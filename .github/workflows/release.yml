@@ -1,0 +1,64 @@
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ MOVE THIS FILE to the repository root: <repo-root>/.github/workflows/       │
+# │ GitHub Actions only runs workflows found there. This monorepo mounts only   │
+# │ connectors/ibmmq/solmq-gen, so the file is staged here for you to relocate. │
+# └──────────────────────────────────────────────────────────────────────────┘
+#
+# Cross-compiles solmq-gen for all supported platforms and publishes them to a
+# GitHub Release when a tag like `solmq-gen-v1.2.3` is pushed (monorepo-scoped
+# tag prefix so it doesn't fire for other components).
+#
+#   git tag solmq-gen-v1.0.0 && git push origin solmq-gen-v1.0.0
+name: solmq-gen release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write # create the release and upload assets
+
+jobs:
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build static binary
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          ext=""
+          [ "$GOOS" = "windows" ] && ext=".exe"
+          out="solmq-gen-${GOOS}-${GOARCH}${ext}"
+          go build -trimpath -ldflags "-s -w" -o "$out" ./cmd/solmq-gen
+          sha256sum "$out" > "$out.sha256"
+          # action-gh-release resolves file globs from the repo root, not working-directory.
+          echo "ASSET=$out" >> "$GITHUB_ENV"
+          echo "ASSET_SHA=$out.sha256" >> "$GITHUB_ENV"
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET_SHA }}

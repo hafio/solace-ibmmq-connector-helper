@@ -1,0 +1,27 @@
+# Workflow 3 — IBM MQ (topic source) -> Solace.
+# source: the SAME manual MQ block as workflow-0/1 (identical details dedup into
+# the single mq-conn-1 binder), but consuming from an MQ *topic* instead of a
+# queue. An MQ topic: source is always turned into an auto-named durable
+# subscription (a stable UUIDv5) — this is the workflow that exercises that path.
+# target: edge-solace — a MANUAL (inline), SINGLE-USE, PLAINTEXT connection to a
+# different broker: a tcp:// host and no key-alias, so no TLS is wired for this
+# binder (auto-named sol-conn-1). Being inline and used once, it needs no entry
+# in defaults.yaml.
+source:
+  mq:
+    conn-name: mqhost-core.internal(1414)
+    queue-manager: QM_CORE
+    channel: DSU.SVRCONN
+    user: appuser
+    password: ${MQ_CORE_PASSWORD}
+    tls: true
+    cipher: TLS_RSA_WITH_AES_256_CBC_SHA256
+    key-alias: mq-client
+    topic: CORE.EVENTS.BROADCAST          # MQ topic: source => auto durable subscription
+target:
+  solace:
+    host: tcp://edge-broker.internal:55555  # tcp:// => plaintext (no TLS)
+    msg-vpn: edge
+    client-username: bridge
+    client-password: ${EDGE_SOL_PASSWORD}
+    topic: events/from-mq                 # publish to a Solace topic (EDA pub/sub)

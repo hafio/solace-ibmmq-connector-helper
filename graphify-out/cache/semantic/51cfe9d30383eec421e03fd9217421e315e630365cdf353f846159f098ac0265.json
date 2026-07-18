@@ -1,0 +1,1 @@
+{"nodes": [{"id": "github_release_workflow", "label": "solmq-gen release", "file_type": "code", "source_file": ".github/workflows/release.yml"}], "edges": [{"source": "github_release_workflow", "target": "solmq_gen", "relation": "calls", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": ".github/workflows/release.yml"}], "hyperedges": []}

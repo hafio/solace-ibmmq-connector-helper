@@ -1,0 +1,21 @@
+# Workflow 1 — Solace -> IBM MQ.
+# source: the REFERENCED, reused prod-solace connection (2nd of its 4 uses).
+# target: the SAME manual MQ block as workflow-0's source. Because conn-name,
+# queue-manager, channel and user match exactly, both sides collapse into the
+# single mq-conn-1 binder — one connection, reused inline across two workflows.
+# (Repeating the block is why conn-ref exists: prefer it when you can.)
+source:
+  solace:
+    conn-ref: prod-solace
+    queue: Q.TO-MQ.EVENTS                 # consume from this Solace queue
+target:
+  mq:
+    conn-name: mqhost-core.internal(1414)
+    queue-manager: QM_CORE
+    channel: DSU.SVRCONN
+    user: appuser
+    password: ${MQ_CORE_PASSWORD}
+    tls: true
+    cipher: TLS_RSA_WITH_AES_256_CBC_SHA256
+    key-alias: mq-client
+    queue: EVENTS.IN                      # produce to this MQ queue

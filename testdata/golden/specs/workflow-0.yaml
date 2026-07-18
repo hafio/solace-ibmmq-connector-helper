@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------------------
+# Starter set — 4 workflows that together show every connection style.
+# Files named workflow-<N>.yaml map to workflow N (numbered by sorted filename).
+#
+# A side declares its connection one of two ways:
+#   * conn-ref: <name>  — REFERENCE a connection defined in defaults.yaml; the
+#                         side then carries ONLY its queue:/topic:.
+#   * inline block      — MANUAL; write the full connection tuple on the side.
+# Connections with identical details collapse into ONE binder (dedup), whether
+# referenced or inline. So "reused" = same connection on 2+ sides; "single-use"
+# = one side. This set demonstrates all four cases:
+#
+#   connection    style           reuse        where       transport
+#   prod-solace   reference       reused       wf 0,1,2     Solace mTLS
+#   mq-core       manual/inline   reused       wf 0,1,3     MQ mTLS   -> mq-conn-1
+#   mq-archive    reference       single-use   wf 2         MQ TLS (no mTLS)
+#   edge-solace   manual/inline   single-use   wf 3         Solace plaintext -> sol-conn-1
+#
+# Every workflow is cross-platform (MQ <-> Solace). wf 3 additionally consumes
+# from an MQ *topic*, so it demonstrates the auto-named durable subscription.
+# ---------------------------------------------------------------------------
+
+# Workflow 0 — IBM MQ -> Solace.
+# source: a MANUAL (inline) MQ connection, written out in full here. The very
+# same block appears in workflow-1; identical details dedup into one binder
+# (auto-named mq-conn-1) — the manual equivalent of a shared conn-ref.
+# target: the REFERENCED, reused prod-solace connection (details in defaults.yaml).
+source:
+  mq:
+    conn-name: mqhost-core.internal(1414)
+    queue-manager: QM_CORE
+    channel: DSU.SVRCONN
+    user: appuser
+    password: ${MQ_CORE_PASSWORD}
+    tls: true                             # MQ has no URL scheme; opt into TLS explicitly
+    cipher: TLS_RSA_WITH_AES_256_CBC_SHA256
+    key-alias: mq-client                  # presence => mTLS (needs the keystore in defaults.yaml)
+    queue: CORE.ORDERS.OUT                # consume from this MQ queue
+target:
+  solace:
+    conn-ref: prod-solace
+    topic: orders/from-mq                 # publish to a Solace topic (EDA pub/sub)

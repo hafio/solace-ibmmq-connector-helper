@@ -1,0 +1,13 @@
+# Workflow 2 — IBM MQ -> Solace.
+# source: mq-archive — a REFERENCED, SINGLE-USE connection (used only here). It
+# is a different queue-manager than mq-core, so it becomes its own binder. It
+# also shows TLS WITHOUT mTLS: tls: true with no key-alias (server-auth only).
+# target: prod-solace again (referenced, reused) — publish to a Solace topic.
+source:
+  mq:
+    conn-ref: mq-archive
+    queue: ARCHIVE.REPLAY.OUT             # consume from this MQ queue
+target:
+  solace:
+    conn-ref: prod-solace
+    topic: archive/from-mq                # publish to a Solace topic (EDA pub/sub)

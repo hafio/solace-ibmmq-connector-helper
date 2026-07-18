@@ -1,0 +1,11 @@
+# Build outputs
+/solmq-gen
+/solmq-gen.exe
+/dist/
+
+# Coverage artifacts (produced by scripts/dev.* cov)
+/coverage.out
+/coverage.html
+
+# Dev-script logs
+/scripts/logs/

@@ -1,0 +1,4 @@
+# Keep generated/compared text as LF so byte-for-byte golden tests are stable
+# regardless of core.autocrlf. .jks fixtures are binary.
+* text=auto eol=lf
+*.jks binary
