@@ -26,8 +26,10 @@ type Result struct {
 // Scan reads dir (non-recursive) and classifies its *.yaml/*.yml files.
 // kubeFile is the base name of the Kubernetes settings file (default
 // "kubernetes.yaml"); outFile is the -o target (may be "" for stdout) and is
-// excluded from the workflow scan when it resolves inside dir.
-func Scan(dir, kubeFile, outFile string) (*Result, error) {
+// excluded from the workflow scan when it resolves inside dir. filter, when
+// non-empty, is a shell-style glob (`*`, `?`, `[...]`) that a workflow file's
+// base name must match to be included; the reserved files are never filtered.
+func Scan(dir, kubeFile, outFile, filter string) (*Result, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("reading spec folder: %w", err)
@@ -36,6 +38,14 @@ func Scan(dir, kubeFile, outFile string) (*Result, error) {
 		kubeFile = "kubernetes.yaml"
 	}
 	kubeBase := filepath.Base(kubeFile)
+
+	// Validate the filter once (matching against "" traverses the whole pattern,
+	// so any syntactically bad pattern surfaces here with a clear message).
+	if filter != "" {
+		if _, err := filepath.Match(filter, ""); err != nil {
+			return nil, fmt.Errorf("invalid filter pattern %q: %v", filter, err)
+		}
+	}
 
 	// Determine the -o base name to exclude, only if it sits inside dir.
 	outBase := ""
@@ -68,11 +78,20 @@ func Scan(dir, kubeFile, outFile string) (*Result, error) {
 		if outBase != "" && name == outBase {
 			continue
 		}
+		if filter != "" {
+			// Error already validated above, so a mismatch here is a real non-match.
+			if ok, _ := filepath.Match(filter, name); !ok {
+				continue
+			}
+		}
 		res.WorkflowFiles = append(res.WorkflowFiles, full)
 	}
 	sort.Slice(res.WorkflowFiles, func(i, j int) bool {
 		return filepath.Base(res.WorkflowFiles[i]) < filepath.Base(res.WorkflowFiles[j])
 	})
+	if filter != "" && len(res.WorkflowFiles) == 0 {
+		return nil, fmt.Errorf("filter %q matched no workflow files in %s", filter, dir)
+	}
 	return res, nil
 }
 

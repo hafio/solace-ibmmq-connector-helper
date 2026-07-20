@@ -278,6 +278,32 @@ func TestRunConfigShardedStdout(t *testing.T) {
 	}
 }
 
+func TestRunConfigFilter(t *testing.T) {
+	dir := manyWorkflowDir(t, 5) // wf-00..wf-04, each bridging queue Q.IN.<i>
+	var code int
+	out := captureStdout(t, func() { code = run([]string{"config", dir, "--filter", "wf-0[01].yaml"}) })
+	if code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	for _, in := range []string{"Q.IN.0", "Q.IN.1"} {
+		if !strings.Contains(out, in) {
+			t.Errorf("filtered-in workflow %q missing from output", in)
+		}
+	}
+	for _, out2 := range []string{"Q.IN.2", "Q.IN.3", "Q.IN.4"} {
+		if strings.Contains(out, out2) {
+			t.Errorf("filtered-out workflow %q leaked into output", out2)
+		}
+	}
+}
+
+func TestRunConfigFilterNoMatch(t *testing.T) {
+	dir := manyWorkflowDir(t, 3)
+	if code := run([]string{"config", dir, "-f", "zzz*.yaml"}); code != 1 {
+		t.Fatalf("a filter matching nothing should exit 1, got %d", code)
+	}
+}
+
 func mustReadFile(t *testing.T, p string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(p)

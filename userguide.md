@@ -52,16 +52,17 @@ Then edit the files under `examples/`, drop your `.jks` stores under
 ## 3. Commands
 
 ```text
-solmq-gen config   <dir> [-o out]            Emit application.yml (fails fast)
-solmq-gen deploy   <dir> [-k kube] [-o out]  Emit ConfigMap+Deployment+Service (+Secrets)
-solmq-gen validate <dir> [-k kube]           Lint only; report every error
-solmq-gen examples [dir] [-f]                Write sample spec files (default dir: examples)
+solmq-gen config   <dir> [-o out] [-f glob]            Emit application.yml (fails fast)
+solmq-gen deploy   <dir> [-k kube] [-o out] [-f glob]  Emit ConfigMap+Deployment+Service (+Secrets)
+solmq-gen validate <dir> [-k kube] [-f glob]           Lint only; report every error
+solmq-gen examples [dir] [-f]                          Write sample spec files (default dir: examples)
 ```
 
 | flag | applies to | meaning |
 |------|-----------|---------|
 | `-o`, `--out` | `config`, `deploy` | write output to a file (default: stdout) |
 | `-k`, `--kube` | `deploy`, `validate` | Kubernetes settings file (default: `kubernetes.yaml`) |
+| `-f`, `--filter` | `config`, `deploy`, `validate` | include only workflow files whose **base name** matches this glob (`*`, `?`, `[…]`), e.g. `workflow*.yaml` or `*edge*.yml`. Reserved files (`defaults.yaml`, the `-k` file, the `-o` file) are never matched; an empty match set is an error |
 | `-f`, `--force` | `examples` | overwrite existing files |
 
 Flags may appear **before or after** the `<dir>` argument. Exit codes: **0**
@@ -97,6 +98,11 @@ workflow's id in the output (`input-<N>` / `output-<N>` and
 `solace.connector.workflows.<N>`). Naming files `workflow-0.yaml`,
 `workflow-1.yaml`, … keeps the mapping obvious, but any names work — only sort
 order matters.
+
+Use **`-f`/`--filter <glob>`** to process only a subset of the workflow files
+(e.g. `--filter 'workflow-1?.yaml'`). Filtering happens **before** numbering, so
+the surviving files are numbered `0..N` among themselves — the ids reflect the
+filtered set, not the original filenames.
 
 The connector runtime holds **up to 20 workflows** (ids `0..19`) per
 `application.yml`. With more than 20 workflows the tool automatically **splits them

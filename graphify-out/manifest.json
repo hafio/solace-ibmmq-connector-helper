@@ -10,13 +10,13 @@
     "semantic_hash": ""
   },
   "cmd/solmq-gen/main.go": {
-    "mtime": 1784515263.6755655,
-    "ast_hash": "dc7782f75b1739008763b332395bbda6",
+    "mtime": 1784524269.4566755,
+    "ast_hash": "e6842fb2f18a85df972e5650e98a36bc",
     "semantic_hash": ""
   },
   "cmd/solmq-gen/main_test.go": {
-    "mtime": 1784517113.6086264,
-    "ast_hash": "0c4183f4b1c3b346c66bde4a097fe905",
+    "mtime": 1784524369.4029913,
+    "ast_hash": "fbef478bee04890a47ebce631574e6db",
     "semantic_hash": ""
   },
   "go.mod": {
@@ -85,8 +85,8 @@
     "semantic_hash": ""
   },
   "internal/gen/golden_test.go": {
-    "mtime": 1784515467.9104133,
-    "ast_hash": "5d37dec4eca569a32f8f8fc40232ee78",
+    "mtime": 1784524283.7383356,
+    "ast_hash": "3b892ffc25146153b873f045c7bc4f7d",
     "semantic_hash": ""
   },
   "internal/render/render.go": {
@@ -100,14 +100,14 @@
     "semantic_hash": ""
   },
   "internal/scan/scan.go": {
-    "mtime": 1783098325.2787802,
-    "ast_hash": "4437bbad91628e2691c1cc842866bed6",
-    "semantic_hash": "4437bbad91628e2691c1cc842866bed6"
+    "mtime": 1784524211.5527198,
+    "ast_hash": "89e85d3b69c51732e67272cb86758837",
+    "semantic_hash": ""
   },
   "internal/scan/scan_test.go": {
-    "mtime": 1783152457.8519459,
-    "ast_hash": "d0dcea36e8c71f284f1d45d29534f490",
-    "semantic_hash": "d0dcea36e8c71f284f1d45d29534f490"
+    "mtime": 1784524343.5865662,
+    "ast_hash": "eb46f7dca59e90c09a31caf5d9a72108",
+    "semantic_hash": ""
   },
   "internal/spec/defaults.go": {
     "mtime": 1783643194.2101924,
@@ -175,8 +175,8 @@
     "semantic_hash": "8a6643a420fdad6bfb583523bc6cef16"
   },
   "README.md": {
-    "mtime": 1784515813.2068932,
-    "ast_hash": "900ab0a71b3ab32fd83da6a76f9e3b83",
+    "mtime": 1784524422.4449136,
+    "ast_hash": "c835a063ac184090357755740755e5ba",
     "semantic_hash": ""
   },
   "example-application.yml": {
@@ -220,8 +220,8 @@
     "semantic_hash": ""
   },
   "userguide.md": {
-    "mtime": 1784515765.0946777,
-    "ast_hash": "79eebf6d5bbabe52fbab850151f4c31f",
+    "mtime": 1784524411.2659545,
+    "ast_hash": "d61b87fba974861a139d0d0a274f663a",
     "semantic_hash": ""
   },
   "doc.md": {

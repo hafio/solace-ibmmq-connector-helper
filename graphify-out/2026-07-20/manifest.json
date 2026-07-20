@@ -10,14 +10,14 @@
     "semantic_hash": ""
   },
   "cmd/solmq-gen/main.go": {
-    "mtime": 1783575663.8499632,
-    "ast_hash": "417e1dec80f2f861d6b5e70d6d55c67a",
-    "semantic_hash": "417e1dec80f2f861d6b5e70d6d55c67a"
+    "mtime": 1784515263.6755655,
+    "ast_hash": "dc7782f75b1739008763b332395bbda6",
+    "semantic_hash": ""
   },
   "cmd/solmq-gen/main_test.go": {
-    "mtime": 1783152457.9700317,
-    "ast_hash": "840206f8d5d160149e40f725e313c967",
-    "semantic_hash": "840206f8d5d160149e40f725e313c967"
+    "mtime": 1784517113.6086264,
+    "ast_hash": "0c4183f4b1c3b346c66bde4a097fe905",
+    "semantic_hash": ""
   },
   "go.mod": {
     "mtime": 1783098131.0850396,
@@ -55,13 +55,13 @@
     "semantic_hash": ""
   },
   "internal/deploy/deploy.go": {
-    "mtime": 1784207868.2129133,
-    "ast_hash": "88b2b27d73ee443611bad50ba83d1204",
+    "mtime": 1784515175.0961163,
+    "ast_hash": "b0d0dde678468af6249c733ba69cc7d1",
     "semantic_hash": ""
   },
   "internal/deploy/deploy_test.go": {
-    "mtime": 1784208015.1468,
-    "ast_hash": "6107eeb26a25e063c257183d7d79d48f",
+    "mtime": 1784515450.322863,
+    "ast_hash": "8f661f3b16f1170204333d8fffb6f6f1",
     "semantic_hash": ""
   },
   "internal/examples/examples.go": {
@@ -75,18 +75,18 @@
     "semantic_hash": ""
   },
   "internal/gen/gen.go": {
-    "mtime": 1783615075.4906168,
-    "ast_hash": "8e608cbba4e3fa713b2646a93da15eda",
-    "semantic_hash": "8e608cbba4e3fa713b2646a93da15eda"
+    "mtime": 1784515222.2233908,
+    "ast_hash": "cc1b0f7c0b54e7057486b4ae526ac75f",
+    "semantic_hash": ""
   },
   "internal/gen/gen_extra_test.go": {
-    "mtime": 1783152457.9373062,
-    "ast_hash": "e1d6918a16ed722bc1d3256f60893aa3",
-    "semantic_hash": "e1d6918a16ed722bc1d3256f60893aa3"
+    "mtime": 1784515573.2196455,
+    "ast_hash": "ee58b436cabc0765b8d6551c8d832bd9",
+    "semantic_hash": ""
   },
   "internal/gen/golden_test.go": {
-    "mtime": 1784207942.272709,
-    "ast_hash": "bb65ef627975c41c98536424cbb065cc",
+    "mtime": 1784515467.9104133,
+    "ast_hash": "5d37dec4eca569a32f8f8fc40232ee78",
     "semantic_hash": ""
   },
   "internal/render/render.go": {
@@ -140,8 +140,8 @@
     "semantic_hash": "19202b019d169b3acee9c53afed64298"
   },
   "internal/validate/validate.go": {
-    "mtime": 1784207787.9658053,
-    "ast_hash": "00eb6995a5d43f5024a240ea335a6f3c",
+    "mtime": 1784515058.150847,
+    "ast_hash": "6c24cc0f36f926e998eb0bc3085dbd97",
     "semantic_hash": ""
   },
   "internal/validate/validate_extra_test.go": {
@@ -150,9 +150,9 @@
     "semantic_hash": ""
   },
   "internal/validate/validate_test.go": {
-    "mtime": 1783641656.3037548,
-    "ast_hash": "37b435674c998513734c271fd90db0cc",
-    "semantic_hash": "37b435674c998513734c271fd90db0cc"
+    "mtime": 1784515301.2049296,
+    "ast_hash": "bcf0a2075cbcc824f38dcde4bd903beb",
+    "semantic_hash": ""
   },
   "scripts/dev.ps1": {
     "mtime": 1784168287.9305093,
@@ -175,8 +175,8 @@
     "semantic_hash": "8a6643a420fdad6bfb583523bc6cef16"
   },
   "README.md": {
-    "mtime": 1784209393.5197475,
-    "ast_hash": "5432eadb462261a090143b3d502357a3",
+    "mtime": 1784515813.2068932,
+    "ast_hash": "900ab0a71b3ab32fd83da6a76f9e3b83",
     "semantic_hash": ""
   },
   "example-application.yml": {
@@ -190,8 +190,8 @@
     "semantic_hash": ""
   },
   "internal/examples/files/kubernetes.yaml": {
-    "mtime": 1784208071.5001771,
-    "ast_hash": "8942507681783aa67c9996e59fe931a0",
+    "mtime": 1784515822.119589,
+    "ast_hash": "41d63820437aab39e91442b97a9b4335",
     "semantic_hash": ""
   },
   "internal/examples/files/workflow-0.yaml": {
@@ -220,13 +220,13 @@
     "semantic_hash": ""
   },
   "userguide.md": {
-    "mtime": 1784209438.8561077,
-    "ast_hash": "665e4db7b5ec66f30b90cb7e63d0efb0",
+    "mtime": 1784515765.0946777,
+    "ast_hash": "79eebf6d5bbabe52fbab850151f4c31f",
     "semantic_hash": ""
   },
   "doc.md": {
-    "mtime": 1777001454.861104,
-    "ast_hash": "5bdf62e9a5e4aa006da0bb71d5b97f46",
+    "mtime": 1784515712.2996478,
+    "ast_hash": "f592cece5104a84067110469d14a0687",
     "semantic_hash": ""
   },
   "internal/examples/files/workflow-2.yaml": {
@@ -257,11 +257,6 @@
   "testdata/golden/specs/workflow-3.yaml": {
     "mtime": 1783857644.2990887,
     "ast_hash": "f825254efb6c68d782fd8c3d2f2f3e98",
-    "semantic_hash": ""
-  },
-  "full-deploy-sample.yaml": {
-    "mtime": 1784204519.920782,
-    "ast_hash": "b339518113d2eb5d6a56463c3cd1745c",
     "semantic_hash": ""
   },
   "docs/DEVELOPMENT.md": {

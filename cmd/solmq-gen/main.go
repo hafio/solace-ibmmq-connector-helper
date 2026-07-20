@@ -51,15 +51,24 @@ func run(args []string) int {
 	}
 }
 
+// filterFlag registers the shared -f/--filter workflow glob on fs.
+func filterFlag(fs *flag.FlagSet) *string {
+	const usage = "only include workflow files whose base name matches this glob (e.g. 'workflow*.yaml')"
+	filter := fs.String("f", "", usage)
+	fs.StringVar(filter, "filter", "", usage)
+	return filter
+}
+
 func runConfig(args []string) int {
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
 	out := fs.String("o", "", "write output to a file (default: stdout)")
 	fs.StringVar(out, "output", "", "write output to a file (default: stdout)")
+	filter := filterFlag(fs)
 	dir, code := parseArgs(fs, args)
 	if code != 0 {
 		return code
 	}
-	req, err := loadRequest(dir, "", *out)
+	req, err := loadRequest(dir, "", *out, *filter)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
@@ -80,11 +89,12 @@ func runDeploy(args []string) int {
 	fs.StringVar(out, "output", "", "write output to a file (default: stdout)")
 	kube := fs.String("k", "kubernetes.yaml", "Kubernetes settings file (always excluded from the scan)")
 	fs.StringVar(kube, "kube", "kubernetes.yaml", "Kubernetes settings file")
+	filter := filterFlag(fs)
 	dir, code := parseArgs(fs, args)
 	if code != 0 {
 		return code
 	}
-	req, err := loadRequest(dir, *kube, *out)
+	req, err := loadRequest(dir, *kube, *out, *filter)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
@@ -102,11 +112,12 @@ func runValidate(args []string) int {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	kube := fs.String("k", "kubernetes.yaml", "Kubernetes settings file (always excluded from the scan)")
 	fs.StringVar(kube, "kube", "kubernetes.yaml", "Kubernetes settings file")
+	filter := filterFlag(fs)
 	dir, code := parseArgs(fs, args)
 	if code != 0 {
 		return code
 	}
-	req, err := loadRequest(dir, *kube, "")
+	req, err := loadRequest(dir, *kube, "", *filter)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
@@ -189,9 +200,10 @@ func parseArgs(fs *flag.FlagSet, args []string) (string, int) {
 }
 
 // loadRequest scans dir and reads the workflow/defaults/kubernetes files into a
-// gen.Request. kubeFile "" uses the default name.
-func loadRequest(dir, kubeFile, outFile string) (gen.Request, error) {
-	res, err := scan.Scan(dir, kubeFile, outFile)
+// gen.Request. kubeFile "" uses the default name; filter "" includes every
+// workflow file, otherwise it is a glob the base name must match.
+func loadRequest(dir, kubeFile, outFile, filter string) (gen.Request, error) {
+	res, err := scan.Scan(dir, kubeFile, outFile, filter)
 	if err != nil {
 		return gen.Request{}, err
 	}
@@ -293,15 +305,16 @@ func usage() {
 	fmt.Fprint(os.Stderr, `solmq-gen — Solace IBM MQ Connector config generator
 
 Usage:
-  solmq-gen config   <dir> [-o out]            Emit application.yml (fails fast)
-  solmq-gen deploy   <dir> [-k kube] [-o out]  Emit ConfigMap+Deployment+Service (+Secrets)
-  solmq-gen validate <dir> [-k kube]           Lint only; report every error
-  solmq-gen examples [dir] [-f]                Write sample spec files (default dir: examples)
+  solmq-gen config   <dir> [-o out] [-f glob]            Emit application.yml (fails fast)
+  solmq-gen deploy   <dir> [-k kube] [-o out] [-f glob]  Emit ConfigMap+Deployment+Service (+Secrets)
+  solmq-gen validate <dir> [-k kube] [-f glob]           Lint only; report every error
+  solmq-gen examples [dir] [-f]                          Write sample spec files (default dir: examples)
 
 Flags:
-  -o, --out    Output file (default: stdout)
-  -k, --kube   Kubernetes settings file (default: kubernetes.yaml)
-  -f, --force  Overwrite existing files (examples)
+  -o, --out     Output file (default: stdout)
+  -k, --kube    Kubernetes settings file (default: kubernetes.yaml)
+  -f, --filter  Only include workflow files matching this glob, e.g. 'workflow*.yaml'
+                (config/deploy/validate). For examples, -f/--force overwrites existing files.
 
 Reserved files (never treated as workflows): defaults.yaml, the -k file, the -o file.
 `)

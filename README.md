@@ -75,14 +75,15 @@ workflows exceed 20.
 ## Commands
 
 ```text
-solmq-gen config   <dir> [-o out]            Emit application.yml (fails fast)
-solmq-gen deploy   <dir> [-k kube] [-o out]  Emit ConfigMap+Deployment+Service (+Secrets)
-solmq-gen validate <dir> [-k kube]           Lint only; report every error
-solmq-gen examples [dir] [-f]                Write sample spec files (default dir: examples)
+solmq-gen config   <dir> [-o out] [-f glob]            Emit application.yml (fails fast)
+solmq-gen deploy   <dir> [-k kube] [-o out] [-f glob]  Emit ConfigMap+Deployment+Service (+Secrets)
+solmq-gen validate <dir> [-k kube] [-f glob]           Lint only; report every error
+solmq-gen examples [dir] [-f]                          Write sample spec files (default dir: examples)
 
--o, --out    Output file (default: stdout)
--k, --kube   Kubernetes settings file (default: kubernetes.yaml)
--f, --force  Overwrite existing files (examples)
+-o, --out     Output file (default: stdout)
+-k, --kube    Kubernetes settings file (default: kubernetes.yaml)
+-f, --filter  Include only workflow files matching this glob, e.g. 'workflow*.yaml'
+              (config/deploy/validate; for examples, -f/--force overwrites files)
 ```
 
 `config`/`deploy` fail fast (stop at the first error, write nothing); `validate`

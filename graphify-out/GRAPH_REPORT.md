@@ -1,16 +1,16 @@
 # Graph Report - solace-ibmmq-connector-helper  (2026-07-20)
 
 ## Corpus Check
-- 38 files · ~42,744 words
+- 38 files · ~43,395 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 543 nodes · 1435 edges · 42 communities (30 shown, 12 thin omitted)
-- Extraction: 84% EXTRACTED · 16% INFERRED · 0% AMBIGUOUS · INFERRED: 226 edges (avg confidence: 0.8)
+- 549 nodes · 1462 edges · 42 communities (30 shown, 12 thin omitted)
+- Extraction: 84% EXTRACTED · 16% INFERRED · 0% AMBIGUOUS · INFERRED: 231 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `a9ae98eb`
+- Built from commit: `e7c0adda`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -60,7 +60,7 @@
 1. `Run()` - 49 edges
 2. `hasErr()` - 34 edges
 3. `Build()` - 32 edges
-4. `run()` - 29 edges
+4. `run()` - 31 edges
 5. `wf()` - 28 edges
 6. `vMQ()` - 25 edges
 7. `Solace PubSub+ Connector for IBM MQ — Configuration Guide` - 24 edges
@@ -98,8 +98,8 @@ Cohesion: 0.20
 Nodes (48): baseKubeDeploy(), connDefaults(), T, TestCheckKubeCredentialSources(), TestCheckKubeRequiredAndReplicas(), TestCheckKubeStoresRequireTruststore(), TestCheckLibs(), TestCheckSideMQMissingFields() (+40 more)
 
 ### Community 3 - "CLI Entry & Commands"
-Cohesion: 0.12
-Nodes (45): T, TestRunExamplesDefaultDir(), TestRunExamplesGeneratesAndConfigs(), TestRunExamplesSkipsThenForces(), collectFlagsAndDirs(), emit(), emitConfigs(), failFast() (+37 more)
+Cohesion: 0.21
+Nodes (30): T, TestRunExamplesDefaultDir(), TestRunExamplesGeneratesAndConfigs(), TestRunExamplesSkipsThenForces(), run(), captureStdout(), T, manyWorkflowDir() (+22 more)
 
 ### Community 4 - "Kubernetes Deploy Rendering"
 Cohesion: 0.15
@@ -130,8 +130,8 @@ Cohesion: 0.43
 Nodes (13): configMapDoc(), deploymentDoc(), dirReader(), T, itoa(), lineDiff(), loadSpecs(), mustRead() (+5 more)
 
 ### Community 11 - "Input Directory Scanning"
-Cohesion: 0.36
-Nodes (12): isYAML(), Scan(), bases(), T, TestIsYAML(), TestScanClassifies(), TestScanCustomKubeNoDefaults(), TestScanEmptyKubeDefaultsToKubernetesYAML() (+4 more)
+Cohesion: 0.34
+Nodes (15): isYAML(), Scan(), bases(), T, TestIsYAML(), TestScanClassifies(), TestScanCustomKubeNoDefaults(), TestScanEmptyKubeDefaultsToKubernetesYAML() (+7 more)
 
 ### Community 12 - "TLS Store Paths"
 Cohesion: 0.32
@@ -142,8 +142,8 @@ Cohesion: 0.39
 Nodes (6): DurableName(), mustParseUUID(), T, TestDurableNameDeterministic(), TestDurableNameGolden(), uuidv5()
 
 ### Community 15 - "Examples Writer"
-Cohesion: 0.47
-Nodes (4): T, TestWriteCreatesSkipsForces(), TestWriteMkdirError(), Write()
+Cohesion: 0.17
+Nodes (22): collectFlagsAndDirs(), emit(), emitConfigs(), failFast(), fileReader(), filterFlag(), instanceBanner(), loadRequest() (+14 more)
 
 ### Community 17 - "Docs & Golden Output"
 Cohesion: 0.07
@@ -206,16 +206,16 @@ Nodes (3): Solace Binder Headers (`solace_scst_*`), Solace Message Headers Refer
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `Defaults` connect `Spec Model & Validation` to `Binding Consolidation`, `Validation Test Suite`, `Kubernetes Deploy Rendering`, `Generation Orchestration`, `Spec Parsing Tests`, `TLS Store Paths`?**
-  _High betweenness centrality (0.128) - this node is a cross-community bridge._
+  _High betweenness centrality (0.127) - this node is a cross-community bridge._
 - **Why does `Build()` connect `Binding Consolidation` to `Spec Model & Validation`, `TLS Store Paths`, `Generation Orchestration`, `application.yml Rendering`?**
-  _High betweenness centrality (0.117) - this node is a cross-community bridge._
-- **Why does `Deploy()` connect `Generation Orchestration` to `Golden File Tests`, `Validation Test Suite`, `CLI Entry & Commands`, `Kubernetes Deploy Rendering`?**
-  _High betweenness centrality (0.110) - this node is a cross-community bridge._
+  _High betweenness centrality (0.116) - this node is a cross-community bridge._
+- **Why does `Deploy()` connect `Generation Orchestration` to `Validation Test Suite`, `Golden File Tests`, `Kubernetes Deploy Rendering`, `Examples Writer`?**
+  _High betweenness centrality (0.112) - this node is a cross-community bridge._
 - **Are the 38 inferred relationships involving `Run()` (e.g. with `Config()` and `Deploy()`) actually correct?**
   _`Run()` has 38 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 17 inferred relationships involving `hasErr()` (e.g. with `TestCheckKubeCredentialSources()` and `TestCheckKubeRequiredAndReplicas()`) actually correct?**
   _`hasErr()` has 17 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 18 inferred relationships involving `Build()` (e.g. with `SolaceProps()` and `TestBuildCipherConflictWarning()`) actually correct?**
   _`Build()` has 18 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 22 inferred relationships involving `run()` (e.g. with `TestRunExamplesDefaultDir()` and `TestRunExamplesGeneratesAndConfigs()`) actually correct?**
-  _`run()` has 22 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 24 inferred relationships involving `run()` (e.g. with `TestRunExamplesDefaultDir()` and `TestRunExamplesGeneratesAndConfigs()`) actually correct?**
+  _`run()` has 24 INFERRED edges - model-reasoned connections that need verification._

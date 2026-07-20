@@ -16,7 +16,7 @@ const specsDir = "../../testdata/golden/specs"
 // loadSpecs reads the golden spec folder into a gen.Request (mirrors the CLI).
 func loadSpecs(t *testing.T) gen.Request {
 	t.Helper()
-	res, err := scan.Scan(specsDir, "kubernetes.yaml", "")
+	res, err := scan.Scan(specsDir, "kubernetes.yaml", "", "")
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
