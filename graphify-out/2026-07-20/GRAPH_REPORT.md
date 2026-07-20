@@ -1,16 +1,16 @@
-# Graph Report - solace-ibmmq-connector-helper  (2026-07-20)
+# Graph Report - solace-ibmmq-connector-helper  (2026-07-16)
 
 ## Corpus Check
-- 38 files · ~42,744 words
+- 38 files · ~41,024 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 543 nodes · 1435 edges · 42 communities (30 shown, 12 thin omitted)
-- Extraction: 84% EXTRACTED · 16% INFERRED · 0% AMBIGUOUS · INFERRED: 226 edges (avg confidence: 0.8)
+- 517 nodes · 1344 edges · 42 communities (30 shown, 12 thin omitted)
+- Extraction: 84% EXTRACTED · 16% INFERRED · 0% AMBIGUOUS · INFERRED: 219 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `a9ae98eb`
+- Built from commit: `47801b50`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -57,16 +57,16 @@
 - application.yml (Golden)
 
 ## God Nodes (most connected - your core abstractions)
-1. `Run()` - 49 edges
-2. `hasErr()` - 34 edges
-3. `Build()` - 32 edges
-4. `run()` - 29 edges
-5. `wf()` - 28 edges
+1. `Run()` - 48 edges
+2. `Build()` - 33 edges
+3. `hasErr()` - 33 edges
+4. `wf()` - 28 edges
+5. `run()` - 26 edges
 6. `vMQ()` - 25 edges
 7. `Solace PubSub+ Connector for IBM MQ — Configuration Guide` - 24 edges
 8. `vSolace()` - 23 edges
-9. `Defaults` - 22 edges
-10. `Render()` - 21 edges
+9. `Render()` - 21 edges
+10. `Defaults` - 21 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `TestCheckLibs()` --calls--> `run()`  [INFERRED]
@@ -90,24 +90,24 @@ Cohesion: 0.09
 Nodes (55): acc, Binder, Binding, Bundle, JMSBinding, LeaderElectionModel, MQBinder, Prop (+47 more)
 
 ### Community 1 - "Spec Model & Validation"
-Cohesion: 0.09
-Nodes (42): Node, applyDest(), Node, nodePtr(), checkConnections(), checkDuplicateSources(), checkKeyAliasConflicts(), checkKube() (+34 more)
+Cohesion: 0.10
+Nodes (41): Node, applyDest(), Node, nodePtr(), checkConnections(), checkDuplicateSources(), checkKeyAliasConflicts(), checkKube() (+33 more)
 
 ### Community 2 - "Validation Test Suite"
-Cohesion: 0.20
-Nodes (48): baseKubeDeploy(), connDefaults(), T, TestCheckKubeCredentialSources(), TestCheckKubeRequiredAndReplicas(), TestCheckKubeStoresRequireTruststore(), TestCheckLibs(), TestCheckSideMQMissingFields() (+40 more)
+Cohesion: 0.21
+Nodes (46): baseKubeDeploy(), connDefaults(), T, TestCheckKubeCredentialSources(), TestCheckKubeRequiredAndReplicas(), TestCheckKubeStoresRequireTruststore(), TestCheckLibs(), TestCheckSideMQMissingFields() (+38 more)
 
 ### Community 3 - "CLI Entry & Commands"
-Cohesion: 0.12
-Nodes (45): T, TestRunExamplesDefaultDir(), TestRunExamplesGeneratesAndConfigs(), TestRunExamplesSkipsThenForces(), collectFlagsAndDirs(), emit(), emitConfigs(), failFast() (+37 more)
+Cohesion: 0.15
+Nodes (37): T, TestRunExamplesDefaultDir(), TestRunExamplesGeneratesAndConfigs(), TestRunExamplesSkipsThenForces(), collectFlagsAndDirs(), emit(), failFast(), fileReader() (+29 more)
 
 ### Community 4 - "Kubernetes Deploy Rendering"
 Cohesion: 0.15
-Nodes (35): Input, Instance, KV, StoreFile, yw, baseName(), Builder, Model (+27 more)
+Nodes (31): Input, KV, StoreFile, yw, baseName(), Builder, Model, LogbackXML() (+23 more)
 
 ### Community 5 - "Generation Orchestration"
-Cohesion: 0.14
-Nodes (36): File, Request, Resolver, shard, b64(), baseName(), buildShards(), Config() (+28 more)
+Cohesion: 0.19
+Nodes (26): File, Request, Resolver, b64(), baseName(), Config(), Deploy(), T (+18 more)
 
 ### Community 6 - "application.yml Rendering"
 Cohesion: 0.24
@@ -154,8 +154,8 @@ Cohesion: 0.12
 Nodes (15): 11. Spring SSL Bundles, 13. Logging, 14. JVM System Properties, 15. Environment Variable Overrides, 3. Spring Cloud Stream — Binders, 4. Spring Cloud Stream — Bindings (Workflows), 5. JMS Binder Options, 8. Solace Connector — Workflow Configuration (+7 more)
 
 ### Community 21 - "consolidate_test.go"
-Cohesion: 0.20
-Nodes (18): syslogOf(), storesWired(), CredCreate, CredentialsSecret, Deployment, Kubernetes, Libs, LibsDownload (+10 more)
+Cohesion: 0.21
+Nodes (17): storesWired(), CredCreate, CredentialsSecret, Deployment, Kubernetes, Libs, LibsDownload, LibsPVC (+9 more)
 
 ### Community 23 - "YAML & Spring Boot Essentials (For Non-Spring Users)"
 Cohesion: 0.25
@@ -205,17 +205,17 @@ Nodes (3): Solace Binder Headers (`solace_scst_*`), Solace Message Headers Refer
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Defaults` connect `Spec Model & Validation` to `Binding Consolidation`, `Validation Test Suite`, `Kubernetes Deploy Rendering`, `Generation Orchestration`, `Spec Parsing Tests`, `TLS Store Paths`?**
-  _High betweenness centrality (0.128) - this node is a cross-community bridge._
+- **Why does `Deploy()` connect `Generation Orchestration` to `Binding Consolidation`, `Validation Test Suite`, `CLI Entry & Commands`, `Kubernetes Deploy Rendering`, `application.yml Rendering`, `Golden File Tests`?**
+  _High betweenness centrality (0.145) - this node is a cross-community bridge._
 - **Why does `Build()` connect `Binding Consolidation` to `Spec Model & Validation`, `TLS Store Paths`, `Generation Orchestration`, `application.yml Rendering`?**
-  _High betweenness centrality (0.117) - this node is a cross-community bridge._
-- **Why does `Deploy()` connect `Generation Orchestration` to `Golden File Tests`, `Validation Test Suite`, `CLI Entry & Commands`, `Kubernetes Deploy Rendering`?**
-  _High betweenness centrality (0.110) - this node is a cross-community bridge._
-- **Are the 38 inferred relationships involving `Run()` (e.g. with `Config()` and `Deploy()`) actually correct?**
-  _`Run()` has 38 INFERRED edges - model-reasoned connections that need verification._
+  _High betweenness centrality (0.143) - this node is a cross-community bridge._
+- **Why does `Defaults` connect `Spec Model & Validation` to `Binding Consolidation`, `Validation Test Suite`, `Kubernetes Deploy Rendering`, `Generation Orchestration`, `Spec Parsing Tests`, `TLS Store Paths`?**
+  _High betweenness centrality (0.094) - this node is a cross-community bridge._
+- **Are the 37 inferred relationships involving `Run()` (e.g. with `Config()` and `Deploy()`) actually correct?**
+  _`Run()` has 37 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 19 inferred relationships involving `Build()` (e.g. with `SolaceProps()` and `TestBuildCipherConflictWarning()`) actually correct?**
+  _`Build()` has 19 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 17 inferred relationships involving `hasErr()` (e.g. with `TestCheckKubeCredentialSources()` and `TestCheckKubeRequiredAndReplicas()`) actually correct?**
   _`hasErr()` has 17 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 18 inferred relationships involving `Build()` (e.g. with `SolaceProps()` and `TestBuildCipherConflictWarning()`) actually correct?**
-  _`Build()` has 18 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 22 inferred relationships involving `run()` (e.g. with `TestRunExamplesDefaultDir()` and `TestRunExamplesGeneratesAndConfigs()`) actually correct?**
-  _`run()` has 22 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 13 inferred relationships involving `wf()` (e.g. with `TestCheckSideMQMissingFields()` and `TestCheckSideSolaceMissingAndBadScheme()`) actually correct?**
+  _`wf()` has 13 INFERRED edges - model-reasoned connections that need verification._

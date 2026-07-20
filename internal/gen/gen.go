@@ -42,18 +42,68 @@ type Resolver struct {
 // Issue re-exports validate.Issue for callers that only import gen.
 type Issue = validate.Issue
 
-// Config parses+validates the request and returns application.yml on success.
-func Config(r Request, res Resolver) (out string, errs, warns []Issue) {
+// Config parses+validates the request and returns one application.yml per
+// connector instance (workflows are sharded at MaxWorkflowsPerInstance). A folder
+// with <= that many workflows yields a single-element slice.
+func Config(r Request, res Resolver) (outs []string, errs, warns []Issue) {
 	wfs, d, _, pissues := parse(r)
 	e, w := validate.Run(validate.Context{Workflows: wfs, Defaults: d, Env: res.Env})
 	errs = append(pissues, e...)
 	warns = w
 	if len(errs) > 0 {
-		return "", errs, warns
+		return nil, errs, warns
 	}
-	m, cw := consolidate.Build(wfs, d, false)
+	shards, cw := buildShards(wfs, d, false)
 	warns = append(warns, toIssues(cw)...)
-	return render.Application(m), nil, warns
+	for _, s := range shards {
+		outs = append(outs, s.appYAML)
+	}
+	return outs, nil, warns
+}
+
+// shard is one connector instance's consolidated model and rendered config.
+type shard struct {
+	appYAML string
+	model   *consolidate.Model
+}
+
+// shardWorkflows splits wfs into fill-to-N chunks preserving order (instance 1 =
+// workflows 0..N-1, instance 2 = N..2N-1, ...). Always returns at least one chunk
+// (an empty folder yields one empty chunk, matching the single-instance path).
+func shardWorkflows(wfs []spec.Workflow) [][]spec.Workflow {
+	per := validate.MaxWorkflowsPerInstance
+	if len(wfs) <= per {
+		return [][]spec.Workflow{wfs}
+	}
+	var out [][]spec.Workflow
+	for i := 0; i < len(wfs); i += per {
+		end := i + per
+		if end > len(wfs) {
+			end = len(wfs)
+		}
+		out = append(out, wfs[i:end])
+	}
+	return out
+}
+
+// buildShards builds one Model + application.yml per chunk. When there is more
+// than one instance, the leader-election coordination queue is suffixed per
+// instance (<queue>-<n>) so the independent connector clusters do not contend for
+// a single election queue. The suffix is applied before rendering.
+func buildShards(wfs []spec.Workflow, d *spec.Defaults, mountStores bool) ([]shard, []string) {
+	chunks := shardWorkflows(wfs)
+	n := len(chunks)
+	var shards []shard
+	var warns []string
+	for i, c := range chunks {
+		m, cw := consolidate.Build(c, d, mountStores)
+		warns = append(warns, cw...)
+		if n > 1 && m.LeaderElection != nil && m.LeaderElection.Queue != "" {
+			m.LeaderElection.Queue = fmt.Sprintf("%s-%d", m.LeaderElection.Queue, i+1)
+		}
+		shards = append(shards, shard{appYAML: render.Application(m), model: m})
+	}
+	return shards, warns
 }
 
 // Validate runs every check and returns all findings (errors + warnings).
@@ -100,10 +150,11 @@ func Deploy(r Request, res Resolver) (out string, errs, warns []Issue) {
 		return "", errs, warns
 	}
 
-	m, cw := consolidate.Build(wfs, d, true)
+	shards, cw := buildShards(wfs, d, true)
 	warns = append(warns, toIssues(cw)...)
-	in := deploy.Input{Kube: k, Defaults: d, Model: m, AppYAML: render.Application(m)}
 
+	in := deploy.Input{Kube: k, Defaults: d}
+	// Secrets are shared across all instances — resolve once.
 	if c := k.Secrets.Credentials; c != nil && c.Create != nil {
 		kvs, err := resolveCred(c.Create, res)
 		if err != nil {
@@ -117,6 +168,16 @@ func Deploy(r Request, res Resolver) (out string, errs, warns []Issue) {
 			return "", []Issue{{File: "kubernetes.yaml", Msg: err.Error()}}, warns
 		}
 		in.Stores = files
+	}
+
+	// One instance keeps the base name; multiple get a 1-based -N suffix.
+	base := k.Deployment.Name
+	for i, s := range shards {
+		name := base
+		if len(shards) > 1 {
+			name = fmt.Sprintf("%s-%d", base, i+1)
+		}
+		in.Instances = append(in.Instances, deploy.Instance{Name: name, AppYAML: s.appYAML, Model: s.model})
 	}
 	return deploy.Render(in), nil, warns
 }

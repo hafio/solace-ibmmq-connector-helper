@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -106,14 +107,35 @@ func TestKeyAliasConflict(t *testing.T) {
 	}
 }
 
-func TestMaxWorkflows(t *testing.T) {
+func manyWorkflows(n int) []spec.Workflow {
 	var wfs []spec.Workflow
-	for i := 0; i < MaxWorkflows+1; i++ {
-		wfs = append(wfs, wf("f.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("MQ", spec.DestQueue, false)))
+	for i := 0; i < n; i++ {
+		wfs = append(wfs, wf(fmt.Sprintf("wf-%02d.yaml", i), vSolace("Q", spec.DestQueue, ""), vMQ("MQ", spec.DestQueue, false)))
 	}
-	errs, _ := Run(Context{Workflows: wfs, Defaults: &spec.Defaults{}})
-	if !hasErr(errs, "too many workflows") {
-		t.Fatalf("want too-many-workflows, got first few: %v", errs[:1])
+	return wfs
+}
+
+func TestNoWorkflowCap(t *testing.T) {
+	// >MaxWorkflowsPerInstance workflows no longer fail: the gen layer shards them.
+	errs, _ := Run(Context{Workflows: manyWorkflows(MaxWorkflowsPerInstance + 1), Defaults: &spec.Defaults{}})
+	if hasErr(errs, "too many workflows") {
+		t.Fatalf("workflow cap should be gone, got %v", errs)
+	}
+}
+
+func TestDeployNameTooLongWhenSharded(t *testing.T) {
+	// 21 workflows -> 2 instances -> longest generated name is "<name>-2-config".
+	longName := strings.Repeat("a", 60) // 60 + len("-2-config")=9 -> 69 > 63
+	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: longName, Namespace: "ns", Image: "img", Replicas: 1}}
+	errs, _ := Run(Context{Workflows: manyWorkflows(MaxWorkflowsPerInstance + 1), Defaults: &spec.Defaults{}, Kube: k, Deploy: true})
+	if !hasErr(errs, "exceeds the 63-char DNS-1123 limit") {
+		t.Fatalf("want too-long suffixed name error, got %v", errs)
+	}
+	// A short name with the same workflow count is fine.
+	k.Deployment.Name = "solmq"
+	errs2, _ := Run(Context{Workflows: manyWorkflows(MaxWorkflowsPerInstance + 1), Defaults: &spec.Defaults{}, Kube: k, Deploy: true})
+	if hasErr(errs2, "exceeds the 63-char DNS-1123 limit") {
+		t.Fatalf("short name should not trip the length guard, got %v", errs2)
 	}
 }
 

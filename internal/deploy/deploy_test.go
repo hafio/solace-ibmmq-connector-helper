@@ -19,6 +19,11 @@ func baseKube() *spec.Kubernetes {
 	}
 }
 
+// one wraps a single connector instance (the common single-instance test case).
+func one(name, appYAML string, m *consolidate.Model) []Instance {
+	return []Instance{{Name: name, AppYAML: appYAML, Model: m}}
+}
+
 func TestRenderFull(t *testing.T) {
 	k := baseKube()
 	k.Secrets = spec.Secrets{
@@ -26,10 +31,10 @@ func TestRenderFull(t *testing.T) {
 		Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{Name: "tls"}},
 	}
 	in := Input{
-		Kube: k, Defaults: &spec.Defaults{}, Model: &consolidate.Model{MQTLS: true},
-		AppYAML: "spring:\n  x: 1\n\n  y: 2\n",
-		CredKVs: []KV{{Key: "A", Val: `sec"ret`}},
-		Stores:  []StoreFile{{Name: "truststore.jks", Base64: "QUJD"}},
+		Kube: k, Defaults: &spec.Defaults{},
+		CredKVs:   []KV{{Key: "A", Val: `sec"ret`}},
+		Stores:    []StoreFile{{Name: "truststore.jks", Base64: "QUJD"}},
+		Instances: one(k.Deployment.Name, "spring:\n  x: 1\n\n  y: 2\n", &consolidate.Model{MQTLS: true}),
 	}
 	out := Render(in)
 	for _, w := range []string{
@@ -54,7 +59,7 @@ func TestRenderFull(t *testing.T) {
 func TestRenderNoSecretsNoServiceNoTLS(t *testing.T) {
 	k := baseKube()
 	k.Service.Enabled = false
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Model: &consolidate.Model{MQTLS: false}, AppYAML: "x: 1\n"})
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instances: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{MQTLS: false})})
 	for _, no := range []string{
 		"JAVA_TOOL_OPTIONS", "envFrom:", "kind: Secret", "kind: Service", "- name: stores",
 		"logback-spring.xml", "LOGGING_SYSLOG_HOST", "- name: libs", "initContainers:",
@@ -68,7 +73,7 @@ func TestRenderNoSecretsNoServiceNoTLS(t *testing.T) {
 func TestRenderSyslogUDP(t *testing.T) {
 	k := baseKube()
 	k.Logging = &spec.Logging{Syslog: &spec.Syslog{Host: "sys.host", Port: 514, Protocol: spec.SyslogUDP}}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Model: &consolidate.Model{}, AppYAML: "x: 1\n"})
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instances: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	for _, want := range []string{
 		"logback-spring.xml: |", "ch.qos.logback.classic.net.SyslogAppender",
 		"- name: LOGGING_SYSLOG_APPNAME", "value: solmq",
@@ -88,7 +93,7 @@ func TestRenderSyslogUDP(t *testing.T) {
 func TestRenderSyslogTCP(t *testing.T) {
 	k := baseKube()
 	k.Logging = &spec.Logging{Syslog: &spec.Syslog{Host: "sys.host", Port: 6514, Protocol: spec.SyslogTCP}}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Model: &consolidate.Model{}, AppYAML: "x: 1\n"})
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instances: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	for _, want := range []string{"LogstashTcpSocketAppender", "<destination>${SYSLOG_HOST}:${SYSLOG_PORT}</destination>"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q", want)
@@ -104,7 +109,7 @@ func TestRenderSyslogTCP(t *testing.T) {
 func TestRenderLibsPVCExisting(t *testing.T) {
 	k := baseKube()
 	k.Libs = &spec.Libs{PVC: &spec.LibsPVC{Existing: "my-pvc"}}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Model: &consolidate.Model{}, AppYAML: "x: 1\n"})
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instances: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	for _, want := range []string{"claimName: my-pvc", "mountPath: /app/external/libs"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q\n%s", want, out)
@@ -122,7 +127,7 @@ func TestRenderLibsPVCCreate(t *testing.T) {
 	k.Libs = &spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{
 		Name: "jar-libs", Storage: "2Gi", NFS: spec.NFS{Server: "nfs1", Path: "/libs"},
 	}}}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Model: &consolidate.Model{}, AppYAML: "x: 1\n"})
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instances: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	for _, want := range []string{
 		"kind: PersistentVolume", "name: jar-libs-pv", "server: nfs1", "path: /libs", "readOnly: true",
 		"kind: PersistentVolumeClaim", `storageClassName: ""`, "volumeName: jar-libs-pv",
@@ -142,7 +147,7 @@ func TestRenderLibsDownload(t *testing.T) {
 	k.Libs = &spec.Libs{Download: &spec.LibsDownload{
 		URLs: []string{"https://repo/a.jar", "https://repo/b.jar"}, Image: "busybox:1.37",
 	}}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Model: &consolidate.Model{}, AppYAML: "x: 1\n"})
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instances: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	for _, want := range []string{
 		"initContainers:", "- name: libs-download", "image: busybox:1.37",
 		`wget -O '/libs/a.jar' 'https://repo/a.jar' && wget -O '/libs/b.jar' 'https://repo/b.jar'`,
@@ -154,14 +159,15 @@ func TestRenderLibsDownload(t *testing.T) {
 	}
 	// download into an existing PVC instead of emptyDir
 	k.Libs.Download.PVC = "dl-pvc"
-	out = Render(Input{Kube: k, Defaults: &spec.Defaults{}, Model: &consolidate.Model{}, AppYAML: "x: 1\n"})
+	out = Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instances: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	if !strings.Contains(out, "claimName: dl-pvc") || strings.Contains(out, "emptyDir: {}") {
 		t.Errorf("download pvc volume wrong:\n%s", out)
 	}
 }
 
 func TestRenderNamespaceAlwaysFirst(t *testing.T) {
-	out := Render(Input{Kube: baseKube(), Defaults: &spec.Defaults{}, Model: &consolidate.Model{}, AppYAML: "x: 1\n"})
+	k := baseKube()
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instances: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	// The Namespace doc is always emitted first, before the ConfigMap, and names
 	// the deployment namespace.
 	nsDoc := "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ns\n"
@@ -173,13 +179,55 @@ func TestRenderNamespaceAlwaysFirst(t *testing.T) {
 	}
 }
 
+func TestRenderMultiInstance(t *testing.T) {
+	k := baseKube()
+	k.Secrets = spec.Secrets{
+		Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "creds", Source: spec.SourceEnv, Variables: []string{"A"}}},
+	}
+	in := Input{
+		Kube: k, Defaults: &spec.Defaults{},
+		CredKVs: []KV{{Key: "A", Val: "v"}},
+		Instances: []Instance{
+			{Name: "solmq-1", AppYAML: "a: 1\n", Model: &consolidate.Model{}},
+			{Name: "solmq-2", AppYAML: "b: 2\n", Model: &consolidate.Model{}},
+		},
+	}
+	out := Render(in)
+	// Shared docs exactly once.
+	if got := strings.Count(out, "kind: Namespace"); got != 1 {
+		t.Errorf("Namespace count = %d, want 1", got)
+	}
+	if got := strings.Count(out, "kind: Secret"); got != 1 {
+		t.Errorf("Secret count = %d, want 1 (shared)", got)
+	}
+	// Per-instance docs: 2 ConfigMaps, 2 Deployments, 2 Services with -N names.
+	if got := strings.Count(out, "kind: ConfigMap"); got != 2 {
+		t.Errorf("ConfigMap count = %d, want 2", got)
+	}
+	if got := strings.Count(out, "kind: Deployment"); got != 2 {
+		t.Errorf("Deployment count = %d, want 2", got)
+	}
+	if got := strings.Count(out, "kind: Service"); got != 2 {
+		t.Errorf("Service count = %d, want 2", got)
+	}
+	for _, want := range []string{
+		"name: solmq-1-config", "name: solmq-2-config",
+		"name: solmq-1\n", "name: solmq-2\n",
+		"app: solmq-1", "app: solmq-2",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q\n%s", want, out)
+		}
+	}
+}
+
 func TestRenderExistingSecrets(t *testing.T) {
 	k := baseKube()
 	k.Secrets = spec.Secrets{
 		Credentials: &spec.CredentialsSecret{Existing: "my-creds"},
 		Stores:      &spec.StoresSecret{Existing: "my-tls"},
 	}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Model: &consolidate.Model{}, AppYAML: "x: 1\n"})
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instances: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	if strings.Contains(out, "kind: Secret") {
 		t.Error("existing secrets must not emit Secret docs")
 	}
@@ -189,15 +237,15 @@ func TestRenderExistingSecrets(t *testing.T) {
 }
 
 func TestManagementPortFallback(t *testing.T) {
-	if got := managementPort(Input{Kube: baseKube(), Defaults: &spec.Defaults{Management: spec.Management{Present: true, Port: 9999}}, Model: &consolidate.Model{}}); got != 9999 {
+	if got := managementPort(Input{Kube: baseKube(), Defaults: &spec.Defaults{Management: spec.Management{Present: true, Port: 9999}}}); got != 9999 {
 		t.Errorf("mgmt = %d want 9999 (defaults)", got)
 	}
-	if got := managementPort(Input{Kube: baseKube(), Defaults: &spec.Defaults{}, Model: &consolidate.Model{}}); got != 8090 {
+	if got := managementPort(Input{Kube: baseKube(), Defaults: &spec.Defaults{}}); got != 8090 {
 		t.Errorf("mgmt = %d want 8090 (service port)", got)
 	}
 	k := baseKube()
 	k.Service.Port = 0
-	if got := managementPort(Input{Kube: k, Defaults: nil, Model: &consolidate.Model{}}); got != 8090 {
+	if got := managementPort(Input{Kube: k, Defaults: nil}); got != 8090 {
 		t.Errorf("mgmt = %d want 8090 (default)", got)
 	}
 }
@@ -211,7 +259,7 @@ func TestQuoteRes(t *testing.T) {
 func TestRenderNoResources(t *testing.T) {
 	k := baseKube()
 	k.Deployment.Resources = spec.Resources{}
-	if strings.Contains(Render(Input{Kube: k, Defaults: &spec.Defaults{}, Model: &consolidate.Model{}, AppYAML: "x\n"}), "resources:") {
+	if strings.Contains(Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instances: one(k.Deployment.Name, "x\n", &consolidate.Model{})}), "resources:") {
 		t.Error("no resources block expected when all empty")
 	}
 }

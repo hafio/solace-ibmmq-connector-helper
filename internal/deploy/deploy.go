@@ -22,14 +22,24 @@ type StoreFile struct {
 	Base64 string // base64 of the file bytes
 }
 
-// Input is everything needed to render the manifests.
+// Instance is one connector instance: its own ConfigMap + Deployment + Service.
+// A folder with more than MaxWorkflowsPerInstance workflows is sharded into
+// several instances that share one namespace, secrets, and libs volume.
+type Instance struct {
+	Name    string             // deployment name: the base name, or base-N when sharded
+	AppYAML string             // this instance's rendered application.yml (trailing newline)
+	Model   *consolidate.Model // this instance's model (drives per-instance MQTLS etc.)
+}
+
+// Input is everything needed to render the manifests. Shared objects (namespace,
+// secrets, libs PV/PVC) are emitted once; ConfigMap/Deployment/Service are
+// emitted per Instance.
 type Input struct {
-	Kube     *spec.Kubernetes
-	Defaults *spec.Defaults
-	Model    *consolidate.Model
-	AppYAML  string      // the rendered application.yml (with trailing newline)
-	CredKVs  []KV        // resolved credential values (only when credentials.create)
-	Stores   []StoreFile // resolved .jks files (only when stores.create)
+	Kube      *spec.Kubernetes
+	Defaults  *spec.Defaults
+	CredKVs   []KV        // resolved credential values (only when credentials.create)
+	Stores    []StoreFile // resolved .jks files (only when stores.create)
+	Instances []Instance  // one or more connector instances
 }
 
 type yw struct{ b strings.Builder }
@@ -147,14 +157,16 @@ func baseName(p string) string {
 	return p
 }
 
-// Render produces the full multi-doc manifest set.
+// Render produces the full multi-doc manifest set. Shared objects (Namespace,
+// Secrets, libs PV/PVC) are emitted once; the ConfigMap, Deployment, and Service
+// are emitted per instance. The emission order (Namespace, all ConfigMaps, shared
+// Secrets, PV/PVC, all Deployments, all Services) is chosen so that a single
+// instance reproduces the historical byte-for-byte layout.
 func Render(in Input) string {
 	dep := in.Kube.Deployment
-	name := dep.Name
 	ns := dep.Namespace
-	cmName := name + "-config"
 
-	// Secret references / emission flags.
+	// Secret references / emission flags (shared across instances).
 	credRef, emitCred := "", false
 	if c := in.Kube.Secrets.Credentials; c != nil {
 		if c.Create != nil {
@@ -183,42 +195,21 @@ func Render(in Input) string {
 		docs++
 	}
 
-	// 0. Namespace: always emitted first so the objects below land in a namespace
-	// that exists in the same apply (applying it when it already exists is a no-op).
+	// 0. Namespace: emitted first so the objects below land in a namespace that
+	// exists in the same apply (applying it when it already exists is a no-op).
 	sep()
 	w.line(0, "apiVersion: v1")
 	w.line(0, "kind: Namespace")
 	w.line(0, "metadata:")
 	w.line(2, "name: "+ns)
 
-	// 1. ConfigMap
-	sep()
-	w.line(0, "apiVersion: v1")
-	w.line(0, "kind: ConfigMap")
-	w.line(0, "metadata:")
-	w.line(2, "name: "+cmName)
-	w.line(2, "namespace: "+ns)
-	w.line(0, "data:")
-	w.line(2, "application.yml: |")
-	for _, ln := range splitLines(in.AppYAML) {
-		if ln == "" {
-			w.raw("\n")
-		} else {
-			w.line(4, ln)
-		}
-	}
-	if sys := syslogOf(in.Kube); sys != nil {
-		w.line(2, "logback-spring.xml: |")
-		for _, ln := range splitLines(LogbackXML(sys.Protocol)) {
-			if ln == "" {
-				w.raw("\n")
-			} else {
-				w.line(4, ln)
-			}
-		}
+	// 1. ConfigMap — one per instance.
+	for _, inst := range in.Instances {
+		sep()
+		renderConfigMap(w, inst.Name+"-config", ns, inst.AppYAML, syslogOf(in.Kube))
 	}
 
-	// 2. credentials Secret (stringData)
+	// 2. credentials Secret (stringData) — shared.
 	if emitCred {
 		sep()
 		w.line(0, "apiVersion: v1")
@@ -233,7 +224,7 @@ func Render(in Input) string {
 		}
 	}
 
-	// 3. stores Secret (base64 data)
+	// 3. stores Secret (base64 data) — shared.
 	if emitStores {
 		sep()
 		w.line(0, "apiVersion: v1")
@@ -248,7 +239,7 @@ func Render(in Input) string {
 		}
 	}
 
-	// 3b. libs PV + PVC (only for libs.pvc.create; PV is cluster-scoped, no namespace)
+	// 3b. libs PV + PVC — shared (only for libs.pvc.create; PV is cluster-scoped).
 	if lb := in.Kube.Libs; lb != nil && lb.PVC != nil && lb.PVC.Create != nil {
 		c := lb.PVC.Create
 		sep()
@@ -281,21 +272,56 @@ func Render(in Input) string {
 		w.line(6, "storage: "+c.Storage)
 	}
 
-	// 4. Deployment
-	sep()
-	renderDeployment(w, in, name, ns, cmName, credRef, storeRef, hasStores, mgmtPort)
-
-	// 5. Service
-	if in.Kube.Service.Enabled {
+	// 4. Deployment — one per instance.
+	for _, inst := range in.Instances {
 		sep()
-		renderService(w, name, ns, in.Kube.Service.Port, mgmtPort)
+		renderDeployment(w, in, inst, ns, credRef, storeRef, hasStores, mgmtPort)
+	}
+
+	// 5. Service — one per instance (when enabled).
+	if in.Kube.Service.Enabled {
+		for _, inst := range in.Instances {
+			sep()
+			renderService(w, inst.Name, ns, in.Kube.Service.Port, mgmtPort)
+		}
 	}
 
 	return w.String()
 }
 
-func renderDeployment(w *yw, in Input, name, ns, cmName, credRef, storeRef string, hasStores bool, mgmtPort int) {
+// renderConfigMap emits one ConfigMap embedding this instance's application.yml
+// and, when syslog is configured, the shared logback-spring.xml.
+func renderConfigMap(w *yw, cmName, ns, appYAML string, sys *spec.Syslog) {
+	w.line(0, "apiVersion: v1")
+	w.line(0, "kind: ConfigMap")
+	w.line(0, "metadata:")
+	w.line(2, "name: "+cmName)
+	w.line(2, "namespace: "+ns)
+	w.line(0, "data:")
+	w.line(2, "application.yml: |")
+	for _, ln := range splitLines(appYAML) {
+		if ln == "" {
+			w.raw("\n")
+		} else {
+			w.line(4, ln)
+		}
+	}
+	if sys != nil {
+		w.line(2, "logback-spring.xml: |")
+		for _, ln := range splitLines(LogbackXML(sys.Protocol)) {
+			if ln == "" {
+				w.raw("\n")
+			} else {
+				w.line(4, ln)
+			}
+		}
+	}
+}
+
+func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef string, hasStores bool, mgmtPort int) {
 	dep := in.Kube.Deployment
+	name := inst.Name
+	cmName := inst.Name + "-config"
 	w.line(0, "apiVersion: apps/v1")
 	w.line(0, "kind: Deployment")
 	w.line(0, "metadata:")
@@ -336,13 +362,13 @@ func renderDeployment(w *yw, in Input, name, ns, cmName, credRef, storeRef strin
 	w.line(10, "env:")
 	w.line(12, "- name: TZ")
 	w.line(14, "value: "+dep.Timezone)
-	if in.Model.MQTLS {
+	if inst.Model.MQTLS {
 		w.line(12, "- name: JAVA_TOOL_OPTIONS")
 		w.line(14, `value: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"`)
 	}
 	if sys := syslogOf(in.Kube); sys != nil {
 		w.line(12, "- name: LOGGING_SYSLOG_APPNAME")
-		w.line(14, "value: "+dep.Name)
+		w.line(14, "value: "+name)
 		w.line(12, "- name: LOGGING_SYSLOG_HOST")
 		w.line(14, "value: "+sys.Host)
 		w.line(12, "- name: LOGGING_SYSLOG_PORT")

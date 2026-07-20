@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/examples"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/gen"
@@ -65,12 +66,12 @@ func runConfig(args []string) int {
 	}
 	req.Kubernetes = nil // config never reads kubernetes.yaml
 	res := gen.Resolver{Env: os.LookupEnv, ReadFile: fileReader(dir)}
-	yaml, errs, warns := gen.Config(req, res)
+	docs, errs, warns := gen.Config(req, res)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs) // config: stop at the first error
 	}
-	return emit(*out, yaml)
+	return emitConfigs(*out, docs)
 }
 
 func runDeploy(args []string) int {
@@ -239,6 +240,42 @@ func emit(out, content string) int {
 		return 1
 	}
 	return 0
+}
+
+// emitConfigs writes the per-instance application.yml documents. A single
+// instance behaves exactly like emit (plain stdout / one -o file). With several
+// instances, stdout gets a banner before each doc and -o writes <base>-<n><ext>.
+func emitConfigs(out string, docs []string) int {
+	if len(docs) == 1 {
+		return emit(out, docs[0])
+	}
+	if out == "" {
+		for i, doc := range docs {
+			fmt.Print(instanceBanner(i+1, len(docs)))
+			fmt.Print(doc)
+		}
+		return 0
+	}
+	for i, doc := range docs {
+		if code := emit(suffixBeforeExt(out, i+1), doc); code != 0 {
+			return code
+		}
+	}
+	return 0
+}
+
+// instanceBanner is the 5-line separator printed before each instance's config
+// when several are streamed to stdout.
+func instanceBanner(n, total int) string {
+	bar := "# " + strings.Repeat("=", 60)
+	return fmt.Sprintf("%s\n%s\n#  CONNECTOR INSTANCE %d OF %d  —  application.yml\n%s\n%s\n", bar, bar, n, total, bar, bar)
+}
+
+// suffixBeforeExt inserts -<n> before the file extension: out.yml -> out-1.yml,
+// out -> out-1.
+func suffixBeforeExt(path string, n int) string {
+	ext := filepath.Ext(path)
+	return fmt.Sprintf("%s-%d%s", strings.TrimSuffix(path, ext), n, ext)
 }
 
 func failFast(errs []gen.Issue) int {

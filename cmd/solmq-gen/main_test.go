@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -96,11 +97,18 @@ func captureStdout(t *testing.T, f func()) string {
 		t.Fatal(err)
 	}
 	os.Stdout = w
+	// Drain concurrently: os.Pipe has a small buffer, so output larger than it
+	// (e.g. a multi-instance config) would block the writer if we read only
+	// after f() returns.
+	done := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
 	f()
 	_ = w.Close()
 	os.Stdout = old
-	b, _ := io.ReadAll(r)
-	return string(b)
+	return <-done
 }
 
 func TestRunConfigToFile(t *testing.T) {
@@ -181,6 +189,102 @@ func TestRunDeployMissingKube(t *testing.T) {
 	if code := run([]string{"deploy", specDir(t, validWF)}); code != 1 {
 		t.Fatalf("deploy without kubernetes.yaml should fail, got %d", code)
 	}
+}
+
+const kubeSharded = `
+deployment:
+  name: solmq
+  namespace: ns
+  image: img:1
+service:
+  enabled: true
+  port: 8090
+`
+
+// manyWorkflowDir writes n distinct, valid workflow files (literal passwords, so
+// no env is needed) into a fresh temp dir.
+func manyWorkflowDir(t *testing.T, n int) string {
+	dir := t.TempDir()
+	for i := 0; i < n; i++ {
+		write(t, dir, fmt.Sprintf("wf-%02d.yaml", i), fmt.Sprintf(`
+source:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: prod
+    client-username: connector
+    client-password: pw
+    queue: Q.IN.%d
+target:
+  mq:
+    conn-name: mqhost(1414)
+    queue-manager: QM1
+    channel: CH
+    user: app
+    password: pw
+    queue: OUT.%d
+`, i, i))
+	}
+	return dir
+}
+
+func TestRunDeploySharded(t *testing.T) {
+	dir := manyWorkflowDir(t, 21)
+	write(t, dir, "kubernetes.yaml", kubeSharded)
+	out := filepath.Join(dir, "manifests.yml")
+	if code := run([]string{"deploy", dir, "-o", out}); code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	s := string(mustReadFile(t, out))
+	if c := strings.Count(s, "kind: Namespace"); c != 1 {
+		t.Errorf("Namespace count = %d, want 1", c)
+	}
+	if c := strings.Count(s, "kind: Deployment"); c != 2 {
+		t.Errorf("Deployment count = %d, want 2", c)
+	}
+	for _, w := range []string{"name: solmq-1\n", "name: solmq-2\n"} {
+		if !strings.Contains(s, w) {
+			t.Errorf("missing %q", w)
+		}
+	}
+}
+
+func TestRunConfigShardedFiles(t *testing.T) {
+	dir := manyWorkflowDir(t, 21)
+	out := filepath.Join(dir, "app.yml")
+	if code := run([]string{"config", dir, "-o", out}); code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	for _, f := range []string{"app-1.yml", "app-2.yml"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			t.Errorf("expected %s to be written: %v", f, err)
+		}
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("unsuffixed %s should not be written when sharded", out)
+	}
+}
+
+func TestRunConfigShardedStdout(t *testing.T) {
+	dir := manyWorkflowDir(t, 21)
+	var code int
+	out := captureStdout(t, func() { code = run([]string{"config", dir}) })
+	if code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	for _, w := range []string{"CONNECTOR INSTANCE 1 OF 2", "CONNECTOR INSTANCE 2 OF 2"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("stdout banner missing %q", w)
+		}
+	}
+}
+
+func mustReadFile(t *testing.T, p string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func TestRunUsageAndErrors(t *testing.T) {

@@ -1,7 +1,7 @@
 # Deploy settings — used by `solmq-gen deploy`, ignored by `config`.
 # Override the filename with `-k`; it is never treated as a workflow.
 deployment:
-  name: solmq-connector                   # DNS-1123 label
+  name: solmq-connector                   # DNS-1123 label (suffixed -1, -2, … when >20 workflows split into instances)
   namespace: solace-connectors            # deploy also emits a `kind: Namespace` for it
   image: solace/solace-pubsub-connector-ibmmq:2.13.0
   replicas: 2                             # active_standby: 1 leader + standbys (standalone needs 1)

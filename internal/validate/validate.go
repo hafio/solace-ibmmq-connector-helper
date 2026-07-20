@@ -13,8 +13,11 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/spec"
 )
 
-// MaxWorkflows is the hard cap on workflows per folder.
-const MaxWorkflows = 20
+// MaxWorkflowsPerInstance is the connector runtime's cap on workflow IDs
+// (0..19) per application.yml. Folders with more workflows are sharded across
+// that many connector instances by the gen layer, so this is a per-instance
+// size — not a hard folder cap.
+const MaxWorkflowsPerInstance = 20
 
 // Issue is one validation finding (File "" means a global/cross-file problem).
 type Issue struct {
@@ -61,9 +64,6 @@ func Run(ctx Context) (errs, warns []Issue) {
 	}
 	d := ctx.Defaults
 
-	if len(ctx.Workflows) > MaxWorkflows {
-		add("", "too many workflows: %d (max %d)", len(ctx.Workflows), MaxWorkflows)
-	}
 
 	haveKeystore := d.TLS.Keystore != nil && d.TLS.Keystore.File != ""
 
@@ -322,6 +322,12 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 		add("kubernetes.yaml", "deployment.name is required")
 	} else if !isDNS1123(dep.Name) {
 		add("kubernetes.yaml", "deployment.name %q is not a valid DNS-1123 label", dep.Name)
+	} else if instances := shardCount(len(ctx.Workflows)); instances > 1 {
+		// With >1 instance the name is suffixed -<n>; the ConfigMap (<name>-<n>-config)
+		// is the longest derived name and must stay within the 63-char DNS-1123 limit.
+		if longest := fmt.Sprintf("%s-%d-config", dep.Name, instances); len(longest) > 63 {
+			add("kubernetes.yaml", "deployment.name %q is too long: %d instances generate names up to %q which exceeds the 63-char DNS-1123 limit", dep.Name, instances, longest)
+		}
 	}
 	if dep.Namespace == "" {
 		add("kubernetes.yaml", "deployment.namespace is required")
@@ -550,6 +556,12 @@ func storesWired(k *spec.Kubernetes) bool {
 }
 
 func isDNS1123(s string) bool { return len(s) <= 63 && dns1123RE.MatchString(s) }
+
+// shardCount is the number of connector instances n workflows split into
+// (ceil(n / MaxWorkflowsPerInstance)); 0 for an empty folder.
+func shardCount(n int) int {
+	return (n + MaxWorkflowsPerInstance - 1) / MaxWorkflowsPerInstance
+}
 
 func dedupKey(s spec.Side) string {
 	if s.System == spec.SystemSolace {

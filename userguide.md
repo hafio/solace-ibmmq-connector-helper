@@ -92,11 +92,17 @@ reserved files, which are never treated as workflows:
   names (see §7)
 - the `-o` output file, if it happens to live inside `<dir>`
 
-Workflows are **numbered `0..N` by sorted filename** (maximum 20). The number
-becomes the workflow's id in the output (`input-<N>` / `output-<N>` and
+Workflows are **numbered `0..N` by sorted filename**. The number becomes the
+workflow's id in the output (`input-<N>` / `output-<N>` and
 `solace.connector.workflows.<N>`). Naming files `workflow-0.yaml`,
 `workflow-1.yaml`, … keeps the mapping obvious, but any names work — only sort
 order matters.
+
+The connector runtime holds **up to 20 workflows** (ids `0..19`) per
+`application.yml`. With more than 20 workflows the tool automatically **splits them
+across multiple connector instances** — fill-to-20 in sorted order (instance 1 =
+workflows 0–19, instance 2 = 20–39, …). Each instance renumbers its own workflows
+from `0`, and `config`/`deploy` emit one set of artifacts per instance (see §7).
 
 ---
 
@@ -393,9 +399,9 @@ secrets:                         # entirely optional
 
 | section | option | notes |
 |---------|--------|-------|
-| `deployment` | `name`, `namespace` | required; must be valid DNS-1123 labels; a `kind: Namespace` doc for `namespace` is always emitted first |
+| `deployment` | `name`, `namespace` | required; must be valid DNS-1123 labels; a `kind: Namespace` doc for `namespace` is always emitted first. With **>20 workflows** the name is suffixed `-1`, `-2`, … per instance (single instance keeps the bare name); keep the base short enough that `<name>-<n>-config` stays within 63 chars |
 | `deployment` | `image` | required |
-| `deployment` | `replicas` | default `1`; `standalone` leader-election requires `1`, `active_*` allow more |
+| `deployment` | `replicas` | default `1`; `standalone` leader-election requires `1`, `active_*` allow more. **Replicas** are copies of one instance (leader-election picks the active one); **instances** are the separate Deployments created when workflows exceed 20 |
 | `deployment` | `resources.cpu`, `resources.memory` | one value each; emitted as identical requests **and** limits (guaranteed QoS); a bare integer like `cpu: 1` is auto-quoted |
 | `deployment` | `timezone` | sets the container `TZ` env var |
 | `service` | `enabled`, `port` | emit a Service on this port |
@@ -435,12 +441,17 @@ wired.
 
 ## 9. What gets generated
 
-**`config` → one multi-binder `application.yml`:** deduplicated binders (connections
-sharing a broker/queue-manager tuple collapse into one binder), numbered workflows,
-the mandatory `undefined` binder (always emitted, always last), derived
-destination-types, auto `durable-subscription-name` for MQ topic consumers,
-verbatim `api-properties` / `additional-properties`, `${VAR}` placeholders, and the
-Solace + MQ TLS/mTLS blocks.
+**`config` → one multi-binder `application.yml` per instance:** deduplicated binders
+(connections sharing a broker/queue-manager tuple collapse into one binder), numbered
+workflows, the mandatory `undefined` binder (always emitted, always last), derived
+destination-types, auto `durable-subscription-name` for MQ topic consumers, verbatim
+`api-properties` / `additional-properties`, `${VAR}` placeholders, and the Solace + MQ
+TLS/mTLS blocks. With ≤20 workflows this is a single document. With more, `config`
+emits one `application.yml` per instance: to **stdout** each is preceded by a banner
+(`CONNECTOR INSTANCE n OF N`); with **`-o out.yml`** they are written to `out-1.yml`,
+`out-2.yml`, … (a single instance still writes plain `out.yml`). Point `-o` **outside**
+the spec folder when sharding, so the suffixed outputs are not re-scanned as workflows
+on the next run.
 
 **Store paths differ by command.** `config` writes each truststore/keystore
 `location` exactly as it appears in `defaults.yaml`, so you can run the connector
@@ -450,10 +461,14 @@ there — the `application.yml` embedded in the ConfigMap points at that mount p
 
 **`deploy` → a multi-document manifest set:** a `Namespace` doc for
 `deployment.namespace` (emitted first; applying it when the namespace already
-exists is a no-op), a `ConfigMap` mounting `application.yml` at
-`/app/external/spring/config/application.yml` (via `subPath`), optional `Secret`s
-(credentials and/or stores), a `Deployment`, and an optional `Service`. Probes use
-a **tcpSocket** check on the management port (basic-auth protects `/actuator/*`).
+exists is a no-op), then **per instance** a `ConfigMap` mounting `application.yml` at
+`/app/external/spring/config/application.yml` (via `subPath`), a `Deployment`, and an
+optional `Service`; the credentials/stores `Secret`s and any libs `PersistentVolume`/
+`PersistentVolumeClaim` are **shared** (emitted once). With >20 workflows the
+ConfigMap/Deployment/Service names are suffixed `-1`, `-2`, … per instance, and each
+instance's leader-election coordination `queue` is suffixed to match (so the separate
+connector clusters don't contend for one election queue). Probes use a **tcpSocket**
+check on the management port (basic-auth protects `/actuator/*`).
 When any MQ-TLS binder exists the Deployment sets
 `JAVA_TOOL_OPTIONS=-Dcom.ibm.mq.cfg.useIBMCipherMappings=false`. When
 `logging.syslog` is set, the ConfigMap also gets a `logback-spring.xml` key
@@ -508,8 +523,9 @@ cleanly: `solmq-gen examples && solmq-gen config examples`.
 - **Deterministic, byte-for-byte output.** Regenerating from unchanged inputs
   produces identical bytes (an ordered emitter, not generic YAML marshaling), so
   files diff cleanly in review.
-- **Workflow numbering is filename-driven** and capped at 20. Sort order decides the
-  ids; gaps in your naming are fine.
+- **Workflow numbering is filename-driven**; sort order decides the ids and gaps in
+  your naming are fine. More than 20 workflows are auto-split into additional
+  connector instances (20 per instance), each renumbering from `0`.
 - **Renaming a workflow file changes its MQ durable subscription name** (it is part
   of the UUIDv5 key). Rename deliberately, or the old durable subscription is
   orphaned.

@@ -54,13 +54,16 @@ func norm(s string) string { return strings.ReplaceAll(s, "\r\n", "\n") }
 
 func TestGoldenConfig(t *testing.T) {
 	req := loadSpecs(t)
-	out, errs, _ := gen.Config(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()})
+	outs, errs, _ := gen.Config(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()})
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
+	if len(outs) != 1 {
+		t.Fatalf("golden specs (4 workflows) should be one instance, got %d", len(outs))
+	}
 	want := norm(string(mustRead(t, "../../testdata/golden/application.yml")))
-	if norm(out) != want {
-		t.Errorf("config output mismatch\n%s", lineDiff(want, norm(out)))
+	if norm(outs[0]) != want {
+		t.Errorf("config output mismatch\n%s", lineDiff(want, norm(outs[0])))
 	}
 }
 

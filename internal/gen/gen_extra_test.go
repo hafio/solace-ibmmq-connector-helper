@@ -2,6 +2,8 @@ package gen
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/deploy"
@@ -111,6 +113,121 @@ func TestBaseNameB64ToIssues(t *testing.T) {
 	}
 	if iss := toIssues([]string{"a", "b"}); len(iss) != 2 || iss[0].Msg != "a" {
 		t.Errorf("toIssues=%v", iss)
+	}
+}
+
+// ---- sharding (>20 workflows) ----------------------------------------------
+
+// synthWorkflows builds n minimal, valid workflows (distinct queues per index).
+func synthWorkflows(n int) []spec.Workflow {
+	var wfs []spec.Workflow
+	for i := 0; i < n; i++ {
+		wfs = append(wfs, spec.Workflow{
+			File: fmt.Sprintf("wf-%02d.yaml", i), Enabled: true, SourceSet: true, TargetSet: true,
+			Source: spec.Side{System: spec.SystemSolace, Host: "tcp://b", MsgVPN: "v", ClientUser: "u", ClientPass: "p", DestKind: spec.DestQueue, Dest: fmt.Sprintf("IN-%d", i)},
+			Target: spec.Side{System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM", Channel: "C", User: "u", Password: "p", DestKind: spec.DestQueue, Dest: fmt.Sprintf("OUT-%d", i)},
+		})
+	}
+	return wfs
+}
+
+// synthWorkflowFiles renders synthWorkflows as gen.File YAML for end-to-end tests.
+func synthWorkflowFiles(n int) []File {
+	var fs []File
+	for i := 0; i < n; i++ {
+		data := fmt.Sprintf(`source:
+  solace:
+    host: tcp://b
+    msg-vpn: v
+    client-username: u
+    client-password: p
+    queue: IN-%d
+target:
+  mq:
+    conn-name: h(1414)
+    queue-manager: QM
+    channel: C
+    user: u
+    password: p
+    queue: OUT-%d
+`, i, i)
+		fs = append(fs, File{Name: fmt.Sprintf("wf-%02d.yaml", i), Data: []byte(data)})
+	}
+	return fs
+}
+
+func TestShardWorkflows(t *testing.T) {
+	for _, c := range []struct{ n, want int }{{0, 1}, {1, 1}, {20, 1}, {21, 2}, {40, 2}, {41, 3}} {
+		if got := len(shardWorkflows(make([]spec.Workflow, c.n))); got != c.want {
+			t.Errorf("n=%d chunks=%d want %d", c.n, got, c.want)
+		}
+	}
+	chunks := shardWorkflows(synthWorkflows(21))
+	if len(chunks) != 2 || len(chunks[0]) != 20 || len(chunks[1]) != 1 {
+		t.Fatalf("chunk sizes = %d then %d,%d", len(chunks), len(chunks[0]), len(chunks[1]))
+	}
+	if chunks[1][0].File != "wf-20.yaml" {
+		t.Errorf("chunk 2 first workflow = %q, want wf-20.yaml", chunks[1][0].File)
+	}
+}
+
+func TestBuildShardsLeaderQueueSuffix(t *testing.T) {
+	d := &spec.Defaults{LeaderElection: spec.LeaderElection{
+		Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q",
+		Session: &spec.Side{System: spec.SystemSolace, Host: "tcp://b", MsgVPN: "v", ClientUser: "u", ClientPass: "p"},
+	}}
+	shards, _ := buildShards(synthWorkflows(21), d, true)
+	if len(shards) != 2 {
+		t.Fatalf("shards=%d want 2", len(shards))
+	}
+	if shards[0].model.LeaderElection.Queue != "mgmt-q-1" || shards[1].model.LeaderElection.Queue != "mgmt-q-2" {
+		t.Errorf("queues = %q, %q want mgmt-q-1, mgmt-q-2", shards[0].model.LeaderElection.Queue, shards[1].model.LeaderElection.Queue)
+	}
+	// Single instance keeps the queue unchanged.
+	single, _ := buildShards(synthWorkflows(3), d, true)
+	if len(single) != 1 || single[0].model.LeaderElection.Queue != "mgmt-q" {
+		t.Errorf("single-instance queue = %q want mgmt-q", single[0].model.LeaderElection.Queue)
+	}
+}
+
+func TestDeploySharding(t *testing.T) {
+	req := Request{
+		Workflows:  synthWorkflowFiles(21),
+		Kubernetes: &File{Name: "kubernetes.yaml", Data: []byte("deployment:\n  name: solmq\n  namespace: ns\n  image: img\nservice:\n  enabled: true\n  port: 8090\n")},
+	}
+	out, errs, _ := Deploy(req, Resolver{})
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	for _, c := range []struct {
+		kind string
+		want int
+	}{{"kind: Namespace", 1}, {"kind: ConfigMap", 2}, {"kind: Deployment", 2}, {"kind: Service", 2}} {
+		if got := strings.Count(out, c.kind); got != c.want {
+			t.Errorf("%q count = %d, want %d", c.kind, got, c.want)
+		}
+	}
+	for _, want := range []string{"name: solmq-1\n", "name: solmq-2\n", "name: solmq-1-config", "name: solmq-2-config"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+}
+
+func TestConfigSharding(t *testing.T) {
+	outs, errs, _ := Config(Request{Workflows: synthWorkflowFiles(21)}, Resolver{})
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(outs) != 2 {
+		t.Fatalf("instances = %d, want 2", len(outs))
+	}
+	if !strings.Contains(outs[0], "input-19") || strings.Contains(outs[0], "input-20") {
+		t.Errorf("instance 1 should hold workflows 0..19")
+	}
+	// Instance 2 renumbers its lone workflow from 0.
+	if !strings.Contains(outs[1], "input-0") || strings.Contains(outs[1], "input-1") {
+		t.Errorf("instance 2 should renumber from 0:\n%s", outs[1])
 	}
 }
 

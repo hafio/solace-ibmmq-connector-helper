@@ -1,14 +1,16 @@
 # solmq-gen — Solace IBM MQ Connector config generator
 
-`solmq-gen` turns a folder of small, per-workflow YAML files into one consolidated
+`solmq-gen` turns a folder of small, per-workflow YAML files into a consolidated
 `application.yml` for the **Solace PubSub+ Connector for IBM MQ**
 (`solace/solace-pubsub-connector-ibmmq:2.13.0`), and can emit the Kubernetes
-manifests that run it.
+manifests that run it. More than 20 workflows are split across multiple connector
+instances (20 per instance) automatically.
 
 - **Reusable connections**: define `connections.<name>` once in `defaults.yaml`,
   reference it with `conn-ref`; identical connections dedup into shared **binders**.
-- Auto-numbers workflows by sorted filename, derives destination-types from
-  `queue:`/`topic:`, and auto-names a **durable subscription** for every MQ topic source.
+- Auto-numbers workflows by sorted filename (auto-splitting into additional
+  instances past 20), derives destination-types from `queue:`/`topic:`, and
+  auto-names a **durable subscription** for every MQ topic source.
 - Implements **leader-election** (`standalone` / `active_active` / `active_standby`).
 - Wires **TLS + mTLS** for both Solace and MQ from one shared truststore/keystore.
 - Secrets stay `${VAR}` placeholders — never inlined into config.
@@ -66,7 +68,9 @@ solmq-gen config specs -o application.yml  # ...or written to a file
 ```
 
 Add a `kubernetes.yaml` ([userguide.md](userguide.md) §7) and `solmq-gen deploy specs`
-emits the full manifest set (Namespace, ConfigMap, Deployment, Service, Secrets).
+emits the full manifest set (Namespace, ConfigMap, Deployment, Service, Secrets) —
+one ConfigMap/Deployment/Service per instance, with shared Namespace/Secrets, when
+workflows exceed 20.
 
 ## Commands
 
