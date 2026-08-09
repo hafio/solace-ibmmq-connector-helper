@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/consolidate"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
 // KV is one resolved credential entry (plaintext; K8s base64-encodes stringData).
@@ -149,7 +149,15 @@ func syslogOf(k *spec.Kubernetes) *spec.Syslog {
 	return k.Logging.Syslog
 }
 
-// baseName returns the final path element of a URL (mirrors gen.baseName).
+// baseName returns the final path element of a URL. It deliberately does NOT
+// normalize backslashes the way gen.baseName does: its only caller,
+// renderDeployment, feeds it entries from Libs.Download.URLs, and
+// internal/validate's safeLibsURL rejects any libs.download url containing a
+// backslash (along with quotes, control chars, etc.) before GenerateKubernetes
+// ever calls Render -- see gen.GenerateKubernetes, which runs validate.Run and
+// returns on the first error without rendering. So a Windows-style path can
+// never reach this function through the CLI. If a future caller feeds it an
+// unvalidated string, normalize backslashes here first, to match gen.baseName.
 func baseName(p string) string {
 	if i := strings.LastIndexByte(p, '/'); i >= 0 {
 		return p[i+1:]

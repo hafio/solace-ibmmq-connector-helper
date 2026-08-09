@@ -6,7 +6,7 @@
 # target: edge-solace — a MANUAL (inline), SINGLE-USE, PLAINTEXT connection to a
 # different broker: a tcp:// host and no key-alias, so no TLS is wired for this
 # binder (auto-named sol-conn-1). Being inline and used once, it needs no entry
-# in defaults.yaml.
+# in env.yaml.
 source:
   mq:
     conn-name: mqhost-core.internal(1414)

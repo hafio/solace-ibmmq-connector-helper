@@ -25,7 +25,7 @@ type Resources struct {
 	Memory string `yaml:"memory"`
 }
 
-// Deployment mirrors kubernetes.yaml.deployment.
+// Deployment mirrors the kubernetes.deployment section of env.yaml.
 type Deployment struct {
 	Name      string    `yaml:"name"`
 	Namespace string    `yaml:"namespace"`
@@ -35,7 +35,7 @@ type Deployment struct {
 	Timezone  string    `yaml:"timezone"`
 }
 
-// Service mirrors kubernetes.yaml.service.
+// Service mirrors the kubernetes.service section of env.yaml.
 type Service struct {
 	Enabled bool `yaml:"enabled"`
 	Port    int  `yaml:"port"`
@@ -55,7 +55,7 @@ type CredentialsSecret struct {
 	Existing string      `yaml:"existing"`
 }
 
-// StoreCreate embeds the .jks files from defaults.yaml tls.*.file.
+// StoreCreate embeds the .jks files from env.yaml tls.*.file.
 type StoreCreate struct {
 	Name string `yaml:"name"`
 }
@@ -72,14 +72,14 @@ type Secrets struct {
 	Stores      *StoresSecret      `yaml:"stores"`
 }
 
-// Syslog mirrors kubernetes.yaml.logging.syslog.
+// Syslog mirrors the kubernetes.logging.syslog section of env.yaml.
 type Syslog struct {
 	Host     string `yaml:"host"`
 	Port     int    `yaml:"port"`
 	Protocol string `yaml:"protocol"` // SyslogUDP (default) | SyslogTCP
 }
 
-// Logging mirrors kubernetes.yaml.logging.
+// Logging mirrors the kubernetes.logging section of env.yaml.
 type Logging struct {
 	Syslog *Syslog `yaml:"syslog"`
 }
@@ -116,8 +116,13 @@ type Libs struct {
 	Download *LibsDownload `yaml:"download"`
 }
 
-// Kubernetes is the parsed kubernetes.yaml.
+// DefaultKubeCommand is the CLI used to apply/delete manifests when the
+// kubernetes.command key is unset.
+const DefaultKubeCommand = "kubectl"
+
+// Kubernetes is the parsed kubernetes section of env.yaml.
 type Kubernetes struct {
+	Command    string     `yaml:"command"` // deploy CLI (default kubectl; e.g. "oc" or "kubectl --context prod")
 	Deployment Deployment `yaml:"deployment"`
 	Service    Service    `yaml:"service"`
 	Logging    *Logging   `yaml:"logging"`
@@ -125,11 +130,22 @@ type Kubernetes struct {
 	Secrets    Secrets    `yaml:"secrets"`
 }
 
-// ParseKubernetes decodes kubernetes.yaml. Replicas defaults to 1 when unset.
+// ParseKubernetes decodes a standalone kubernetes document (env.yaml reuses
+// applyKubeDefaults via ParseEnv). Replicas defaults to 1 when unset.
 func ParseKubernetes(data []byte) (*Kubernetes, error) {
 	var k Kubernetes
 	if err := yaml.Unmarshal(data, &k); err != nil {
-		return nil, fmt.Errorf("kubernetes.yaml: %v", err)
+		return nil, fmt.Errorf("env.yaml: %v", err)
+	}
+	applyKubeDefaults(&k)
+	return &k, nil
+}
+
+// applyKubeDefaults fills in the defaults the connector runtime expects: command
+// kubectl, replicas 1, udp syslog, 1Gi libs storage, busybox download image.
+func applyKubeDefaults(k *Kubernetes) {
+	if k.Command == "" {
+		k.Command = DefaultKubeCommand
 	}
 	if k.Deployment.Replicas == 0 {
 		k.Deployment.Replicas = 1
@@ -145,5 +161,4 @@ func ParseKubernetes(data []byte) (*Kubernetes, error) {
 			lb.Download.Image = "busybox:1.37"
 		}
 	}
-	return &k, nil
 }

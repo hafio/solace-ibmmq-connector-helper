@@ -270,12 +270,6 @@ func TestParseKubernetesError(t *testing.T) {
 	}
 }
 
-func TestHasSystem(t *testing.T) {
-	if !(Side{System: SystemSolace}).HasSystem() || !(Side{System: SystemMQ}).HasSystem() || (Side{}).HasSystem() {
-		t.Fatal("HasSystem wrong")
-	}
-}
-
 func TestParseKubernetesResources(t *testing.T) {
 	k, err := ParseKubernetes([]byte("deployment:\n  name: c\n  namespace: ns\n  image: img\n  resources:\n    cpu: \"1\"\n    memory: 1Gi\n"))
 	if err != nil {

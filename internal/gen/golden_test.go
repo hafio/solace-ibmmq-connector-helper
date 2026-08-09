@@ -1,32 +1,51 @@
 package gen_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/deploy"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/gen"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/scan"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/scan"
 )
 
 const specsDir = "../../testdata/golden/specs"
 
-// loadSpecs reads the golden spec folder into a gen.Request (mirrors the CLI).
+// loadSpecs reads the golden spec folder into a gen.Request (mirrors the CLI):
+// env.yaml is the config, every other *.yaml/*.yml is a workflow.
 func loadSpecs(t *testing.T) gen.Request {
 	t.Helper()
-	res, err := scan.Scan(specsDir, "kubernetes.yaml", "", "")
+	envPath := filepath.Join(specsDir, "env.yaml")
+	absEnv, err := filepath.Abs(envPath)
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	res, err := scan.Scan(specsDir, "*", absEnv)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	var req gen.Request
+	req := gen.Request{Env: &gen.File{Name: "env.yaml", Data: mustRead(t, envPath)}}
 	for _, p := range res.WorkflowFiles {
 		req.Workflows = append(req.Workflows, gen.File{Name: filepath.Base(p), Data: mustRead(t, p)})
 	}
-	req.Defaults = &gen.File{Name: "defaults.yaml", Data: mustRead(t, res.DefaultsPath)}
-	req.Kubernetes = &gen.File{Name: "kubernetes.yaml", Data: mustRead(t, res.KubernetesPath)}
 	return req
+}
+
+// envWithKube returns the golden env.yaml with its kubernetes: section replaced
+// by kubeBlock, so a variant test keeps the exact defaults (and therefore the
+// exact application.yml) while swapping only the deploy settings.
+func envWithKube(t *testing.T, kubeBlock string) []byte {
+	t.Helper()
+	full := mustRead(t, filepath.Join(specsDir, "env.yaml"))
+	i := bytes.Index(full, []byte("\nkubernetes:\n"))
+	if i < 0 {
+		t.Fatal("golden env.yaml has no kubernetes: section")
+	}
+	base := append([]byte(nil), full[:i+1]...) // defaults + workflows, trailing newline
+	return append(base, kubeBlock...)
 }
 
 func dirReader() func(string) ([]byte, error) {
@@ -67,8 +86,8 @@ func TestGoldenConfig(t *testing.T) {
 	}
 }
 
-func TestGoldenDeployCreate(t *testing.T) {
-	// source: env — provide the seven credential values.
+func TestGoldenKubernetesCreate(t *testing.T) {
+	// source: env -- provide the seven credential values.
 	for k, v := range map[string]string{
 		"SOL_PASSWORD": "sol-pw", "MQ_CORE_PASSWORD": "mqcore-pw",
 		"MQ_ARCHIVE_PASSWORD": "mqarchive-pw", "EDGE_SOL_PASSWORD": "edge-pw",
@@ -78,14 +97,14 @@ func TestGoldenDeployCreate(t *testing.T) {
 		t.Setenv(k, v)
 	}
 	req := loadSpecs(t)
-	out, errs, _ := gen.Deploy(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()})
+	out, errs, _ := gen.GenerateKubernetes(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()})
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
 	appYAML := norm(string(mustRead(t, "../../testdata/golden/application.yml")))
-	// deploy mounts the stores at MountDir, so the embedded application.yml uses the
-	// mount path where `config` keeps the raw defaults.yaml path.
+	// kubernetes mounts the stores at MountDir, so the embedded application.yml uses
+	// the mount path where `config` keeps the raw env.yaml path.
 	appMounted := strings.NewReplacer(
 		"./certs/truststore.jks", "/app/external/classpath/truststores/truststore.jks",
 		"./certs/keystore.jks", "/app/external/classpath/truststores/keystore.jks",
@@ -101,21 +120,21 @@ func TestGoldenDeployCreate(t *testing.T) {
 		serviceDoc,
 	}, "---\n"))
 	if norm(out) != want {
-		t.Errorf("deploy(create) mismatch\n%s", lineDiff(want, norm(out)))
+		t.Errorf("kubernetes(create) mismatch\n%s", lineDiff(want, norm(out)))
 	}
 }
 
-func TestGoldenDeployNoSecrets(t *testing.T) {
+func TestGoldenKubernetesNoSecrets(t *testing.T) {
 	req := loadSpecs(t)
-	// Replace the kubernetes.yaml with a secrets-free variant.
-	req.Kubernetes = &gen.File{Name: "kubernetes.yaml", Data: []byte(kubeNoSecrets)}
-	out, errs, _ := gen.Deploy(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()})
+	// Swap in a secrets/syslog/libs-free kubernetes: section (defaults unchanged).
+	req.Env = &gen.File{Name: "env.yaml", Data: envWithKube(t, kubeNoSecrets)}
+	out, errs, _ := gen.GenerateKubernetes(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()})
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	appYAML := norm(string(mustRead(t, "../../testdata/golden/application.yml")))
-	// deploy mounts the stores at MountDir, so the embedded application.yml uses the
-	// mount path where `config` keeps the raw defaults.yaml path.
+	// kubernetes mounts the stores at MountDir, so the embedded application.yml uses
+	// the mount path where `config` keeps the raw env.yaml path.
 	appMounted := strings.NewReplacer(
 		"./certs/truststore.jks", "/app/external/classpath/truststores/truststore.jks",
 		"./certs/keystore.jks", "/app/external/classpath/truststores/keystore.jks",
@@ -127,7 +146,7 @@ func TestGoldenDeployNoSecrets(t *testing.T) {
 		serviceDoc,
 	}, "---\n"))
 	if norm(out) != want {
-		t.Errorf("deploy(no-secrets) mismatch\n%s", lineDiff(want, norm(out)))
+		t.Errorf("kubernetes(no-secrets) mismatch\n%s", lineDiff(want, norm(out)))
 	}
 }
 
@@ -329,18 +348,21 @@ spec:
 	return b.String()
 }
 
-const kubeNoSecrets = `deployment:
-  name: solmq-connector
-  namespace: solace-connectors
-  image: solace/solace-pubsub-connector-ibmmq:2.13.0
-  replicas: 2
-  resources:
-    cpu: "1"
-    memory: 1Gi
-  timezone: Asia/Singapore
-service:
-  enabled: true
-  port: 8090
+// kubeNoSecrets is a full kubernetes: section with no secrets, syslog, or libs.
+const kubeNoSecrets = `kubernetes:
+  command: kubectl
+  deployment:
+    name: solmq-connector
+    namespace: solace-connectors
+    image: solace/solace-pubsub-connector-ibmmq:2.13.0
+    replicas: 2
+    resources:
+      cpu: "1"
+      memory: 1Gi
+    timezone: Asia/Singapore
+  service:
+    enabled: true
+    port: 8090
 `
 
 // lineDiff returns a compact first-divergence report for two multi-line strings.

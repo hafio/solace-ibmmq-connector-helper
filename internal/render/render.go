@@ -13,8 +13,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/consolidate"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
 // yw is an indentation-aware line writer (2 spaces per level).
@@ -251,7 +251,7 @@ func renderLogging(w *yw, level *yaml.Node) {
 	w.line(0, "logging:")
 	w.line(2, "level:")
 	for i := 0; i+1 < len(level.Content); i += 2 {
-		w.line(4, level.Content[i].Value+": "+scalarVal(level.Content[i+1]))
+		w.line(4, level.Content[i].Value+": "+consolidate.FormatScalar(level.Content[i+1]))
 	}
 }
 
@@ -273,7 +273,7 @@ func renderContainer(w *yw, indent int, n *yaml.Node) {
 			k := n.Content[i].Value
 			v := n.Content[i+1]
 			if v.Kind == yaml.ScalarNode {
-				w.line(indent, k+": "+scalarVal(v))
+				w.line(indent, k+": "+consolidate.FormatScalar(v))
 			} else {
 				w.line(indent, k+":")
 				renderContainer(w, indent+2, v)
@@ -282,24 +282,11 @@ func renderContainer(w *yw, indent int, n *yaml.Node) {
 	case yaml.SequenceNode:
 		for _, item := range n.Content {
 			if item.Kind == yaml.ScalarNode {
-				w.line(indent, "- "+scalarVal(item))
+				w.line(indent, "- "+consolidate.FormatScalar(item))
 			} else {
 				w.line(indent, "-")
 				renderContainer(w, indent+2, item)
 			}
 		}
-	}
-}
-
-// scalarVal returns a scalar node's value, re-applying quoting when the source
-// used it, so verbatim passthrough survives faithfully.
-func scalarVal(n *yaml.Node) string {
-	switch n.Style {
-	case yaml.DoubleQuotedStyle:
-		return strconv.Quote(n.Value)
-	case yaml.SingleQuotedStyle:
-		return "'" + strings.ReplaceAll(n.Value, "'", "''") + "'"
-	default:
-		return n.Value
 	}
 }

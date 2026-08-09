@@ -59,7 +59,7 @@ type LeaderElection struct {
 	FailOver *yaml.Node // verbatim leader-election.fail-over mapping
 }
 
-// Defaults is the parsed defaults.yaml (all sections optional).
+// Defaults is the parsed connector-defaults section of env.yaml (all subsections optional).
 type Defaults struct {
 	TLS            TLSConfig
 	LoggingLevel   *yaml.Node // ordered mapping under logging.level
@@ -130,12 +130,19 @@ type rawLeader struct {
 	FailOver yaml.Node  `yaml:"fail-over"` // verbatim
 }
 
-// ParseDefaults decodes defaults.yaml. An empty/absent file yields a zero Defaults.
+// ParseDefaults decodes a standalone defaults document. An empty/absent file
+// yields a zero Defaults. The unified env.yaml reuses defaultsFromRaw directly
+// (see ParseEnv) so both paths apply identical mapping and defaulting.
 func ParseDefaults(data []byte) (*Defaults, error) {
 	var raw rawDefaults
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("defaults.yaml: %v", err)
+		return nil, fmt.Errorf("env.yaml: %v", err)
 	}
+	return defaultsFromRaw(raw), nil
+}
+
+// defaultsFromRaw maps a decoded rawDefaults into the public Defaults.
+func defaultsFromRaw(raw rawDefaults) *Defaults {
 	d := &Defaults{}
 	if raw.TLS != nil {
 		d.TLS.Truststore = raw.TLS.Truststore
@@ -181,5 +188,5 @@ func ParseDefaults(data []byte) (*Defaults, error) {
 		}
 	}
 	d.SolaceDefaults = nodePtr(raw.SolaceDefaults)
-	return d, nil
+	return d
 }

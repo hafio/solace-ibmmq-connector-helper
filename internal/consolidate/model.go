@@ -3,7 +3,7 @@ package consolidate
 import (
 	"gopkg.in/yaml.v3"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
 // Prop is one ordered property line. Scalar values render as "key: val"; when

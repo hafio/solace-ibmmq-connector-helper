@@ -12,8 +12,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/spec"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/tls"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/tls"
 )
 
 // acc accumulates the state of one deduplicated binder across all sides that map
@@ -342,7 +342,7 @@ func nodeToProps(node *yaml.Node) []Prop {
 		k := node.Content[i].Value
 		v := node.Content[i+1]
 		if v.Kind == yaml.ScalarNode {
-			out = append(out, Prop{Key: k, Val: formatScalar(v)})
+			out = append(out, Prop{Key: k, Val: FormatScalar(v)})
 		} else {
 			out = append(out, Prop{Key: k, Sub: v})
 		}
@@ -350,9 +350,11 @@ func nodeToProps(node *yaml.Node) []Prop {
 	return out
 }
 
-// formatScalar renders a scalar node, re-applying quoting when the source used
-// it so verbatim passthrough (e.g. a quoted DN) survives faithfully.
-func formatScalar(n *yaml.Node) string {
+// FormatScalar renders a scalar node, re-applying quoting when the source used
+// it so verbatim passthrough (e.g. a quoted DN) survives faithfully. Shared with
+// the render package, which calls it while walking nested (Sub) passthrough
+// trees at arbitrary depth.
+func FormatScalar(n *yaml.Node) string {
 	switch n.Style {
 	case yaml.DoubleQuotedStyle:
 		return strconv.Quote(n.Value)

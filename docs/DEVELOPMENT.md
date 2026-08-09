@@ -1,6 +1,6 @@
-# solmq-gen — Development Guide
+# solmq-conn -- Development Guide
 
-Building, testing, releasing, and design notes for `solmq-gen`. For using the
+Building, testing, releasing, and design notes for `solmq-conn`. For using the
 tool, see the [user guide](../userguide.md); for a quick start, the
 [README](../README.md).
 
@@ -9,53 +9,83 @@ tool, see the [user guide](../userguide.md); for a quick start, the
 Requires Go 1.24+ (developed against 1.26). Dependency: `gopkg.in/yaml.v3` only.
 
 ```sh
-# from connectors/ibmmq/solmq-gen
+# from the repo root
 go mod tidy          # offline if the module cache already has yaml.v3
-go build -o solmq-gen ./cmd/solmq-gen     # CGO_ENABLED=0 for a static binary
+go build -o solmq-conn ./cmd/solmq-conn   # CGO_ENABLED=0 for a static binary
 ```
 
 Or use the mirrored task runner (`dev.sh` / `dev.ps1`, behaviorally identical):
 
 ```sh
-./scripts/dev.sh all          # build + vet + test + cov      (fatal gates)
-./scripts/dev.sh full         # all + vuln + cross-platform dist
-./scripts/dev.sh dist         # just the cross-compiled binaries -> dist/
+./scripts/dev.sh all          # build + vet + test              (fatal gates; CI runs `all scan`)
+./scripts/dev.sh full         # all + cov + scan + graphify     (pre-tag sweep)
+./scripts/dev.sh build        # one binary -> dist/ (host, or the TARGET_OS/TARGET_ARCH pair)
 .\scripts\dev.ps1 full        # same on Windows PowerShell
 ```
 
-Tasks: `build vet test cov vuln dist all full`. Correctness gates (build/vet/test/cov)
-are fatal; `vuln` (govulncheck) is report-only. `dist` cross-compiles static, CGO-free
-binaries for linux/darwin/windows (amd64 + arm64) into `dist/`. `image`/`trivy`/`up`/`down`
-are not applicable — the generator ships no Dockerfile or local stack.
+Tasks: `build vet test cov scan graphify`, plus aggregates `all` (= build vet test, run by CI
+as `all scan`) and `full` (= all + cov + scan + graphify, the pre-tag sweep). Gates
+build/vet/test/scan are fatal. `scan` is `go run golang.org/x/vuln/cmd/govulncheck@latest
+./...`, fatal on any finding — every Go vuln-DB finding is reachable-and-fixable, so there is
+nothing to warn-and-pass on. `build` honors `TARGET_OS`/`TARGET_ARCH` and writes
+`dist/solmq-conn-<os>-<arch>[.exe]` (host os/arch when unset), so one task serves the laptop and
+the CI matrix. `graphify` is local-only (warn-skips under CI). `image`/`up`/`down` are omitted --
+the tool ships no Dockerfile or local stack (it generates artifacts for other engines; it is not
+itself containerized).
 
 ## Testing
 
 A worked golden example lives in [`testdata/golden/`](../testdata/golden) and is
 asserted byte-for-byte by the tests (`internal/gen/golden_test.go`).
 
-## Release (CI)
+[`test.md`](test.md) is the full test catalogue -- every test, grouped by package and
+expanded to individual cases. Keep it in sync: a test or case added, removed, or renamed
+updates the matching row in the same change.
 
-[`.github/workflows/release.yml`](../.github/workflows/release.yml) cross-compiles the
-six platform binaries and publishes them to a **GitHub Release** when a tag matching
-`solmq-gen-v*` is pushed:
+[`commands.md`](commands.md) is the **generated** command reference, rendered from the
+command model in [`cmd/solmq-conn/commands.go`](../cmd/solmq-conn/commands.go). Do not edit
+it by hand; `TestCommandsDocInSync` fails the build if it drifts from the model. Regenerate
+after changing a command:
 
 ```sh
-git tag solmq-gen-v1.0.0 && git push origin solmq-gen-v1.0.0
+go test ./cmd/solmq-conn -run TestCommandsDocInSync -update   # or: go generate ./cmd/solmq-conn
 ```
 
-> **Monorepo note:** GitHub only runs workflows found at the *repository root*
-> `.github/workflows/`. This file is staged under `solmq-gen/.github/workflows/`; move it
-> to the repo root (its header repeats this). It scopes to a `solmq-gen-v*` tag prefix and
-> builds with `working-directory: connectors/ibmmq/solmq-gen`.
+## Release (CI)
+
+Two workflows, both calling dev-script task names only (never build commands):
+
+- [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) — the gates. Runs `all scan` on
+  Ubuntu + Windows. Nothing runs on a normal push or PR; it fires when `tag.yml` calls it, on
+  manual dispatch, and on PRs that touch CI config or the dev scripts (which gates Dependabot's
+  action bumps).
+- [`.github/workflows/tag.yml`](../.github/workflows/tag.yml) — the only automatic pipeline.
+  Pushing a `v*` tag runs `plan -> gates -> binaries -> release`, cross-compiling the six
+  platform binaries (per the `BUILD_TARGETS` repo variable) and publishing them with a
+  `SHA256SUMS.txt` to a **GitHub Release**. A failure anywhere publishes nothing.
+
+```sh
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+Binaries-only: with no Dockerfile the image job self-skips. Cross-compilation reuses
+`dev.sh build` with `TARGET_OS`/`TARGET_ARCH` supplied by the matrix, so local and CI build
+the same way. Actions are SHA-pinned and tracked by [`.github/dependabot.yml`](../.github/dependabot.yml).
 
 ## Design notes
 
 - **Byte-for-byte output.** `application.yml` and the manifests use a deterministic ordered
   emitter (not generic YAML marshaling, which would re-sort keys), so regenerated files diff
   cleanly and match the golden fixture exactly.
-- **Layered core.** The CLI (`cmd/solmq-gen`) is a thin shell over `internal/gen`, which
-  ties parse → validate → consolidate → render/deploy together. Packages: `scan`, `spec`,
-  `consolidate`, `tls`, `render`, `deploy`, `validate`, `gen`.
+- **Layered core.** The CLI (`cmd/solmq-conn`) is a thin shell over `internal/gen`, which
+  ties parse -> validate -> consolidate -> render together. Packages: `scan`, `spec`,
+  `consolidate`, `tls`, `render`, `deploy`, `dockergen`, `podmangen`, `runner`, `validate`,
+  `examples`, `gen`.
+- **Deploy exec layer.** `internal/runner` shells out to the CLI named by each target's
+  `command:` through an `os/exec` argv slice -- never `sh -c`. Every config-derived token is
+  validated against a safe charset before it reaches argv (shell metacharacters and control
+  chars are rejected with an actionable error), and credential env-files are written `0600`
+  and never logged. Kubernetes manifests are piped on **stdin** (`apply -f -`), not argv.
 - **Durable names** use UUIDv5 (namespace `6ba7f4e2-9c1d-5a3b-8e47-2f9a0c7d13e5`, key =
   `conn-name ‖ queue-manager ‖ topic ‖ file-basename` joined by `0x1F`). Renaming a workflow
   file changes its durable name and orphans the old subscription — rename deliberately.

@@ -3,7 +3,7 @@
 # Files named workflow-<N>.yaml map to workflow N (numbered by sorted filename).
 #
 # A side declares its connection one of two ways:
-#   * conn-ref: <name>  — REFERENCE a connection defined in defaults.yaml; the
+#   * conn-ref: <name>  — REFERENCE a connection defined in env.yaml; the
 #                         side then carries ONLY its queue:/topic:.
 #   * inline block      — MANUAL; write the full connection tuple on the side.
 # Connections with identical details collapse into ONE binder (dedup), whether
@@ -24,7 +24,7 @@
 # source: a MANUAL (inline) MQ connection, written out in full here. The very
 # same block appears in workflow-1; identical details dedup into one binder
 # (auto-named mq-conn-1) — the manual equivalent of a shared conn-ref.
-# target: the REFERENCED, reused prod-solace connection (details in defaults.yaml).
+# target: the REFERENCED, reused prod-solace connection (details in env.yaml).
 source:
   mq:
     conn-name: mqhost-core.internal(1414)
@@ -34,7 +34,7 @@ source:
     password: ${MQ_CORE_PASSWORD}
     tls: true                             # MQ has no URL scheme; opt into TLS explicitly
     cipher: TLS_RSA_WITH_AES_256_CBC_SHA256
-    key-alias: mq-client                  # presence => mTLS (needs the keystore in defaults.yaml)
+    key-alias: mq-client                  # presence => mTLS (needs the keystore in env.yaml)
     queue: CORE.ORDERS.OUT                # consume from this MQ queue
 target:
   solace:

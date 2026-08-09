@@ -1,5 +1,6 @@
-// Package spec defines the on-disk input schema for solmq-gen — the per-workflow
-// files, defaults.yaml, and kubernetes.yaml — and parses them into typed values.
+// Package spec defines the on-disk input schema for solmq-conn -- the per-workflow
+// files and the unified env.yaml (connector defaults plus the workflows,
+// kubernetes, docker, and podman sections) -- and parses them into typed values.
 //
 // Verbatim passthrough maps (Solace api-properties, MQ additional-properties, and
 // per-binding consumer/producer tuning) are captured as *yaml.Node so their key
@@ -50,7 +51,7 @@ type Side struct {
 	// mTLS: presence selects a client key from the shared keystore.
 	KeyAlias string
 
-	// ConnRef names a reusable connection defined in defaults.yaml (connections.<name>).
+	// ConnRef names a reusable connection defined in env.yaml (connections.<name>).
 	// When set, this side carries only ConnRef + the destination; the connection supplies
 	// the tuple / TLS / passthrough (materialised by Defaults.Resolve).
 	ConnRef string

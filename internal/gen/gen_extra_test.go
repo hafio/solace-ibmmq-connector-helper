@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/deploy"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
 func TestLooksDotenv(t *testing.T) {
@@ -108,11 +108,74 @@ func TestBaseNameB64ToIssues(t *testing.T) {
 	if baseName(`a\b\c.jks`) != "c.jks" || baseName("a/b/c.jks") != "c.jks" || baseName("x") != "x" {
 		t.Error("baseName")
 	}
-	if b64([]byte("ABC")) != "QUJD" {
-		t.Errorf("b64=%q", b64([]byte("ABC")))
-	}
 	if iss := toIssues([]string{"a", "b"}); len(iss) != 2 || iss[0].Msg != "a" {
 		t.Errorf("toIssues=%v", iss)
+	}
+}
+
+// ---- names, paths, mounts (docker/podman plumbing) --------------------------
+
+func TestNamesAndPaths(t *testing.T) {
+	if credEnvFileName("n", nil) != "" {
+		t.Error("nil creds -> empty")
+	}
+	if credEnvFileName("n", &spec.CredentialsSecret{Existing: "e.env"}) != "e.env" {
+		t.Error("existing wins")
+	}
+	if credEnvFileName("n", &spec.CredentialsSecret{Create: &spec.CredCreate{}}) != "n.env" {
+		t.Error("create -> <name>.env")
+	}
+	if pathIn("", "a") != "a" || pathIn("/base/", "a") != "/base/a" || pathIn("/base", "a") != "/base/a" {
+		t.Error("pathIn")
+	}
+	if instanceName("b", 0, 1) != "b" || instanceName("b", 0, 2) != "b-1" || instanceName("b", 1, 2) != "b-2" {
+		t.Error("instanceName")
+	}
+}
+
+func TestTargetMounts(t *testing.T) {
+	tls := spec.TLSConfig{
+		Truststore: &spec.Store{File: "certs/t.jks"},
+		Keystore:   &spec.Store{File: "certs/k.jks"},
+	}
+	res := Resolver{Abs: func(p string) string { return "/abs/" + p }}
+	// The store bind-mount target is always the fixed in-container dir; the
+	// supplied stores.MountPath ("/mnt") is deliberately ignored (a non-default
+	// value is rejected in validate). Only the host Source comes from res.Abs.
+	sm, lm := targetMounts(tls, &spec.StoresMount{MountPath: "/mnt"}, &spec.LibsMount{Dir: "libs", MountPath: "/libs"}, res)
+	if len(sm) != 2 {
+		t.Fatalf("store mounts=%d want 2", len(sm))
+	}
+	if sm[0].Source != "/abs/certs/t.jks" || sm[0].Target != spec.DefaultStoresMountPath+"/t.jks" {
+		t.Errorf("store mount 0 = %+v", sm[0])
+	}
+	if sm[1].Target != spec.DefaultStoresMountPath+"/k.jks" {
+		t.Errorf("store mount 1 = %+v", sm[1])
+	}
+	if lm == nil || lm.Source != "/abs/libs" || lm.Target != "/libs" {
+		t.Errorf("libs mount = %+v", lm)
+	}
+	// Opt-out: nil stores and libs yield nothing (bind mounts are opt-in).
+	if sm2, lm2 := targetMounts(tls, nil, nil, res); sm2 != nil || lm2 != nil {
+		t.Errorf("nil sections should yield no mounts: %v %v", sm2, lm2)
+	}
+}
+
+func TestResolveCredentialsAndEnvFileContent(t *testing.T) {
+	if kvs, err := ResolveCredentials(nil, Resolver{}); err != nil || kvs != nil {
+		t.Errorf("nil creds -> nil,nil: %v %v", kvs, err)
+	}
+	if kvs, err := ResolveCredentials(&spec.CredentialsSecret{Existing: "x.env"}, Resolver{}); err != nil || kvs != nil {
+		t.Errorf("existing -> nil,nil: %v %v", kvs, err)
+	}
+	creds := &spec.CredentialsSecret{Create: &spec.CredCreate{Source: spec.SourceEnv, Variables: []string{"A", "B"}}}
+	env := map[string]string{"A": "1", "B": "2"}
+	kvs, err := ResolveCredentials(creds, Resolver{Env: func(k string) (string, bool) { v, ok := env[k]; return v, ok }})
+	if err != nil || len(kvs) != 2 {
+		t.Fatalf("kvs=%v err=%v", kvs, err)
+	}
+	if EnvFileContent(kvs) != "A=1\nB=2\n" {
+		t.Errorf("env-file = %q", EnvFileContent(kvs))
 	}
 }
 
@@ -190,12 +253,42 @@ func TestBuildShardsLeaderQueueSuffix(t *testing.T) {
 	}
 }
 
-func TestDeploySharding(t *testing.T) {
-	req := Request{
-		Workflows:  synthWorkflowFiles(21),
-		Kubernetes: &File{Name: "kubernetes.yaml", Data: []byte("deployment:\n  name: solmq\n  namespace: ns\n  image: img\nservice:\n  enabled: true\n  port: 8090\n")},
+// TestBuildShardsLeaderActiveActive pins the one field that actually
+// distinguishes active_active from active_standby: the literal mode string
+// carried through the model and into the rendered application.yml (queue
+// suffixing is mode-agnostic; buildShards never branches on Mode).
+func TestBuildShardsLeaderActiveActive(t *testing.T) {
+	d := &spec.Defaults{LeaderElection: spec.LeaderElection{
+		Present: true, Mode: spec.LeaderActiveActive, Queue: "mgmt-q",
+		Session: &spec.Side{System: spec.SystemSolace, Host: "tcp://b", MsgVPN: "v", ClientUser: "u", ClientPass: "p"},
+	}}
+	shards, _ := buildShards(synthWorkflows(21), d, true)
+	if len(shards) != 2 {
+		t.Fatalf("shards=%d want 2", len(shards))
 	}
-	out, errs, _ := Deploy(req, Resolver{})
+	for i, s := range shards {
+		if s.model.LeaderElection == nil || s.model.LeaderElection.Mode != spec.LeaderActiveActive {
+			t.Errorf("shard %d LeaderElection = %+v want mode %q", i, s.model.LeaderElection, spec.LeaderActiveActive)
+		}
+	}
+	if shards[0].model.LeaderElection.Queue != "mgmt-q-1" || shards[1].model.LeaderElection.Queue != "mgmt-q-2" {
+		t.Errorf("queues = %q, %q want mgmt-q-1, mgmt-q-2", shards[0].model.LeaderElection.Queue, shards[1].model.LeaderElection.Queue)
+	}
+	if !strings.Contains(shards[0].appYAML, "mode: active_active") {
+		t.Errorf("rendered appYAML missing 'mode: active_active':\n%s", shards[0].appYAML)
+	}
+	if strings.Contains(shards[0].appYAML, "active_standby") {
+		t.Errorf("rendered appYAML should not mention active_standby:\n%s", shards[0].appYAML)
+	}
+}
+
+func TestKubernetesSharding(t *testing.T) {
+	envData := "kubernetes:\n  deployment:\n    name: solmq\n    namespace: ns\n    image: img\n  service:\n    enabled: true\n    port: 8090\n"
+	req := Request{
+		Env:       &File{Name: "env.yaml", Data: []byte(envData)},
+		Workflows: synthWorkflowFiles(21),
+	}
+	out, errs, _ := GenerateKubernetes(req, Resolver{})
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -231,6 +324,133 @@ func TestConfigSharding(t *testing.T) {
 	}
 }
 
+// ---- docker / podman generation ---------------------------------------------
+
+func TestGenerateDockerBasics(t *testing.T) {
+	envData := `tls:
+  truststore:
+    file: ./certs/truststore.jks
+    password: ts
+    type: JKS
+docker:
+  command: docker
+  image: solace/connector:9.9
+  name: solmq-connector
+  restart: unless-stopped
+  ports:
+    - 8090
+  timezone: UTC
+  secrets:
+    credentials:
+      existing: solmq.env
+  stores:
+    mount-path: /app/external/classpath/truststores
+`
+	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
+	plan, errs, _ := GenerateDocker(req, Resolver{})
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if plan.Compose == "" {
+		t.Fatal("empty compose")
+	}
+	if plan.EnvFileName != "solmq.env" {
+		t.Errorf("env-file = %q want solmq.env (existing)", plan.EnvFileName)
+	}
+	if !strings.Contains(plan.Compose, "solace/connector:9.9") {
+		t.Errorf("compose missing image:\n%s", plan.Compose)
+	}
+}
+
+func TestGeneratePodmanRunAndQuadlet(t *testing.T) {
+	envData := `podman:
+  command: podman
+  mode: run
+  image: solace/connector:9.9
+  name: solmq-connector
+  restart: unless-stopped
+  ports:
+    - 8090
+  timezone: UTC
+  secrets:
+    credentials:
+      create:
+        name: solmq-credentials
+        source: env
+        variables:
+          - FOO
+`
+	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
+	res := Resolver{Env: func(string) (string, bool) { return "v", true }}
+
+	// mode: run -> a run script, no quadlet units.
+	plan, errs, _ := GeneratePodman(req, res, PodmanOpts{})
+	if len(errs) > 0 {
+		t.Fatalf("run: unexpected errors: %v", errs)
+	}
+	if plan.Mode != spec.PodmanModeRun || plan.RunScript == "" || len(plan.Units) != 0 {
+		t.Errorf("run plan mode=%q script=%d units=%d", plan.Mode, len(plan.RunScript), len(plan.Units))
+	}
+	if plan.EnvFileName != "solmq-connector.env" {
+		t.Errorf("env-file = %q want solmq-connector.env", plan.EnvFileName)
+	}
+	if len(plan.AppYAMLs) != 1 || plan.AppYAMLs[0].Name != "solmq-connector-application.yml" {
+		t.Errorf("app yamls = %+v", plan.AppYAMLs)
+	}
+	if len(plan.Services) != 1 || plan.Services[0] != "solmq-connector.service" {
+		t.Errorf("services = %+v", plan.Services)
+	}
+
+	// ForceQuadlet -> quadlet units, no run script (deploy path).
+	q, errs, _ := GeneratePodman(req, res, PodmanOpts{ForceQuadlet: true, BaseDir: "/base"})
+	if len(errs) > 0 {
+		t.Fatalf("quadlet: unexpected errors: %v", errs)
+	}
+	if q.Mode != spec.PodmanModeQuadlet || len(q.Units) == 0 || q.RunScript != "" {
+		t.Errorf("quadlet plan mode=%q units=%d script=%d", q.Mode, len(q.Units), len(q.RunScript))
+	}
+}
+
+func issuesContain(errs []Issue, sub string) bool {
+	for _, e := range errs {
+		if strings.Contains(e.Msg, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestGenerateMissingTargetSection covers the nil-section guards: an env.yaml
+// that parses (it has a tls: section) but omits the requested target section
+// must fail loud with an actionable message rather than emit an empty artifact.
+func TestGenerateMissingTargetSection(t *testing.T) {
+	envData := `tls:
+  truststore:
+    file: ./certs/truststore.jks
+    password: ts
+    type: JKS
+`
+	cases := []struct {
+		name string
+		want string
+		gen  func(Request, Resolver) []Issue
+	}{
+		{"kubernetes", "kubernetes target requires a 'kubernetes:' section in env.yaml",
+			func(r Request, res Resolver) []Issue { _, e, _ := GenerateKubernetes(r, res); return e }},
+		{"docker", "docker target requires a 'docker:' section in env.yaml",
+			func(r Request, res Resolver) []Issue { _, e, _ := GenerateDocker(r, res); return e }},
+		{"podman", "podman target requires a 'podman:' section in env.yaml",
+			func(r Request, res Resolver) []Issue { _, e, _ := GeneratePodman(r, res, PodmanOpts{}); return e }},
+	}
+	for _, c := range cases {
+		req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
+		errs := c.gen(req, Resolver{})
+		if !issuesContain(errs, c.want) {
+			t.Errorf("%s: want %q, got %v", c.name, c.want, errs)
+		}
+	}
+}
+
 func TestGenValidateAndValuesFileKeys(t *testing.T) {
 	wfData := `
 source:
@@ -249,31 +469,36 @@ target:
     password: p
     queue: OUT
 `
-	kubeData := `
-deployment:
-  name: c
-  namespace: ns
-  image: img
-secrets:
-  credentials:
-    create:
-      name: s
-      source: file
-      values-file: v.env
+	envData := `kubernetes:
+  deployment:
+    name: c
+    namespace: ns
+    image: img
+  secrets:
+    credentials:
+      create:
+        name: s
+        source: file
+        values-file: v.env
 `
 	req := Request{
-		Workflows:  []File{{Name: "10.yaml", Data: []byte(wfData)}},
-		Kubernetes: &File{Name: "kubernetes.yaml", Data: []byte(kubeData)},
+		Env:       &File{Name: "env.yaml", Data: []byte(envData)},
+		Workflows: []File{{Name: "10.yaml", Data: []byte(wfData)}},
 	}
 	res := Resolver{ReadFile: func(string) ([]byte, error) { return []byte("SOL=x\n"), nil }}
-	if _, warns := Validate(req, res); warns == nil {
-		_ = warns // path exercised
+	errs, warns := Validate(req, res)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
 	}
-	k, err := spec.ParseKubernetes([]byte(kubeData))
+	wantWarn := "a TLS/mTLS connection exists but secrets.stores is omitted; the store files will be missing at runtime"
+	if len(warns) != 1 || warns[0].File != fileEnv || warns[0].Msg != wantWarn {
+		t.Fatalf("warns = %+v, want exactly one {%q, %q}", warns, fileEnv, wantWarn)
+	}
+	e, err := spec.ParseEnv([]byte(envData))
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys, iss := valuesFileKeys(k, res)
+	keys, iss := valuesFileKeys(e.Kubernetes, res)
 	if iss != nil || !keys["SOL"] {
 		t.Fatalf("keys=%v iss=%v", keys, iss)
 	}

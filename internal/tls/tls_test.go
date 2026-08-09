@@ -3,11 +3,11 @@ package tls
 import (
 	"testing"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
 // MountPath must strip both '/' and '\' independent of host OS, so a Windows-
-// authored defaults.yaml path (which may use backslashes) resolves to the same
+// authored env.yaml path (which may use backslashes) resolves to the same
 // mounted base name even when the CLI runs on Linux/Mac — the base name the
 // stores Secret mounts, not left unsplit.
 func TestMountPathSeparatorAgnostic(t *testing.T) {
@@ -27,7 +27,7 @@ func TestMountPathSeparatorAgnostic(t *testing.T) {
 }
 
 // The store locations wired into Solace api-properties must be the mounted base
-// name, not the raw (possibly backslash) path from defaults.yaml — otherwise the
+// name, not the raw (possibly backslash) path from env.yaml — otherwise the
 // bundle/location references a file the volume never mounts.
 func TestSolacePropsUseMountedBaseName(t *testing.T) {
 	d := &spec.Defaults{TLS: spec.TLSConfig{

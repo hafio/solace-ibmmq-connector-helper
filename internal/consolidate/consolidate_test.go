@@ -3,7 +3,7 @@ package consolidate
 import (
 	"testing"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
 func solaceSide(vpn, dest, destKind, keyAlias string) spec.Side {

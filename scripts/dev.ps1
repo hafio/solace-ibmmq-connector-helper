@@ -1,111 +1,147 @@
-# solmq-gen task runner (mirror of dev.sh). Run from anywhere.
-#   .\scripts\dev.ps1 <task> [task...]
-# Correctness gates (build/vet/test/cov) are fatal; vuln is report-only.
+#requires -Version 5.1
+# Dev tasks for solmq-conn. Behaviourally identical to dev.sh -- same task names,
+# same gating, same footer format.
+#
+# solmq-conn is a pure-Go CLI with no Dockerfile and no compose stack, so the
+# Docker tasks (image, up, down) do not apply and are omitted.
+[CmdletBinding()]
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Tasks)
 
 $ErrorActionPreference = 'Continue'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Root = Split-Path -Parent $ScriptDir          # module root = parent of scripts/
-$Logs = Join-Path $ScriptDir 'logs'
-New-Item -ItemType Directory -Force -Path $Logs | Out-Null
-Set-Location $Root
+$RepoRoot  = Split-Path -Parent $ScriptDir
+$LogDir    = Join-Path $ScriptDir 'logs'
+$Dist      = Join-Path $RepoRoot 'dist'
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+Set-Location $RepoRoot
+$env:NO_COLOR = '1'
 
-# Python for the graphify update (override with $env:PYTHON).
-$Python = if ($env:PYTHON) { $env:PYTHON }
-  elseif (Get-Command python -ErrorAction SilentlyContinue) { 'python' }
-  elseif (Get-Command python3 -ErrorAction SilentlyContinue) { 'python3' }
-  else { 'python' }
+# --- output helpers ---------------------------------------------------------
+function Step { param($m) Write-Host "==> $m" -ForegroundColor Cyan }
+function Ok   { param($m) Write-Host "ok: $m"    -ForegroundColor Green }
+function Warn { param($m) Write-Host "warn: $m"  -ForegroundColor Yellow }
+function Die  { param($m) Write-Host "error: $m" -ForegroundColor Red; exit 1 }
 
-# Platforms cross-compiled by `dist` (static, CGO-free — pure Go + yaml.v3).
-$DistTargets = @('linux/amd64', 'linux/arm64', 'darwin/amd64', 'darwin/arm64', 'windows/amd64', 'windows/arm64')
+function Get-Now { (Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz') }
+function Get-Log { param($Task) Join-Path $LogDir "$Task.log" }
 
-function Step($m) { Write-Host "==> $m" -ForegroundColor Yellow }
-function Ok($m)   { Write-Host "ok: $m" -ForegroundColor Green }
-function Warn($m) { Write-Host "warn: $m" -ForegroundColor Yellow }
-function Die($m)  { Write-Host "FAIL: $m" -ForegroundColor Red; exit 1 }
+function Start-TaskLog {
+  param($Task)
+  Set-Content -Path (Get-Log $Task) -Encoding utf8 `
+    -Value ("=== {0} | {1} ===" -f (Get-Now), $Task)
+}
 
-# Run <logname> <scriptblock>: run cmd, tee combined output to a UTF-8 log, and
-# return ONLY the exit code (captured output must not leak into the pipeline).
-function Run($name, [scriptblock]$cmd) {
-  $log = Join-Path $Logs "$name.log"
-  $output = & $cmd 2>&1 | Out-String
+function Write-Finish {
+  param([string]$Task, [int]$Code, [int]$Seconds)
+  $status = if ($Code -eq 0) { 'OK' } else { "FAILED (exit $Code)" }
+  $line = '{0} | {1} | {2}s | {3}' -f (Get-Now), $Task, $Seconds, $status
+  # Add-Content, never Tee-Object: Tee doubles lines and writes UTF-16.
+  Add-Content -Path (Get-Log $Task) -Value $line -Encoding utf8
+  Write-Host $line
+}
+
+# Capture once, write once. "$_" flattens stderr ErrorRecords; -Width stops
+# column wrap; the CSI strip keeps the file readable plain text.
+function Invoke-Logged {
+  # NB: parameter is $CmdArgs, not $Args -- $Args is an automatic variable, so a
+  # param named $Args binds empty and `& $Exe @Args` would run $Exe with no args.
+  param([string]$Task, [string]$Exe, [string[]]$CmdArgs)
+  $out = (& $Exe @CmdArgs 2>&1 | ForEach-Object { "$_" } | Out-String -Width 4096)
   $code = $LASTEXITCODE
-  "# $(Get-Date)`r`n$output" | Out-File -Encoding utf8 $log
-  if ($output.Trim()) { Write-Host $output.TrimEnd() }
+  $out = $out -replace "\x1b\[[0-9;?]*[a-zA-Z]", ""
+  Add-Content -Path (Get-Log $Task) -Value $out -Encoding utf8
+  Write-Host $out
   return $code
 }
 
-function Task-Build { Step build; if ((Run 'build' { go build -o solmq-gen.exe ./cmd/solmq-gen }) -ne 0) { Die build }; Ok 'build (-> .\solmq-gen.exe)' }
-function Task-Vet   { Step vet;   if ((Run 'vet'   { go vet ./... })  -ne 0) { Die vet };   Ok vet }
-function Task-Test  { Step test;  if ((Run 'test'  { go test -count=1 ./... }) -ne 0) { Die test }; Ok test }
-function Task-Cov {
-  Step cov
-  if ((Run 'cov' { go test "-coverprofile=coverage.out" -count=1 ./... }) -ne 0) { Die 'cov (tests)' }
-  go tool cover "-html=coverage.out" -o coverage.html | Out-Null
-  go tool cover "-func=coverage.out" | Select-Object -Last 1
-  Ok 'cov (coverage.html + total above)'
-}
-function Task-Dist {  # cross-compiled static binaries for every platform -> dist\
-  Step dist
-  Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
-  New-Item -ItemType Directory -Force -Path dist | Out-Null
-  $log = @("# $(Get-Date)"); $failed = 0
-  foreach ($t in $DistTargets) {
-    $parts = $t.Split('/'); $os = $parts[0]; $arch = $parts[1]
-    $ext = if ($os -eq 'windows') { '.exe' } else { '' }
-    $out = "dist/solmq-gen-$os-$arch$ext"
-    $env:CGO_ENABLED = '0'; $env:GOOS = $os; $env:GOARCH = $arch
-    $o = go build -trimpath -o $out ./cmd/solmq-gen 2>&1 | Out-String
-    if ($LASTEXITCODE -eq 0) { Ok "  $out"; $log += "ok: $out" }
-    else { Warn "  build FAILED: $t"; if ($o.Trim()) { Write-Host $o.TrimEnd() }; $log += "FAIL: $t`n$o"; $failed = 1 }
+# --- target resolution ------------------------------------------------------
+function Get-HostArch {
+  switch ($env:PROCESSOR_ARCHITECTURE) {
+    'AMD64' { 'amd64' } 'ARM64' { 'arm64' } default { 'amd64' }
   }
+}
+$TOs   = if ($env:TARGET_OS)   { $env:TARGET_OS }   else { 'windows' }
+$TArch = if ($env:TARGET_ARCH) { $env:TARGET_ARCH } else { Get-HostArch }
+$BinName = "solmq-conn-{0}-{1}" -f $TOs, $TArch
+if ($TOs -eq 'windows') { $BinName = "$BinName.exe" }
+
+# --- tasks ------------------------------------------------------------------
+function Task-build {
+  New-Item -ItemType Directory -Force -Path $Dist | Out-Null
+  $env:CGO_ENABLED = '0'; $env:GOOS = $TOs; $env:GOARCH = $TArch
+  $code = Invoke-Logged 'build' 'go' @(
+    'build','-trimpath','-ldflags','-s -w','-o',(Join-Path $Dist $BinName),'./cmd/solmq-conn')
   Remove-Item Env:CGO_ENABLED, Env:GOOS, Env:GOARCH -ErrorAction SilentlyContinue
-  $log -join "`r`n" | Out-File -Encoding utf8 (Join-Path $Logs 'dist.log')
-  if ($failed -ne 0) { Die 'dist (a target failed; see logs/dist.log)' }
-  Ok 'dist (-> .\dist\)'
+  return $code
 }
-function Task-Vuln { # report-only
-  Step vuln
-  if (-not (Get-Command govulncheck -ErrorAction SilentlyContinue)) {
-    Warn 'govulncheck not installed (go install golang.org/x/vuln/cmd/govulncheck@latest); skipping'; return
+
+function Task-vet  { Invoke-Logged 'vet'  'go' @('vet','./...') }
+function Task-test { Invoke-Logged 'test' 'go' @('test','-count=1','./...') }
+
+function Task-cov {
+  # Coverage profile -> HTML, and PRINT the total so the footer captures it.
+  # -coverpkg credits cross-package execution (e.g. spec parsing driven by gen
+  # tests); without it those lines report 0% and the floor lies. Adding it is
+  # a one-time step change in the total -- the floor resets at that run.
+  $code = Invoke-Logged 'cov' 'go' @('test','-coverpkg=./...','-coverprofile=coverage.out','-count=1','./...')
+  if ($code -ne 0) { return $code }
+  go tool cover "-html=coverage.out" -o coverage.html | Out-Null
+  $total = (go tool cover "-func=coverage.out" | Select-Object -Last 1)
+  Add-Content -Path (Get-Log 'cov') -Value $total -Encoding utf8
+  Write-Host $total
+  return 0
+}
+
+# One task, every applicable check. FATAL on fixable CVEs. solmq-conn ships no
+# image, so this is the Go dependency scan alone. govulncheck reports only vulns
+# reachable from called code -- all actionable -- so a non-zero exit stops the
+# run. `go run @latest` needs only the Go toolchain and floats the scanner
+# deliberately, matching CI.
+function Task-scan {
+  return (Invoke-Logged 'scan' 'go' @('run','golang.org/x/vuln/cmd/govulncheck@latest','./...'))
+}
+
+function Task-graphify {
+  if ($env:CI) { Warn 'graphify is local-only; skipping in CI'; return 0 }
+  if (-not (Get-Command graphify -ErrorAction SilentlyContinue)) {
+    Warn 'graphify not on PATH; skipping'; return 0
   }
-  if ((Run 'vuln' { govulncheck ./... }) -ne 0) { Warn 'govulncheck reported findings (report-only)' } else { Ok vuln }
-}
-# Incrementally update the graphify knowledge graph (AST-only, no API cost).
-# Report-only: a missing python/graphify or absent graph warns, never aborts.
-function Task-Graphify {
-  Step 'graphify'
-  $env:NO_COLOR = '1'
-  if ((Run 'graphify' { & $Python -m graphify update . }) -eq 0) { Ok 'graphify' } else { Warn 'graphify (report-only)' }
-}
-function Task-All  { Task-Build; Task-Vet; Task-Test; Task-Cov; Task-Graphify }
-function Task-Full { Task-All; Task-Vuln; Task-Dist }
-
-function Usage {
-  @'
-solmq-gen dev tasks:
-  build   go build -o solmq-gen.exe ./cmd/solmq-gen (fatal; writes .\solmq-gen.exe)
-  vet     go vet ./...                          (fatal)
-  test    go test ./...  - golden + unit        (fatal)
-  cov     coverage profile -> coverage.html + printed total (fatal)
-  vuln    govulncheck ./...                     (report-only)
-  gpfy    python -m graphify update .
-  dist    cross-compile static binaries for all platforms -> dist\
-  all     build + vet + test + cov
-  full    all + vuln + dist
-
-Not applicable to this generator (no Dockerfile / local stack): image, trivy, up, down.
-'@ | Write-Host
+  return (Invoke-Logged 'graphify' 'graphify' @('update','.'))
 }
 
-if (-not $Tasks -or $Tasks.Count -eq 0) { Usage; exit 0 }
+# --- dispatch ---------------------------------------------------------------
+$All  = @('build','vet','test')
+$Full = @('build','vet','test','cov','scan','graphify')
+
+function Show-Usage {
+  @"
+usage: dev.ps1 <task>...
+
+  build vet test cov scan graphify
+  all   = $($All -join ' ')            (what CI runs, as: all scan)
+  full  = $($Full -join ' ')   (pre-tag sweep)
+"@ | Write-Host
+}
+
+if (-not $Tasks -or $Tasks[0] -in @('-h','--help','help')) { Show-Usage; exit 0 }
+
+$queue = @()
 foreach ($t in $Tasks) {
-  switch ($t) {
-    'build' { Task-Build } 'vet' { Task-Vet } 'test' { Task-Test }
-    'cov' { Task-Cov } 'dist' { Task-Dist } 'vuln' { Task-Vuln }
-    'gpfy' { Task-Graphify } 
-    'all' { Task-All } 'full' { Task-Full }
-    { $_ -in 'help', '-h', '--help' } { Usage }
-    default { Die "unknown task: $t" }
-  }
+  switch ($t) { 'all' { $queue += $All } 'full' { $queue += $Full } default { $queue += $t } }
 }
+
+$failed = 0
+foreach ($task in $queue) {
+  if (-not (Get-Command "Task-$task" -ErrorAction SilentlyContinue)) { Die "unknown task: $task" }
+  Step $task
+  Start-TaskLog $task
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  $code = 0
+  try { $code = & "Task-$task" } catch { $code = 1 }
+  if ($null -eq $code) { $code = 0 }
+  $sw.Stop()
+  Write-Finish -Task $task -Code $code -Seconds ([int]$sw.Elapsed.TotalSeconds)
+  if ($code -ne 0) { $failed = 1; Warn "$task failed; stopping"; break }
+  Ok $task
+}
+exit $failed

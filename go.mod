@@ -1,4 +1,4 @@
-module github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen
+module github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn
 
 go 1.26
 

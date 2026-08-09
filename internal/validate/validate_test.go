@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
 func vSolace(dest, kind, keyAlias string) spec.Side {

@@ -1,101 +1,144 @@
 #!/usr/bin/env bash
-# solmq-gen task runner (mirror of dev.ps1). Run from anywhere.
-#   ./scripts/dev.sh <task> [task...]
-# Correctness gates (build/vet/test/cov) are fatal; vuln is report-only.
+# Dev tasks for solmq-conn. The only place that knows how to build/vet/test/scan
+# this repo. CI calls task names only. Keep dev.ps1 behaviourally identical.
+#
+# solmq-conn is a pure-Go CLI with no Dockerfile and no compose stack, so the
+# Docker tasks (image, up, down) do not apply and are omitted.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"   # module root = parent of scripts/
-LOGS="$SCRIPT_DIR/logs"
-mkdir -p "$LOGS"
-cd "$ROOT"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+LOG_DIR="$SCRIPT_DIR/logs"
+DIST="$REPO_ROOT/dist"
+mkdir -p "$LOG_DIR"
+cd "$REPO_ROOT"
 
-# Python for the graphify update (override with PYTHON env var).
-PYTHON="${PYTHON:-python}"; command -v "$PYTHON" >/dev/null 2>&1 || PYTHON=python3
+export NO_COLOR=1
 
-# Platforms cross-compiled by `dist` (static, CGO-free — pure Go + yaml.v3).
-DIST_TARGETS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"
+# --- output helpers ---------------------------------------------------------
+c() { printf '\033[%sm%s\033[0m\n' "$1" "$2"; }
+step() { c '1;36' "==> $*"; }
+ok()   { c '1;32' "ok: $*"; }
+warn() { c '1;33' "warn: $*"; }
+die()  { c '1;31' "error: $*"; exit 1; }
 
-c_g=$'\033[32m'; c_y=$'\033[33m'; c_r=$'\033[31m'; c_0=$'\033[0m'
-step() { echo "${c_y}==> $*${c_0}"; }
-ok()   { echo "${c_g}ok: $*${c_0}"; }
-warn() { echo "${c_y}warn: $*${c_0}"; }
-die()  { echo "${c_r}FAIL: $*${c_0}"; exit 1; }
+now() { date +%Y-%m-%dT%H:%M:%S%z; }
 
-# run <logname> <cmd...>  — tee combined output to logs/<logname>.log
+# Truncate this task's log with a header, then everything tees onto it.
+log_begin() {
+  printf '=== %s | %s ===\n' "$(now)" "$1" > "$LOG_DIR/$1.log"
+}
+
+# finish <task> <exit-code> <elapsed-seconds>
+finish() {
+  local task=$1 code=$2 secs=$3 status
+  if [ "$code" -eq 0 ]; then status=OK; else status="FAILED (exit $code)"; fi
+  printf '%s | %s | %ss | %s\n' "$(now)" "$task" "$secs" "$status" \
+    | tee -a "$LOG_DIR/$task.log"
+}
+
+# Strip ANSI/CSI so logs stay readable plain text.
+strip_csi() { sed -E $'s/\x1b\\[[0-9;?]*[a-zA-Z]//g'; }
+
+# run <task> <cmd...> -- tees combined output, returns the command's code.
 run() {
-  local name="$1"; shift
-  { echo "# $(date) :: $*"; "$@"; } 2>&1 | tee "$LOGS/$name.log"
+  local task=$1; shift
+  "$@" 2>&1 | strip_csi | tee -a "$LOG_DIR/$task.log"
   return "${PIPESTATUS[0]}"
 }
 
-task_build() { step build; run build go build -o solmq-gen ./cmd/solmq-gen || die build; ok "build (-> ./solmq-gen)"; }
-task_vet()   { step vet;   run vet   go vet ./...   || die vet;   ok vet; }
-task_test()  { step test;  run test  go test ./...  || die test;  ok test; }
-task_cov()   {
-  step cov
-  run cov go test -coverprofile=coverage.out ./... || die "cov (tests)"
+# --- target resolution ------------------------------------------------------
+# CI sets TARGET_OS/TARGET_ARCH; unset means host. Translate to Go's GOOS/GOARCH
+# here and nowhere else. Binary name carries the target so the release job can
+# merge every cross-compile leg into one directory without collisions.
+host_os()   { uname -s | tr '[:upper:]' '[:lower:]'; }
+host_arch() { case "$(uname -m)" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; *) uname -m;; esac; }
+T_OS="${TARGET_OS:-$(host_os)}"
+T_ARCH="${TARGET_ARCH:-$(host_arch)}"
+BIN_NAME="solmq-conn-$T_OS-$T_ARCH"
+[ "$T_OS" = "windows" ] && BIN_NAME="$BIN_NAME.exe"
+
+# --- tasks ------------------------------------------------------------------
+task_build() {
+  mkdir -p "$DIST"
+  run build env CGO_ENABLED=0 GOOS="$T_OS" GOARCH="$T_ARCH" \
+    go build -trimpath -ldflags "-s -w" -o "$DIST/$BIN_NAME" ./cmd/solmq-conn
+}
+
+task_vet() { run vet go vet ./...; }
+
+task_test() { run test go test -count=1 ./...; }
+
+task_cov() {
+  # Coverage profile -> HTML, and PRINT the total so the footer captures it.
+  # The previous total in logs/cov.log is the floor (local only -- CI is a
+  # fresh checkout with no prior log).
+  # -coverpkg credits cross-package execution (e.g. spec parsing driven by gen
+  # tests); without it those lines report 0% and the floor lies. Adding it is
+  # a one-time step change in the total -- the floor resets at that run.
+  run cov go test -coverpkg=./... -coverprofile=coverage.out -count=1 ./... || return $?
   go tool cover -html=coverage.out -o coverage.html
-  go tool cover -func=coverage.out | tail -n1
-  ok "cov (coverage.html + total above)"
+  go tool cover -func=coverage.out | tail -n1 | tee -a "$LOG_DIR/cov.log"
 }
-task_dist()  {  # cross-compiled static binaries for every platform -> dist/
-  step dist
-  rm -rf dist; mkdir -p dist
-  local log="$LOGS/dist.log"; echo "# $(date)" > "$log"
-  local failed=0 os arch ext out
-  for t in $DIST_TARGETS; do
-    os="${t%/*}"; arch="${t#*/}"; ext=""
-    [ "$os" = windows ] && ext=".exe"
-    out="dist/solmq-gen-${os}-${arch}${ext}"
-    if CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -o "$out" ./cmd/solmq-gen 2>>"$log"; then
-      ok "  $out"; echo "ok: $out" >> "$log"
-    else
-      warn "  build FAILED: $t"; echo "FAIL: $t" >> "$log"; failed=1
-    fi
-  done
-  [ "$failed" = 0 ] || die "dist (a target failed; see $log)"
-  ok "dist (-> ./dist/)"
-}
-task_vuln()  { # report-only: never aborts
-  step vuln
-  if ! command -v govulncheck >/dev/null 2>&1; then
-    warn "govulncheck not installed (go install golang.org/x/vuln/cmd/govulncheck@latest); skipping"
-    return 0
-  fi
-  run vuln govulncheck ./... || warn "govulncheck reported findings (report-only)"
-  ok vuln
-}
-# Incrementally update the graphify knowledge graph (AST-only, no API cost).
-# Report-only: a missing python/graphify or absent graph warns, never aborts.
-task_graphify() { step "graphify"; NO_COLOR=1 run graphify "$PYTHON" -m graphify update . && ok graphify || warn "graphify (report-only)"; }
-task_all()   { task_build; task_vet; task_test; task_cov; }   # fast post-change loop
-task_full()  { task_all; task_vuln; task_dist; }              # + vuln + cross-platform dist
 
-usage() { cat <<USAGE
-solmq-gen dev tasks:
-  build   go build -o solmq-gen ./cmd/solmq-gen  (fatal; writes ./solmq-gen)
-  vet     go vet ./...                          (fatal)
-  test    go test ./...  — golden + unit        (fatal)
-  cov     coverage profile -> coverage.html + printed total (fatal)
-  vuln    govulncheck ./...                     (report-only)
-  gpfy    python -m graphify update .
-  dist    cross-compile static binaries for all platforms -> dist/
-  all     build + vet + test + cov
-  full    all + vuln + dist
+# One task, every applicable check. FATAL on fixable CVEs. solmq-conn ships no
+# image, so this is the Go dependency scan alone. govulncheck reports only vulns
+# reachable from called code -- all actionable -- so a non-zero exit stops the
+# run. `go run @latest` needs only the Go toolchain and floats the scanner
+# deliberately, matching CI.
+task_scan() {
+  run scan go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+}
 
-Not applicable to this generator (no Dockerfile / local stack): image, trivy, up, down.
-USAGE
+# Local only: the graph is a developer artifact, not a CI output.
+task_graphify() {
+  [ -n "${CI:-}" ] && { warn "graphify is local-only; skipping in CI"; return 0; }
+  command -v graphify >/dev/null || { warn "graphify not on PATH; skipping"; return 0; }
+  run graphify graphify update .
+}
+
+# --- dispatch ---------------------------------------------------------------
+ALL="build vet test"
+FULL="build vet test cov scan graphify"
+
+usage() {
+  cat <<EOF
+usage: $(basename "$0") <task>...
+
+  build vet test cov scan graphify
+  all   = $ALL            (what CI runs, as: all scan)
+  full  = $FULL   (pre-tag sweep)
+EOF
+}
+
+expand() {
+  case "$1" in
+    all)  echo "$ALL" ;;
+    full) echo "$FULL" ;;
+    *)    echo "$1" ;;
+  esac
 }
 
 [ $# -eq 0 ] && { usage; exit 0; }
-for t in "$@"; do
-  case "$t" in
-    build) task_build ;; vet) task_vet ;; test) task_test ;;
-    cov) task_cov ;; dist) task_dist ;; vuln) task_vuln ;;
-    gpfy) task_graphify ;;
-    all) task_all ;; full) task_full ;;
-    help|-h|--help) usage ;;
-    *) die "unknown task: $t" ;;
-  esac
+case "${1:-}" in -h|--help|help) usage; exit 0 ;; esac
+
+TASKS=""
+for a in "$@"; do TASKS="$TASKS $(expand "$a")"; done
+
+FAILED=0
+for task in $TASKS; do
+  type "task_$task" >/dev/null 2>&1 || die "unknown task: $task"
+  step "$task"
+  log_begin "$task"
+  start=$SECONDS
+  code=0
+  "task_$task" || code=$?
+  finish "$task" "$code" "$((SECONDS - start))"
+  if [ "$code" -ne 0 ]; then
+    FAILED=1
+    warn "$task failed; stopping"
+    break   # build/vet/test/scan are all fatal
+  fi
+  ok "$task"
 done
+exit "$FAILED"

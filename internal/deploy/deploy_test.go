@@ -1,11 +1,12 @@
 package deploy
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/consolidate"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
 func baseKube() *spec.Kubernetes {
@@ -24,19 +25,24 @@ func one(name, appYAML string, m *consolidate.Model) []Instance {
 	return []Instance{{Name: name, AppYAML: appYAML, Model: m}}
 }
 
-func TestRenderFull(t *testing.T) {
+// fullFixtureInput builds the everything-on fixture shared by TestRenderFull
+// and TestRenderFull_ExactDocument so the two cannot drift.
+func fullFixtureInput() Input {
 	k := baseKube()
 	k.Secrets = spec.Secrets{
 		Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "creds", Source: spec.SourceEnv, Variables: []string{"A"}}},
 		Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{Name: "tls"}},
 	}
-	in := Input{
+	return Input{
 		Kube: k, Defaults: &spec.Defaults{},
 		CredKVs:   []KV{{Key: "A", Val: `sec"ret`}},
 		Stores:    []StoreFile{{Name: "truststore.jks", Base64: "QUJD"}},
 		Instances: one(k.Deployment.Name, "spring:\n  x: 1\n\n  y: 2\n", &consolidate.Model{MQTLS: true}),
 	}
-	out := Render(in)
+}
+
+func TestRenderFull(t *testing.T) {
+	out := Render(fullFixtureInput())
 	for _, w := range []string{
 		"kind: ConfigMap", "name: solmq-config", "application.yml: |", "    spring:",
 		"kind: Secret", "name: creds", "stringData:", `A: "sec\"ret"`,
@@ -54,6 +60,154 @@ func TestRenderFull(t *testing.T) {
 	if !strings.Contains(out, "\n\n") {
 		t.Error("blank line in app yaml not preserved in block scalar")
 	}
+}
+
+// TestRenderFull_ExactDocument is a full-document exact comparison for the
+// TestRenderFull fixture. Unlike the strings.Contains checks above -- which
+// pass even if a doc were duplicated, mis-indented, or a field landed in the
+// wrong block -- this pins the entire byte-for-byte output.
+func TestRenderFull_ExactDocument(t *testing.T) {
+	got := Render(fullFixtureInput())
+	if got != wantRenderFull {
+		t.Errorf("Render mismatch\n%s", lineDiff(wantRenderFull, got))
+	}
+}
+
+// wantRenderFull is the byte-for-byte expected output for the
+// TestRenderFull_ExactDocument fixture (traced by hand over Render).
+const wantRenderFull = `apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: solmq-config
+  namespace: ns
+data:
+  application.yml: |
+    spring:
+      x: 1
+
+      y: 2
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: creds
+  namespace: ns
+type: Opaque
+stringData:
+  A: "sec\"ret"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tls
+  namespace: ns
+type: Opaque
+data:
+  truststore.jks: QUJD
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: solmq
+  namespace: ns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: solmq
+  template:
+    metadata:
+      labels:
+        app: solmq
+    spec:
+      containers:
+        - name: connector
+          image: img:1
+          ports:
+            - name: management
+              containerPort: 8090
+          env:
+            - name: TZ
+              value: UTC
+            - name: JAVA_TOOL_OPTIONS
+              value: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"
+          envFrom:
+            - secretRef:
+                name: creds
+          volumeMounts:
+            - name: config
+              mountPath: /app/external/spring/config/application.yml
+              subPath: application.yml
+              readOnly: true
+            - name: stores
+              mountPath: /app/external/classpath/truststores
+              readOnly: true
+          livenessProbe:
+            tcpSocket:
+              port: 8090
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          readinessProbe:
+            tcpSocket:
+              port: 8090
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: config
+          configMap:
+            name: solmq-config
+        - name: stores
+          secret:
+            secretName: tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: solmq
+  namespace: ns
+spec:
+  selector:
+    app: solmq
+  ports:
+    - name: management
+      port: 8090
+      targetPort: 8090
+`
+
+// lineDiff returns a compact first-divergence report for two multi-line
+// strings (pattern: internal/gen/golden_test.go's lineDiff).
+func lineDiff(want, got string) string {
+	wl := strings.Split(want, "\n")
+	gl := strings.Split(got, "\n")
+	n := len(wl)
+	if len(gl) > n {
+		n = len(gl)
+	}
+	for i := 0; i < n; i++ {
+		var wv, gv string
+		if i < len(wl) {
+			wv = wl[i]
+		}
+		if i < len(gl) {
+			gv = gl[i]
+		}
+		if wv != gv {
+			return "first diff at line " + strconv.Itoa(i+1) + ":\n  want: " + strconv.Quote(wv) + "\n  got:  " + strconv.Quote(gv)
+		}
+	}
+	return "(strings differ only in length/trailing content)"
 }
 
 func TestRenderNoSecretsNoServiceNoTLS(t *testing.T) {
@@ -261,6 +415,25 @@ func TestRenderNoResources(t *testing.T) {
 	k.Deployment.Resources = spec.Resources{}
 	if strings.Contains(Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instances: one(k.Deployment.Name, "x\n", &consolidate.Model{})}), "resources:") {
 		t.Error("no resources block expected when all empty")
+	}
+}
+
+// TestBaseName pins baseName's current behavior, including that it does NOT
+// normalize backslashes the way gen.baseName does (internal/gen/gen_extra_test.go's
+// TestBaseNameB64ToIssues).
+// That divergence is safe: baseName's only caller (renderDeployment) feeds it
+// Libs.Download.URLs entries, and internal/validate's safeLibsURL rejects any
+// libs.download url containing a backslash before GenerateKubernetes ever
+// calls Render, so a Windows-style path can never reach it through the CLI.
+func TestBaseName(t *testing.T) {
+	if got := baseName("https://repo/a.jar"); got != "a.jar" {
+		t.Errorf("baseName(url) = %q, want %q", got, "a.jar")
+	}
+	if got := baseName("noslash"); got != "noslash" {
+		t.Errorf("baseName(no slash) = %q, want %q", got, "noslash")
+	}
+	if got := baseName(`a\b\c.jar`); got != `a\b\c.jar` {
+		t.Errorf("baseName(backslash) = %q, want unchanged %q", got, `a\b\c.jar`)
 	}
 }
 

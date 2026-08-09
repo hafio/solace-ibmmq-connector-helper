@@ -1,5 +1,8 @@
-// Package gen is the in-memory generation core behind the CLI. It ties together parse -> validate -> consolidate ->
-// render/deploy; all I/O (folder scan, env, file reads) is injected by callers.
+// Package gen is the in-memory generation core behind the CLI. It ties together
+// parse -> validate -> consolidate -> render for every target (application.yml,
+// kubernetes manifests, docker compose, podman run/quadlet). All I/O (folder
+// scan, env lookups, file reads, path resolution) is injected by callers so the
+// package stays pure and testable.
 package gen
 
 import (
@@ -10,12 +13,17 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/consolidate"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/deploy"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/render"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/spec"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-gen/internal/validate"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/dockergen"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/podmangen"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/render"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
+
+// fileEnv labels issues that are not tied to a specific workflow file.
+const fileEnv = "env.yaml"
 
 // File is one named input document.
 type File struct {
@@ -23,21 +31,32 @@ type File struct {
 	Data []byte
 }
 
-// Request is a full set of inputs (workflow files + optional defaults/kubernetes).
+// Request is a full set of inputs: the env.yaml document and the workflow files.
 type Request struct {
-	Workflows  []File
-	Defaults   *File
-	Kubernetes *File
+	Env       *File
+	Workflows []File
 }
 
-// Resolver injects the environment-dependent bits deploy needs.
+// Resolver injects the environment-dependent bits generation needs.
 type Resolver struct {
 	// Env looks up an environment variable (CLI: os.LookupEnv; nil skips checks).
 	Env func(string) (string, bool)
-	// ReadFile reads a values-file or .jks referenced by config (from disk).
-	// Nil means no file access.
+	// ReadFile reads a values-file or .jks referenced by config (nil = no access).
 	ReadFile func(string) ([]byte, error)
+	// Abs resolves a config-relative path (store/libs dir) to a host path for
+	// bind mounts. Nil leaves the path unchanged.
+	Abs func(string) string
 }
+
+func (res Resolver) abs(p string) string {
+	if res.Abs == nil {
+		return p
+	}
+	return res.Abs(p)
+}
+
+// KV is one resolved credential entry (re-exported for CLI env-file writing).
+type KV = deploy.KV
 
 // Issue re-exports validate.Issue for callers that only import gen.
 type Issue = validate.Issue
@@ -46,20 +65,255 @@ type Issue = validate.Issue
 // connector instance (workflows are sharded at MaxWorkflowsPerInstance). A folder
 // with <= that many workflows yields a single-element slice.
 func Config(r Request, res Resolver) (outs []string, errs, warns []Issue) {
-	wfs, d, _, pissues := parse(r)
-	e, w := validate.Run(validate.Context{Workflows: wfs, Defaults: d, Env: res.Env})
-	errs = append(pissues, e...)
+	wfs, e, pissues := parse(r)
+	verrs, w := validate.Run(validate.Context{Workflows: wfs, Defaults: &e.Defaults, Env: res.Env})
+	errs = append(pissues, verrs...)
 	warns = w
 	if len(errs) > 0 {
 		return nil, errs, warns
 	}
-	shards, cw := buildShards(wfs, d, false)
+	shards, cw := buildShards(wfs, &e.Defaults, false)
 	warns = append(warns, toIssues(cw)...)
 	for _, s := range shards {
 		outs = append(outs, s.appYAML)
 	}
 	return outs, nil, warns
 }
+
+// Validate runs every check for every section present and returns all findings.
+func Validate(r Request, res Resolver) (errs, warns []Issue) {
+	wfs, e, pissues := parse(r)
+	valuesKeys, vErr := valuesFileKeys(e.Kubernetes, res)
+	verrs, w := validate.Run(validate.Context{
+		Workflows:      wfs,
+		Defaults:       &e.Defaults,
+		Kube:           e.Kubernetes,
+		Docker:         e.Docker,
+		Podman:         e.Podman,
+		Deploy:         e.Kubernetes != nil,
+		CheckDocker:    e.Docker != nil,
+		CheckPodman:    e.Podman != nil,
+		Env:            res.Env,
+		ValuesFileKeys: valuesKeys,
+	})
+	errs = append(pissues, verrs...)
+	if vErr != nil {
+		errs = append(errs, *vErr)
+	}
+	return errs, w
+}
+
+// GenerateKubernetes parses+validates and returns the manifest set on success.
+// Credentials/stores are resolved and embedded (stringData/base64), so this is
+// the same rendered output the deploy path applies.
+func GenerateKubernetes(r Request, res Resolver) (out string, errs, warns []Issue) {
+	wfs, e, pissues := parse(r)
+	k := e.Kubernetes
+	if k == nil {
+		pissues = append(pissues, Issue{File: fileEnv, Msg: "kubernetes target requires a 'kubernetes:' section in env.yaml"})
+	}
+	valuesKeys, vErr := valuesFileKeys(k, res)
+	verrs, w := validate.Run(validate.Context{
+		Workflows:      wfs,
+		Defaults:       &e.Defaults,
+		Kube:           k,
+		Deploy:         true,
+		Env:            res.Env,
+		ValuesFileKeys: valuesKeys,
+	})
+	errs = append(pissues, verrs...)
+	if vErr != nil {
+		errs = append(errs, *vErr)
+	}
+	warns = w
+	if len(errs) > 0 {
+		return "", errs, warns
+	}
+
+	shards, cw := buildShards(wfs, &e.Defaults, true)
+	warns = append(warns, toIssues(cw)...)
+
+	in := deploy.Input{Kube: k, Defaults: &e.Defaults}
+	if c := k.Secrets.Credentials; c != nil && c.Create != nil {
+		kvs, err := resolveCred(c.Create, res)
+		if err != nil {
+			return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+		}
+		in.CredKVs = kvs
+	}
+	if s := k.Secrets.Stores; s != nil && s.Create != nil {
+		files, err := resolveStores(&e.Defaults, res)
+		if err != nil {
+			return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+		}
+		in.Stores = files
+	}
+	for i, s := range shards {
+		name := instanceName(k.Deployment.Name, i, len(shards))
+		in.Instances = append(in.Instances, deploy.Instance{Name: name, AppYAML: s.appYAML, Model: s.model})
+	}
+	return deploy.Render(in), nil, warns
+}
+
+// DockerPlan is the rendered compose plus the env-file base name the compose
+// references (empty when there are no credentials). Credential values are not
+// resolved here; the CLI writes the env-file (0600) at deploy time.
+type DockerPlan struct {
+	Compose     string
+	EnvFileName string
+}
+
+// GenerateDocker parses+validates and renders the docker-compose.yml (with
+// application.yml inlined under compose configs:). Store/libs host paths are
+// resolved to absolute so the compose is portable regardless of cwd.
+func GenerateDocker(r Request, res Resolver) (plan DockerPlan, errs, warns []Issue) {
+	wfs, e, pissues := parse(r)
+	d := e.Docker
+	if d == nil {
+		pissues = append(pissues, Issue{File: fileEnv, Msg: "docker target requires a 'docker:' section in env.yaml"})
+	}
+	verrs, w := validate.Run(validate.Context{
+		Workflows: wfs, Defaults: &e.Defaults, Docker: d, CheckDocker: true, Env: res.Env,
+	})
+	errs = append(pissues, verrs...)
+	warns = w
+	if len(errs) > 0 {
+		return DockerPlan{}, errs, warns
+	}
+
+	shards, cw := buildShards(wfs, &e.Defaults, true)
+	warns = append(warns, toIssues(cw)...)
+
+	sm, lm := targetMounts(e.Defaults.TLS, d.Stores, d.Libs, res)
+	in := dockergen.Input{
+		Docker:  d,
+		EnvFile: credEnvFileName(d.Name, d.Secrets.Credentials),
+		Stores:  toDockerMounts(sm),
+		Libs:    toDockerMount(lm),
+	}
+	for i, s := range shards {
+		in.Instances = append(in.Instances, dockergen.Instance{
+			Name:    instanceName(d.Name, i, len(shards)),
+			AppYAML: s.appYAML,
+			MQTLS:   s.model.MQTLS,
+		})
+	}
+	return DockerPlan{Compose: dockergen.Render(in), EnvFileName: in.EnvFile}, nil, warns
+}
+
+// NamedDoc is one on-disk document (podman writes application.yml files to the
+// unit/script directory because a container cannot inline file content).
+type NamedDoc struct {
+	Name string
+	Data string
+}
+
+// PodmanOpts tunes podman generation. ForceQuadlet overrides the config mode
+// (deploy/delete are always quadlet). BaseDir, when set, makes the on-disk file
+// paths (application.yml, env-file) absolute under it so systemd quadlet units
+// reference real locations; empty BaseDir keeps base names for a preview.
+type PodmanOpts struct {
+	ForceQuadlet bool
+	BaseDir      string
+}
+
+// PodmanPlan carries whichever artifact the effective mode produced plus the
+// on-disk material a deploy must write before activating the units.
+type PodmanPlan struct {
+	Mode        string           // effective mode: run | quadlet
+	RunScript   string           // set when Mode == run
+	Units       []podmangen.Unit // set when Mode == quadlet
+	AppYAMLs    []NamedDoc        // application.yml per instance (write to disk)
+	EnvFileName string           // credential env-file base name ("" when none)
+	Services    []string         // systemd service names (quadlet), e.g. name.service
+}
+
+// GeneratePodman parses+validates and renders either a `podman run` script
+// (mode run) or one .container quadlet unit per instance (mode quadlet, or when
+// opts.ForceQuadlet is set). application.yml documents are returned separately
+// for the caller to write to disk.
+func GeneratePodman(r Request, res Resolver, opts PodmanOpts) (plan PodmanPlan, errs, warns []Issue) {
+	wfs, e, pissues := parse(r)
+	p := e.Podman
+	if p == nil {
+		pissues = append(pissues, Issue{File: fileEnv, Msg: "podman target requires a 'podman:' section in env.yaml"})
+	}
+	verrs, w := validate.Run(validate.Context{
+		Workflows: wfs, Defaults: &e.Defaults, Podman: p, CheckPodman: true, Env: res.Env,
+	})
+	errs = append(pissues, verrs...)
+	warns = w
+	if len(errs) > 0 {
+		return PodmanPlan{}, errs, warns
+	}
+
+	shards, cw := buildShards(wfs, &e.Defaults, true)
+	warns = append(warns, toIssues(cw)...)
+
+	plan.Mode = p.Mode
+	if opts.ForceQuadlet {
+		plan.Mode = spec.PodmanModeQuadlet
+	}
+	plan.EnvFileName = credEnvFileName(p.Name, p.Secrets.Credentials)
+
+	sm, lm := targetMounts(e.Defaults.TLS, p.Stores, p.Libs, res)
+	in := podmangen.Input{Podman: p, Stores: toPodmanMounts(sm), Libs: toPodmanMount(lm)}
+	// The quadlet EnvironmentFile= line references the env-file by an absolute host
+	// path. A tool-created env-file is written into BaseDir (the quadlet dir) at
+	// deploy, so reference it there; an existing env-file is the user's own and
+	// lives at its env.yaml-resolved location -- reference it like stores/libs, via
+	// res.abs, never joined onto BaseDir.
+	if c := p.Secrets.Credentials; c != nil {
+		switch {
+		case c.Existing != "":
+			in.EnvFile = res.abs(c.Existing)
+		case c.Create != nil:
+			in.EnvFile = pathIn(opts.BaseDir, plan.EnvFileName)
+		}
+	}
+	for i, s := range shards {
+		name := instanceName(p.Name, i, len(shards))
+		appName := name + "-application.yml"
+		plan.AppYAMLs = append(plan.AppYAMLs, NamedDoc{Name: appName, Data: s.appYAML})
+		plan.Services = append(plan.Services, name+".service")
+		in.Instances = append(in.Instances, podmangen.Instance{
+			Name:        name,
+			AppYAMLPath: pathIn(opts.BaseDir, appName),
+			MQTLS:       s.model.MQTLS,
+		})
+	}
+	if plan.Mode == spec.PodmanModeQuadlet {
+		plan.Units = podmangen.RenderQuadlet(in)
+	} else {
+		plan.RunScript = podmangen.RenderRunScript(in)
+	}
+	return plan, nil, warns
+}
+
+// ResolveCredentials resolves a docker/podman credentials block to ordered KV
+// pairs for the env-file. A nil block, or one that names an existing env-file
+// (Existing), returns no pairs.
+func ResolveCredentials(creds *spec.CredentialsSecret, res Resolver) ([]KV, error) {
+	if creds == nil || creds.Create == nil {
+		return nil, nil
+	}
+	return resolveCred(creds.Create, res)
+}
+
+// EnvFileContent renders ordered KV pairs as env-file lines (KEY=VALUE). Written
+// 0600 by the caller; never logged.
+func EnvFileContent(kvs []KV) string {
+	var b strings.Builder
+	for _, kv := range kvs {
+		b.WriteString(kv.Key)
+		b.WriteByte('=')
+		b.WriteString(kv.Val)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// ---- shared shard building ---------------------------------------------------
 
 // shard is one connector instance's consolidated model and rendered config.
 type shard struct {
@@ -106,85 +360,98 @@ func buildShards(wfs []spec.Workflow, d *spec.Defaults, mountStores bool) ([]sha
 	return shards, warns
 }
 
-// Validate runs every check and returns all findings (errors + warnings).
-func Validate(r Request, res Resolver) (errs, warns []Issue) {
-	wfs, d, k, pissues := parse(r)
-	valuesKeys, vErr := valuesFileKeys(k, res)
-	e, w := validate.Run(validate.Context{
-		Workflows:      wfs,
-		Defaults:       d,
-		Kube:           k,
-		Deploy:         k != nil,
-		Env:            res.Env,
-		ValuesFileKeys: valuesKeys,
-	})
-	errs = append(pissues, e...)
-	if vErr != nil {
-		errs = append(errs, *vErr)
+// instanceName is the base name for one instance, suffixed -N (1-based) only when
+// there is more than one instance.
+func instanceName(base string, i, n int) string {
+	if n > 1 {
+		return fmt.Sprintf("%s-%d", base, i+1)
 	}
-	warns = w
-	return errs, warns
+	return base
 }
 
-// Deploy parses+validates and returns the manifest set on success.
-func Deploy(r Request, res Resolver) (out string, errs, warns []Issue) {
-	wfs, d, k, pissues := parse(r)
-	if k == nil {
-		pissues = append(pissues, Issue{Msg: "deploy requires a kubernetes.yaml settings file"})
-	}
-	valuesKeys, vErr := valuesFileKeys(k, res)
-	e, w := validate.Run(validate.Context{
-		Workflows:      wfs,
-		Defaults:       d,
-		Kube:           k,
-		Deploy:         true,
-		Env:            res.Env,
-		ValuesFileKeys: valuesKeys,
-	})
-	errs = append(pissues, e...)
-	if vErr != nil {
-		errs = append(errs, *vErr)
-	}
-	warns = w
-	if len(errs) > 0 {
-		return "", errs, warns
-	}
+// ---- mount resolution --------------------------------------------------------
 
-	shards, cw := buildShards(wfs, d, true)
-	warns = append(warns, toIssues(cw)...)
+// mount is a resolved host->container bind mount, converted to the target
+// renderer's own Mount type at the call site.
+type mount struct{ Source, Target string }
 
-	in := deploy.Input{Kube: k, Defaults: d}
-	// Secrets are shared across all instances — resolve once.
-	if c := k.Secrets.Credentials; c != nil && c.Create != nil {
-		kvs, err := resolveCred(c.Create, res)
-		if err != nil {
-			return "", []Issue{{File: "kubernetes.yaml", Msg: err.Error()}}, warns
+// targetMounts resolves the store files (each tls.*.file bind-mounted onto the
+// fixed in-container store dir spec.DefaultStoresMountPath, matching where
+// application.yml references them) and the libs directory into host->container
+// mounts. Both are nil/absent unless the section opted in.
+func targetMounts(tls spec.TLSConfig, stores *spec.StoresMount, libs *spec.LibsMount, res Resolver) (sm []mount, lm *mount) {
+	if stores != nil {
+		for _, st := range []*spec.Store{tls.Truststore, tls.Keystore} {
+			if st == nil || st.File == "" {
+				continue
+			}
+			sm = append(sm, mount{Source: res.abs(st.File), Target: spec.DefaultStoresMountPath + "/" + baseName(st.File)})
 		}
-		in.CredKVs = kvs
 	}
-	if s := k.Secrets.Stores; s != nil && s.Create != nil {
-		files, err := resolveStores(d, res)
-		if err != nil {
-			return "", []Issue{{File: "kubernetes.yaml", Msg: err.Error()}}, warns
-		}
-		in.Stores = files
+	if libs != nil && libs.Dir != "" {
+		lm = &mount{Source: res.abs(libs.Dir), Target: libs.MountPath}
 	}
+	return sm, lm
+}
 
-	// One instance keeps the base name; multiple get a 1-based -N suffix.
-	base := k.Deployment.Name
-	for i, s := range shards {
-		name := base
-		if len(shards) > 1 {
-			name = fmt.Sprintf("%s-%d", base, i+1)
-		}
-		in.Instances = append(in.Instances, deploy.Instance{Name: name, AppYAML: s.appYAML, Model: s.model})
+func toDockerMounts(ms []mount) []dockergen.Mount {
+	out := make([]dockergen.Mount, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, dockergen.Mount{Source: m.Source, Target: m.Target})
 	}
-	return deploy.Render(in), nil, warns
+	return out
+}
+
+func toDockerMount(m *mount) *dockergen.Mount {
+	if m == nil {
+		return nil
+	}
+	return &dockergen.Mount{Source: m.Source, Target: m.Target}
+}
+
+func toPodmanMounts(ms []mount) []podmangen.Mount {
+	out := make([]podmangen.Mount, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, podmangen.Mount{Source: m.Source, Target: m.Target})
+	}
+	return out
+}
+
+func toPodmanMount(m *mount) *podmangen.Mount {
+	if m == nil {
+		return nil
+	}
+	return &podmangen.Mount{Source: m.Source, Target: m.Target}
+}
+
+// credEnvFileName is the env-file the compose/unit references: <name>.env for a
+// created secret, the Existing value when one is named, or "" when there are no
+// credentials.
+func credEnvFileName(name string, creds *spec.CredentialsSecret) string {
+	if creds == nil {
+		return ""
+	}
+	if creds.Existing != "" {
+		return creds.Existing
+	}
+	if creds.Create != nil {
+		return name + ".env"
+	}
+	return ""
+}
+
+// pathIn joins base and name with a forward slash (the on-target separator for
+// docker/podman). An empty base yields the bare name for a portable preview.
+func pathIn(base, name string) string {
+	if base == "" {
+		return name
+	}
+	return strings.TrimRight(base, "/\\") + "/" + name
 }
 
 // ---- parsing -----------------------------------------------------------------
 
-func parse(r Request) (wfs []spec.Workflow, d *spec.Defaults, k *spec.Kubernetes, issues []Issue) {
+func parse(r Request) (wfs []spec.Workflow, e *spec.Env, issues []Issue) {
 	files := append([]File(nil), r.Workflows...)
 	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
 	for _, f := range files {
@@ -195,24 +462,16 @@ func parse(r Request) (wfs []spec.Workflow, d *spec.Defaults, k *spec.Kubernetes
 		}
 		wfs = append(wfs, *wf)
 	}
-	d = &spec.Defaults{}
-	if r.Defaults != nil {
-		pd, err := spec.ParseDefaults(r.Defaults.Data)
-		if err != nil {
-			issues = append(issues, Issue{File: "defaults.yaml", Msg: err.Error()})
-		} else {
-			d = pd
-		}
+	data := []byte(nil)
+	if r.Env != nil {
+		data = r.Env.Data
 	}
-	if r.Kubernetes != nil {
-		pk, err := spec.ParseKubernetes(r.Kubernetes.Data)
-		if err != nil {
-			issues = append(issues, Issue{File: "kubernetes.yaml", Msg: err.Error()})
-		} else {
-			k = pk
-		}
+	pe, err := spec.ParseEnv(data)
+	if err != nil {
+		issues = append(issues, Issue{File: fileEnv, Msg: err.Error()})
+		pe, _ = spec.ParseEnv(nil) // fall back to a defaulted env so downstream code has a value
 	}
-	return wfs, d, k, issues
+	return wfs, pe, issues
 }
 
 // ---- secret resolution -------------------------------------------------------
@@ -224,11 +483,11 @@ func resolveCred(c *spec.CredCreate, res Resolver) ([]deploy.KV, error) {
 		for _, v := range c.Variables {
 			val := ""
 			if res.Env != nil {
-				if got, ok := res.Env(v); ok {
-					val = got
-				} else {
+				got, ok := res.Env(v)
+				if !ok {
 					return nil, fmt.Errorf("credentials variable %q is not set in the environment", v)
 				}
+				val = got
 			}
 			out = append(out, deploy.KV{Key: v, Val: val})
 		}
@@ -282,11 +541,11 @@ func valuesFileKeys(k *spec.Kubernetes, res Resolver) (map[string]bool, *Issue) 
 	}
 	data, err := res.ReadFile(c.ValuesFile)
 	if err != nil {
-		return nil, &Issue{File: "kubernetes.yaml", Msg: fmt.Sprintf("reading values-file %q: %v", c.ValuesFile, err)}
+		return nil, &Issue{File: fileEnv, Msg: fmt.Sprintf("reading values-file %q: %v", c.ValuesFile, err)}
 	}
 	kvs, err := parseValues(data)
 	if err != nil {
-		return nil, &Issue{File: "kubernetes.yaml", Msg: fmt.Sprintf("parsing values-file %q: %v", c.ValuesFile, err)}
+		return nil, &Issue{File: fileEnv, Msg: fmt.Sprintf("parsing values-file %q: %v", c.ValuesFile, err)}
 	}
 	keys := map[string]bool{}
 	for _, kv := range kvs {
