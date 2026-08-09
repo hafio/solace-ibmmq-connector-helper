@@ -25,9 +25,14 @@ Or use the mirrored task runner (`dev.sh` / `dev.ps1`, behaviorally identical):
 
 Tasks: `build vet test cov scan graphify`, plus aggregates `all` (= build vet test, run by CI
 as `all scan`) and `full` (= all + cov + scan + graphify, the pre-tag sweep). Gates
-build/vet/test/scan are fatal. `scan` is `go run golang.org/x/vuln/cmd/govulncheck@latest
-./...`, fatal on any finding — every Go vuln-DB finding is reachable-and-fixable, so there is
-nothing to warn-and-pass on. `build` honors `TARGET_OS`/`TARGET_ARCH` and writes
+build/vet/test/scan are fatal. `scan` is `go tool govulncheck ./...`, fatal on any finding — every
+Go vuln-DB finding is reachable-and-fixable, so there is nothing to warn-and-pass on. The scanner is
+pinned in `go.mod` as a tool dependency rather than invoked as `go run ...@latest`: that form ignores
+`go.mod` and builds the scanner on whatever toolchain its own module requires, which then cannot load
+packages from a module on a newer `go` directive. The Go toolchain itself is pinned exactly
+(`toolchain` directive in `go.mod`), so the laptop and both CI runners download and run the identical
+Go rather than whatever the runner image preinstalls -- bump the pin deliberately when upgrading
+locally. `build` honors `TARGET_OS`/`TARGET_ARCH` and writes
 `dist/solmq-conn-<os>-<arch>[.exe]` (host os/arch when unset), so one task serves the laptop and
 the CI matrix. `graphify` is local-only (warn-skips under CI). `image`/`up`/`down` are omitted --
 the tool ships no Dockerfile or local stack (it generates artifacts for other engines; it is not
@@ -70,7 +75,8 @@ git tag v1.0.0 && git push origin v1.0.0
 
 Binaries-only: with no Dockerfile the image job self-skips. Cross-compilation reuses
 `dev.sh build` with `TARGET_OS`/`TARGET_ARCH` supplied by the matrix, so local and CI build
-the same way. Actions are SHA-pinned and tracked by [`.github/dependabot.yml`](../.github/dependabot.yml).
+the same way. Actions are SHA-pinned and tracked by [`.github/dependabot.yml`](../.github/dependabot.yml);
+Go module pins (including govulncheck and the toolchain) move deliberately, gates re-run.
 
 ## Design notes
 

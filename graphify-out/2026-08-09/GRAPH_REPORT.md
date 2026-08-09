@@ -1,16 +1,16 @@
 # Graph Report - solace-ibmmq-connector-helper  (2026-08-09)
 
 ## Corpus Check
-- 48 files · ~72,749 words
+- 51 files · ~76,375 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 791 nodes · 2138 edges · 49 communities (38 shown, 11 thin omitted)
-- Extraction: 83% EXTRACTED · 17% INFERRED · 0% AMBIGUOUS · INFERRED: 359 edges (avg confidence: 0.8)
+- 827 nodes · 2185 edges · 52 communities (41 shown, 11 thin omitted)
+- Extraction: 83% EXTRACTED · 17% INFERRED · 0% AMBIGUOUS · INFERRED: 363 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `021326af`
+- Built from commit: `3e1e07b8`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -21,7 +21,7 @@
 - runner_test.go
 - Render
 - gen.go
-- spec_test.go
+- Application
 - solmq-conn test catalogue
 - dev.sh
 - dev.ps1
@@ -61,6 +61,9 @@
 - solmq-conn -- Development Guide
 - solmq-conn -- Solace IBM MQ Connector config generator and deployer
 - 7. Deploy targets (`kubernetes:`, `docker:`, `podman:`)
+- Command details
+- spec_test.go
+- commands.go
 
 ## God Nodes (most connected - your core abstractions)
 1. `hasErr()` - 43 edges
@@ -75,6 +78,8 @@
 10. `Side` - 23 edges
 
 ## Surprising Connections (you probably didn't know these)
+- `TestCommandsDocInSync()` --calls--> `WriteFile()`  [INFERRED]
+  cmd/solmq-conn/commands_doc_test.go → internal/runner/runner.go
 - `TestCheckLibs()` --calls--> `run()`  [INFERRED]
   internal/validate/validate_extra_test.go → cmd/solmq-conn/main.go
 - `TestCheckSyslog()` --calls--> `run()`  [INFERRED]
@@ -83,13 +88,11 @@
   cmd/solmq-conn/main.go → internal/gen/gen.go
 - `genKubernetes()` --calls--> `GenerateKubernetes()`  [INFERRED]
   cmd/solmq-conn/main.go → internal/gen/gen.go
-- `genDocker()` --calls--> `GenerateDocker()`  [INFERRED]
-  cmd/solmq-conn/main.go → internal/gen/gen.go
 
 ## Import Cycles
 - None detected.
 
-## Communities (49 total, 11 thin omitted)
+## Communities (52 total, 11 thin omitted)
 
 ### Community 0 - "Build"
 Cohesion: 0.08
@@ -109,15 +112,15 @@ Nodes (46): FileMode, T, mustWrite(), testResolver(), TestShippedExamplesGenerat
 
 ### Community 4 - "Render"
 Cohesion: 0.12
-Nodes (42): Input, Instance, KV, StoreFile, yw, Instance, baseName(), Builder (+34 more)
+Nodes (41): Input, Instance, KV, StoreFile, yw, Instance, baseName(), Builder (+33 more)
 
 ### Community 5 - "gen.go"
 Cohesion: 0.09
 Nodes (61): DockerPlan, File, mount, NamedDoc, PodmanOpts, PodmanPlan, Request, Resolver (+53 more)
 
-### Community 6 - "spec_test.go"
-Cohesion: 0.11
-Nodes (43): Application(), Builder, Model, Node, renderBundles(), renderCloudStream(), renderConnector(), renderContainer() (+35 more)
+### Community 6 - "Application"
+Cohesion: 0.21
+Nodes (23): Application(), Builder, Model, Node, renderBundles(), renderCloudStream(), renderConnector(), renderContainer() (+15 more)
 
 ### Community 7 - "solmq-conn test catalogue"
 Cohesion: 0.13
@@ -169,7 +172,7 @@ Nodes (18): Input, Instance, Mount, yw, Builder, Render(), renderConfig(), rende
 
 ### Community 21 - "ParseEnv"
 Cohesion: 0.08
-Nodes (49): ParseEnv(), T, TestParseEnvEmpty(), TestParseEnvUnknownKeyIgnored(), TestParseEnvWrongScalarTypeErrors(), TestWorkflowsFromRawDefaultWhenAbsent(), TestWorkflowsFromRawDirOverride(), TestWorkflowsFromRawFilePatternOverride() (+41 more)
+Nodes (50): syslogOf(), ParseEnv(), T, TestParseEnvEmpty(), TestParseEnvUnknownKeyIgnored(), TestParseEnvWrongScalarTypeErrors(), TestWorkflowsFromRawDefaultWhenAbsent(), TestWorkflowsFromRawDirOverride() (+42 more)
 
 ### Community 23 - "YAML & Spring Boot Essentials (For Non-Spring Users)"
 Cohesion: 0.25
@@ -231,20 +234,32 @@ Nodes (5): Commands, Documentation, Minimal working example, Quick start, solmq-
 Cohesion: 0.50
 Nodes (4): 7.1 kubernetes, 7.2 docker, 7.3 podman, 7. Deploy targets (`kubernetes:`, `docker:`, `podman:`)
 
+### Community 49 - "Command details"
+Cohesion: 0.09
+Nodes (22): All commands, Command details, Command tree, delete, deploy, examples, Exit codes, Flags (+14 more)
+
+### Community 50 - "spec_test.go"
+Cohesion: 0.22
+Nodes (20): ParseDefaults(), ParseKubernetes(), ParseWorkflow(), T, TestParseDefaultsConnectionsAndLeaderElection(), TestParseDefaultsEmpty(), TestParseDefaultsError(), TestParseDefaultsFull() (+12 more)
+
+### Community 51 - "commands.go"
+Cohesion: 0.26
+Nodes (11): T, normLF(), TestCommandsDocInSync(), TestCommandsModelMatchesUsage(), flagsLine(), invocation(), renderCommandsDoc(), usageText() (+3 more)
+
 ## Knowledge Gaps
-- **97 isolated node(s):** `github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn`, `Model`, `NO_COLOR`, `graphify`, `Quick start` (+92 more)
+- **115 isolated node(s):** `cliFlag`, `github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn`, `Model`, `NO_COLOR`, `graphify` (+110 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **11 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Defaults` connect `validate.go` to `Build`, `.Run`, `Render`, `gen.go`, `spec_test.go`, `TLS Store Paths`, `ParseEnv`?**
-  _High betweenness centrality (0.130) - this node is a cross-community bridge._
-- **Why does `Build()` connect `Build` to `validate.go`, `TLS Store Paths`, `gen.go`, `spec_test.go`?**
-  _High betweenness centrality (0.092) - this node is a cross-community bridge._
+- **Why does `Defaults` connect `validate.go` to `Build`, `.Run`, `Render`, `gen.go`, `TLS Store Paths`, `spec_test.go`, `ParseEnv`?**
+  _High betweenness centrality (0.121) - this node is a cross-community bridge._
+- **Why does `Build()` connect `Build` to `validate.go`, `TLS Store Paths`, `gen.go`, `Application`?**
+  _High betweenness centrality (0.086) - this node is a cross-community bridge._
 - **Why does `Kubernetes` connect `ParseEnv` to `validate.go`, `runner_test.go`, `Render`, `gen.go`, `spec_test.go`?**
-  _High betweenness centrality (0.076) - this node is a cross-community bridge._
+  _High betweenness centrality (0.071) - this node is a cross-community bridge._
 - **Are the 26 inferred relationships involving `hasErr()` (e.g. with `TestCheckCommandMultiToken()` and `TestCheckContainerNameRejected()`) actually correct?**
   _`hasErr()` has 26 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 17 inferred relationships involving `wf()` (e.g. with `TestCheckSideMQMissingFields()` and `TestCheckSideSolaceMissingAndBadScheme()`) actually correct?**

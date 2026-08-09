@@ -5,7 +5,7 @@
   "3": "runner_test.go",
   "4": "Render",
   "5": "gen.go",
-  "6": "spec_test.go",
+  "6": "Application",
   "7": "solmq-conn test catalogue",
   "8": "dev.sh",
   "9": "dev.ps1",
@@ -47,5 +47,8 @@
   "45": "solmq-conn -- Development Guide",
   "46": "solmq-conn -- Solace IBM MQ Connector config generator and deployer",
   "47": "DEVELOPMENT.md",
-  "48": "7. Deploy targets (`kubernetes:`, `docker:`, `podman:`)"
+  "48": "7. Deploy targets (`kubernetes:`, `docker:`, `podman:`)",
+  "49": "Command details",
+  "50": "spec_test.go",
+  "51": "commands.go"
 }

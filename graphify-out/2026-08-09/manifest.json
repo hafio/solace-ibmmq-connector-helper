@@ -5,8 +5,8 @@
     "semantic_hash": ""
   },
   "go.mod": {
-    "mtime": 1785821158.4140377,
-    "ast_hash": "7aade37bf21d6b9bda85dc0159d5c483",
+    "mtime": 1786281507.6262164,
+    "ast_hash": "42f505abdf8527bb458add1f61ebb1d4",
     "semantic_hash": ""
   },
   "internal/consolidate/consolidate.go": {
@@ -140,13 +140,13 @@
     "semantic_hash": ""
   },
   "scripts/dev.ps1": {
-    "mtime": 1785980465.9362311,
-    "ast_hash": "2486f058558c0405fbf3e221c505a44c",
+    "mtime": 1786266701.6201642,
+    "ast_hash": "d02475462574121bfe3ffaeef7162235",
     "semantic_hash": ""
   },
   "scripts/dev.sh": {
-    "mtime": 1785980464.8614955,
-    "ast_hash": "7b54b0e973d951589d9f2b66b70f2e93",
+    "mtime": 1786266698.4805143,
+    "ast_hash": "dce28b0149e2338831ca2a639272b110",
     "semantic_hash": ""
   },
   "CLAUDE.md": {
@@ -155,8 +155,8 @@
     "semantic_hash": "8a6643a420fdad6bfb583523bc6cef16"
   },
   "README.md": {
-    "mtime": 1785825706.3311293,
-    "ast_hash": "fa3d536179b811b4a60da29b9c892236",
+    "mtime": 1786247006.0585213,
+    "ast_hash": "f343b10a9d8f24e51cf321a8ea22e9b8",
     "semantic_hash": ""
   },
   "example-application.yml": {
@@ -180,8 +180,8 @@
     "semantic_hash": ""
   },
   "userguide.md": {
-    "mtime": 1785860049.6596892,
-    "ast_hash": "d51fb5a99080640183f28ee7650bea96",
+    "mtime": 1786247012.496649,
+    "ast_hash": "20913a33f6a3c1b5a308260b0db48eb3",
     "semantic_hash": ""
   },
   "doc.md": {
@@ -220,18 +220,18 @@
     "semantic_hash": ""
   },
   "docs/DEVELOPMENT.md": {
-    "mtime": 1786244676.5301921,
-    "ast_hash": "215ca4e8208f57798cecdb39c2b40d9e",
+    "mtime": 1786266729.3588538,
+    "ast_hash": "7143ecf00b2c69f0cd7948105b8404fa",
     "semantic_hash": ""
   },
   ".github/dependabot.yml": {
-    "mtime": 1785812055.3001654,
-    "ast_hash": "608ccb95d7263f7269bc34f5463184df",
+    "mtime": 1786266709.8352737,
+    "ast_hash": "b077b3a6b69aa04b32069f81f2ad8a73",
     "semantic_hash": ""
   },
   ".github/workflows/ci.yml": {
-    "mtime": 1785811991.4738626,
-    "ast_hash": "065051f9c157cf5d09329afa65db84dd",
+    "mtime": 1786266714.2331524,
+    "ast_hash": "985551ac353342ca60fa18f23ee2e790",
     "semantic_hash": ""
   },
   ".github/workflows/tag.yml": {
@@ -240,8 +240,8 @@
     "semantic_hash": ""
   },
   "cmd/solmq-conn/main.go": {
-    "mtime": 1785981053.7596285,
-    "ast_hash": "5572b9ac7a53b344b1fb981dd4ce635d",
+    "mtime": 1786246938.4148192,
+    "ast_hash": "92094a3a9ce6eb10e1e64bd868e2b446",
     "semantic_hash": ""
   },
   "internal/dockergen/dockergen.go": {
@@ -285,13 +285,13 @@
     "semantic_hash": ""
   },
   "internal/examples/files/env.yaml": {
-    "mtime": 1785824466.6108491,
-    "ast_hash": "458d2a89ebc0da0918507413b351d904",
+    "mtime": 1786248821.4837093,
+    "ast_hash": "7e9ad3b2464a75fde3c0665f6e9e9e32",
     "semantic_hash": ""
   },
   "testdata/golden/specs/env.yaml": {
-    "mtime": 1785824670.657422,
-    "ast_hash": "7019e53bed2afc50ee1c2390e2eeee98",
+    "mtime": 1786248849.7093718,
+    "ast_hash": "5b11a4943a1be0a338d9536a2137f5e2",
     "semantic_hash": ""
   },
   "cmd/solmq-conn/main_test.go": {
@@ -312,6 +312,21 @@
   "docs/test.md": {
     "mtime": 1786244486.1795688,
     "ast_hash": "780553b8f784de735fd78a42f6eda723",
+    "semantic_hash": ""
+  },
+  "cmd/solmq-conn/commands.go": {
+    "mtime": 1786246906.8126814,
+    "ast_hash": "3a5df366d158753402ba4649c3e2952f",
+    "semantic_hash": ""
+  },
+  "cmd/solmq-conn/commands_doc_test.go": {
+    "mtime": 1786246954.4598055,
+    "ast_hash": "35d5b579e7abbc8722f13f4577e4d5bd",
+    "semantic_hash": ""
+  },
+  "docs/commands.md": {
+    "mtime": 1786247364.3848403,
+    "ast_hash": "6078ab3ded29f29b39bc4ab440088117",
     "semantic_hash": ""
   }
 }

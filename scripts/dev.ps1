@@ -95,10 +95,13 @@ function Task-cov {
 # One task, every applicable check. FATAL on fixable CVEs. solmq-conn ships no
 # image, so this is the Go dependency scan alone. govulncheck reports only vulns
 # reachable from called code -- all actionable -- so a non-zero exit stops the
-# run. `go run @latest` needs only the Go toolchain and floats the scanner
-# deliberately, matching CI.
+# run. NOT `go run ...@version`: that form ignores this go.mod, so the scanner
+# is built by whatever toolchain its own module asks for, and a govulncheck
+# built with go1.25 refuses to load packages from a module declaring go 1.26.
+# `go tool` builds it in this module, on this toolchain, at the version go.mod
+# pins -- which is also what stops an unpinned scanner arriving mid-release.
 function Task-scan {
-  return (Invoke-Logged 'scan' 'go' @('run','golang.org/x/vuln/cmd/govulncheck@latest','./...'))
+  return (Invoke-Logged 'scan' 'go' @('tool','govulncheck','./...'))
 }
 
 function Task-graphify {

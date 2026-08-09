@@ -1,7 +1,7 @@
 # Graph Report - solace-ibmmq-connector-helper  (2026-08-09)
 
 ## Corpus Check
-- 51 files · ~75,460 words
+- 51 files · ~76,317 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -10,7 +10,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `021326af`
+- Built from commit: `3e1e07b8`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 

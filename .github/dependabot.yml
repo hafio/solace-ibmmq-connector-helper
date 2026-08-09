@@ -19,4 +19,6 @@ updates:
       # One PR for routine bumps; majors arrive separately so a breaking
       # change is never buried in a batch.
       actions-minor:
-        update-types: [minor, patch]
+        update-types:
+          - minor
+          - patch
