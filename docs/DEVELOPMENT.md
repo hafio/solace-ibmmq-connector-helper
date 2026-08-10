@@ -56,6 +56,26 @@ after changing a command:
 go test ./cmd/solmq-conn -run TestCommandsDocInSync -update   # or: go generate ./cmd/solmq-conn
 ```
 
+## The spec generator (`solmq-conn-generator.html`)
+
+[`solmq-conn-generator.html`](../solmq-conn-generator.html) is a standalone, dependency-free
+page that builds a spec folder (`env.yaml` + workflow files) from a form. It has **no build
+step** and is not part of any dev-script task -- open it from disk and edit it in place.
+
+It carries a JavaScript port of `validate.Run`, `consolidate.Build`, `render.Application`,
+`tls.SolaceProps` and the UUIDv5 durable-name derivation so it can lint the spec and preview
+the consolidated `application.yml` in the browser. That port is a second implementation and
+can drift, so the page embeds a copy of [`testdata/golden/application.yml`](../testdata/golden/application.yml)
+in a `<script type="text/plain" id="golden">` block and its **Self-test** button diffs the
+shipped sample set against it. Two rules follow:
+
+- Changing the golden file means refreshing the embedded copy in the same change.
+- Changing `consolidate`, `render`, `tls` or the durable-name derivation means re-running
+  Self-test (open the page, **Load sample**, **Self-test**) and porting the change.
+
+The page never ships secrets: every password field expects a `${VAR}` placeholder and a
+literal value is reported as a finding.
+
 ## Release (CI)
 
 Two workflows, both calling dev-script task names only (never build commands):

@@ -51,6 +51,29 @@ Then edit the files under `examples/` (start with `examples/env.yaml`), drop you
 `.jks` stores under `examples/certs/`, and re-run. See section 10 for the
 `examples` command.
 
+### The spec generator (no editor required)
+
+If you would rather fill in a form than hand-write YAML, open
+[solmq-conn-generator.html](solmq-conn-generator.html) in any browser -- it is a
+single self-contained page, so there is nothing to install and no server to run.
+It builds the whole spec folder for you:
+
+- a form for every `env.yaml` section (section 6) and for each deploy target
+  (section 7), plus repeatable cards for `connections` and for the workflow files
+  (section 5), so a `conn-ref` is picked from a list rather than typed;
+- live findings using the same rules and wording as `solmq-conn validate`
+  (section 3), including the EDA advisories;
+- a preview of the `application.yml` the spec consolidates into, sharded exactly
+  as the CLI shards it past 20 workflows (section 9);
+- **Download all (.zip)** writes `specs/env.yaml` plus one file per workflow,
+  ready to unzip and hand to `-e specs/env.yaml`; **Load sample** fills in the
+  same starter set `examples` writes (section 10).
+
+Secrets are never entered as values: every password field takes a `${VAR}`
+placeholder (section 8), and a literal value is reported as a finding so the
+generated `env.yaml` stays safe to commit. The preview is a convenience --
+`solmq-conn generate config` remains authoritative.
+
 ---
 
 ## 3. Commands

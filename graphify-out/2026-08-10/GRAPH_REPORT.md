@@ -1,16 +1,16 @@
-# Graph Report - solace-ibmmq-connector-helper  (2026-08-10)
+# Graph Report - solace-ibmmq-connector-helper  (2026-08-09)
 
 ## Corpus Check
-- 51 files · ~87,430 words
+- 51 files · ~76,317 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 829 nodes · 2187 edges · 52 communities (41 shown, 11 thin omitted)
+- 827 nodes · 2185 edges · 52 communities (41 shown, 11 thin omitted)
 - Extraction: 83% EXTRACTED · 17% INFERRED · 0% AMBIGUOUS · INFERRED: 363 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `bd40661e`
+- Built from commit: `3e1e07b8`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -107,8 +107,8 @@ Cohesion: 0.16
 Nodes (61): baseKubeDeploy(), connDefaults(), dockerOK(), T, podmanOK(), TestCheckCommandMultiToken(), TestCheckContainerNameRejected(), TestCheckDocker() (+53 more)
 
 ### Community 3 - "runner_test.go"
-Cohesion: 0.11
-Nodes (39): FileMode, Docker(), Kubernetes(), kubeVerb(), ParseCommand(), PodmanDelete(), PodmanDeploy(), ResolveQuadletScope() (+31 more)
+Cohesion: 0.09
+Nodes (46): FileMode, T, mustWrite(), testResolver(), TestShippedExamplesGenerateConfig(), TestWriteCreatesSkipsForces(), TestWriteMkdirError(), Write() (+38 more)
 
 ### Community 4 - "Render"
 Cohesion: 0.12
@@ -155,12 +155,12 @@ Cohesion: 0.39
 Nodes (6): DurableName(), mustParseUUID(), T, TestDurableNameDeterministic(), TestDurableNameGolden(), uuidv5()
 
 ### Community 15 - "main.go"
-Cohesion: 0.14
-Nodes (40): absPath(), absResolver(), actDocker(), actKubernetes(), actPodman(), collectFlagsAndDirs(), emit(), emitConfigs() (+32 more)
+Cohesion: 0.20
+Nodes (33): absPath(), absResolver(), actDocker(), actKubernetes(), actPodman(), collectFlagsAndDirs(), emit(), emitConfigs() (+25 more)
 
 ### Community 17 - "solmq-conn -- User Guide"
-Cohesion: 0.18
-Nodes (11): 10. `examples`, 11. Notes and gotchas, 1. Running solmq-conn, 2. Quick start, 3. Commands, 4. The config file and workflow discovery, 6. Connector defaults (`env.yaml` top level), 8. Secrets model (+3 more)
+Cohesion: 0.20
+Nodes (10): 10. `examples`, 11. Notes and gotchas, 1. Running solmq-conn, 2. Quick start, 3. Commands, 4. The config file and workflow discovery, 6. Connector defaults (`env.yaml` top level), 8. Secrets model (+2 more)
 
 ### Community 18 - "Project Instructions"
 Cohesion: 0.12
@@ -223,8 +223,8 @@ Cohesion: 0.29
 Nodes (7): 5.1 Top-level, 5.2 `solace:` options, 5.3 `mq:` options, 5.4 Destinations, durable names, passthrough, 5.5 Event-driven guidance (warnings), 5.6 Reusable connections (`conn-ref`), 5. Workflow file
 
 ### Community 45 - "solmq-conn -- Development Guide"
-Cohesion: 0.33
-Nodes (6): Build, Design notes, Release (CI), solmq-conn -- Development Guide, Testing, The spec generator (`solmq-conn-generator.html`)
+Cohesion: 0.40
+Nodes (5): Build, Design notes, Release (CI), solmq-conn -- Development Guide, Testing
 
 ### Community 46 - "solmq-conn -- Solace IBM MQ Connector config generator and deployer"
 Cohesion: 0.40
@@ -247,7 +247,7 @@ Cohesion: 0.26
 Nodes (11): T, normLF(), TestCommandsDocInSync(), TestCommandsModelMatchesUsage(), flagsLine(), invocation(), renderCommandsDoc(), usageText() (+3 more)
 
 ## Knowledge Gaps
-- **116 isolated node(s):** `cliFlag`, `github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn`, `Model`, `NO_COLOR`, `graphify` (+111 more)
+- **115 isolated node(s):** `cliFlag`, `github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn`, `Model`, `NO_COLOR`, `graphify` (+110 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **11 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
@@ -255,7 +255,7 @@ Nodes (11): T, normLF(), TestCommandsDocInSync(), TestCommandsModelMatchesUsage(
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `Defaults` connect `validate.go` to `Build`, `.Run`, `Render`, `gen.go`, `TLS Store Paths`, `spec_test.go`, `ParseEnv`?**
-  _High betweenness centrality (0.120) - this node is a cross-community bridge._
+  _High betweenness centrality (0.121) - this node is a cross-community bridge._
 - **Why does `Build()` connect `Build` to `validate.go`, `TLS Store Paths`, `gen.go`, `Application`?**
   _High betweenness centrality (0.086) - this node is a cross-community bridge._
 - **Why does `Kubernetes` connect `ParseEnv` to `validate.go`, `runner_test.go`, `Render`, `gen.go`, `spec_test.go`?**

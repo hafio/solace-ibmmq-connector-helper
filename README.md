@@ -36,6 +36,12 @@ every connection style -- referenced vs. inline, reused vs. single-use -- across
 mTLS, TLS-only, and plaintext transports, plus an MQ topic source exercising the
 auto-named durable subscription. Full breakdown: [userguide.md](userguide.md) section 10.
 
+Prefer a form to a text editor? Open
+[solmq-conn-generator.html](solmq-conn-generator.html) in a browser (no server, no
+install): it builds the whole spec folder, lints it with the same rules `validate`
+enforces, previews the `application.yml` it consolidates into, and downloads the
+set as a zip.
+
 ## Minimal working example
 
 One `env.yaml` plus one workflow file in a folder (`specs/` here) are a complete
@@ -119,3 +125,6 @@ token is checked against a safe charset. Details and exit codes:
   generated from the command model and gated against drift.
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) -- building, dev-script tasks, tests
   and golden fixtures, CI release, design notes.
+- [solmq-conn-generator.html](solmq-conn-generator.html) -- a standalone browser
+  page (no install, no server) that generates the `env.yaml` + workflow files,
+  reports the same findings as `validate`, and previews the `application.yml`.

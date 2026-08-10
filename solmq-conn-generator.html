@@ -1,0 +1,2417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="application-name" content="solmq-conn Spec Generator">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#03213B">
+<title>solmq-conn Spec Generator</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 250 250'%3E%3Ccircle cx='125' cy='125' r='120' fill='%233dba91'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--sg:#00C895;--sgl:#ABFF88;--sdb:#093B5F;--sddb:#03213B;--st:#009193;--so:#FCAB29;--sr:#e05252;--sky:#C2F7FF;--bg:#f8f9fa;--bgc:#fff;--bgi:#f1f5f9;--tp:#334155;--ts:#64748b;--tm:#94a3b8;--bc:#e2e8f0;--r:6px;--rl:8px;--ss:0 1px 3px 0 rgb(0 0 0/.1)}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',system-ui,sans-serif;font-size:.88rem;color:var(--tp);background:var(--bg);line-height:1.5}
+.hero{background:linear-gradient(135deg,var(--sddb),var(--sdb));color:#fff;padding:.8rem 1.4rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
+.hero h1{font-size:1.15rem;font-weight:700}.hero .sub{font-size:.74rem;color:rgba(255,255,255,.6)}
+.hero-actions{margin-left:auto;display:flex;gap:.4rem;flex-wrap:wrap}
+.page{display:flex;height:calc(100vh - 60px)}
+
+/* Sidebar */
+.sidebar{width:200px;flex-shrink:0;background:var(--sddb);overflow-y:auto;padding:.75rem 0}
+.sidebar::-webkit-scrollbar{width:4px}.sidebar::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:4px}
+.sb-hdr{font-size:.6rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--tm);padding:.5rem .75rem .25rem;margin-top:.4rem}
+.sb-hdr:first-child{margin-top:0}
+.sb-item{display:block;padding:.3rem .75rem;font-size:.72rem;color:rgba(255,255,255,.55);text-decoration:none;border-left:2px solid transparent;transition:all .15s;cursor:pointer}
+.sb-item:hover{color:#fff;background:rgba(255,255,255,.05)}
+.sb-item.active{color:#fff;border-left-color:var(--sg);background:rgba(0,200,149,.1);font-weight:600}
+
+/* Main */
+.main-area{flex:1;display:flex;overflow:hidden;min-width:0}
+.form-scroll{flex:1;overflow-y:auto;padding:1rem 1rem 3rem;min-width:320px}
+.yaml-scroll{flex:1;overflow-y:auto;padding:1rem;min-width:320px;background:#0a1628}
+
+/* Sections */
+.sec{background:var(--bgc);border:1px solid var(--bc);border-radius:var(--rl);padding:1rem 1.1rem;margin-bottom:.65rem;box-shadow:var(--ss)}
+.sec h3{font-size:.68rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--tm);margin-bottom:.6rem;padding-bottom:.35rem;border-bottom:1px solid var(--bc)}
+.sec-t{border-left:3px solid var(--st)}
+.sub-h{font-size:.72rem;color:var(--ts);font-weight:600;margin:.75rem 0 .4rem}
+
+/* Fields */
+.f{margin-bottom:.5rem}
+.f label{display:block;font-size:.74rem;font-weight:500;color:var(--ts);margin-bottom:.15rem}
+.f input,.f select,.f textarea{width:100%;padding:.38rem .6rem;background:var(--bgi);border:1px solid var(--bc);border-radius:var(--r);font-family:inherit;font-size:.8rem;color:var(--tp);transition:border .15s}
+.f input:focus,.f select:focus,.f textarea:focus{outline:none;border-color:var(--sg)}
+.f textarea{resize:vertical;min-height:52px;font-family:'Consolas','Fira Code',monospace;font-size:.75rem;line-height:1.4}
+.f .h{font-size:.68rem;color:var(--tm);margin-top:.1rem;font-style:italic}
+.fr{display:flex;gap:.6rem}.fr .f{flex:1;min-width:0}
+.tgl{display:flex;align-items:center;gap:.4rem;margin-bottom:.5rem}
+.tgl input[type=checkbox]{accent-color:var(--sg);width:15px;height:15px}
+.tgl label{font-size:.78rem;color:var(--tp);cursor:pointer}
+.opt-fields{display:none}.opt-fields.vis{display:block}
+details{margin:.35rem 0 .2rem}
+details>summary{cursor:pointer;font-size:.7rem;color:var(--st);font-weight:600;list-style:none;padding:.15rem 0}
+details>summary::-webkit-details-marker{display:none}
+details>summary::before{content:"+ ";font-weight:700}
+details[open]>summary::before{content:"- "}
+
+/* Repeater cards */
+.card{border:1px solid var(--bc);border-left:3px solid var(--sg);border-radius:var(--r);padding:.6rem .7rem;margin-bottom:.5rem;background:var(--bgi)}
+.card-hdr{display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem}
+.card-hdr .ttl{font-size:.72rem;font-weight:700;color:var(--sdb);flex:1;min-width:0}
+.side-box{border:1px solid var(--bc);border-radius:var(--r);padding:.5rem .6rem;margin-top:.4rem;background:var(--bgc)}
+.side-box>.lbl{font-size:.66rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--tm);margin-bottom:.35rem}
+.rm{background:#fee;color:#c33;border:1px solid #fcc;border-radius:var(--r);width:1.7rem;height:1.7rem;font-size:.8rem;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;flex-shrink:0}
+.rm:hover{background:#fcc}
+.add{margin-top:.4rem;padding:.35rem .8rem;background:var(--sg);color:#fff;border:none;border-radius:var(--r);font-size:.75rem;font-weight:600;cursor:pointer}
+.add:hover{background:#00a87d}
+
+/* Dynamic port / user rows */
+.pr{display:flex;gap:.4rem;align-items:center;margin-bottom:.35rem}
+.pr input,.pr select{padding:.3rem .5rem;background:var(--bgi);border:1px solid var(--bc);border-radius:var(--r);font-family:inherit;font-size:.78rem;color:var(--tp);min-width:0}
+.pr input:focus,.pr select:focus{outline:none;border-color:var(--sg)}
+.pr .grow{flex:1}
+
+/* YAML panels */
+.ypanel{margin-bottom:1rem}
+.ypanel-hdr{display:flex;align-items:center;justify-content:space-between;gap:.5rem;padding:.4rem .7rem;background:var(--sddb);border-radius:var(--r) var(--r) 0 0;border:1px solid rgba(255,255,255,.08)}
+.ypanel-hdr span{color:rgba(255,255,255,.7);font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.ypanel-actions{display:flex;gap:.3rem;flex-shrink:0}
+.btn{padding:.28rem .6rem;border-radius:var(--r);font-size:.72rem;font-weight:600;border:none;cursor:pointer;transition:all .15s}
+.btn-c{background:var(--st);color:#fff}.btn-c:hover{background:#007a7c}
+.btn-d{background:var(--sg);color:#fff}.btn-d:hover{background:#00a87d}
+.btn-g{background:rgba(255,255,255,.14);color:#fff}.btn-g:hover{background:rgba(255,255,255,.24)}
+.ycode{background:#0d1b2a;color:#e2e8f0;padding:.75rem;font-family:'Consolas','Fira Code',monospace;font-size:.72rem;line-height:1.55;white-space:pre;overflow-x:auto;border-radius:0 0 var(--r) var(--r);border:1px solid rgba(255,255,255,.05);border-top:0;max-height:600px;overflow-y:auto}
+.ycode .k{color:var(--sky)}.ycode .v{color:var(--sgl)}.ycode .c{color:var(--tm)}.ycode .d{color:var(--so)}
+
+/* Findings */
+.fbody{background:#0d1b2a;padding:.6rem .75rem;border-radius:0 0 var(--r) var(--r);border:1px solid rgba(255,255,255,.05);border-top:0;font-size:.72rem;line-height:1.5;max-height:340px;overflow-y:auto}
+.fi{display:flex;gap:.5rem;padding:.2rem 0;color:#cbd5e1}
+.fi .tag{flex-shrink:0;font-weight:700;font-family:'Consolas','Fira Code',monospace}
+.fi-e .tag{color:var(--sr)}.fi-w .tag{color:var(--so)}.fi-ok{color:var(--sgl)}
+.fi .file{color:var(--sky)}
+
+.toast{position:fixed;bottom:1rem;right:1rem;background:var(--sddb);color:#fff;padding:.5rem 1rem;border-radius:var(--r);font-size:.78rem;opacity:0;transform:translateY(8px);transition:all .25s;pointer-events:none;z-index:100}
+.toast.show{opacity:1;transform:translateY(0)}
+
+@media(max-width:1000px){.sidebar{display:none}.page{height:auto}.main-area{flex-direction:column}.form-scroll,.yaml-scroll{overflow:visible;min-width:0}.ycode{max-height:none}}
+</style>
+</head>
+<body>
+<div class="hero">
+  <div>
+    <h1>solmq-conn Spec Generator</h1>
+    <div class="sub">Build the env.yaml + workflow files for the Solace PubSub+ Connector for IBM MQ</div>
+  </div>
+  <div class="hero-actions">
+    <button class="btn btn-g" onclick="loadSample()">Load sample</button>
+    <button class="btn btn-g" onclick="resetAll()">Reset</button>
+    <button class="btn btn-g" onclick="selfTest()">Self-test</button>
+    <button class="btn btn-d" onclick="downloadAll()">Download all (.zip)</button>
+  </div>
+</div>
+<div class="page">
+
+<nav class="sidebar" id="sidebar">
+  <div class="sb-hdr">Spec</div>
+  <a class="sb-item active" data-s="s-disc">Workflow Discovery</a>
+  <a class="sb-item" data-s="s-conns">Connections</a>
+  <a class="sb-item" data-s="s-wfs">Workflows</a>
+  <a class="sb-item" data-s="s-tls">TLS Stores</a>
+  <a class="sb-item" data-s="s-log">Logging</a>
+  <a class="sb-item" data-s="s-mgmt">Management</a>
+  <a class="sb-item" data-s="s-sec">Security</a>
+  <a class="sb-item" data-s="s-le">Leader Election</a>
+  <a class="sb-item" data-s="s-soldef">Solace Defaults</a>
+  <div class="sb-hdr">Deploy Targets</div>
+  <a class="sb-item" data-s="s-k8s">Kubernetes</a>
+  <a class="sb-item" data-s="s-docker">Docker</a>
+  <a class="sb-item" data-s="s-podman">Podman</a>
+</nav>
+
+<div class="main-area">
+<div class="form-scroll" id="formScroll">
+
+  <!-- Workflow discovery -->
+  <div class="sec" id="s-disc"><h3>Workflow Discovery</h3>
+    <div class="fr">
+      <div class="f"><label>Directory</label><input id="i-wf-dir" value="."><div class="h">Folder to scan, relative to env.yaml or absolute.</div></div>
+      <div class="f"><label>File Pattern</label><input id="i-wf-pat" value="*"><div class="h">Only the '*' wildcard; matches *.yaml / *.yml base names.</div></div>
+    </div>
+  </div>
+
+  <!-- Connections -->
+  <div class="sec" id="s-conns"><h3>Connections</h3>
+    <div class="h" style="margin-bottom:.5rem;font-size:.7rem;color:var(--tm);font-style:italic">Reusable connections referenced from a workflow side (or leader election) with conn-ref. A referencing side then carries only its queue/topic.</div>
+    <div id="conns-list"></div>
+    <button type="button" class="add" onclick="addConn();gen()">+ Add connection</button>
+  </div>
+
+  <!-- Workflows -->
+  <div class="sec" id="s-wfs"><h3>Workflows</h3>
+    <div class="h" style="margin-bottom:.5rem;font-size:.7rem;color:var(--tm);font-style:italic">One file per message flow. Workflows are numbered by sorted filename; past 20 they split across additional connector instances.</div>
+    <div id="wfs-list"></div>
+    <button type="button" class="add" onclick="addWf();gen()">+ Add workflow</button>
+  </div>
+
+  <!-- TLS stores -->
+  <div class="sec" id="s-tls"><h3>TLS Stores</h3>
+    <div class="tgl"><input type="checkbox" id="i-ts-on" onchange="togOpt('i-ts-on','ts-fields')"><label for="i-ts-on">Define a shared truststore</label></div>
+    <div class="opt-fields" id="ts-fields">
+      <div class="f"><label>Truststore File</label><input id="i-ts-file" placeholder="./certs/truststore.jks"></div>
+      <div class="fr">
+        <div class="f"><label>Truststore Password</label><input id="i-ts-pass" placeholder="${TRUSTSTORE_PASSWORD}"></div>
+        <div class="f"><label>Type</label><input id="i-ts-type" value="JKS"></div>
+      </div>
+    </div>
+    <div class="tgl"><input type="checkbox" id="i-ks-on" onchange="togOpt('i-ks-on','ks-fields')"><label for="i-ks-on">Define a keystore (required for mTLS / key-alias)</label></div>
+    <div class="opt-fields" id="ks-fields">
+      <div class="f"><label>Keystore File</label><input id="i-ks-file" placeholder="./certs/keystore.jks"></div>
+      <div class="fr">
+        <div class="f"><label>Keystore Password</label><input id="i-ks-pass" placeholder="${KEYSTORE_PASSWORD}"></div>
+        <div class="f"><label>Type</label><input id="i-ks-type" value="JKS"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Logging -->
+  <div class="sec" id="s-log"><h3>Logging</h3>
+    <div class="f"><label>logging.level</label><textarea id="i-log" rows="3" placeholder="root: INFO"></textarea><div class="h">One "key: value" per line, order preserved.</div></div>
+  </div>
+
+  <!-- Management -->
+  <div class="sec" id="s-mgmt"><h3>Management</h3>
+    <div class="tgl"><input type="checkbox" id="i-mgmt-on" onchange="togOpt('i-mgmt-on','mgmt-fields')"><label for="i-mgmt-on">Configure the actuator management endpoint</label></div>
+    <div class="opt-fields" id="mgmt-fields">
+      <div class="fr">
+        <div class="f"><label>Port</label><input id="i-mgmt-port" type="number" min="1" max="65535" value="8090"></div>
+        <div class="f"><label>Exposure</label><input id="i-mgmt-exp" value="health,info,workflows"></div>
+      </div>
+      <div class="f"><label>Health Show Details</label><input id="i-mgmt-hsd" value="always"></div>
+    </div>
+  </div>
+
+  <!-- Security -->
+  <div class="sec" id="s-sec"><h3>Security</h3>
+    <div class="tgl"><input type="checkbox" id="i-sec-on" onchange="togOpt('i-sec-on','sec-fields')"><label for="i-sec-on">Configure management-endpoint security</label></div>
+    <div class="opt-fields" id="sec-fields">
+      <div class="tgl"><input type="checkbox" id="i-sec-en" checked><label for="i-sec-en">Enabled</label></div>
+      <div class="sub-h">Users</div>
+      <div id="users-list"></div>
+      <button type="button" class="add" onclick="addUser();gen()">+ Add user</button>
+    </div>
+  </div>
+
+  <!-- Leader election -->
+  <div class="sec" id="s-le"><h3>Leader Election</h3>
+    <div class="f"><label>Mode</label><select id="i-le-mode" onchange="syncLE()">
+      <option value="">(not configured)</option>
+      <option value="standalone">standalone</option>
+      <option value="active_active">active_active</option>
+      <option value="active_standby">active_standby</option>
+    </select></div>
+    <div class="opt-fields" id="le-fields">
+      <div class="f"><label>Management Queue</label><input id="i-le-queue" placeholder="solmq-connector-mgmt"><div class="h">Exclusive coordination queue; suffixed -1, -2 ... when workflows split across instances.</div></div>
+      <div class="f"><label>Management Session</label><select id="i-le-src" onchange="syncLE()">
+        <option value="ref">conn-ref to a solace connection</option>
+        <option value="inline">inline solace session</option>
+      </select></div>
+      <div class="f" id="le-ref-f"><label>conn-ref</label><select id="i-le-ref"></select></div>
+      <div class="opt-fields" id="le-inline-f">
+        <div class="fr">
+          <div class="f"><label>Host</label><input id="i-le-host" placeholder="tcps://broker.internal:55443"></div>
+          <div class="f"><label>Msg VPN</label><input id="i-le-vpn" placeholder="prod"></div>
+        </div>
+        <div class="fr">
+          <div class="f"><label>Client Username</label><input id="i-le-user" placeholder="connector"></div>
+          <div class="f"><label>Client Password</label><input id="i-le-pass" placeholder="${SOL_PASSWORD}"></div>
+        </div>
+        <div class="f"><label>Key Alias (mTLS)</label><input id="i-le-alias" placeholder="solace-client"></div>
+      </div>
+      <div class="f"><label>fail-over</label><textarea id="i-le-fo" rows="3" placeholder="max-attempts: 5"></textarea><div class="h">Emitted verbatim. One "key: value" per line.</div></div>
+    </div>
+  </div>
+
+  <!-- Solace defaults -->
+  <div class="sec" id="s-soldef"><h3>Solace Defaults</h3>
+    <div class="f"><label>solace-defaults</label><textarea id="i-soldef" rows="3" placeholder="connect-retries: -1"></textarea><div class="h">Merged into every Solace binder's solace.java.* block.</div></div>
+  </div>
+
+  <!-- Kubernetes -->
+  <div class="sec sec-t" id="s-k8s"><h3>Kubernetes</h3>
+    <div class="tgl"><input type="checkbox" id="i-k8s-on" onchange="togOpt('i-k8s-on','k8s-fields')"><label for="i-k8s-on">Include the kubernetes section</label></div>
+    <div class="opt-fields" id="k8s-fields">
+      <div class="f"><label>Deploy Command</label><input id="i-k8s-cmd" value="kubectl"><div class="h">e.g. "oc", or "kubectl --context prod".</div></div>
+      <div class="fr">
+        <div class="f"><label>Deployment Name</label><input id="i-k8s-name" placeholder="solmq-connector"></div>
+        <div class="f"><label>Namespace</label><input id="i-k8s-ns" placeholder="solace-connectors"></div>
+      </div>
+      <div class="f"><label>Image</label><input id="i-k8s-img" placeholder="solace/solace-pubsub-connector-ibmmq:2.13.0"></div>
+      <div class="fr">
+        <div class="f"><label>Replicas</label><input id="i-k8s-rep" type="number" min="1" value="1"></div>
+        <div class="f"><label>CPU</label><input id="i-k8s-cpu" placeholder="1"></div>
+        <div class="f"><label>Memory</label><input id="i-k8s-mem" placeholder="1Gi"></div>
+      </div>
+      <div class="f"><label>Timezone</label><input id="i-k8s-tz" placeholder="Asia/Singapore"></div>
+      <div class="tgl"><input type="checkbox" id="i-k8s-svc"><label for="i-k8s-svc">Create a Service</label></div>
+      <div class="f"><label>Service Port</label><input id="i-k8s-svcport" type="number" min="1" max="65535" value="8090"></div>
+
+      <div class="sub-h">Syslog (optional)</div>
+      <div class="tgl"><input type="checkbox" id="i-k8s-sl-on" onchange="togOpt('i-k8s-sl-on','k8s-sl-fields')"><label for="i-k8s-sl-on">Ship logs to syslog</label></div>
+      <div class="opt-fields" id="k8s-sl-fields">
+        <div class="fr">
+          <div class="f"><label>Host</label><input id="i-k8s-sl-host" placeholder="syslog.corp"></div>
+          <div class="f"><label>Port</label><input id="i-k8s-sl-port" type="number" min="1" max="65535" value="514"></div>
+          <div class="f"><label>Protocol</label><select id="i-k8s-sl-proto"><option value="udp">udp</option><option value="tcp">tcp</option></select></div>
+        </div>
+      </div>
+
+      <div class="sub-h">IBM MQ Libraries</div>
+      <div class="f"><label>Mode</label><select id="i-k8s-libs" onchange="syncK8s()">
+        <option value="">(none)</option>
+        <option value="pvc-existing">pvc: existing</option>
+        <option value="pvc-create">pvc: create (NFS PV + PVC)</option>
+        <option value="download">download in an initContainer</option>
+      </select></div>
+      <div class="opt-fields" id="k8s-libs-pe"><div class="f"><label>Existing PVC</label><input id="i-k8s-libs-existing" placeholder="jar-libs-pvc"></div></div>
+      <div class="opt-fields" id="k8s-libs-pc">
+        <div class="fr">
+          <div class="f"><label>PVC Name</label><input id="i-k8s-libs-name" placeholder="jar-libs-pvc"></div>
+          <div class="f"><label>Storage</label><input id="i-k8s-libs-storage" placeholder="1Gi"></div>
+        </div>
+        <div class="fr">
+          <div class="f"><label>NFS Server</label><input id="i-k8s-libs-nfssrv" placeholder="nfs1.corp.example"></div>
+          <div class="f"><label>NFS Path</label><input id="i-k8s-libs-nfspath" placeholder="/solace-libs"></div>
+        </div>
+      </div>
+      <div class="opt-fields" id="k8s-libs-dl">
+        <div class="f"><label>URLs</label><textarea id="i-k8s-libs-urls" rows="2" placeholder="https://repo.example/mq/com.ibm.mq.allclient.jar"></textarea><div class="h">One http(s) URL per line.</div></div>
+        <div class="fr">
+          <div class="f"><label>Image</label><input id="i-k8s-libs-img" placeholder="busybox:1.37"></div>
+          <div class="f"><label>Cache PVC</label><input id="i-k8s-libs-dlpvc" placeholder="(blank = emptyDir)"></div>
+        </div>
+      </div>
+
+      <div class="sub-h">Secrets</div>
+      <div class="f"><label>Credentials Secret</label><select id="i-k8s-cred" onchange="syncK8s()">
+        <option value="">(none)</option>
+        <option value="create">create</option>
+        <option value="existing">existing</option>
+      </select></div>
+      <div class="opt-fields" id="k8s-cred-c">
+        <div class="fr">
+          <div class="f"><label>Secret Name</label><input id="i-k8s-cred-name" placeholder="solmq-credentials"></div>
+          <div class="f"><label>Source</label><select id="i-k8s-cred-src" onchange="syncK8s()"><option value="env">env</option><option value="file">file</option></select></div>
+        </div>
+        <div class="f" id="k8s-cred-vars"><label>Variables</label><textarea id="i-k8s-cred-varlist" rows="3" placeholder="SOL_PASSWORD"></textarea><div class="h">One environment variable name per line. Use "Fill from spec" to collect every ${VAR} in use.</div><button type="button" class="add" onclick="fillCredVars('i-k8s-cred-varlist')">Fill from spec</button></div>
+        <div class="f" id="k8s-cred-vf"><label>Values File</label><input id="i-k8s-cred-file" placeholder="./secrets.env"></div>
+      </div>
+      <div class="opt-fields" id="k8s-cred-e"><div class="f"><label>Existing Secret</label><input id="i-k8s-cred-existing" placeholder="my-credentials"></div></div>
+      <div class="f"><label>Stores Secret</label><select id="i-k8s-stores" onchange="syncK8s()">
+        <option value="">(none)</option>
+        <option value="create">create</option>
+        <option value="existing">existing</option>
+      </select></div>
+      <div class="opt-fields" id="k8s-stores-c"><div class="f"><label>Secret Name</label><input id="i-k8s-stores-name" placeholder="solmq-tls"></div></div>
+      <div class="opt-fields" id="k8s-stores-e"><div class="f"><label>Existing Secret</label><input id="i-k8s-stores-existing" placeholder="my-tls"></div></div>
+    </div>
+  </div>
+
+  <!-- Docker -->
+  <div class="sec sec-t" id="s-docker"><h3>Docker</h3>
+    <div class="tgl"><input type="checkbox" id="i-dk-on" onchange="togOpt('i-dk-on','dk-fields')"><label for="i-dk-on">Include the docker section</label></div>
+    <div class="opt-fields" id="dk-fields">
+      <div class="fr">
+        <div class="f"><label>Deploy Command</label><input id="i-dk-cmd" value="docker"></div>
+        <div class="f"><label>Container Name</label><input id="i-dk-name" value="solmq-connector"></div>
+      </div>
+      <div class="f"><label>Image</label><input id="i-dk-img" placeholder="solace/solace-pubsub-connector-ibmmq:2.13.0"></div>
+      <div class="fr">
+        <div class="f"><label>Restart Policy</label><input id="i-dk-restart" value="unless-stopped"></div>
+        <div class="f"><label>Timezone</label><input id="i-dk-tz" placeholder="Asia/Singapore"></div>
+      </div>
+      <div class="sub-h">Published Ports</div>
+      <div id="dk-ports"></div>
+      <button type="button" class="add" onclick="addPort('dk-ports');gen()">+ Add port</button>
+      <div class="sub-h">Credentials</div>
+      <div class="f"><select id="i-dk-cred" onchange="syncCtr('dk')">
+        <option value="">(none)</option><option value="create">create</option><option value="existing">existing</option>
+      </select></div>
+      <div class="opt-fields" id="dk-cred-c">
+        <div class="fr">
+          <div class="f"><label>Env-file Name</label><input id="i-dk-cred-name" placeholder="solmq-credentials"></div>
+          <div class="f"><label>Source</label><select id="i-dk-cred-src" onchange="syncCtr('dk')"><option value="env">env</option><option value="file">file</option></select></div>
+        </div>
+        <div class="f" id="dk-cred-vars"><label>Variables</label><textarea id="i-dk-cred-varlist" rows="3"></textarea><button type="button" class="add" onclick="fillCredVars('i-dk-cred-varlist')">Fill from spec</button></div>
+        <div class="f" id="dk-cred-vf"><label>Values File</label><input id="i-dk-cred-file" placeholder="./secrets.env"></div>
+      </div>
+      <div class="opt-fields" id="dk-cred-e"><div class="f"><label>Existing Env-file</label><input id="i-dk-cred-existing" placeholder="solmq-connector.env"></div></div>
+      <div class="sub-h">Mounts</div>
+      <div class="tgl"><input type="checkbox" id="i-dk-stores"><label for="i-dk-stores">Bind-mount the TLS stores</label></div>
+      <div class="tgl"><input type="checkbox" id="i-dk-libs-on" onchange="togOpt('i-dk-libs-on','dk-libs-f')"><label for="i-dk-libs-on">Bind-mount an IBM MQ jar directory</label></div>
+      <div class="opt-fields" id="dk-libs-f"><div class="f"><label>Host Directory</label><input id="i-dk-libs-dir" placeholder="./libs"></div></div>
+    </div>
+  </div>
+
+  <!-- Podman -->
+  <div class="sec sec-t" id="s-podman"><h3>Podman</h3>
+    <div class="tgl"><input type="checkbox" id="i-pd-on" onchange="togOpt('i-pd-on','pd-fields')"><label for="i-pd-on">Include the podman section</label></div>
+    <div class="opt-fields" id="pd-fields">
+      <div class="fr">
+        <div class="f"><label>Deploy Command</label><input id="i-pd-cmd" value="podman"></div>
+        <div class="f"><label>Container Name</label><input id="i-pd-name" value="solmq-connector"></div>
+      </div>
+      <div class="f"><label>Image</label><input id="i-pd-img" placeholder="solace/solace-pubsub-connector-ibmmq:2.13.0"></div>
+      <div class="fr">
+        <div class="f"><label>Generate Mode</label><select id="i-pd-mode"><option value="run">run</option><option value="quadlet">quadlet</option></select><div class="h">Controls generate only; deploy is always quadlet + systemctl.</div></div>
+        <div class="f"><label>Quadlet Scope</label><select id="i-pd-scope"><option value="auto">auto</option><option value="user">user</option><option value="system">system</option></select></div>
+      </div>
+      <div class="fr">
+        <div class="f"><label>Quadlet Directory</label><input id="i-pd-qdir" placeholder="(default for the resolved scope)"></div>
+        <div class="f"><label>Restart Policy</label><input id="i-pd-restart" value="unless-stopped"></div>
+      </div>
+      <div class="f"><label>Timezone</label><input id="i-pd-tz" placeholder="Asia/Singapore"></div>
+      <div class="sub-h">Published Ports</div>
+      <div id="pd-ports"></div>
+      <button type="button" class="add" onclick="addPort('pd-ports');gen()">+ Add port</button>
+      <div class="sub-h">Credentials</div>
+      <div class="f"><select id="i-pd-cred" onchange="syncCtr('pd')">
+        <option value="">(none)</option><option value="create">create</option><option value="existing">existing</option>
+      </select></div>
+      <div class="opt-fields" id="pd-cred-c">
+        <div class="fr">
+          <div class="f"><label>Env-file Name</label><input id="i-pd-cred-name" placeholder="solmq-credentials"></div>
+          <div class="f"><label>Source</label><select id="i-pd-cred-src" onchange="syncCtr('pd')"><option value="env">env</option><option value="file">file</option></select></div>
+        </div>
+        <div class="f" id="pd-cred-vars"><label>Variables</label><textarea id="i-pd-cred-varlist" rows="3"></textarea><button type="button" class="add" onclick="fillCredVars('i-pd-cred-varlist')">Fill from spec</button></div>
+        <div class="f" id="pd-cred-vf"><label>Values File</label><input id="i-pd-cred-file" placeholder="./secrets.env"></div>
+      </div>
+      <div class="opt-fields" id="pd-cred-e"><div class="f"><label>Existing Env-file</label><input id="i-pd-cred-existing" placeholder="solmq-connector.env"></div></div>
+      <div class="sub-h">Mounts</div>
+      <div class="tgl"><input type="checkbox" id="i-pd-stores"><label for="i-pd-stores">Bind-mount the TLS stores</label></div>
+      <div class="tgl"><input type="checkbox" id="i-pd-libs-on" onchange="togOpt('i-pd-libs-on','pd-libs-f')"><label for="i-pd-libs-on">Bind-mount an IBM MQ jar directory</label></div>
+      <div class="opt-fields" id="pd-libs-f"><div class="f"><label>Host Directory</label><input id="i-pd-libs-dir" placeholder="./libs"></div></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Output -->
+<div class="yaml-scroll" id="yamlScroll">
+  <div class="ypanel">
+    <div class="ypanel-hdr"><span>Findings</span><span id="f-count" style="text-transform:none;letter-spacing:0"></span></div>
+    <div class="fbody" id="findings"></div>
+  </div>
+  <div class="ypanel">
+    <div class="ypanel-hdr"><span>env.yaml</span><div class="ypanel-actions"><button class="btn btn-c" onclick="copy('yc-env')">Copy</button><button class="btn btn-d" onclick="dl('yc-env','env.yaml')">Download</button></div></div>
+    <div class="ycode" id="yc-env"></div>
+  </div>
+  <div id="wf-panels"></div>
+  <div id="app-panels"></div>
+  <div class="ypanel">
+    <div class="ypanel-hdr"><span>Commands</span><div class="ypanel-actions"><button class="btn btn-c" onclick="copy('yc-cmd')">Copy</button></div></div>
+    <div class="ycode" id="yc-cmd"></div>
+  </div>
+</div>
+</div></div>
+<div class="toast" id="toast">Copied to clipboard</div>
+
+<!-- Expected application.yml for the shipped sample set (testdata/golden/application.yml).
+     Kept in a text/plain block so ${VAR} placeholders need no escaping. Refresh this
+     copy whenever the golden file changes. -->
+<script type="text/plain" id="golden">spring:
+  ssl:
+    bundle:
+      jks:
+        mq-conn-1-bundle:
+          truststore:
+            location: ./certs/truststore.jks
+            password: ${TRUSTSTORE_PASSWORD}
+            type: JKS
+          keystore:
+            location: ./certs/keystore.jks
+            password: ${KEYSTORE_PASSWORD}
+            type: JKS
+          key:
+            alias: mq-client
+        mq-archive-bundle:
+          truststore:
+            location: ./certs/truststore.jks
+            password: ${TRUSTSTORE_PASSWORD}
+            type: JKS
+  cloud:
+    stream:
+      binders:
+        mq-conn-1:
+          type: jms
+          environment:
+            ibm:
+              mq:
+                queue-manager: QM_CORE
+                channel: DSU.SVRCONN
+                conn-name: mqhost-core.internal(1414)
+                user: appuser
+                password: ${MQ_CORE_PASSWORD}
+                ssl-bundle: mq-conn-1-bundle
+                additional-properties:
+                  WMQ_SSL_CIPHER_SUITE: TLS_RSA_WITH_AES_256_CBC_SHA256
+        prod-solace:
+          type: solace
+          environment:
+            solace:
+              java:
+                host: tcps://broker.internal:55443
+                msg-vpn: prod
+                client-username: connector
+                client-password: ${SOL_PASSWORD}
+                connect-retries: -1
+                reconnect-retries: -1
+                api-properties:
+                  SSL_VALIDATE_CERTIFICATE: true
+                  SSL_TRUST_STORE: ./certs/truststore.jks
+                  SSL_TRUST_STORE_PASSWORD: ${TRUSTSTORE_PASSWORD}
+                  SSL_TRUST_STORE_FORMAT: JKS
+                  SSL_KEY_STORE: ./certs/keystore.jks
+                  SSL_KEY_STORE_PASSWORD: ${KEYSTORE_PASSWORD}
+                  SSL_KEY_STORE_FORMAT: JKS
+                  SSL_PRIVATE_KEY_ALIAS: solace-client
+                  REAPPLY_SUBSCRIPTIONS: true
+        mq-archive:
+          type: jms
+          environment:
+            ibm:
+              mq:
+                queue-manager: QM_ARCHIVE
+                channel: DSU.SVRCONN
+                conn-name: mqhost-archive.internal(1414)
+                user: appuser
+                password: ${MQ_ARCHIVE_PASSWORD}
+                ssl-bundle: mq-archive-bundle
+                additional-properties:
+                  WMQ_SSL_CIPHER_SUITE: TLS_RSA_WITH_AES_256_CBC_SHA256
+        sol-conn-1:
+          type: solace
+          environment:
+            solace:
+              java:
+                host: tcp://edge-broker.internal:55555
+                msg-vpn: edge
+                client-username: bridge
+                client-password: ${EDGE_SOL_PASSWORD}
+                connect-retries: -1
+                reconnect-retries: -1
+        undefined:
+          type: undefined
+      bindings:
+        input-0:
+          destination: CORE.ORDERS.OUT
+          binder: mq-conn-1
+        output-0:
+          destination: orders/from-mq
+          binder: prod-solace
+        input-1:
+          destination: Q.TO-MQ.EVENTS
+          binder: prod-solace
+        output-1:
+          destination: EVENTS.IN
+          binder: mq-conn-1
+        input-2:
+          destination: ARCHIVE.REPLAY.OUT
+          binder: mq-archive
+        output-2:
+          destination: archive/from-mq
+          binder: prod-solace
+        input-3:
+          destination: CORE.EVENTS.BROADCAST
+          binder: mq-conn-1
+        output-3:
+          destination: events/from-mq
+          binder: sol-conn-1
+      jms:
+        bindings:
+          input-0:
+            consumer:
+              destination-type: queue
+          output-1:
+            producer:
+              destination-type: queue
+          input-2:
+            consumer:
+              destination-type: queue
+          input-3:
+            consumer:
+              destination-type: topic
+              durable-subscription-name: solmq-5a276dea-602d-581b-b6d1-1d30d60b7be9
+solace:
+  connector:
+    workflows:
+      0:
+        enabled: true
+      1:
+        enabled: true
+      2:
+        enabled: true
+      3:
+        enabled: true
+    security:
+      enabled: true
+      users:
+        - name: healthcheck
+          password: ${HEALTHCHECK_PASSWORD}
+    management:
+      leader-election:
+        mode: active_standby
+        fail-over:
+          max-attempts: 5
+          back-off-initial-interval: 1000
+          back-off-max-interval: 10000
+          back-off-multiplier: 1.5
+      queue: solmq-connector-mgmt
+      session:
+        host: tcps://broker.internal:55443
+        msg-vpn: prod
+        client-username: connector
+        client-password: ${SOL_PASSWORD}
+        api-properties:
+          SSL_VALIDATE_CERTIFICATE: true
+          SSL_TRUST_STORE: ./certs/truststore.jks
+          SSL_TRUST_STORE_PASSWORD: ${TRUSTSTORE_PASSWORD}
+          SSL_TRUST_STORE_FORMAT: JKS
+          SSL_KEY_STORE: ./certs/keystore.jks
+          SSL_KEY_STORE_PASSWORD: ${KEYSTORE_PASSWORD}
+          SSL_KEY_STORE_FORMAT: JKS
+          SSL_PRIVATE_KEY_ALIAS: solace-client
+management:
+  server:
+    port: 8090
+  endpoints:
+    web:
+      exposure:
+        include: health,info,workflows
+  endpoint:
+    health:
+      show-details: always
+logging:
+  level:
+    root: INFO
+    com.solace.connector: INFO</script>
+
+<script>
+// ===== DOM helpers =====
+const $ = id => document.getElementById(id);
+const V = id => ($(id) ? $(id).value.trim() : '');
+const C = id => ($(id) ? $(id).checked : false);
+const L = id => V(id).split('\n').map(s => s.trim()).filter(s => s);
+function togOpt(chkId, fieldsId){ $(fieldsId).classList.toggle('vis', C(chkId)); gen(); }
+function show(id, on){ const e = $(id); if(e) e.classList.toggle('vis', !!on); }
+
+// ===== YAML scalar emission =====
+// Quote only when a plain scalar could be misread. ${VAR} placeholders and
+// tcps:// URLs stay plain, matching how the shipped examples are written.
+const YAML_IND = '-?:,[]{}#&*!|>\'"%@`';
+function dq(s){ return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'; }
+function yq(s){
+  s = String(s);
+  if(s === '') return '""';
+  if(YAML_IND.indexOf(s[0]) >= 0) return dq(s);
+  if(/^(y|n|yes|no|true|false|on|off|null|nil|~)$/i.test(s)) return dq(s);
+  // Every kv() target is a Go string field, so a bare number would fail to decode.
+  if(/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s)) return dq(s);
+  if(/^\s|\s$/.test(s)) return dq(s);
+  if(/:\s/.test(s) || /\s#/.test(s) || /\t/.test(s)) return dq(s);
+  return s;
+}
+// kv/knum/kbool/klist/blk skip empty values so the Go defaults apply instead.
+function kv(k, v, ind){ return v ? `${ind}${k}: ${yq(v)}\n` : ''; }
+function knum(k, v, ind){ return (v !== '' && v != null) ? `${ind}${k}: ${v}\n` : ''; }
+function kbool(k, v, ind){ return `${ind}${k}: ${v ? 'true' : 'false'}\n`; }
+function klist(k, arr, ind){
+  if(!arr || !arr.length) return '';
+  let o = `${ind}${k}:\n`;
+  arr.forEach(v => { o += `${ind}  - ${yq(v)}\n`; });
+  return o;
+}
+function blk(name, body, ind){ return body ? `${ind}${name}:\n${body}` : ''; }
+
+// ===== Ordered passthrough blocks =====
+// Textareas holding api-properties / additional-properties / consumer / producer /
+// logging.level / solace-defaults / fail-over parse into an ordered node list:
+//   {key, val}      scalar
+//   {key, children} nested mapping or sequence
+//   {item}          sequence entry
+// Order and formatting are preserved, matching the *yaml.Node passthrough the Go
+// spec package captures.
+function parseProps(text, bad){
+  const raw = String(text || '').replace(/\r/g, '').split('\n');
+  const lines = [];
+  raw.forEach((l, i) => {
+    if(!l.trim() || /^\s*#/.test(l)) return;
+    lines.push({ indent: l.match(/^ */)[0].length, text: l.trim(), no: i + 1 });
+  });
+  let pos = 0;
+  function block(minIndent){
+    const out = [];
+    while(pos < lines.length && lines[pos].indent >= minIndent){
+      const ln = lines[pos];
+      if(ln.indent > minIndent) break;
+      pos++;
+      if(ln.text.startsWith('- ')){ out.push({ item: ln.text.slice(2).trim() }); continue; }
+      const m = ln.text.match(/^([^:]+):\s*(.*)$/);
+      if(!m){ if(bad) bad.push(ln.no); continue; }
+      const key = m[1].trim(), val = m[2].trim();
+      if(val !== ''){ out.push({ key: key, val: val }); continue; }
+      const kids = (pos < lines.length && lines[pos].indent > ln.indent) ? block(lines[pos].indent) : [];
+      out.push(kids.length ? { key: key, children: kids } : { key: key, val: '' });
+    }
+    return out;
+  }
+  return lines.length ? block(lines[0].indent) : [];
+}
+// emitProps renders a parsed block back out at the given indent.
+function emitProps(props, ind){
+  let o = '';
+  (props || []).forEach(p => {
+    if(p.item !== undefined){ o += `${ind}- ${p.item}\n`; return; }
+    if(p.children){ o += `${ind}${p.key}:\n` + emitProps(p.children, ind + '  '); return; }
+    o += `${ind}${p.key}: ${p.val}\n`;
+  });
+  return o;
+}
+// ===== Repeater cards =====
+function rmCard(btn){ btn.closest('.card').remove(); refreshRefs(); renumberWfs(); gen(); }
+
+function sideHTML(cls){
+  return `
+  <div class="fr">
+    <div class="f"><label>System</label><select class="x-sys ${cls}-sys" onchange="syncSide(this)"><option value="mq">mq</option><option value="solace">solace</option></select></div>
+    <div class="f"><label>Connection</label><select class="x-mode" onchange="syncSide(this)"><option value="inline">inline (manual)</option><option value="ref">conn-ref</option></select></div>
+  </div>
+  <div class="f opt-fields x-ref-f"><label>conn-ref</label><select class="x-ref"></select></div>
+  <div class="opt-fields x-sol">
+    <div class="fr">
+      <div class="f"><label>Host</label><input class="x-host" placeholder="tcps://broker.internal:55443"></div>
+      <div class="f"><label>Msg VPN</label><input class="x-vpn" placeholder="prod"></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Client Username</label><input class="x-user" placeholder="connector"></div>
+      <div class="f"><label>Client Password</label><input class="x-pass" placeholder="\${SOL_PASSWORD}"></div>
+    </div>
+    <div class="f"><label>Key Alias (mTLS)</label><input class="x-alias" placeholder="solace-client"></div>
+  </div>
+  <div class="opt-fields x-mq">
+    <div class="fr">
+      <div class="f"><label>Conn Name</label><input class="x-conn" placeholder="mqhost.internal(1414)"></div>
+      <div class="f"><label>Queue Manager</label><input class="x-qm" placeholder="QM1"></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Channel</label><input class="x-ch" placeholder="DEV.APP.SVRCONN"></div>
+      <div class="f"><label>User</label><input class="x-mquser" placeholder="appuser"></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Password</label><input class="x-mqpass" placeholder="\${MQ_PASSWORD}"></div>
+      <div class="f"><label>Cipher</label><input class="x-cipher" placeholder="TLS_RSA_WITH_AES_256_CBC_SHA256"></div>
+    </div>
+    <div class="tgl"><input type="checkbox" class="x-tls"><label>TLS (MQ has no URL scheme, opt in explicitly)</label></div>
+    <div class="f"><label>Key Alias (mTLS)</label><input class="x-mqalias" placeholder="mq-client"></div>
+  </div>
+  <div class="fr">
+    <div class="f" style="flex:0 0 8rem"><label>Destination</label><select class="x-dk"><option value="queue">queue</option><option value="topic">topic</option></select></div>
+    <div class="f"><label>Name</label><input class="x-dest" placeholder="ORDERS.OUT"></div>
+  </div>
+  <details><summary>Advanced passthrough</summary>
+    <div class="f"><label>api-properties / additional-properties</label><textarea class="x-props" rows="2"></textarea><div class="h">Inline sides only; a conn-ref side inherits the connection's.</div></div>
+    <div class="f"><label>consumer / producer tuning</label><textarea class="x-tune" rows="2"></textarea><div class="h">Emitted under consumer: on a source, producer: on a target.</div></div>
+  </details>`;
+}
+
+function addConn(c){
+  const d = document.createElement('div');
+  d.className = 'card'; d.dataset.k = 'conn';
+  d.innerHTML = `
+  <div class="card-hdr"><span class="ttl">Connection</span><button type="button" class="rm" title="Remove" onclick="rmCard(this)">x</button></div>
+  <div class="fr">
+    <div class="f"><label>Name</label><input class="c-name" placeholder="prod-solace"></div>
+    <div class="f"><label>System</label><select class="c-sys" onchange="syncConn(this)"><option value="solace">solace</option><option value="mq">mq</option></select></div>
+  </div>
+  <div class="opt-fields vis c-sol">
+    <div class="fr">
+      <div class="f"><label>Host</label><input class="c-host" placeholder="tcps://broker.internal:55443"></div>
+      <div class="f"><label>Msg VPN</label><input class="c-vpn" placeholder="prod"></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Client Username</label><input class="c-user" placeholder="connector"></div>
+      <div class="f"><label>Client Password</label><input class="c-pass" placeholder="\${SOL_PASSWORD}"></div>
+    </div>
+    <div class="f"><label>Key Alias (mTLS)</label><input class="c-alias" placeholder="solace-client"></div>
+  </div>
+  <div class="opt-fields c-mq">
+    <div class="fr">
+      <div class="f"><label>Conn Name</label><input class="c-conn" placeholder="mqhost.internal(1414)"></div>
+      <div class="f"><label>Queue Manager</label><input class="c-qm" placeholder="QM1"></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Channel</label><input class="c-ch" placeholder="DEV.APP.SVRCONN"></div>
+      <div class="f"><label>User</label><input class="c-mquser" placeholder="appuser"></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Password</label><input class="c-mqpass" placeholder="\${MQ_PASSWORD}"></div>
+      <div class="f"><label>Cipher</label><input class="c-cipher" placeholder="TLS_RSA_WITH_AES_256_CBC_SHA256"></div>
+    </div>
+    <div class="tgl"><input type="checkbox" class="c-tls"><label>TLS</label></div>
+    <div class="f"><label>Key Alias (mTLS)</label><input class="c-mqalias" placeholder="mq-client"></div>
+  </div>
+  <details><summary>Advanced passthrough</summary>
+    <div class="f"><label>api-properties / additional-properties</label><textarea class="c-props" rows="2"></textarea></div>
+  </details>`;
+  $('conns-list').appendChild(d);
+  if(c) fillConn(d, c);
+  syncConn(d.querySelector('.c-sys'));
+  refreshRefs();
+  return d;
+}
+
+function addWf(w){
+  const d = document.createElement('div');
+  d.className = 'card'; d.dataset.k = 'wf';
+  d.innerHTML = `
+  <div class="card-hdr"><span class="ttl">Workflow</span><button type="button" class="rm" title="Remove" onclick="rmCard(this)">x</button></div>
+  <div class="fr">
+    <div class="f"><label>File Name</label><input class="w-file"></div>
+    <div class="f" style="flex:0 0 7rem"><label>State</label><div class="tgl" style="margin:.3rem 0 0"><input type="checkbox" class="w-en" checked><label>enabled</label></div></div>
+  </div>
+  <div class="side-box sb-src"><div class="lbl">Source (consumes)</div>${sideHTML('src')}</div>
+  <div class="side-box sb-tgt"><div class="lbl">Target (produces)</div>${sideHTML('tgt')}</div>`;
+  $('wfs-list').appendChild(d);
+  d.querySelector('.sb-tgt .x-sys').value = 'solace'; // MQ -> Solace is the common default
+  d.querySelectorAll('.side-box').forEach(sb => syncSide(sb.querySelector('.x-sys')));
+  refreshRefs();
+  renumberWfs();
+  if(w) fillWf(d, w);
+  return d;
+}
+
+function addUser(u){
+  const r = document.createElement('div');
+  r.className = 'pr';
+  r.innerHTML = `<input class="u-name grow" placeholder="healthcheck"><input class="u-pass grow" placeholder="\${HEALTHCHECK_PASSWORD}"><button type="button" class="rm" title="Remove" onclick="this.parentElement.remove();gen()">x</button>`;
+  $('users-list').appendChild(r);
+  if(u){ r.querySelector('.u-name').value = u.name || ''; r.querySelector('.u-pass').value = u.password || ''; }
+}
+
+function addPort(listId, val){
+  const r = document.createElement('div');
+  r.className = 'pr';
+  r.innerHTML = `<input class="p-val grow" placeholder="8090 or 8081:8090"><button type="button" class="rm" title="Remove" onclick="this.parentElement.remove();gen()">x</button>`;
+  $(listId).appendChild(r);
+  if(val) r.querySelector('.p-val').value = val;
+}
+
+// renumberWfs keeps the default file names in sync with card order; a name the
+// user edited (not matching the default shape) is left alone.
+function renumberWfs(){
+  document.querySelectorAll('#wfs-list .card').forEach((c, i) => {
+    const f = c.querySelector('.w-file');
+    if(!f.value.trim() || /^workflow-\d+\.yaml$/.test(f.value.trim())) f.value = `workflow-${i}.yaml`;
+    c.querySelector('.ttl').textContent = `Workflow ${i} -- ${f.value.trim()}`;
+  });
+}
+
+// ===== Visibility sync =====
+function syncConn(sel){
+  const card = sel.closest('.card'), mq = sel.value === 'mq';
+  card.querySelector('.c-sol').classList.toggle('vis', !mq);
+  card.querySelector('.c-mq').classList.toggle('vis', mq);
+  gen();
+}
+function syncSide(el){
+  const box = el.closest('.side-box');
+  const mq = box.querySelector('.x-sys').value === 'mq';
+  const ref = box.querySelector('.x-mode').value === 'ref';
+  box.querySelector('.x-ref-f').classList.toggle('vis', ref);
+  box.querySelector('.x-sol').classList.toggle('vis', !ref && !mq);
+  box.querySelector('.x-mq').classList.toggle('vis', !ref && mq);
+  gen();
+}
+function syncLE(){
+  const mode = V('i-le-mode');
+  show('le-fields', mode === 'active_active' || mode === 'active_standby');
+  show('le-ref-f', V('i-le-src') === 'ref');
+  show('le-inline-f', V('i-le-src') === 'inline');
+  gen();
+}
+function syncK8s(){
+  const lb = V('i-k8s-libs');
+  show('k8s-libs-pe', lb === 'pvc-existing');
+  show('k8s-libs-pc', lb === 'pvc-create');
+  show('k8s-libs-dl', lb === 'download');
+  const cr = V('i-k8s-cred');
+  show('k8s-cred-c', cr === 'create');
+  show('k8s-cred-e', cr === 'existing');
+  show('k8s-cred-vars', V('i-k8s-cred-src') === 'env');
+  show('k8s-cred-vf', V('i-k8s-cred-src') === 'file');
+  const st = V('i-k8s-stores');
+  show('k8s-stores-c', st === 'create');
+  show('k8s-stores-e', st === 'existing');
+  gen();
+}
+function syncCtr(p){
+  const cr = V('i-' + p + '-cred');
+  show(p + '-cred-c', cr === 'create');
+  show(p + '-cred-e', cr === 'existing');
+  show(p + '-cred-vars', V('i-' + p + '-cred-src') === 'env');
+  show(p + '-cred-vf', V('i-' + p + '-cred-src') === 'file');
+  gen();
+}
+// refreshRefs repopulates every conn-ref picker from the current connection names.
+function refreshRefs(){
+  const names = Array.from(document.querySelectorAll('#conns-list .c-name')).map(i => i.value.trim()).filter(Boolean);
+  document.querySelectorAll('.x-ref, #i-le-ref').forEach(sel => {
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">(select a connection)</option>' + names.map(n => `<option value="${n}">${n}</option>`).join('');
+    sel.value = names.indexOf(cur) >= 0 ? cur : '';
+  });
+}
+
+// ===== readModel: the single DOM read =====
+function readSide(box){
+  const q = c => box.querySelector('.' + c);
+  const sys = q('x-sys').value, ref = q('x-mode').value === 'ref';
+  const s = {
+    system: sys,
+    connRef: ref ? q('x-ref').value.trim() : '',
+    host: '', msgVpn: '', clientUser: '', clientPass: '', keyAlias: '',
+    connName: '', queueManager: '', channel: '', user: '', password: '', tls: false, cipher: '',
+    destKind: q('x-dk').value, dest: q('x-dest').value.trim(),
+    props: [], tune: []
+  };
+  if(!ref){
+    if(sys === 'solace'){
+      s.host = q('x-host').value.trim(); s.msgVpn = q('x-vpn').value.trim();
+      s.clientUser = q('x-user').value.trim(); s.clientPass = q('x-pass').value.trim();
+      s.keyAlias = q('x-alias').value.trim();
+    } else {
+      s.connName = q('x-conn').value.trim(); s.queueManager = q('x-qm').value.trim();
+      s.channel = q('x-ch').value.trim(); s.user = q('x-mquser').value.trim();
+      s.password = q('x-mqpass').value.trim(); s.tls = q('x-tls').checked;
+      s.cipher = q('x-cipher').value.trim(); s.keyAlias = q('x-mqalias').value.trim();
+    }
+    s.props = parseProps(q('x-props').value);
+  }
+  s.tune = parseProps(q('x-tune').value);
+  return s;
+}
+
+function readModel(){
+  const m = {};
+  m.workflows = { dir: V('i-wf-dir') || '.', filePattern: V('i-wf-pat') || '*' };
+
+  m.connections = Array.from(document.querySelectorAll('#conns-list .card')).map(card => {
+    const q = c => card.querySelector('.' + c);
+    const sys = q('c-sys').value;
+    const s = {
+      system: sys, connRef: '',
+      host: '', msgVpn: '', clientUser: '', clientPass: '', keyAlias: '',
+      connName: '', queueManager: '', channel: '', user: '', password: '', tls: false, cipher: '',
+      destKind: '', dest: '', props: parseProps(q('c-props').value), tune: []
+    };
+    if(sys === 'solace'){
+      s.host = q('c-host').value.trim(); s.msgVpn = q('c-vpn').value.trim();
+      s.clientUser = q('c-user').value.trim(); s.clientPass = q('c-pass').value.trim();
+      s.keyAlias = q('c-alias').value.trim();
+    } else {
+      s.connName = q('c-conn').value.trim(); s.queueManager = q('c-qm').value.trim();
+      s.channel = q('c-ch').value.trim(); s.user = q('c-mquser').value.trim();
+      s.password = q('c-mqpass').value.trim(); s.tls = q('c-tls').checked;
+      s.cipher = q('c-cipher').value.trim(); s.keyAlias = q('c-mqalias').value.trim();
+    }
+    return { name: q('c-name').value.trim(), side: s };
+  });
+
+  m.wfs = Array.from(document.querySelectorAll('#wfs-list .card')).map(card => ({
+    file: card.querySelector('.w-file').value.trim(),
+    enabled: card.querySelector('.w-en').checked,
+    source: readSide(card.querySelector('.sb-src')),
+    target: readSide(card.querySelector('.sb-tgt'))
+  })).sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0);
+
+  m.tls = {
+    truststore: C('i-ts-on') ? { file: V('i-ts-file'), password: V('i-ts-pass'), type: V('i-ts-type') } : null,
+    keystore: C('i-ks-on') ? { file: V('i-ks-file'), password: V('i-ks-pass'), type: V('i-ks-type') } : null
+  };
+  m.loggingLevel = parseProps(V('i-log'));
+  m.solaceDefaults = parseProps(V('i-soldef'));
+  m.management = C('i-mgmt-on')
+    ? { present: true, port: V('i-mgmt-port'), exposure: V('i-mgmt-exp'), healthShowDetails: V('i-mgmt-hsd') }
+    : { present: false };
+  m.security = C('i-sec-on')
+    ? {
+        present: true, enabled: C('i-sec-en'),
+        users: Array.from(document.querySelectorAll('#users-list .pr')).map(r => ({
+          name: r.querySelector('.u-name').value.trim(),
+          password: r.querySelector('.u-pass').value.trim()
+        })).filter(u => u.name || u.password)
+      }
+    : { present: false, users: [] };
+
+  const mode = V('i-le-mode');
+  m.leader = { present: !!mode, mode: mode, queue: '', connRef: '', session: null, failOver: [] };
+  if(mode === 'active_active' || mode === 'active_standby'){
+    m.leader.queue = V('i-le-queue');
+    m.leader.failOver = parseProps(V('i-le-fo'));
+    if(V('i-le-src') === 'ref'){
+      m.leader.connRef = V('i-le-ref');
+    } else {
+      m.leader.session = {
+        system: 'solace', connRef: '', host: V('i-le-host'), msgVpn: V('i-le-vpn'),
+        clientUser: V('i-le-user'), clientPass: V('i-le-pass'), keyAlias: V('i-le-alias'),
+        connName: '', queueManager: '', channel: '', user: '', password: '', tls: false, cipher: '',
+        destKind: '', dest: '', props: [], tune: []
+      };
+    }
+  }
+
+  m.kube = C('i-k8s-on') ? {
+    command: V('i-k8s-cmd') || 'kubectl',
+    deployment: {
+      name: V('i-k8s-name'), namespace: V('i-k8s-ns'), image: V('i-k8s-img'),
+      replicas: parseInt(V('i-k8s-rep') || '1', 10) || 1,
+      cpu: V('i-k8s-cpu'), memory: V('i-k8s-mem'), timezone: V('i-k8s-tz')
+    },
+    service: { enabled: C('i-k8s-svc'), port: V('i-k8s-svcport') },
+    syslog: C('i-k8s-sl-on') ? { host: V('i-k8s-sl-host'), port: parseInt(V('i-k8s-sl-port') || '0', 10), protocol: V('i-k8s-sl-proto') } : null,
+    libs: readLibs(),
+    cred: readCred('k8s'),
+    stores: V('i-k8s-stores') === 'create' ? { create: V('i-k8s-stores-name') }
+          : V('i-k8s-stores') === 'existing' ? { existing: V('i-k8s-stores-existing') } : null
+  } : null;
+
+  m.docker = C('i-dk-on') ? readCtr('dk', 'docker') : null;
+  m.podman = C('i-pd-on') ? Object.assign(readCtr('pd', 'podman'), {
+    mode: V('i-pd-mode') || 'run',
+    quadlet: { scope: V('i-pd-scope') || 'auto', dir: V('i-pd-qdir') }
+  }) : null;
+  return m;
+}
+
+function readLibs(){
+  switch(V('i-k8s-libs')){
+    case 'pvc-existing': return { kind: 'pvc-existing', existing: V('i-k8s-libs-existing') };
+    case 'pvc-create': return { kind: 'pvc-create', name: V('i-k8s-libs-name'), storage: V('i-k8s-libs-storage') || '1Gi',
+      nfsServer: V('i-k8s-libs-nfssrv'), nfsPath: V('i-k8s-libs-nfspath') };
+    case 'download': return { kind: 'download', urls: L('i-k8s-libs-urls'), image: V('i-k8s-libs-img') || 'busybox:1.37', pvc: V('i-k8s-libs-dlpvc') };
+    default: return null;
+  }
+}
+function readCred(p){
+  const mode = V('i-' + p + '-cred');
+  if(mode === 'existing') return { existing: V('i-' + p + '-cred-existing') };
+  if(mode !== 'create') return null;
+  return {
+    create: {
+      name: V('i-' + p + '-cred-name'),
+      source: V('i-' + p + '-cred-src'),
+      variables: L('i-' + p + '-cred-varlist'),
+      valuesFile: V('i-' + p + '-cred-file')
+    }
+  };
+}
+function readCtr(p, section){
+  return {
+    section: section,
+    command: V('i-' + p + '-cmd') || section,
+    image: V('i-' + p + '-img'),
+    name: V('i-' + p + '-name') || 'solmq-connector',
+    restart: V('i-' + p + '-restart') || 'unless-stopped',
+    timezone: V('i-' + p + '-tz'),
+    ports: Array.from(document.querySelectorAll('#' + p + '-ports .p-val')).map(i => i.value.trim()).filter(Boolean),
+    cred: readCred(p),
+    stores: C('i-' + p + '-stores'),
+    libsDir: C('i-' + p + '-libs-on') ? V('i-' + p + '-libs-dir') : ''
+  };
+}
+
+// ===== env.yaml =====
+const STORES_MOUNT = '/app/external/classpath/truststores';
+
+function sideBody(s, ind, withDest){
+  let o = '';
+  if(s.connRef){
+    o += kv('conn-ref', s.connRef, ind);
+  } else if(s.system === 'solace'){
+    o += kv('host', s.host, ind) + kv('msg-vpn', s.msgVpn, ind)
+       + kv('client-username', s.clientUser, ind) + kv('client-password', s.clientPass, ind)
+       + kv('key-alias', s.keyAlias, ind);
+  } else {
+    o += kv('conn-name', s.connName, ind) + kv('queue-manager', s.queueManager, ind)
+       + kv('channel', s.channel, ind) + kv('user', s.user, ind) + kv('password', s.password, ind);
+    if(s.tls) o += kbool('tls', true, ind);
+    o += kv('cipher', s.cipher, ind) + kv('key-alias', s.keyAlias, ind);
+  }
+  if(withDest && s.dest) o += kv(s.destKind, s.dest, ind);
+  if(!s.connRef && s.props.length){
+    o += blk(s.system === 'solace' ? 'api-properties' : 'additional-properties', emitProps(s.props, ind + '  '), ind);
+  }
+  return o;
+}
+
+function emitEnv(m){
+  let y = '# Generated by the solmq-conn Spec Generator.\n';
+  y += '# Single config for the Solace PubSub+ Connector for IBM MQ. Safe to commit as\n';
+  y += '# long as every secret stays a ${VAR} placeholder. Block style throughout --\n';
+  y += '# ${VAR} is invalid inside YAML flow { }.\n\n';
+
+  y += 'workflows:\n' + kv('dir', m.workflows.dir, '  ') + kv('file_pattern', m.workflows.filePattern, '  ');
+
+  const conns = m.connections.filter(c => c.name);
+  if(conns.length){
+    let b = '';
+    conns.forEach(c => { b += `  ${c.name}:\n    ${c.side.system}:\n` + sideBody(c.side, '      ', false); });
+    y += '\nconnections:\n' + b;
+  }
+
+  const ts = m.tls.truststore, ks = m.tls.keystore;
+  let tb = '';
+  if(ts) tb += '  truststore:\n' + kv('file', ts.file, '    ') + kv('password', ts.password, '    ') + kv('type', ts.type, '    ');
+  if(ks) tb += '  keystore:\n' + kv('file', ks.file, '    ') + kv('password', ks.password, '    ') + kv('type', ks.type, '    ');
+  if(tb) y += '\ntls:\n' + tb;
+
+  if(m.loggingLevel.length) y += '\nlogging:\n  level:\n' + emitProps(m.loggingLevel, '    ');
+
+  if(m.management.present){
+    y += '\nmanagement:\n' + knum('port', m.management.port, '  ')
+       + kv('exposure', m.management.exposure, '  ')
+       + kv('health-show-details', m.management.healthShowDetails, '  ');
+  }
+
+  if(m.security.present){
+    y += '\nsecurity:\n' + kbool('enabled', m.security.enabled, '  ');
+    if(m.security.users.length){
+      y += '  users:\n';
+      m.security.users.forEach(u => { y += `    - name: ${yq(u.name)}\n` + kv('password', u.password, '      '); });
+    }
+  }
+
+  if(m.leader.present){
+    y += '\nleader-election:\n' + kv('mode', m.leader.mode, '  ') + kv('queue', m.leader.queue, '  ');
+    if(m.leader.connRef) y += kv('conn-ref', m.leader.connRef, '  ');
+    else if(m.leader.session) y += '  solace:\n' + sideBody(m.leader.session, '    ', false);
+    if(m.leader.failOver.length) y += '  fail-over:\n' + emitProps(m.leader.failOver, '    ');
+  }
+
+  if(m.solaceDefaults.length) y += '\nsolace-defaults:\n' + emitProps(m.solaceDefaults, '  ');
+
+  if(m.kube) y += '\n' + emitKube(m.kube);
+  if(m.docker) y += '\n' + emitCtr(m.docker);
+  if(m.podman) y += '\n' + emitCtr(m.podman);
+  return y;
+}
+
+function emitCred(cred, ind){
+  if(!cred) return '';
+  if(cred.existing) return `${ind}credentials:\n` + kv('existing', cred.existing, ind + '  ');
+  const c = cred.create;
+  let b = kv('name', c.name, ind + '    ') + kv('source', c.source, ind + '    ');
+  if(c.source === 'env') b += klist('variables', c.variables, ind + '    ');
+  else b += kv('values-file', c.valuesFile, ind + '    ');
+  return `${ind}credentials:\n${ind}  create:\n` + b;
+}
+
+function emitKube(k){
+  let y = '# ---- kubernetes target ----\nkubernetes:\n' + kv('command', k.command, '  ');
+  const d = k.deployment;
+  y += '  deployment:\n' + kv('name', d.name, '    ') + kv('namespace', d.namespace, '    ')
+     + kv('image', d.image, '    ') + knum('replicas', d.replicas, '    ');
+  if(d.cpu || d.memory) y += '    resources:\n' + kv('cpu', d.cpu, '      ') + kv('memory', d.memory, '      ');
+  y += kv('timezone', d.timezone, '    ');
+  y += '  service:\n' + kbool('enabled', k.service.enabled, '    ') + knum('port', k.service.port, '    ');
+  if(k.syslog){
+    y += '  logging:\n    syslog:\n' + kv('host', k.syslog.host, '      ')
+       + knum('port', k.syslog.port, '      ') + kv('protocol', k.syslog.protocol, '      ');
+  }
+  const lb = k.libs;
+  if(lb){
+    y += '  libs:\n';
+    if(lb.kind === 'pvc-existing') y += '    pvc:\n' + kv('existing', lb.existing, '      ');
+    if(lb.kind === 'pvc-create'){
+      y += '    pvc:\n      create:\n' + kv('name', lb.name, '        ') + kv('storage', lb.storage, '        ')
+         + '        nfs:\n' + kv('server', lb.nfsServer, '          ') + kv('path', lb.nfsPath, '          ');
+    }
+    if(lb.kind === 'download'){
+      y += '    download:\n' + klist('urls', lb.urls, '      ') + kv('image', lb.image, '      ') + kv('pvc', lb.pvc, '      ');
+    }
+  }
+  let sb = emitCred(k.cred, '    ');
+  if(k.stores){
+    sb += '    stores:\n' + (k.stores.create
+      ? '      create:\n' + kv('name', k.stores.create, '        ')
+      : kv('existing', k.stores.existing, '      '));
+  }
+  if(sb) y += '  secrets:\n' + sb;
+  return y;
+}
+
+function emitCtr(c){
+  let y = `# ---- ${c.section} target ----\n${c.section}:\n` + kv('command', c.command, '  ');
+  if(c.section === 'podman'){
+    y += kv('mode', c.mode, '  ');
+    if(c.quadlet.scope !== 'auto' || c.quadlet.dir){
+      y += '  quadlet:\n' + kv('scope', c.quadlet.scope, '    ') + kv('dir', c.quadlet.dir, '    ');
+    }
+  }
+  y += kv('image', c.image, '  ') + kv('name', c.name, '  ') + kv('restart', c.restart, '  ');
+  y += klist('ports', c.ports, '  ') + kv('timezone', c.timezone, '  ');
+  const cb = emitCred(c.cred, '    ');
+  if(cb) y += '  secrets:\n' + cb;
+  if(c.stores) y += '  stores:\n' + kv('mount-path', STORES_MOUNT, '    ');
+  if(c.libsDir) y += '  libs:\n' + kv('dir', c.libsDir, '    ');
+  return y;
+}
+
+// ===== workflow files =====
+function emitWorkflow(wf){
+  let y = '# Generated by the solmq-conn Spec Generator.\n';
+  y += `# Workflow file: ${wf.file}. Numbered by sorted filename.\n\n`;
+  if(!wf.enabled) y += 'enabled: false\n\n';
+  [['source', wf.source], ['target', wf.target]].forEach(([label, s]) => {
+    y += `${label}:\n  ${s.system}:\n` + sideBody(s, '    ', true);
+    if(s.tune.length) y += blk(label === 'source' ? 'consumer' : 'producer', emitProps(s.tune, '      '), '    ');
+  });
+  return y;
+}
+
+// ===== commands panel =====
+function emitCommands(m){
+  const env = 'specs/env.yaml';
+  let o = '# Unzip the spec files into ./specs, then:\n';
+  o += `solmq-conn validate            -e ${env}\n`;
+  o += `solmq-conn generate config     -e ${env} -o application.yml\n`;
+  if(m.kube){
+    o += `solmq-conn generate kubernetes -e ${env} -o manifests.yaml\n`;
+    o += `solmq-conn deploy   kubernetes -e ${env}\n`;
+    o += `solmq-conn delete   kubernetes -e ${env}\n`;
+  }
+  if(m.docker){
+    o += `solmq-conn generate docker     -e ${env} -o docker-compose.yml\n`;
+    o += `solmq-conn deploy   docker     -e ${env}\n`;
+    o += `solmq-conn delete   docker     -e ${env}\n`;
+  }
+  if(m.podman){
+    o += `solmq-conn generate podman     -e ${env} -o run-connector.sh\n`;
+    o += `solmq-conn deploy   podman     -e ${env}\n`;
+    o += `solmq-conn delete   podman     -e ${env}\n`;
+  }
+  const vars = Array.from(collectVars(m)).sort();
+  if(vars.length){
+    o += '\n# Every placeholder the spec references must be set in the environment\n';
+    o += '# before deploy (source: env) -- they are never written into the files:\n';
+    vars.forEach(v => { o += `#   ${v}\n`; });
+  }
+  return o;
+}
+
+// collectVars gathers the ${VAR} names referenced by the spec (mirrors validate.collectVars).
+const VAR_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(:[^}]*)?\}/g;
+function collectVars(m){
+  const out = new Set();
+  const scan = s => { if(!s) return; let x; VAR_RE.lastIndex = 0; while((x = VAR_RE.exec(s)) !== null) out.add(x[1]); };
+  m.wfs.forEach(wf => {
+    [resolveSide(m, wf.source), resolveSide(m, wf.target)].forEach(s => { scan(s.clientPass); scan(s.password); });
+  });
+  if(m.tls.truststore) scan(m.tls.truststore.password);
+  if(m.tls.keystore) scan(m.tls.keystore.password);
+  (m.security.users || []).forEach(u => scan(u.password));
+  if(m.leader.connRef){
+    const c = m.connections.find(c => c.name === m.leader.connRef);
+    if(c) scan(c.side.clientPass);
+  } else if(m.leader.session){
+    scan(m.leader.session.clientPass);
+  }
+  return out;
+}
+function fillCredVars(id){
+  $(id).value = Array.from(collectVars(readModel())).sort().join('\n');
+  gen();
+}
+// ===== Validation (port of internal/validate) =====
+const RE_CONNNAME = /^[^()\s,]+\(\d+\)(,[^()\s,]+\(\d+\))*$/;
+const RE_DNS1123 = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+const RE_HOST = /^[A-Za-z0-9._:-]+$/;
+const RE_PLACEHOLDER = /^\$\{[A-Za-z_][A-Za-z0-9_]*(:[^}]*)?\}$/;
+const MAX_WF_PER_INSTANCE = 20;
+const ENV_FILE = 'env.yaml';
+
+function isDNS1123(s){ return s.length <= 63 && RE_DNS1123.test(s); }
+function shardCount(n){ return Math.ceil(n / MAX_WF_PER_INSTANCE); }
+function isTCPS(h){ return String(h || '').startsWith('tcps://'); }
+
+function validateModel(m){
+  const errs = [], warns = [];
+  const add = (file, msg) => errs.push({ file: file, msg: msg });
+  const warn = (file, msg) => warns.push({ file: file, msg: msg });
+  const haveKeystore = !!(m.tls.keystore && m.tls.keystore.file);
+
+  // Connection definitions.
+  const seenNames = {};
+  m.connections.forEach((c, i) => {
+    if(!c.name){ add(ENV_FILE, `connections entry ${i + 1} needs a name`); return; }
+    if(seenNames[c.name]) add(ENV_FILE, `connections.${c.name} is defined more than once`);
+    seenNames[c.name] = true;
+    const label = 'connections.' + c.name;
+    checkTuple(add, ENV_FILE, label, c.side, haveKeystore);
+    checkPlaceholders(warn, ENV_FILE, label, c.side);
+  });
+
+  // Per-workflow structural + semantic checks (raw sides, before resolution).
+  const seenFiles = {};
+  m.wfs.forEach(wf => {
+    if(!wf.file){ add('(unnamed)', 'the workflow file needs a name'); return; }
+    if(seenFiles[wf.file]) add(wf.file, 'another workflow uses the same file name');
+    seenFiles[wf.file] = true;
+    checkSide(add, warn, wf.file, 'source', wf.source, true, haveKeystore, m.connections);
+    checkSide(add, warn, wf.file, 'target', wf.target, false, haveKeystore, m.connections);
+  });
+
+  // Cross-workflow checks on resolved tuples.
+  const resolved = m.wfs.map(wf => ({
+    file: wf.file, source: resolveSide(m, wf.source), target: resolveSide(m, wf.target)
+  }));
+  const aliasByKey = {};
+  resolved.forEach(wf => [wf.source, wf.target].forEach(s => {
+    if(!s.keyAlias) return;
+    const k = dedupKey(s), prev = aliasByKey[k];
+    if(prev){
+      if(prev.alias !== s.keyAlias){
+        add(wf.file, `conflicting key-alias "${s.keyAlias}" vs "${prev.alias}" for the same binder (also in ${prev.file})`);
+      }
+      return;
+    }
+    aliasByKey[k] = { alias: s.keyAlias, file: wf.file };
+  }));
+  const srcByKey = {};
+  resolved.forEach(wf => {
+    const k = dedupKey(wf.source) + '|' + wf.source.dest;
+    if(srcByKey[k]){
+      warn(wf.file, `source "${wf.source.dest}" is also consumed in ${srcByKey[k]} (duplicate source on the same binder)`);
+      return;
+    }
+    srcByKey[k] = wf.file;
+  });
+
+  checkLeaderElection(add, warn, m, haveKeystore);
+
+  if(m.kube) checkKube(add, warn, m);
+  if(m.docker) checkContainerTarget(add, m, m.docker);
+  if(m.podman){
+    checkContainerTarget(add, m, m.podman);
+    if(m.podman.mode !== 'run' && m.podman.mode !== 'quadlet'){
+      add(ENV_FILE, `podman.mode must be "run" or "quadlet" (got "${m.podman.mode}")`);
+    }
+  }
+  const tlsInUse = usesTLS(resolved);
+  if(m.kube && tlsInUse && !m.kube.stores){
+    warn(ENV_FILE, 'a TLS/mTLS connection exists but secrets.stores is omitted; the store files will be missing at runtime');
+  }
+  [m.docker, m.podman].forEach(c => {
+    if(c && tlsInUse && !c.stores){
+      warn(ENV_FILE, `a TLS/mTLS connection exists but ${c.section}.stores is omitted; the store files will be missing at runtime`);
+    }
+  });
+
+  if(m.tls.truststore) checkStore(add, warn, 'tls.truststore', m.tls.truststore);
+  if(m.tls.keystore) checkStore(add, warn, 'tls.keystore', m.tls.keystore);
+  (m.security.users || []).forEach(u => {
+    if(!u.name) add(ENV_FILE, 'security.users entry needs a name');
+    if(u.password && !RE_PLACEHOLDER.test(u.password)){
+      warn(ENV_FILE, `security.users.${u.name} password is a literal value; use a \${VAR} placeholder so env.yaml stays safe to commit`);
+    }
+  });
+  if(!m.wfs.length) add(ENV_FILE, 'no workflows defined; add at least one workflow file');
+  return { errs: errs, warns: warns };
+}
+
+function checkSide(add, warn, file, which, s, isSource, haveKeystore, conns){
+  if(!s.dest){
+    add(file, `${which} (${s.system}) must specify exactly one of 'queue:' or 'topic:'`);
+  }
+  if(s.connRef){
+    const conn = conns.find(c => c.name === s.connRef);
+    if(!conn){
+      add(file, `${which} (${s.system}) conn-ref "${s.connRef}" is not defined under connections`);
+    } else if(conn.side.system !== s.system){
+      add(file, `${which} conn-ref "${s.connRef}" is a "${conn.side.system}" connection but is referenced under "${s.system}"`);
+    }
+    edaAdvisory(warn, file, s, isSource);
+    return;
+  }
+  checkTuple(add, file, which, s, haveKeystore);
+  checkPlaceholders(warn, file, which, s);
+  edaAdvisory(warn, file, s, isSource);
+}
+
+function checkTuple(add, file, label, s, haveKeystore){
+  if(s.system === 'solace'){
+    if(!s.host) add(file, `${label} solace: missing 'host'`);
+    else if(!s.host.startsWith('tcp://') && !s.host.startsWith('tcps://')){
+      add(file, `${label} solace: host "${s.host}" must start with tcp:// or tcps://`);
+    }
+    if(!s.msgVpn) add(file, `${label} solace: missing 'msg-vpn'`);
+    if(s.keyAlias){
+      if(!isTCPS(s.host)) add(file, `${label} solace: key-alias (mTLS) requires a tcps:// host`);
+      if(!haveKeystore) add(file, `${label} solace: key-alias set but no keystore defined`);
+    }
+  } else {
+    if(!s.connName) add(file, `${label} mq: missing 'conn-name'`);
+    else if(!RE_CONNNAME.test(s.connName)) add(file, `${label} mq: conn-name "${s.connName}" must be host(port)[,host(port)]`);
+    if(!s.queueManager) add(file, `${label} mq: missing 'queue-manager'`);
+    if(!s.channel) add(file, `${label} mq: missing 'channel'`);
+    if((s.cipher || s.keyAlias) && !s.tls) add(file, `${label} mq: cipher/key-alias require 'tls: true'`);
+    if(s.keyAlias && !haveKeystore) add(file, `${label} mq: key-alias set but no keystore defined`);
+  }
+}
+
+// checkPlaceholders is generator-only: env.yaml is meant to be committable, so a
+// secret written as a literal (rather than a ${VAR} placeholder) is flagged.
+function checkPlaceholders(warn, file, label, s){
+  const v = s.system === 'solace' ? s.clientPass : s.password;
+  const field = s.system === 'solace' ? 'client-password' : 'password';
+  if(v && !RE_PLACEHOLDER.test(v)){
+    warn(file, `${label} ${field} is a literal value; use a \${VAR} placeholder so env.yaml stays safe to commit`);
+  }
+}
+function checkStore(add, warn, label, st){
+  if(!st.file) add(ENV_FILE, `${label}.file is required`);
+  if(st.password && !RE_PLACEHOLDER.test(st.password)){
+    warn(ENV_FILE, `${label}.password is a literal value; use a \${VAR} placeholder so env.yaml stays safe to commit`);
+  }
+}
+
+function edaAdvisory(warn, file, s, isSource){
+  if(s.system !== 'solace') return;
+  if(isSource && s.destKind === 'topic'){
+    warn(file, `source solace: topic "${s.dest}" as a source is a direct, non-durable subscription (at-most-once) -- events published while this connector is down are lost. EDA guaranteed-delivery favors consuming from a queue subscribed to the topic, decoupling producer and consumer availability`);
+  }
+  if(!isSource && s.destKind === 'queue'){
+    warn(file, `target solace: producing to queue "${s.dest}" is point-to-point and couples this flow to one endpoint. EDA favors publishing to a topic and letting the broker fan out to subscribed queues, so producers stay unaware of consumers (loose coupling)`);
+  }
+}
+
+function checkLeaderElection(add, warn, m, haveKeystore){
+  const le = m.leader;
+  if(!le.present || !le.mode || le.mode === 'standalone') return;
+  if(!le.queue) add(ENV_FILE, `leader-election mode "${le.mode}" requires a 'queue'`);
+  if(le.connRef){
+    const c = m.connections.find(x => x.name === le.connRef);
+    if(!c) add(ENV_FILE, `leader-election conn-ref "${le.connRef}" is not defined under connections`);
+    else if(c.side.system !== 'solace') add(ENV_FILE, `leader-election conn-ref "${le.connRef}" must be a solace connection (got "${c.side.system}")`);
+  } else if(le.session){
+    checkTuple(add, ENV_FILE, 'leader-election session', le.session, haveKeystore);
+    checkPlaceholders(warn, ENV_FILE, 'leader-election session', le.session);
+  } else {
+    add(ENV_FILE, `leader-election mode "${le.mode}" requires a solace session (conn-ref or inline solace:)`);
+  }
+}
+
+function checkKube(add, warn, m){
+  const k = m.kube, d = k.deployment;
+  if(!d.name) add(ENV_FILE, 'deployment.name is required');
+  else if(!isDNS1123(d.name)) add(ENV_FILE, `deployment.name "${d.name}" is not a valid DNS-1123 label`);
+  else {
+    const instances = shardCount(m.wfs.length);
+    if(instances > 1){
+      const longest = `${d.name}-${instances}-config`;
+      if(longest.length > 63){
+        add(ENV_FILE, `deployment.name "${d.name}" is too long: ${instances} instances generate names up to "${longest}" which exceeds the 63-char DNS-1123 limit`);
+      }
+    }
+  }
+  if(!d.namespace) add(ENV_FILE, 'deployment.namespace is required');
+  else if(!isDNS1123(d.namespace)) add(ENV_FILE, `deployment.namespace "${d.namespace}" is not a valid DNS-1123 label`);
+  if(!d.image) add(ENV_FILE, 'deployment.image is required');
+
+  const mode = m.leader.mode;
+  if((!mode || mode === 'standalone') && d.replicas > 1){
+    add(ENV_FILE, `leader-election standalone requires replicas: 1 (got ${d.replicas})`);
+  }
+  if(k.cred && k.cred.create) checkCredentialsCreate(add, 'kubernetes', k.cred.create);
+  if(k.stores && k.stores.create && !m.tls.truststore){
+    add(ENV_FILE, 'kubernetes.secrets.stores.create requires tls.truststore');
+  }
+  if(k.syslog){
+    if(!k.syslog.host) add(ENV_FILE, 'logging.syslog.host is required');
+    else if(!RE_HOST.test(k.syslog.host)) add(ENV_FILE, `logging.syslog.host "${k.syslog.host}" may only contain letters, digits, '.', ':', '_' and '-'`);
+    if(k.syslog.port < 1 || k.syslog.port > 65535) add(ENV_FILE, `logging.syslog.port must be 1-65535 (got ${k.syslog.port})`);
+    if(k.syslog.protocol === 'tcp'){
+      warn(ENV_FILE, 'logging.syslog protocol tcp requires the logstash-logback-encoder jar on the connector classpath (provide it via libs)');
+    }
+  }
+  checkLibs(add, k.libs);
+  checkUnsuppliedVars(warn, m, k.cred);
+}
+
+function checkLibs(add, lb){
+  if(!lb) return;
+  if(lb.kind === 'pvc-existing'){
+    if(!lb.existing) add(ENV_FILE, "libs.pvc must set exactly one of 'create' or 'existing'");
+    else if(!isDNS1123(lb.existing)) add(ENV_FILE, `libs.pvc.existing "${lb.existing}" is not a valid DNS-1123 label`);
+  }
+  if(lb.kind === 'pvc-create'){
+    if(!isDNS1123(lb.name)) add(ENV_FILE, `libs.pvc.create.name "${lb.name}" is not a valid DNS-1123 label`);
+    if(!lb.nfsServer || !lb.nfsPath) add(ENV_FILE, 'libs.pvc.create requires nfs.server and nfs.path');
+  }
+  if(lb.kind === 'download'){
+    if(!lb.urls.length) add(ENV_FILE, "libs.download requires a non-empty 'urls' list");
+    lb.urls.forEach(u => {
+      if(!safeLibsURL(u)) add(ENV_FILE, `libs.download url "${u}" must be http(s) and contain no spaces, quotes, or control characters`);
+    });
+    if(lb.pvc && !isDNS1123(lb.pvc)) add(ENV_FILE, `libs.download.pvc "${lb.pvc}" is not a valid DNS-1123 label`);
+  }
+}
+function safeShellChars(s){
+  for(let i = 0; i < s.length; i++){
+    const c = s.charCodeAt(i), ch = s[i];
+    if(c <= 0x20 || c === 0x7f || ch === "'" || ch === '"' || ch === '\\' || ch === '`' || ch === '$') return false;
+  }
+  return true;
+}
+function safeLibsURL(raw){
+  if(!/^https?:\/\/[^/]/.test(raw)) return false;
+  return safeShellChars(raw);
+}
+const SHELL_META = ';|&<>()*?[]{}~#!';
+function safeToken(s){
+  if(!safeShellChars(s)) return false;
+  for(let i = 0; i < s.length; i++){ if(SHELL_META.indexOf(s[i]) >= 0) return false; }
+  return true;
+}
+function checkCommand(add, field, cmd){
+  const tokens = String(cmd || '').split(/\s+/).filter(Boolean);
+  if(!tokens.length){ add(ENV_FILE, `${field} must not be empty`); return; }
+  tokens.forEach(t => {
+    if(!safeToken(t)) add(ENV_FILE, `${field} token "${t}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
+  });
+}
+function checkCredentialsCreate(add, section, c){
+  if(c.source === 'env'){
+    if(!c.variables.length) add(ENV_FILE, `${section}.secrets.credentials.create source: env requires a non-empty 'variables' list`);
+  } else if(c.source === 'file'){
+    if(!c.valuesFile) add(ENV_FILE, `${section}.secrets.credentials.create source: file requires 'values-file'`);
+  } else {
+    add(ENV_FILE, `${section}.secrets.credentials.create source must be "env" or "file"`);
+  }
+}
+function checkContainerTarget(add, m, c){
+  if(!isDNS1123(c.name)) add(ENV_FILE, `${c.section}.name "${c.name}" is not a valid DNS-1123 label`);
+  checkCommand(add, c.section + '.command', c.command);
+  if(!c.image) add(ENV_FILE, `${c.section}.image is required`);
+  c.ports.forEach(p => {
+    const parts = p.split(':');
+    if(parts.length > 2){ add(ENV_FILE, `${c.section}.ports entry "${p}" must be "host:container" (exactly one colon)`); return; }
+    parts.forEach((x, i) => {
+      const n = parseInt(x, 10);
+      if(String(n) !== x.trim()){ add(ENV_FILE, `${c.section}.ports entry "${p}" must be an integer or "host:container"`); return; }
+      if(n < 1 || n > 65535) add(ENV_FILE, `${c.section}.ports ${i === 0 && parts.length === 2 ? 'host' : 'container'} port ${n} must be 1-65535`);
+    });
+  });
+  if(c.cred && c.cred.create) checkCredentialsCreate(add, c.section, c.cred.create);
+  if(c.stores && !m.tls.truststore) add(ENV_FILE, `${c.section}.stores requires tls.truststore`);
+}
+function checkUnsuppliedVars(warn, m, cred){
+  if(!cred || !cred.create) return;
+  const supplied = {};
+  if(cred.create.source === 'env') cred.create.variables.forEach(v => { supplied[v] = true; });
+  else return; // source: file -- the generator cannot read the values-file
+  collectVars(m).forEach(v => {
+    if(!supplied[v]) warn(ENV_FILE, `\${${v}} is used but not supplied by the credentials Secret`);
+  });
+}
+function usesTLS(resolved){
+  return resolved.some(wf => [wf.source, wf.target].some(s =>
+    (s.system === 'solace' && isTCPS(s.host)) || (s.system === 'mq' && s.tls)));
+}
+
+// ===== Consolidation (port of internal/consolidate) =====
+function dedupKey(s){
+  return s.system === 'solace'
+    ? 'S|' + s.host + '|' + s.msgVpn + '|' + s.clientUser
+    : 'M|' + s.connName + '|' + s.queueManager + '|' + s.channel + '|' + s.user;
+}
+function resolveSide(m, s){
+  if(!s.connRef) return s;
+  const c = m.connections.find(x => x.name === s.connRef);
+  if(!c) return s;
+  const r = Object.assign({}, c.side);
+  r.connRef = s.connRef;
+  r.destKind = s.destKind;
+  r.dest = s.dest;
+  r.tune = s.tune;
+  return r;
+}
+function sanitize(s){
+  return String(s).replace(/[^A-Za-z0-9-]/g, '-');
+}
+function displayName(a){
+  if(a.name) return a.name;
+  if(a.connName) return a.connName;
+  return a.kind === 'solace' ? 'solace:' + a.vpn : 'mq:' + a.qm;
+}
+function mergeProp(list, p, warns, binder){
+  if(p.key === undefined) return list;
+  for(let i = 0; i < list.length; i++){
+    if(list[i].key === p.key){
+      if(list[i].val !== p.val || p.children){
+        warns.push(`binder "${binder}": passthrough key "${p.key}" set more than once; last (by filename) wins`);
+        list[i] = p;
+      }
+      return list;
+    }
+  }
+  return list.concat([p]);
+}
+function appendPassthrough(tool, pass, warns, binder){
+  const keys = {};
+  tool.forEach(p => { keys[p.key] = true; });
+  pass.forEach(p => {
+    if(keys[p.key]){
+      warns.push(`binder "${binder}": passthrough overrides tool-managed key "${p.key}"; tool value kept`);
+      return;
+    }
+    tool.push(p);
+  });
+  return tool;
+}
+// storePath mirrors tls.StorePath: config output keeps the path exactly as written
+// in env.yaml (the deploy path rewrites it to the mounted location instead).
+function storePath(file){ return file; }
+function solaceProps(m, keyAlias){
+  const out = [];
+  const ts = m.tls.truststore, ks = m.tls.keystore;
+  if(ts){
+    out.push({ key: 'SSL_VALIDATE_CERTIFICATE', val: 'true' });
+    out.push({ key: 'SSL_TRUST_STORE', val: storePath(ts.file) });
+    out.push({ key: 'SSL_TRUST_STORE_PASSWORD', val: ts.password });
+    out.push({ key: 'SSL_TRUST_STORE_FORMAT', val: ts.type });
+  }
+  if(keyAlias && ks){
+    out.push({ key: 'SSL_KEY_STORE', val: storePath(ks.file) });
+    out.push({ key: 'SSL_KEY_STORE_PASSWORD', val: ks.password });
+    out.push({ key: 'SSL_KEY_STORE_FORMAT', val: ks.type });
+    out.push({ key: 'SSL_PRIVATE_KEY_ALIAS', val: keyAlias });
+  }
+  return out;
+}
+function buildBundle(a, m){
+  const b = { name: a.name + '-bundle', tsLoc: '', tsPwd: '', tsTyp: '', hasKeystore: false, ksLoc: '', ksPwd: '', ksTyp: '', keyAlias: '' };
+  const ts = m.tls.truststore, ks = m.tls.keystore;
+  if(ts){ b.tsLoc = storePath(ts.file); b.tsPwd = ts.password; b.tsTyp = ts.type; }
+  if(a.keyAlias && ks){
+    b.hasKeystore = true; b.ksLoc = storePath(ks.file); b.ksPwd = ks.password;
+    b.ksTyp = ks.type; b.keyAlias = a.keyAlias;
+  }
+  return b;
+}
+
+function consolidateBuild(wfs, m){
+  const model = {
+    bundles: [], binders: [], bindings: [], jms: [], solaceB: [], workflows: [],
+    security: m.security, management: m.management, loggingLevel: m.loggingLevel,
+    leader: null, mqTLS: false
+  };
+  const warns = [];
+  const rwfs = wfs.map(wf => ({
+    file: wf.file, enabled: wf.enabled,
+    src: resolveSide(m, wf.source), tgt: resolveSide(m, wf.target)
+  }));
+
+  // pass 1: register + accumulate binders
+  const byKey = {}, accs = [];
+  function register(s){
+    const key = dedupKey(s);
+    let a = byKey[key];
+    if(!a){
+      a = { key: key, kind: s.system, name: '', host: '', vpn: '', user: '', pass: '',
+            conn: '', qm: '', ch: '', mqUser: '', mqPass: '', tls: false, keyAlias: '',
+            cipher: '', connName: '', pass2: [], binder: null };
+      if(s.system === 'solace'){
+        a.host = s.host; a.vpn = s.msgVpn; a.user = s.clientUser; a.pass = s.clientPass;
+        a.tls = isTCPS(s.host);
+      } else {
+        a.conn = s.connName; a.qm = s.queueManager; a.ch = s.channel;
+        a.mqUser = s.user; a.mqPass = s.password; a.tls = s.tls;
+      }
+      byKey[key] = a; accs.push(a);
+    }
+    if(!a.connName && s.connRef) a.connName = s.connRef;
+    if(!a.keyAlias) a.keyAlias = s.keyAlias;
+    if(s.system === 'mq'){
+      a.tls = a.tls || s.tls;
+      if(s.cipher){
+        if(a.cipher && a.cipher !== s.cipher){
+          warns.push(`binder "${displayName(a)}": conflicting cipher values on the same binder; last (by filename) wins`);
+        }
+        a.cipher = s.cipher;
+      }
+    }
+    (s.props || []).forEach(p => { a.pass2 = mergeProp(a.pass2, p, warns, displayName(a)); });
+    return a;
+  }
+  rwfs.forEach(w => { register(w.src); register(w.tgt); });
+
+  // binder names: contributing connection name, else sol-conn-N / mq-conn-N.
+  const used = {};
+  const assign = base => {
+    if(!used[base]){ used[base] = 1; return base; }
+    used[base]++;
+    return base + '-' + used[base];
+  };
+  let solN = 0, mqN = 0;
+  accs.forEach(a => {
+    let base;
+    if(a.connName) base = sanitize(a.connName);
+    else if(a.kind === 'solace'){ solN++; base = 'sol-conn-' + solN; }
+    else { mqN++; base = 'mq-conn-' + mqN; }
+    a.name = assign(base);
+  });
+
+  // finalize binders + bundles
+  accs.forEach(a => {
+    if(a.kind === 'solace'){
+      const sb = { host: a.host, msgVpn: a.vpn, clientUser: a.user, clientPass: a.pass,
+                   extras: (m.solaceDefaults || []).slice(), apiProps: [] };
+      let props = [];
+      if(a.tls) props = solaceProps(m, a.keyAlias);
+      sb.apiProps = appendPassthrough(props, a.pass2, warns, a.name);
+      a.binder = { name: a.name, kind: 'solace', solace: sb };
+    } else {
+      const mb = { queueManager: a.qm, channel: a.ch, connName: a.conn, user: a.mqUser,
+                   password: a.mqPass, sslBundle: '', addlProps: [] };
+      if(a.tls){
+        mb.sslBundle = a.name + '-bundle';
+        model.mqTLS = true;
+        model.bundles.push(buildBundle(a, m));
+      }
+      const props = a.cipher ? [{ key: 'WMQ_SSL_CIPHER_SUITE', val: a.cipher }] : [];
+      mb.addlProps = appendPassthrough(props, a.pass2, warns, a.name);
+      a.binder = { name: a.name, kind: 'mq', mq: mb };
+    }
+    model.binders.push(a.binder);
+  });
+  model.binders.push({ name: 'undefined', kind: 'undefined' });
+
+  // pass 2: bindings, jms/solace options, workflow enables
+  rwfs.forEach((w, i) => {
+    const inName = 'input-' + i, outName = 'output-' + i;
+    const srcAcc = byKey[dedupKey(w.src)], tgtAcc = byKey[dedupKey(w.tgt)];
+    model.bindings.push({ name: inName, dest: w.src.dest, binder: srcAcc.binder.name });
+    model.bindings.push({ name: outName, dest: w.tgt.dest, binder: tgtAcc.binder.name });
+    emitBindingOptions(model, inName, w.src, true, w.file);
+    emitBindingOptions(model, outName, w.tgt, false, w.file);
+    model.workflows.push({ id: i, enabled: w.enabled });
+    if(srcAcc.binder.name === tgtAcc.binder.name && w.src.dest === w.tgt.dest){
+      warns.push(`workflow "${w.file}": source and target resolve to the same binder and destination "${w.src.dest}" (possible message loop)`);
+    }
+  });
+
+  model.leader = buildLeaderElection(m);
+  return { model: model, warns: warns };
+}
+
+function emitBindingOptions(model, name, s, isInput, file){
+  const role = isInput ? 'consumer' : 'producer';
+  const extra = (s.tune || []).slice();
+  if(s.system === 'mq'){
+    const jb = { name: name, role: role, destType: s.destKind, durable: '', extra: extra };
+    if(isInput && s.destKind === 'topic'){
+      jb.durable = durableName(s.connName, s.queueManager, s.dest, file);
+    }
+    model.jms.push(jb);
+    return;
+  }
+  // Solace defaults: a consumer binds to a queue endpoint, a producer publishes to
+  // a topic. Emit destination-type only when the side departs from that default.
+  let destType = '';
+  if(isInput && s.destKind === 'topic') destType = 'topic';
+  else if(!isInput && s.destKind === 'queue') destType = 'queue';
+  if(!destType && !extra.length) return;
+  model.solaceB.push({ name: name, role: role, destType: destType, extra: extra });
+}
+
+function buildLeaderElection(m){
+  const le = m.leader;
+  if(!le.present || !le.mode || le.mode === 'standalone') return null;
+  const out = { mode: le.mode, queue: le.queue, failOver: le.failOver, session: null };
+  let sess = null;
+  if(le.connRef){
+    const c = m.connections.find(x => x.name === le.connRef);
+    if(c) sess = c.side;
+  } else if(le.session){
+    sess = le.session;
+  }
+  if(sess){
+    const s = { host: sess.host, msgVpn: sess.msgVpn, clientUser: sess.clientUser, clientPass: sess.clientPass, apiProps: [] };
+    if(isTCPS(sess.host)) s.apiProps = solaceProps(m, sess.keyAlias);
+    out.session = s;
+  }
+  return out;
+}
+
+function shardWorkflows(wfs){
+  if(wfs.length <= MAX_WF_PER_INSTANCE) return [wfs];
+  const out = [];
+  for(let i = 0; i < wfs.length; i += MAX_WF_PER_INSTANCE) out.push(wfs.slice(i, i + MAX_WF_PER_INSTANCE));
+  return out;
+}
+// buildShards mirrors gen.buildShards: one application.yml per connector instance,
+// with the leader-election queue suffixed per instance when there is more than one.
+function buildShards(m){
+  const chunks = shardWorkflows(m.wfs);
+  const outs = [], warns = [];
+  chunks.forEach((c, i) => {
+    const r = consolidateBuild(c, m);
+    warns.push.apply(warns, r.warns);
+    if(chunks.length > 1 && r.model.leader && r.model.leader.queue){
+      r.model.leader.queue = `${r.model.leader.queue}-${i + 1}`;
+    }
+    outs.push(renderApplication(r.model));
+  });
+  return { outs: outs, warns: warns };
+}
+
+// ===== Rendering (port of internal/render) =====
+function renderApplication(mm){
+  const out = [];
+  const line = (ind, s) => out.push(' '.repeat(ind) + s);
+  line(0, 'spring:');
+  if(mm.bundles.length) renderBundles(line, mm.bundles);
+  renderCloudStream(line, mm);
+  renderConnector(line, mm);
+  renderManagement(line, mm.management);
+  renderLoggingLevel(line, mm.loggingLevel);
+  return out.join('\n') + '\n';
+}
+function renderBundles(line, bundles){
+  line(2, 'ssl:'); line(4, 'bundle:'); line(6, 'jks:');
+  bundles.forEach(b => {
+    line(8, b.name + ':');
+    line(10, 'truststore:');
+    line(12, 'location: ' + b.tsLoc);
+    line(12, 'password: ' + b.tsPwd);
+    line(12, 'type: ' + b.tsTyp);
+    if(b.hasKeystore){
+      line(10, 'keystore:');
+      line(12, 'location: ' + b.ksLoc);
+      line(12, 'password: ' + b.ksPwd);
+      line(12, 'type: ' + b.ksTyp);
+      line(10, 'key:');
+      line(12, 'alias: ' + b.keyAlias);
+    }
+  });
+}
+function renderCloudStream(line, mm){
+  line(2, 'cloud:'); line(4, 'stream:');
+  line(6, 'binders:');
+  mm.binders.forEach(b => {
+    line(8, b.name + ':');
+    if(b.kind === 'solace'){
+      line(10, 'type: solace');
+      line(10, 'environment:');
+      line(12, 'solace:');
+      line(14, 'java:');
+      line(16, 'host: ' + b.solace.host);
+      line(16, 'msg-vpn: ' + b.solace.msgVpn);
+      if(b.solace.clientUser) line(16, 'client-username: ' + b.solace.clientUser);
+      if(b.solace.clientPass) line(16, 'client-password: ' + b.solace.clientPass);
+      b.solace.extras.forEach(p => renderProp(line, 16, p));
+      if(b.solace.apiProps.length){
+        line(16, 'api-properties:');
+        b.solace.apiProps.forEach(p => renderProp(line, 18, p));
+      }
+    } else if(b.kind === 'mq'){
+      line(10, 'type: jms');
+      line(10, 'environment:');
+      line(12, 'ibm:');
+      line(14, 'mq:');
+      line(16, 'queue-manager: ' + b.mq.queueManager);
+      line(16, 'channel: ' + b.mq.channel);
+      line(16, 'conn-name: ' + b.mq.connName);
+      if(b.mq.user) line(16, 'user: ' + b.mq.user);
+      if(b.mq.password) line(16, 'password: ' + b.mq.password);
+      if(b.mq.sslBundle) line(16, 'ssl-bundle: ' + b.mq.sslBundle);
+      if(b.mq.addlProps.length){
+        line(16, 'additional-properties:');
+        b.mq.addlProps.forEach(p => renderProp(line, 18, p));
+      }
+    } else {
+      line(10, 'type: undefined');
+    }
+  });
+  line(6, 'bindings:');
+  mm.bindings.forEach(bd => {
+    line(8, bd.name + ':');
+    line(10, 'destination: ' + bd.dest);
+    line(10, 'binder: ' + bd.binder);
+  });
+  if(mm.jms.length){
+    line(6, 'jms:'); line(8, 'bindings:');
+    mm.jms.forEach(jb => {
+      line(10, jb.name + ':');
+      line(12, jb.role + ':');
+      if(jb.destType) line(14, 'destination-type: ' + jb.destType);
+      if(jb.durable) line(14, 'durable-subscription-name: ' + jb.durable);
+      jb.extra.forEach(p => renderProp(line, 14, p));
+    });
+  }
+  if(mm.solaceB.length){
+    line(6, 'solace:'); line(8, 'bindings:');
+    mm.solaceB.forEach(sb => {
+      line(10, sb.name + ':');
+      line(12, sb.role + ':');
+      if(sb.destType) line(14, 'destination-type: ' + sb.destType);
+      sb.extra.forEach(p => renderProp(line, 14, p));
+    });
+  }
+}
+function renderConnector(line, mm){
+  line(0, 'solace:');
+  line(2, 'connector:');
+  line(4, 'workflows:');
+  mm.workflows.forEach(wf => {
+    line(6, wf.id + ':');
+    line(8, 'enabled: ' + (wf.enabled ? 'true' : 'false'));
+  });
+  if(mm.security.present){
+    line(4, 'security:');
+    line(6, 'enabled: ' + (mm.security.enabled ? 'true' : 'false'));
+    if(mm.security.users.length){
+      line(6, 'users:');
+      mm.security.users.forEach(u => {
+        line(8, '- name: ' + u.name);
+        line(10, 'password: ' + u.password);
+      });
+    }
+  }
+  if(mm.leader) renderLeaderElection(line, mm.leader);
+}
+function renderLeaderElection(line, le){
+  line(4, 'management:');
+  line(6, 'leader-election:');
+  line(8, 'mode: ' + le.mode);
+  if(le.failOver && le.failOver.length){
+    line(8, 'fail-over:');
+    renderContainer(line, 10, le.failOver);
+  }
+  if(le.queue) line(6, 'queue: ' + le.queue);
+  const s = le.session;
+  if(s){
+    line(6, 'session:');
+    line(8, 'host: ' + s.host);
+    line(8, 'msg-vpn: ' + s.msgVpn);
+    if(s.clientUser) line(8, 'client-username: ' + s.clientUser);
+    if(s.clientPass) line(8, 'client-password: ' + s.clientPass);
+    if(s.apiProps.length){
+      line(8, 'api-properties:');
+      s.apiProps.forEach(p => renderProp(line, 10, p));
+    }
+  }
+}
+function renderManagement(line, mg){
+  if(!mg.present) return;
+  line(0, 'management:');
+  const port = parseInt(mg.port, 10);
+  if(port){ line(2, 'server:'); line(4, 'port: ' + port); }
+  if(mg.exposure){ line(2, 'endpoints:'); line(4, 'web:'); line(6, 'exposure:'); line(8, 'include: ' + mg.exposure); }
+  if(mg.healthShowDetails){ line(2, 'endpoint:'); line(4, 'health:'); line(6, 'show-details: ' + mg.healthShowDetails); }
+}
+function renderLoggingLevel(line, level){
+  if(!level || !level.length) return;
+  line(0, 'logging:');
+  line(2, 'level:');
+  level.forEach(p => line(4, p.key + ': ' + p.val));
+}
+function renderProp(line, indent, p){
+  if(!p.children){ line(indent, p.key + ': ' + p.val); return; }
+  line(indent, p.key + ':');
+  renderContainer(line, indent + 2, p.children);
+}
+function renderContainer(line, indent, nodes){
+  nodes.forEach(n => {
+    if(n.item !== undefined){ line(indent, '- ' + n.item); return; }
+    if(n.children){ line(indent, n.key + ':'); renderContainer(line, indent + 2, n.children); return; }
+    line(indent, n.key + ': ' + n.val);
+  });
+}
+
+// ===== Durable subscription name (UUIDv5 over SHA-1) =====
+// Pinned namespace from internal/consolidate/uuid.go. SHA-1 is implemented here
+// rather than via crypto.subtle so generation stays synchronous and works from a
+// file:// URL.
+const DURABLE_NS = '6ba7f4e2-9c1d-5a3b-8e47-2f9a0c7d13e5';
+const DURABLE_SEP = '\x1f'; // ASCII unit separator (durableUnitSep)
+function utf8Bytes(str){
+  const enc = new TextEncoder().encode(str);
+  return Array.prototype.slice.call(enc);
+}
+function sha1Bytes(bytes){
+  const msg = bytes.slice();
+  const ml = bytes.length * 8;
+  msg.push(0x80);
+  while(msg.length % 64 !== 56) msg.push(0);
+  const hi = Math.floor(ml / 4294967296);
+  msg.push((hi >>> 24) & 255, (hi >>> 16) & 255, (hi >>> 8) & 255, hi & 255,
+           (ml >>> 24) & 255, (ml >>> 16) & 255, (ml >>> 8) & 255, ml & 255);
+  let h0 = 0x67452301, h1 = 0xEFCDAB89, h2 = 0x98BADCFE, h3 = 0x10325476, h4 = 0xC3D2E1F0;
+  const w = new Array(80);
+  for(let i = 0; i < msg.length; i += 64){
+    for(let j = 0; j < 16; j++){
+      w[j] = (msg[i + 4 * j] << 24) | (msg[i + 4 * j + 1] << 16) | (msg[i + 4 * j + 2] << 8) | msg[i + 4 * j + 3];
+    }
+    for(let j = 16; j < 80; j++){
+      const n = w[j - 3] ^ w[j - 8] ^ w[j - 14] ^ w[j - 16];
+      w[j] = (n << 1) | (n >>> 31);
+    }
+    let a = h0, b = h1, c = h2, d = h3, e = h4;
+    for(let j = 0; j < 80; j++){
+      let f, k;
+      if(j < 20){ f = (b & c) | ((~b) & d); k = 0x5A827999; }
+      else if(j < 40){ f = b ^ c ^ d; k = 0x6ED9EBA1; }
+      else if(j < 60){ f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDC; }
+      else { f = b ^ c ^ d; k = 0xCA62C1D6; }
+      const t = (((a << 5) | (a >>> 27)) + f + e + k + w[j]) | 0;
+      e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = t;
+    }
+    h0 = (h0 + a) | 0; h1 = (h1 + b) | 0; h2 = (h2 + c) | 0; h3 = (h3 + d) | 0; h4 = (h4 + e) | 0;
+  }
+  const out = [];
+  [h0, h1, h2, h3, h4].forEach(h => out.push((h >>> 24) & 255, (h >>> 16) & 255, (h >>> 8) & 255, h & 255));
+  return out;
+}
+function uuidv5(nsHex, name){
+  const ns = [];
+  const hex = nsHex.replace(/-/g, '');
+  for(let i = 0; i < 32; i += 2) ns.push(parseInt(hex.substr(i, 2), 16));
+  const sum = sha1Bytes(ns.concat(utf8Bytes(name)));
+  const u = sum.slice(0, 16);
+  u[6] = (u[6] & 0x0f) | 0x50;
+  u[8] = (u[8] & 0x3f) | 0x80;
+  const h = arr => arr.map(x => ('0' + x.toString(16)).slice(-2)).join('');
+  return h(u.slice(0, 4)) + '-' + h(u.slice(4, 6)) + '-' + h(u.slice(6, 8)) + '-' + h(u.slice(8, 10)) + '-' + h(u.slice(10, 16));
+}
+function durableName(connName, queueManager, topic, basename){
+  return 'solmq-' + uuidv5(DURABLE_NS, [connName, queueManager, topic, basename].join(DURABLE_SEP));
+}
+
+// ===== Store-only zip =====
+let CRC_TABLE = null;
+function crc32(u8){
+  if(!CRC_TABLE){
+    CRC_TABLE = new Uint32Array(256);
+    for(let n = 0; n < 256; n++){
+      let c = n;
+      for(let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      CRC_TABLE[n] = c >>> 0;
+    }
+  }
+  let c = 0xFFFFFFFF;
+  for(let i = 0; i < u8.length; i++) c = CRC_TABLE[(c ^ u8[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function zipStore(files){
+  const enc = new TextEncoder();
+  const parts = [], central = [];
+  let offset = 0;
+  const now = new Date();
+  const dt = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xffff;
+  const dd = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xffff;
+  files.forEach(f => {
+    const name = enc.encode(f.name), data = enc.encode(f.text), crc = crc32(data);
+    const lh = new Uint8Array(30 + name.length), lv = new DataView(lh.buffer);
+    lv.setUint32(0, 0x04034b50, true); lv.setUint16(4, 20, true); lv.setUint16(6, 0, true);
+    lv.setUint16(8, 0, true); lv.setUint16(10, dt, true); lv.setUint16(12, dd, true);
+    lv.setUint32(14, crc, true); lv.setUint32(18, data.length, true); lv.setUint32(22, data.length, true);
+    lv.setUint16(26, name.length, true); lv.setUint16(28, 0, true);
+    lh.set(name, 30);
+    parts.push(lh, data);
+    const ch = new Uint8Array(46 + name.length), cv = new DataView(ch.buffer);
+    cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0, true); cv.setUint16(10, 0, true); cv.setUint16(12, dt, true); cv.setUint16(14, dd, true);
+    cv.setUint32(16, crc, true); cv.setUint32(20, data.length, true); cv.setUint32(24, data.length, true);
+    cv.setUint16(28, name.length, true); cv.setUint32(42, offset, true);
+    ch.set(name, 46);
+    central.push(ch);
+    offset += lh.length + data.length;
+  });
+  const cdSize = central.reduce((n, c) => n + c.length, 0);
+  const end = new Uint8Array(22), ev = new DataView(end.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(8, files.length, true); ev.setUint16(10, files.length, true);
+  ev.setUint32(12, cdSize, true); ev.setUint32(16, offset, true);
+  return new Blob(parts.concat(central, [end]), { type: 'application/zip' });
+}
+
+// ===== Output =====
+function hl(yaml){
+  return yaml.split('\n').map(l => {
+    const el = l.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    if(/^\s*---\s*$/.test(el)) return '<span class="d">' + el + '</span>';
+    if(/^\s*#/.test(el)) return '<span class="c">' + el + '</span>';
+    const m = el.match(/^(\s*)([\w\.\-\/][^:]*?):\s+(.+)$/);
+    if(m) return m[1] + '<span class="k">' + m[2] + '</span>: <span class="v">' + m[3] + '</span>';
+    const m2 = el.match(/^(\s*)([\w\.\-\/][^:]*?):\s*$/);
+    if(m2) return m2[1] + '<span class="k">' + m2[2] + '</span>:';
+    return el;
+  }).join('\n');
+}
+function setPanel(id, text){
+  const e = $(id);
+  e.dataset.raw = text;
+  e.innerHTML = hl(text);
+}
+function esc(s){ return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+// syncPanels keeps one panel per file, reusing the existing nodes so the output
+// pane does not jump on every keystroke.
+function syncPanels(containerId, files){
+  const box = $(containerId);
+  while(box.children.length > files.length) box.removeChild(box.lastChild);
+  files.forEach((f, i) => {
+    let p = box.children[i];
+    if(!p){
+      p = document.createElement('div');
+      p.className = 'ypanel';
+      p.innerHTML = '<div class="ypanel-hdr"><span></span><div class="ypanel-actions">'
+        + '<button class="btn btn-c">Copy</button><button class="btn btn-d">Download</button>'
+        + '</div></div><div class="ycode"></div>';
+      const code = p.querySelector('.ycode');
+      p.querySelectorAll('button')[0].onclick = () => copyText(code.dataset.raw);
+      p.querySelectorAll('button')[1].onclick = () => dlText(code.dataset.raw, p.dataset.fn);
+      box.appendChild(p);
+    }
+    p.dataset.fn = f.name;
+    p.querySelector('.ypanel-hdr span').textContent = f.label || f.name;
+    const code = p.querySelector('.ycode');
+    code.dataset.raw = f.text;
+    code.innerHTML = hl(f.text);
+  });
+}
+
+function renderFindings(errs, warns){
+  const box = $('findings');
+  const rows = [];
+  errs.forEach(e => rows.push(`<div class="fi fi-e"><span class="tag">ERROR</span><span><span class="file">${esc(e.file)}</span>: ${esc(e.msg)}</span></div>`));
+  warns.forEach(w => rows.push(`<div class="fi fi-w"><span class="tag">WARN</span><span><span class="file">${esc(w.file)}</span>: ${esc(w.msg)}</span></div>`));
+  if(!rows.length){
+    rows.push('<div class="fi fi-ok">No findings. Run <span class="file">solmq-conn validate -e specs/env.yaml</span> for the authoritative check.</div>');
+  }
+  box.innerHTML = rows.join('');
+  $('f-count').textContent = `${errs.length} error(s), ${warns.length} warning(s)`;
+}
+
+let genTimer;
+function gen(){ clearTimeout(genTimer); genTimer = setTimeout(runGen, 120); }
+function runGen(){
+  const m = readModel();
+  setPanel('yc-env', emitEnv(m));
+  syncPanels('wf-panels', m.wfs.map(wf => ({ name: wf.file || 'workflow.yaml', text: emitWorkflow(wf) })));
+
+  const v = validateModel(m);
+  let warns = v.warns.slice();
+  if(v.errs.length){
+    syncPanels('app-panels', [{
+      name: 'application.yml',
+      label: 'application.yml (blocked)',
+      text: '# generate config stops at the first error and writes nothing.\n'
+          + '# Resolve the findings above to preview the consolidated application.yml.\n'
+    }]);
+  } else {
+    const shards = buildShards(m);
+    warns = warns.concat(shards.warns.map(w => ({ file: ENV_FILE, msg: w })));
+    syncPanels('app-panels', shards.outs.map((text, i) => {
+      const name = shards.outs.length > 1 ? `application-${i + 1}.yml` : 'application.yml';
+      return { name: name, label: `${name} (preview -- generate config is authoritative)`, text: text };
+    }));
+  }
+  renderFindings(v.errs, warns);
+  setPanel('yc-cmd', emitCommands(m));
+}
+
+// ===== Actions =====
+function toast(msg){
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 1600);
+}
+function copyText(text){ navigator.clipboard.writeText(text).then(() => toast('Copied to clipboard')); }
+function dlText(text, fn){
+  const b = new Blob([text], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(b);
+  a.download = fn;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+function copy(id){ copyText($(id).dataset.raw); }
+function dl(id, fn){ dlText($(id).dataset.raw, fn); }
+
+function downloadAll(){
+  const m = readModel();
+  const files = [{ name: 'specs/env.yaml', text: emitEnv(m) }];
+  m.wfs.forEach(wf => files.push({ name: 'specs/' + (wf.file || 'workflow.yaml'), text: emitWorkflow(wf) }));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(zipStore(files));
+  a.download = 'solmq-conn-specs.zip';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast(`${files.length} file(s) zipped`);
+}
+
+function selfTest(){
+  // The embedded block carries no trailing newline (it would otherwise be part of
+  // the markup); render.Application emits exactly one, so restore it before diffing.
+  const golden = $('golden').textContent.replace(/\r\n/g, '\n').replace(/\n*$/, '') + '\n';
+  const m = sampleModel();
+  const got = buildShards(m).outs[0] || '';
+  if(got === golden){ toast('Self-test PASS: sample matches the golden application.yml'); return; }
+  const g = golden.split('\n'), o = got.split('\n');
+  let i = 0;
+  while(i < Math.max(g.length, o.length) && g[i] === o[i]) i++;
+  toast(`Self-test FAIL at line ${i + 1}`);
+  console.error('self-test: line ' + (i + 1) + '\n  want: ' + JSON.stringify(g[i]) + '\n  got:  ' + JSON.stringify(o[i]));
+}
+
+// ===== Sample spec (mirrors internal/examples/files) =====
+function mkSide(o){
+  return Object.assign({
+    system: 'mq', connRef: '', host: '', msgVpn: '', clientUser: '', clientPass: '', keyAlias: '',
+    connName: '', queueManager: '', channel: '', user: '', password: '', tls: false, cipher: '',
+    destKind: 'queue', dest: '', props: [], tune: []
+  }, o);
+}
+function sampleModel(){
+  const mqCore = () => mkSide({
+    system: 'mq', connName: 'mqhost-core.internal(1414)', queueManager: 'QM_CORE',
+    channel: 'DSU.SVRCONN', user: 'appuser', password: '${MQ_CORE_PASSWORD}',
+    tls: true, cipher: 'TLS_RSA_WITH_AES_256_CBC_SHA256', keyAlias: 'mq-client'
+  });
+  const vars = ['SOL_PASSWORD', 'MQ_CORE_PASSWORD', 'MQ_ARCHIVE_PASSWORD', 'EDGE_SOL_PASSWORD',
+                'TRUSTSTORE_PASSWORD', 'KEYSTORE_PASSWORD', 'HEALTHCHECK_PASSWORD'];
+  const cred = { create: { name: 'solmq-credentials', source: 'env', variables: vars, valuesFile: '' } };
+  const image = 'solace/solace-pubsub-connector-ibmmq:2.13.0';
+  return {
+    workflows: { dir: '.', filePattern: '*' },
+    connections: [
+      { name: 'prod-solace', side: mkSide({
+          system: 'solace', host: 'tcps://broker.internal:55443', msgVpn: 'prod',
+          clientUser: 'connector', clientPass: '${SOL_PASSWORD}', keyAlias: 'solace-client',
+          destKind: '', props: parseProps('REAPPLY_SUBSCRIPTIONS: true') }) },
+      { name: 'mq-archive', side: mkSide({
+          system: 'mq', connName: 'mqhost-archive.internal(1414)', queueManager: 'QM_ARCHIVE',
+          channel: 'DSU.SVRCONN', user: 'appuser', password: '${MQ_ARCHIVE_PASSWORD}',
+          tls: true, cipher: 'TLS_RSA_WITH_AES_256_CBC_SHA256', destKind: '' }) }
+    ],
+    wfs: [
+      { file: 'workflow-0.yaml', enabled: true,
+        source: mkSide(Object.assign(mqCore(), { destKind: 'queue', dest: 'CORE.ORDERS.OUT' })),
+        target: mkSide({ system: 'solace', connRef: 'prod-solace', destKind: 'topic', dest: 'orders/from-mq' }) },
+      { file: 'workflow-1.yaml', enabled: true,
+        source: mkSide({ system: 'solace', connRef: 'prod-solace', destKind: 'queue', dest: 'Q.TO-MQ.EVENTS' }),
+        target: mkSide(Object.assign(mqCore(), { destKind: 'queue', dest: 'EVENTS.IN' })) },
+      { file: 'workflow-2.yaml', enabled: true,
+        source: mkSide({ system: 'mq', connRef: 'mq-archive', destKind: 'queue', dest: 'ARCHIVE.REPLAY.OUT' }),
+        target: mkSide({ system: 'solace', connRef: 'prod-solace', destKind: 'topic', dest: 'archive/from-mq' }) },
+      { file: 'workflow-3.yaml', enabled: true,
+        source: mkSide(Object.assign(mqCore(), { destKind: 'topic', dest: 'CORE.EVENTS.BROADCAST' })),
+        target: mkSide({ system: 'solace', host: 'tcp://edge-broker.internal:55555', msgVpn: 'edge',
+          clientUser: 'bridge', clientPass: '${EDGE_SOL_PASSWORD}', destKind: 'topic', dest: 'events/from-mq' }) }
+    ],
+    tls: {
+      truststore: { file: './certs/truststore.jks', password: '${TRUSTSTORE_PASSWORD}', type: 'JKS' },
+      keystore: { file: './certs/keystore.jks', password: '${KEYSTORE_PASSWORD}', type: 'JKS' }
+    },
+    loggingLevel: parseProps('root: INFO\ncom.solace.connector: INFO'),
+    solaceDefaults: parseProps('connect-retries: -1\nreconnect-retries: -1'),
+    management: { present: true, port: '8090', exposure: 'health,info,workflows', healthShowDetails: 'always' },
+    security: { present: true, enabled: true, users: [{ name: 'healthcheck', password: '${HEALTHCHECK_PASSWORD}' }] },
+    leader: {
+      present: true, mode: 'active_standby', queue: 'solmq-connector-mgmt', connRef: 'prod-solace', session: null,
+      failOver: parseProps('max-attempts: 5\nback-off-initial-interval: 1000\nback-off-max-interval: 10000\nback-off-multiplier: 1.5')
+    },
+    kube: {
+      command: 'kubectl',
+      deployment: { name: 'solmq-connector', namespace: 'solace-connectors', image: image,
+                    replicas: 2, cpu: '1', memory: '1Gi', timezone: 'Asia/Singapore' },
+      service: { enabled: true, port: '8090' },
+      syslog: null, libs: null, cred: cred, stores: { create: 'solmq-tls' }
+    },
+    docker: {
+      section: 'docker', command: 'docker', image: image, name: 'solmq-connector',
+      restart: 'unless-stopped', timezone: 'Asia/Singapore', ports: ['8090'],
+      cred: cred, stores: true, libsDir: ''
+    },
+    podman: {
+      section: 'podman', command: 'podman', image: image, name: 'solmq-connector',
+      restart: 'unless-stopped', timezone: 'Asia/Singapore', ports: ['8090'],
+      cred: cred, stores: true, libsDir: '',
+      mode: 'run', quadlet: { scope: 'auto', dir: '' }
+    }
+  };
+}
+
+// ===== Load / reset =====
+function setV(id, val){ if($(id)) $(id).value = val == null ? '' : val; }
+function setC(id, on){ if($(id)) $(id).checked = !!on; }
+
+function fillConn(card, c){
+  const q = cls => card.querySelector('.' + cls);
+  q('c-name').value = c.name;
+  q('c-sys').value = c.side.system;
+  q('c-host').value = c.side.host; q('c-vpn').value = c.side.msgVpn;
+  q('c-user').value = c.side.clientUser; q('c-pass').value = c.side.clientPass;
+  q('c-alias').value = c.side.system === 'solace' ? c.side.keyAlias : '';
+  q('c-conn').value = c.side.connName; q('c-qm').value = c.side.queueManager;
+  q('c-ch').value = c.side.channel; q('c-mquser').value = c.side.user;
+  q('c-mqpass').value = c.side.password; q('c-tls').checked = c.side.tls;
+  q('c-cipher').value = c.side.cipher;
+  q('c-mqalias').value = c.side.system === 'mq' ? c.side.keyAlias : '';
+  q('c-props').value = emitProps(c.side.props, '');
+}
+function fillSide(box, s){
+  const q = cls => box.querySelector('.' + cls);
+  q('x-sys').value = s.system;
+  q('x-mode').value = s.connRef ? 'ref' : 'inline';
+  q('x-ref').value = s.connRef;
+  q('x-host').value = s.host; q('x-vpn').value = s.msgVpn;
+  q('x-user').value = s.clientUser; q('x-pass').value = s.clientPass;
+  q('x-alias').value = s.system === 'solace' ? s.keyAlias : '';
+  q('x-conn').value = s.connName; q('x-qm').value = s.queueManager;
+  q('x-ch').value = s.channel; q('x-mquser').value = s.user;
+  q('x-mqpass').value = s.password; q('x-tls').checked = s.tls;
+  q('x-cipher').value = s.cipher;
+  q('x-mqalias').value = s.system === 'mq' ? s.keyAlias : '';
+  q('x-props').value = emitProps(s.props, '');
+  q('x-tune').value = emitProps(s.tune, '');
+  syncSide(q('x-sys'));
+}
+function fillWf(card, w){
+  card.querySelector('.w-file').value = w.file;
+  card.querySelector('.w-en').checked = w.enabled;
+  fillSide(card.querySelector('.sb-src'), w.source);
+  fillSide(card.querySelector('.sb-tgt'), w.target);
+}
+
+function clearForm(){
+  ['conns-list', 'wfs-list', 'users-list', 'dk-ports', 'pd-ports'].forEach(id => { $(id).innerHTML = ''; });
+  ['i-ts-on', 'i-ks-on', 'i-mgmt-on', 'i-sec-on', 'i-k8s-on', 'i-dk-on', 'i-pd-on',
+   'i-k8s-sl-on', 'i-k8s-svc', 'i-dk-stores', 'i-pd-stores', 'i-dk-libs-on', 'i-pd-libs-on'].forEach(id => setC(id, false));
+  ['i-log', 'i-soldef', 'i-le-queue', 'i-le-fo', 'i-k8s-name', 'i-k8s-ns', 'i-k8s-img', 'i-k8s-tz',
+   'i-k8s-cpu', 'i-k8s-mem', 'i-dk-img', 'i-pd-img', 'i-dk-tz', 'i-pd-tz',
+   'i-k8s-cred-varlist', 'i-dk-cred-varlist', 'i-pd-cred-varlist',
+   'i-ts-file', 'i-ts-pass', 'i-ks-file', 'i-ks-pass'].forEach(id => setV(id, ''));
+  setV('i-wf-dir', '.'); setV('i-wf-pat', '*');
+  setV('i-le-mode', ''); setV('i-k8s-libs', ''); setV('i-k8s-cred', ''); setV('i-k8s-stores', '');
+  setV('i-dk-cred', ''); setV('i-pd-cred', ''); setV('i-k8s-rep', '1');
+  setV('i-ts-type', 'JKS'); setV('i-ks-type', 'JKS');
+  applyAllToggles();
+}
+function applyAllToggles(){
+  [['i-ts-on', 'ts-fields'], ['i-ks-on', 'ks-fields'], ['i-mgmt-on', 'mgmt-fields'], ['i-sec-on', 'sec-fields'],
+   ['i-k8s-on', 'k8s-fields'], ['i-k8s-sl-on', 'k8s-sl-fields'], ['i-dk-on', 'dk-fields'],
+   ['i-pd-on', 'pd-fields'], ['i-dk-libs-on', 'dk-libs-f'], ['i-pd-libs-on', 'pd-libs-f']]
+    .forEach(([c, f]) => show(f, C(c)));
+  syncLE(); syncK8s(); syncCtr('dk'); syncCtr('pd');
+}
+
+function resetAll(){
+  clearForm();
+  addWf();
+  gen();
+}
+
+function loadSample(){
+  const m = sampleModel();
+  clearForm();
+  setV('i-wf-dir', m.workflows.dir); setV('i-wf-pat', m.workflows.filePattern);
+  m.connections.forEach(c => addConn(c));
+  refreshRefs();
+  m.wfs.forEach(w => addWf(w));
+
+  setC('i-ts-on', true); setV('i-ts-file', m.tls.truststore.file);
+  setV('i-ts-pass', m.tls.truststore.password); setV('i-ts-type', m.tls.truststore.type);
+  setC('i-ks-on', true); setV('i-ks-file', m.tls.keystore.file);
+  setV('i-ks-pass', m.tls.keystore.password); setV('i-ks-type', m.tls.keystore.type);
+  setV('i-log', emitProps(m.loggingLevel, ''));
+  setV('i-soldef', emitProps(m.solaceDefaults, ''));
+
+  setC('i-mgmt-on', true);
+  setV('i-mgmt-port', m.management.port); setV('i-mgmt-exp', m.management.exposure);
+  setV('i-mgmt-hsd', m.management.healthShowDetails);
+  setC('i-sec-on', true); setC('i-sec-en', m.security.enabled);
+  m.security.users.forEach(u => addUser(u));
+
+  setV('i-le-mode', m.leader.mode); setV('i-le-queue', m.leader.queue);
+  setV('i-le-src', 'ref'); setV('i-le-fo', emitProps(m.leader.failOver, ''));
+
+  const k = m.kube;
+  setC('i-k8s-on', true);
+  setV('i-k8s-cmd', k.command); setV('i-k8s-name', k.deployment.name);
+  setV('i-k8s-ns', k.deployment.namespace); setV('i-k8s-img', k.deployment.image);
+  setV('i-k8s-rep', k.deployment.replicas); setV('i-k8s-cpu', k.deployment.cpu);
+  setV('i-k8s-mem', k.deployment.memory); setV('i-k8s-tz', k.deployment.timezone);
+  setC('i-k8s-svc', k.service.enabled); setV('i-k8s-svcport', k.service.port);
+  setV('i-k8s-cred', 'create'); setV('i-k8s-cred-name', k.cred.create.name);
+  setV('i-k8s-cred-src', 'env'); setV('i-k8s-cred-varlist', k.cred.create.variables.join('\n'));
+  setV('i-k8s-stores', 'create'); setV('i-k8s-stores-name', k.stores.create);
+
+  [['dk', m.docker], ['pd', m.podman]].forEach(([p, c]) => {
+    setC('i-' + p + '-on', true);
+    setV('i-' + p + '-cmd', c.command); setV('i-' + p + '-img', c.image);
+    setV('i-' + p + '-name', c.name); setV('i-' + p + '-restart', c.restart);
+    setV('i-' + p + '-tz', c.timezone);
+    c.ports.forEach(v => addPort(p + '-ports', v));
+    setV('i-' + p + '-cred', 'create'); setV('i-' + p + '-cred-name', c.cred.create.name);
+    setV('i-' + p + '-cred-src', 'env'); setV('i-' + p + '-cred-varlist', c.cred.create.variables.join('\n'));
+    setC('i-' + p + '-stores', true);
+  });
+  setV('i-pd-mode', m.podman.mode); setV('i-pd-scope', m.podman.quadlet.scope);
+
+  applyAllToggles();
+  // conn-ref pickers are populated after the connections exist; re-apply the refs.
+  refreshRefs();
+  const cards = document.querySelectorAll('#wfs-list .card');
+  m.wfs.forEach((w, i) => {
+    cards[i].querySelector('.sb-src .x-ref').value = w.source.connRef;
+    cards[i].querySelector('.sb-tgt .x-ref').value = w.target.connRef;
+  });
+  setV('i-le-ref', m.leader.connRef);
+  renumberWfs();
+  gen();
+}
+
+// ===== Init =====
+const formScroll = $('formScroll');
+formScroll.addEventListener('input', e => { if(e.target.classList.contains('c-name')) refreshRefs(); gen(); });
+formScroll.addEventListener('change', gen);
+
+const sbItems = document.querySelectorAll('.sb-item[data-s]');
+formScroll.addEventListener('scroll', () => {
+  let cur = null;
+  sbItems.forEach(si => {
+    const sec = $(si.dataset.s);
+    if(!sec) return;
+    const r = sec.getBoundingClientRect(), fr = formScroll.getBoundingClientRect();
+    if(r.top <= fr.top + fr.height * .3) cur = si;
+  });
+  sbItems.forEach(s => s.classList.remove('active'));
+  if(cur) cur.classList.add('active');
+});
+sbItems.forEach(si => si.addEventListener('click', () => {
+  const sec = $(si.dataset.s);
+  if(sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}));
+
+resetAll();
+</script>
+</body>
+</html>
