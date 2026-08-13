@@ -4,21 +4,24 @@
 into a consolidated `application.yml` for the **Solace PubSub+ Connector for IBM
 MQ** (`solace/solace-pubsub-connector-ibmmq:2.13.0`), generates the Kubernetes,
 Docker Compose, or Podman artifacts that run it, and can apply or tear those down
-by shelling out to `kubectl`/`oc`, `docker`, or `podman`/`systemctl`. More than 20
-workflows are split across multiple connector instances (20 per instance)
-automatically.
+by shelling out to `kubectl`/`oc`, `docker`, or `podman`/`systemctl`. One folder is
+one connector instance, holding up to 20 workflows; a folder with more is rejected,
+so splitting them across connectors stays your decision.
 
 - **One config file.** `env.yaml` holds the connector defaults, workflow
   discovery, and a per-target (`kubernetes:` / `docker:` / `podman:`) deploy section.
 - **Reusable connections**: define `connections.<name>` once in `env.yaml`,
   reference it with `conn-ref`; identical connections dedup into shared **binders**.
-- Auto-numbers workflows by sorted filename (auto-splitting into additional
-  instances past 20), derives destination-types from `queue:`/`topic:`, and
-  auto-names a **durable subscription** for every MQ topic source.
+- Auto-numbers workflows by sorted filename, derives destination-types from
+  `queue:`/`topic:`, and auto-names a **durable subscription** for every MQ topic
+  source.
 - Implements **leader-election** (`standalone` / `active_active` / `active_standby`).
 - Wires **TLS + mTLS** for both Solace and MQ from one shared truststore/keystore.
-- Secrets stay `${VAR}` placeholders -- never inlined into config; deploy
-  materializes them into Secrets or env-files (0600), never logged.
+- **One secrets model everywhere**: each credential is declared as a literal or an
+  `-env` variable name, rendered into config only as a derived stable name, and
+  mounted as a file under `/run/secrets/` -- a Kubernetes Secret volume, a compose
+  environment-provider secret, or a podman secret. No credential value or host
+  variable name reaches any generated file, and nothing secret is written to disk.
 
 ## Quick start
 
@@ -84,18 +87,17 @@ solmq-conn generate config -e specs/env.yaml -o application.yml  # ...or written
 
 Add a `kubernetes:` section ([userguide.md](userguide.md) section 7) and
 `solmq-conn generate kubernetes -e specs/env.yaml` emits the full manifest set
-(Namespace, ConfigMap, Deployment, Service, Secrets) -- one
-ConfigMap/Deployment/Service per instance, with shared Namespace/Secrets, when
-workflows exceed 20. `solmq-conn deploy kubernetes -e specs/env.yaml` then applies
-it by piping the manifest to `kubectl`/`oc`.
+(Namespace, ConfigMap, Deployment, Service, Secrets).
+`solmq-conn deploy kubernetes -e specs/env.yaml` then applies it by piping the
+manifest to `kubectl`/`oc`.
 
 ## Commands
 
 ```text
-solmq-conn generate config     [-e env.yaml] [-o out]        Emit application.yml (per instance)
+solmq-conn generate config     [-e env.yaml] [-o out]        Emit application.yml
 solmq-conn generate kubernetes [-e env.yaml] [-o out]        Emit ConfigMap+Deployment+Service (+Secrets)
 solmq-conn generate docker     [-e env.yaml] [-o out]        Emit docker-compose.yml (application.yml inlined)
-solmq-conn generate podman     [-e env.yaml] [-o out]        Emit a podman run script or quadlet unit(s)
+solmq-conn generate podman     [-e env.yaml] [-o out]        Emit a podman run script or quadlet unit
 solmq-conn deploy  kubernetes|docker|podman  [-e env.yaml]   Apply: kubectl/oc, docker compose up, or systemctl start
 solmq-conn delete  kubernetes|docker|podman  [-e env.yaml]   Tear the same target down
 solmq-conn validate            [-e env.yaml]                 Lint the whole env.yaml + workflows

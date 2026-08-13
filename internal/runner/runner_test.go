@@ -24,11 +24,12 @@ type fakeRunner struct {
 type call struct {
 	argv  []string
 	stdin string
+	env   []string
 }
 
-func (f *fakeRunner) Run(argv []string, stdin string) (string, error) {
+func (f *fakeRunner) Run(c Cmd) (string, error) {
 	idx := len(f.calls)
-	f.calls = append(f.calls, call{argv: argv, stdin: stdin})
+	f.calls = append(f.calls, call{argv: c.Argv, stdin: c.Stdin, env: c.Env})
 	if e, ok := f.errByCall[idx]; ok {
 		return "out", e
 	}
@@ -81,6 +82,11 @@ func TestHelperProcess(t *testing.T) {
 	case "fail":
 		fmt.Fprintln(os.Stdout, "before-exit")
 		os.Exit(3)
+	case "env":
+		fmt.Fprintf(os.Stdout, "AMBIENT_ONLY=%s OVERRIDE=%s EXTRA_ONLY=%s\n",
+			os.Getenv("RUNNER_TEST_AMBIENT_ONLY"),
+			os.Getenv("RUNNER_TEST_OVERRIDE"),
+			os.Getenv("RUNNER_TEST_EXTRA_ONLY"))
 	default:
 		fmt.Fprintf(os.Stderr, "TestHelperProcess: unknown mode %q\n", args[0])
 		os.Exit(2)
@@ -90,7 +96,7 @@ func TestHelperProcess(t *testing.T) {
 
 func TestOSRunWiresStdinToChild(t *testing.T) {
 	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	out, err := (OS{}).Run(helperProcessArgv(os.Args[0], "stdin"), "hello-stdin\n")
+	out, err := (OS{}).Run(Cmd{Argv: helperProcessArgv(os.Args[0], "stdin"), Stdin: "hello-stdin\n"})
 	if err != nil {
 		t.Fatalf("Run returned error: %v (output %q)", err, out)
 	}
@@ -101,7 +107,7 @@ func TestOSRunWiresStdinToChild(t *testing.T) {
 
 func TestOSRunCombinesStdoutAndStderr(t *testing.T) {
 	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	out, err := (OS{}).Run(helperProcessArgv(os.Args[0], "both"), "")
+	out, err := (OS{}).Run(Cmd{Argv: helperProcessArgv(os.Args[0], "both")})
 	if err != nil {
 		t.Fatalf("Run returned error: %v (output %q)", err, out)
 	}
@@ -115,12 +121,36 @@ func TestOSRunCombinesStdoutAndStderr(t *testing.T) {
 
 func TestOSRunNonZeroExitReturnsErrorWithOutput(t *testing.T) {
 	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	out, err := (OS{}).Run(helperProcessArgv(os.Args[0], "fail"), "")
+	out, err := (OS{}).Run(Cmd{Argv: helperProcessArgv(os.Args[0], "fail")})
 	if err == nil {
 		t.Fatalf("non-zero child exit must return a non-nil error, output = %q", out)
 	}
 	if !strings.Contains(out, "before-exit") {
 		t.Errorf("output written before the failing exit must still be captured: %q", out)
+	}
+}
+
+// TestOSRunEnvReachesChildAndAmbientInherited pins the two guarantees in the Cmd.Env
+// doc comment: a supplied entry reaches the child, an ambient variable the child
+// process would otherwise see (via os.Environ()) is still inherited when Env carries
+// unrelated entries, and a supplied entry wins over an ambient one of the same name.
+func TestOSRunEnvReachesChildAndAmbientInherited(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Setenv("RUNNER_TEST_AMBIENT_ONLY", "ambient-only-value")
+	t.Setenv("RUNNER_TEST_OVERRIDE", "ambient-should-lose")
+	out, err := (OS{}).Run(Cmd{
+		Argv: helperProcessArgv(os.Args[0], "env"),
+		Env: []string{
+			"RUNNER_TEST_OVERRIDE=override-wins",
+			"RUNNER_TEST_EXTRA_ONLY=extra-only-value",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v (output %q)", err, out)
+	}
+	want := "AMBIENT_ONLY=ambient-only-value OVERRIDE=override-wins EXTRA_ONLY=extra-only-value\n"
+	if out != want {
+		t.Errorf("output = %q, want %q", out, want)
 	}
 }
 
@@ -138,7 +168,7 @@ func TestOSRunAcceptsAbsolutePathArgv0(t *testing.T) {
 		t.Fatalf("os.Executable() returned a non-absolute path %q", exe)
 	}
 	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	out, err := (OS{}).Run(helperProcessArgv(exe, "stdin"), "abs-argv0-ok\n")
+	out, err := (OS{}).Run(Cmd{Argv: helperProcessArgv(exe, "stdin"), Stdin: "abs-argv0-ok\n"})
 	if err != nil {
 		t.Fatalf("Run with absolute argv[0] returned error: %v (output %q)", err, out)
 	}
@@ -158,9 +188,9 @@ func TestParseCommand(t *testing.T) {
 		{"  oc   ", []string{"oc"}, true},
 		{"", nil, false},
 		{"   ", nil, false},
-		{"kubectl; rm -rf /", nil, false},   // ';' is unsafe
-		{"kubectl $(evil)", nil, false},     // '$' and '(' unsafe
-		{"kubectl `id`", nil, false},        // backtick unsafe
+		{"kubectl; rm -rf /", nil, false},          // ';' is unsafe
+		{"kubectl $(evil)", nil, false},            // '$' and '(' unsafe
+		{"kubectl `id`", nil, false},               // backtick unsafe
 		{`kubectl --kubeconfig "a b"`, nil, false}, // quote+space unsafe
 	}
 	for _, c := range cases {
@@ -232,25 +262,32 @@ func TestKubernetesUnknownAction(t *testing.T) {
 
 func TestDockerUpAndDown(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Docker(f, "docker", ActionDeploy, "/tmp/docker-compose.yml"); err != nil {
+	env := []string{"MQ_CONN_1_USER=admin", "MQ_CONN_1_PASSWORD=s3cr3t"}
+	if _, err := Docker(f, "docker", ActionDeploy, "/tmp/docker-compose.yml", env); err != nil {
 		t.Fatal(err)
 	}
 	wantUp := []string{"docker", "compose", "-f", "/tmp/docker-compose.yml", "up", "-d"}
 	if !reflect.DeepEqual(f.calls[0].argv, wantUp) {
 		t.Errorf("up argv = %v, want %v", f.calls[0].argv, wantUp)
 	}
-	if _, err := Docker(f, "docker", ActionDelete, "/tmp/docker-compose.yml"); err != nil {
+	if !reflect.DeepEqual(f.calls[0].env, env) {
+		t.Errorf("up env = %v, want %v (credential values must cross via Cmd.Env, never argv)", f.calls[0].env, env)
+	}
+	if _, err := Docker(f, "docker", ActionDelete, "/tmp/docker-compose.yml", env); err != nil {
 		t.Fatal(err)
 	}
 	wantDown := []string{"docker", "compose", "-f", "/tmp/docker-compose.yml", "down"}
 	if !reflect.DeepEqual(f.calls[1].argv, wantDown) {
 		t.Errorf("down argv = %v, want %v", f.calls[1].argv, wantDown)
 	}
+	if !reflect.DeepEqual(f.calls[1].env, env) {
+		t.Errorf("down env = %v, want %v (down must resolve the same secret declarations up did)", f.calls[1].env, env)
+	}
 }
 
 func TestDockerRejectsUnsafeCommand(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Docker(f, "docker `id`", ActionDeploy, "x"); err == nil {
+	if _, err := Docker(f, "docker `id`", ActionDeploy, "x", nil); err == nil {
 		t.Fatal("unsafe command must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -360,7 +397,7 @@ func TestPodmanDeployStartFailureIsReported(t *testing.T) {
 
 func TestDockerUnknownAction(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Docker(f, "docker", "restart", "x"); err == nil {
+	if _, err := Docker(f, "docker", "restart", "x", nil); err == nil {
 		t.Fatal("unknown action must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -379,6 +416,129 @@ func TestPodmanDeleteStopFailureIsReported(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "stop solmq-connector.service") {
 		t.Errorf("error should name the failed stop, got %v", err)
+	}
+}
+
+// ---- PodmanSecretCreate / PodmanSecretRemove --------------------------------
+
+func TestPodmanSecretCreateRemovesThenCreatesValueOnStdin(t *testing.T) {
+	f := &fakeRunner{}
+	const name = "mq-conn-1-password"
+	const value = "s3cr3t"
+	if _, err := PodmanSecretCreate(f, "podman", name, value); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 2 {
+		t.Fatalf("want rm then create = 2 calls, got %d", len(f.calls))
+	}
+	wantRm := []string{"podman", "secret", "rm", "--ignore", name}
+	if !reflect.DeepEqual(f.calls[0].argv, wantRm) {
+		t.Errorf("rm argv = %v, want %v", f.calls[0].argv, wantRm)
+	}
+	if f.calls[0].stdin != "" {
+		t.Errorf("rm must not carry stdin, got %q", f.calls[0].stdin)
+	}
+	wantCreate := []string{"podman", "secret", "create", name, "-"}
+	if !reflect.DeepEqual(f.calls[1].argv, wantCreate) {
+		t.Errorf("create argv = %v, want %v", f.calls[1].argv, wantCreate)
+	}
+	if f.calls[1].stdin != value {
+		t.Errorf("create stdin = %q, want %q", f.calls[1].stdin, value)
+	}
+	for i, c := range f.calls {
+		for _, a := range c.argv {
+			if strings.Contains(a, value) {
+				t.Errorf("call %d: secret value must never appear in argv, found in %q", i, a)
+			}
+		}
+	}
+}
+
+func TestPodmanSecretCreateSkipsCreateWhenRmFails(t *testing.T) {
+	f := &fakeRunner{err: fmt.Errorf("boom")}
+	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t")
+	if err == nil {
+		t.Fatal("a failed rm must surface as an error")
+	}
+	if !strings.Contains(err.Error(), "podman secret rm mq-conn-1-password") {
+		t.Errorf("error should name the failed rm, got %v", err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("create must not run when rm fails, got %d calls", len(f.calls))
+	}
+}
+
+func TestPodmanSecretCreateReportsCreateFailure(t *testing.T) {
+	f := &fakeRunner{errByCall: map[int]error{1: fmt.Errorf("boom")}}
+	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t")
+	if err == nil {
+		t.Fatal("a failed create must surface as an error")
+	}
+	if !strings.Contains(err.Error(), "podman secret create mq-conn-1-password") {
+		t.Errorf("error should name the failed create, got %v", err)
+	}
+	if len(f.calls) != 2 {
+		t.Fatalf("want rm then create = 2 calls, got %d", len(f.calls))
+	}
+}
+
+func TestPodmanSecretCreateRejectsUnsafeCommand(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := PodmanSecretCreate(f, "podman; rm -rf /", "name", "value"); err == nil {
+		t.Fatal("unsafe command must be rejected")
+	}
+	if len(f.calls) != 0 {
+		t.Fatal("nothing must run when the command is rejected")
+	}
+}
+
+func TestPodmanSecretRemoveBatchesNames(t *testing.T) {
+	f := &fakeRunner{}
+	names := []string{"mq-conn-1-user", "mq-conn-1-password", "truststore-password"}
+	if _, err := PodmanSecretRemove(f, "podman", names); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("want a single batched call, got %d", len(f.calls))
+	}
+	want := append([]string{"podman", "secret", "rm", "--ignore"}, names...)
+	if !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	}
+}
+
+func TestPodmanSecretRemoveNoNamesIsNoop(t *testing.T) {
+	f := &fakeRunner{}
+	out, err := PodmanSecretRemove(f, "podman", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "" {
+		t.Errorf("output = %q, want empty", out)
+	}
+	if len(f.calls) != 0 {
+		t.Fatal("no names must not invoke the runner")
+	}
+}
+
+func TestPodmanSecretRemoveRejectsUnsafeCommand(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := PodmanSecretRemove(f, "podman; rm -rf /", []string{"name"}); err == nil {
+		t.Fatal("unsafe command must be rejected")
+	}
+	if len(f.calls) != 0 {
+		t.Fatal("nothing must run when the command is rejected")
+	}
+}
+
+func TestPodmanSecretRemoveReportsFailure(t *testing.T) {
+	f := &fakeRunner{err: fmt.Errorf("boom")}
+	_, err := PodmanSecretRemove(f, "podman", []string{"name"})
+	if err == nil {
+		t.Fatal("a failed rm must surface as an error")
+	}
+	if !strings.Contains(err.Error(), "podman secret rm") {
+		t.Errorf("error should name the failed operation, got %v", err)
 	}
 }
 

@@ -15,23 +15,67 @@ import (
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/yamlwriter"
 )
 
-// yw is an indentation-aware line writer (2 spaces per level).
-type yw struct{ b strings.Builder }
+// yw is the indentation-aware line writer shared by every renderer here.
+type yw = yamlwriter.Writer
 
-func (w *yw) line(indent int, s string) {
-	w.b.WriteString(strings.Repeat(" ", indent))
-	w.b.WriteString(s)
-	w.b.WriteByte('\n')
+// q renders a user-supplied value as a YAML scalar, quoting only when a plain
+// one would not read back unchanged. Every value that originates in the spec
+// (hosts, credentials, destinations, store paths) goes through it; generated
+// identifiers (binder/binding names, bundle names, enum-valued modes) do not,
+// because their charset already makes them safe.
+func q(s string) string { return consolidate.QuoteScalar(s) }
+
+// writeScalar emits "key: value" -- or a block scalar when the value spans more
+// than one line, since a plain "key: line1\nline2" would put line2 at the
+// document's top level. The indicator preserves the trailing newline the value
+// actually has (| keeps one, |- keeps none), so a round-tripped literal block
+// reads back byte-for-byte.
+func writeScalar(w *yw, indent int, key, val string) {
+	if !strings.Contains(val, "\n") {
+		w.Line(indent, key+": "+val)
+		return
+	}
+	indicator, body := blockIndicator(val)
+	w.Line(indent, key+": "+indicator)
+	writeBlockBody(w, indent+2, body)
 }
 
-func (w *yw) String() string { return w.b.String() }
+// blockIndicator picks the chomping indicator that preserves the value's own
+// trailing newline (| keeps one, |- keeps none) and returns the body to emit.
+func blockIndicator(val string) (indicator, body string) {
+	if strings.HasSuffix(val, "\n") {
+		return "|", strings.TrimSuffix(val, "\n")
+	}
+	return "|-", val
+}
+
+// writeBlockBody emits the lines of a block scalar. An empty line is written
+// bare so the block carries no trailing whitespace.
+func writeBlockBody(w *yw, indent int, body string) {
+	for _, ln := range strings.Split(body, "\n") {
+		if ln == "" {
+			w.Raw("\n")
+			continue
+		}
+		w.Line(indent, ln)
+	}
+}
 
 // Application renders the full application.yml (with trailing newline).
 func Application(m *consolidate.Model) string {
 	w := &yw{}
-	w.line(0, "spring:")
+	w.Line(0, "spring:")
+	// Credentials are mounted as files, one per stable secret name, and read back
+	// as properties from there -- so every ${...} the config below references
+	// resolves without a single credential appearing in this document. `optional:`
+	// keeps it inert wherever nothing is mounted.
+	if m.ConfigImport != "" {
+		w.Line(2, "config:")
+		w.Line(4, "import: "+q(m.ConfigImport))
+	}
 	if len(m.Bundles) > 0 {
 		renderBundles(w, m.Bundles)
 	}
@@ -43,105 +87,105 @@ func Application(m *consolidate.Model) string {
 }
 
 func renderBundles(w *yw, bundles []*consolidate.Bundle) {
-	w.line(2, "ssl:")
-	w.line(4, "bundle:")
-	w.line(6, "jks:")
+	w.Line(2, "ssl:")
+	w.Line(4, "bundle:")
+	w.Line(6, "jks:")
 	for _, b := range bundles {
-		w.line(8, b.Name+":")
-		w.line(10, "truststore:")
-		w.line(12, "location: "+b.TruststoreLoc)
-		w.line(12, "password: "+b.TruststorePwd)
-		w.line(12, "type: "+b.TruststoreTyp)
+		w.Line(8, b.Name+":")
+		w.Line(10, "truststore:")
+		w.Line(12, "location: "+q(b.TruststoreLoc))
+		w.Line(12, "password: "+q(b.TruststorePwd))
+		w.Line(12, "type: "+q(b.TruststoreTyp))
 		if b.HasKeystore {
-			w.line(10, "keystore:")
-			w.line(12, "location: "+b.KeystoreLoc)
-			w.line(12, "password: "+b.KeystorePwd)
-			w.line(12, "type: "+b.KeystoreTyp)
-			w.line(10, "key:")
-			w.line(12, "alias: "+b.KeyAlias)
+			w.Line(10, "keystore:")
+			w.Line(12, "location: "+q(b.KeystoreLoc))
+			w.Line(12, "password: "+q(b.KeystorePwd))
+			w.Line(12, "type: "+q(b.KeystoreTyp))
+			w.Line(10, "key:")
+			w.Line(12, "alias: "+q(b.KeyAlias))
 		}
 	}
 }
 
 func renderCloudStream(w *yw, m *consolidate.Model) {
-	w.line(2, "cloud:")
-	w.line(4, "stream:")
+	w.Line(2, "cloud:")
+	w.Line(4, "stream:")
 
 	// binders
-	w.line(6, "binders:")
+	w.Line(6, "binders:")
 	for _, b := range m.Binders {
-		w.line(8, b.Name+":")
+		w.Line(8, b.Name+":")
 		switch b.Kind {
 		case spec.SystemSolace:
-			w.line(10, "type: solace")
-			w.line(10, "environment:")
-			w.line(12, "solace:")
-			w.line(14, "java:")
-			w.line(16, "host: "+b.Solace.Host)
-			w.line(16, "msg-vpn: "+b.Solace.MsgVPN)
+			w.Line(10, "type: solace")
+			w.Line(10, "environment:")
+			w.Line(12, "solace:")
+			w.Line(14, "java:")
+			w.Line(16, "host: "+q(b.Solace.Host))
+			w.Line(16, "msg-vpn: "+q(b.Solace.MsgVPN))
 			if b.Solace.ClientUser != "" {
-				w.line(16, "client-username: "+b.Solace.ClientUser)
+				w.Line(16, "client-username: "+q(b.Solace.ClientUser))
 			}
 			if b.Solace.ClientPass != "" {
-				w.line(16, "client-password: "+b.Solace.ClientPass)
+				w.Line(16, "client-password: "+q(b.Solace.ClientPass))
 			}
 			for _, p := range b.Solace.Extras {
 				renderProp(w, 16, p)
 			}
 			if len(b.Solace.APIProps) > 0 {
-				w.line(16, "api-properties:")
+				w.Line(16, "api-properties:")
 				for _, p := range b.Solace.APIProps {
 					renderProp(w, 18, p)
 				}
 			}
 		case spec.SystemMQ:
-			w.line(10, "type: jms")
-			w.line(10, "environment:")
-			w.line(12, "ibm:")
-			w.line(14, "mq:")
-			w.line(16, "queue-manager: "+b.MQ.QueueManager)
-			w.line(16, "channel: "+b.MQ.Channel)
-			w.line(16, "conn-name: "+b.MQ.ConnName)
+			w.Line(10, "type: jms")
+			w.Line(10, "environment:")
+			w.Line(12, "ibm:")
+			w.Line(14, "mq:")
+			w.Line(16, "queue-manager: "+q(b.MQ.QueueManager))
+			w.Line(16, "channel: "+q(b.MQ.Channel))
+			w.Line(16, "conn-name: "+q(b.MQ.ConnName))
 			if b.MQ.User != "" {
-				w.line(16, "user: "+b.MQ.User)
+				w.Line(16, "user: "+q(b.MQ.User))
 			}
 			if b.MQ.Password != "" {
-				w.line(16, "password: "+b.MQ.Password)
+				w.Line(16, "password: "+q(b.MQ.Password))
 			}
 			if b.MQ.SSLBundle != "" {
-				w.line(16, "ssl-bundle: "+b.MQ.SSLBundle)
+				w.Line(16, "ssl-bundle: "+b.MQ.SSLBundle)
 			}
 			if len(b.MQ.AddlProps) > 0 {
-				w.line(16, "additional-properties:")
+				w.Line(16, "additional-properties:")
 				for _, p := range b.MQ.AddlProps {
 					renderProp(w, 18, p)
 				}
 			}
 		case "undefined":
-			w.line(10, "type: undefined")
+			w.Line(10, "type: undefined")
 		}
 	}
 
 	// bindings
-	w.line(6, "bindings:")
+	w.Line(6, "bindings:")
 	for _, bd := range m.Bindings {
-		w.line(8, bd.Name+":")
-		w.line(10, "destination: "+bd.Dest)
-		w.line(10, "binder: "+bd.Binder)
+		w.Line(8, bd.Name+":")
+		w.Line(10, "destination: "+q(bd.Dest))
+		w.Line(10, "binder: "+bd.Binder)
 	}
 
 	// jms bindings
 	if len(m.JMSBindings) > 0 {
-		w.line(6, "jms:")
-		w.line(8, "bindings:")
+		w.Line(6, "jms:")
+		w.Line(8, "bindings:")
 		for _, jb := range m.JMSBindings {
-			w.line(10, jb.Name+":")
-			w.line(12, jb.Role+":")
+			w.Line(10, jb.Name+":")
+			w.Line(12, jb.Role+":")
 			if jb.DestType != "" {
-				w.line(14, "destination-type: "+jb.DestType)
+				w.Line(14, "destination-type: "+jb.DestType)
 			}
 			if jb.Durable != "" {
-				w.line(14, "durable-subscription-name: "+jb.Durable)
+				w.Line(14, "durable-subscription-name: "+jb.Durable)
 			}
 			for _, p := range jb.Extra {
 				renderProp(w, 14, p)
@@ -151,13 +195,13 @@ func renderCloudStream(w *yw, m *consolidate.Model) {
 
 	// solace bindings
 	if len(m.SolaceBindings) > 0 {
-		w.line(6, "solace:")
-		w.line(8, "bindings:")
+		w.Line(6, "solace:")
+		w.Line(8, "bindings:")
 		for _, sb := range m.SolaceBindings {
-			w.line(10, sb.Name+":")
-			w.line(12, sb.Role+":")
+			w.Line(10, sb.Name+":")
+			w.Line(12, sb.Role+":")
 			if sb.DestType != "" {
-				w.line(14, "destination-type: "+sb.DestType)
+				w.Line(14, "destination-type: "+sb.DestType)
 			}
 			for _, p := range sb.Extra {
 				renderProp(w, 14, p)
@@ -167,21 +211,21 @@ func renderCloudStream(w *yw, m *consolidate.Model) {
 }
 
 func renderConnector(w *yw, m *consolidate.Model) {
-	w.line(0, "solace:")
-	w.line(2, "connector:")
-	w.line(4, "workflows:")
+	w.Line(0, "solace:")
+	w.Line(2, "connector:")
+	w.Line(4, "workflows:")
 	for _, wf := range m.Workflows {
-		w.line(6, strconv.Itoa(wf.ID)+":")
-		w.line(8, "enabled: "+strconv.FormatBool(wf.Enabled))
+		w.Line(6, strconv.Itoa(wf.ID)+":")
+		w.Line(8, "enabled: "+strconv.FormatBool(wf.Enabled))
 	}
 	if m.Security.Present {
-		w.line(4, "security:")
-		w.line(6, "enabled: "+strconv.FormatBool(m.Security.Enabled))
+		w.Line(4, "security:")
+		w.Line(6, "enabled: "+strconv.FormatBool(m.Security.Enabled))
 		if len(m.Security.Users) > 0 {
-			w.line(6, "users:")
+			w.Line(6, "users:")
 			for _, u := range m.Security.Users {
-				w.line(8, "- name: "+u.Name)
-				w.line(10, "password: "+u.Password)
+				w.Line(8, "- name: "+q(u.Name))
+				w.Line(10, "password: "+q(u.Password))
 			}
 		}
 	}
@@ -191,30 +235,30 @@ func renderConnector(w *yw, m *consolidate.Model) {
 }
 
 // renderLeaderElection emits solace.connector.management for active_active /
-// active_standby, in the order used by example-application.yml.
+// active_standby, in the order used by testdata/golden/application.yml.
 func renderLeaderElection(w *yw, le *consolidate.LeaderElectionModel) {
-	w.line(4, "management:")
-	w.line(6, "leader-election:")
-	w.line(8, "mode: "+le.Mode)
+	w.Line(4, "management:")
+	w.Line(6, "leader-election:")
+	w.Line(8, "mode: "+le.Mode)
 	if le.FailOver != nil && le.FailOver.Kind == yaml.MappingNode && len(le.FailOver.Content) > 0 {
-		w.line(8, "fail-over:")
+		w.Line(8, "fail-over:")
 		renderContainer(w, 10, le.FailOver)
 	}
 	if le.Queue != "" {
-		w.line(6, "queue: "+le.Queue)
+		w.Line(6, "queue: "+q(le.Queue))
 	}
 	if s := le.Session; s != nil {
-		w.line(6, "session:")
-		w.line(8, "host: "+s.Host)
-		w.line(8, "msg-vpn: "+s.MsgVPN)
+		w.Line(6, "session:")
+		w.Line(8, "host: "+q(s.Host))
+		w.Line(8, "msg-vpn: "+q(s.MsgVPN))
 		if s.ClientUser != "" {
-			w.line(8, "client-username: "+s.ClientUser)
+			w.Line(8, "client-username: "+q(s.ClientUser))
 		}
 		if s.ClientPass != "" {
-			w.line(8, "client-password: "+s.ClientPass)
+			w.Line(8, "client-password: "+q(s.ClientPass))
 		}
 		if len(s.APIProps) > 0 {
-			w.line(8, "api-properties:")
+			w.Line(8, "api-properties:")
 			for _, p := range s.APIProps {
 				renderProp(w, 10, p)
 			}
@@ -226,21 +270,21 @@ func renderManagement(w *yw, mg spec.Management) {
 	if !mg.Present {
 		return
 	}
-	w.line(0, "management:")
+	w.Line(0, "management:")
 	if mg.Port != 0 {
-		w.line(2, "server:")
-		w.line(4, "port: "+strconv.Itoa(mg.Port))
+		w.Line(2, "server:")
+		w.Line(4, "port: "+strconv.Itoa(mg.Port))
 	}
 	if mg.Exposure != "" {
-		w.line(2, "endpoints:")
-		w.line(4, "web:")
-		w.line(6, "exposure:")
-		w.line(8, "include: "+mg.Exposure)
+		w.Line(2, "endpoints:")
+		w.Line(4, "web:")
+		w.Line(6, "exposure:")
+		w.Line(8, "include: "+q(mg.Exposure))
 	}
 	if mg.HealthShowDetails != "" {
-		w.line(2, "endpoint:")
-		w.line(4, "health:")
-		w.line(6, "show-details: "+mg.HealthShowDetails)
+		w.Line(2, "endpoint:")
+		w.Line(4, "health:")
+		w.Line(6, "show-details: "+q(mg.HealthShowDetails))
 	}
 }
 
@@ -248,20 +292,20 @@ func renderLogging(w *yw, level *yaml.Node) {
 	if level == nil || level.Kind != yaml.MappingNode || len(level.Content) == 0 {
 		return
 	}
-	w.line(0, "logging:")
-	w.line(2, "level:")
+	w.Line(0, "logging:")
+	w.Line(2, "level:")
 	for i := 0; i+1 < len(level.Content); i += 2 {
-		w.line(4, level.Content[i].Value+": "+consolidate.FormatScalar(level.Content[i+1]))
+		writeScalar(w, 4, level.Content[i].Value, consolidate.FormatScalar(level.Content[i+1]))
 	}
 }
 
 // renderProp emits one property line, recursing for non-scalar passthrough.
 func renderProp(w *yw, indent int, p consolidate.Prop) {
 	if p.Sub == nil {
-		w.line(indent, p.Key+": "+p.Val)
+		writeScalar(w, indent, p.Key, p.Val)
 		return
 	}
-	w.line(indent, p.Key+":")
+	w.Line(indent, p.Key+":")
 	renderContainer(w, indent+2, p.Sub)
 }
 
@@ -273,20 +317,32 @@ func renderContainer(w *yw, indent int, n *yaml.Node) {
 			k := n.Content[i].Value
 			v := n.Content[i+1]
 			if v.Kind == yaml.ScalarNode {
-				w.line(indent, k+": "+consolidate.FormatScalar(v))
+				writeScalar(w, indent, k, consolidate.FormatScalar(v))
 			} else {
-				w.line(indent, k+":")
+				w.Line(indent, k+":")
 				renderContainer(w, indent+2, v)
 			}
 		}
 	case yaml.SequenceNode:
 		for _, item := range n.Content {
 			if item.Kind == yaml.ScalarNode {
-				w.line(indent, "- "+consolidate.FormatScalar(item))
+				writeSeqItem(w, indent, consolidate.FormatScalar(item))
 			} else {
-				w.line(indent, "-")
+				w.Line(indent, "-")
 				renderContainer(w, indent+2, item)
 			}
 		}
 	}
+}
+
+// writeSeqItem emits "- value", putting the block indicator on the dash line
+// when the value spans several lines.
+func writeSeqItem(w *yw, indent int, val string) {
+	if !strings.Contains(val, "\n") {
+		w.Line(indent, "- "+val)
+		return
+	}
+	indicator, body := blockIndicator(val)
+	w.Line(indent, "- "+indicator)
+	writeBlockBody(w, indent+2, body)
 }

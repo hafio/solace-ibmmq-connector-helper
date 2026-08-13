@@ -20,7 +20,6 @@ import (
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/examples"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/podmangen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/scan"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -36,41 +35,98 @@ const (
 	tgtPodman     = "podman"
 )
 
-// newRunner builds the Runner deploy/delete actions run through. Tests swap it
-// for a fake that records argv instead of starting a process.
-var newRunner = func() runner.Runner { return runner.OS{} }
-
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
+// run is the CLI entry point: it dispatches with the production Runner. Tests
+// that need to inspect what would run call dispatch directly with a fake.
 func run(args []string) int {
+	return dispatch(args, runner.OS{})
+}
+
+// verbHandlers maps each modeled verb (cliVerbs in commands.go) to its
+// implementation, threading r down to whichever action ends up shelling out.
+// Keying dispatch off the model instead of a parallel switch is what
+// TestDispatchHandlersMatchModel gates: a verb added to one side and not the
+// other fails that test rather than drifting silently (see task 2's
+// examples-default-dir drift for what this class of bug looks like).
+var verbHandlers = map[string]func(args []string, r runner.Runner) int{
+	"generate": func(args []string, r runner.Runner) int { return runGenerate(args) },
+	"deploy":   func(args []string, r runner.Runner) int { return runAction(runner.ActionDeploy, args, r) },
+	"delete":   func(args []string, r runner.Runner) int { return runAction(runner.ActionDelete, args, r) },
+	"validate": func(args []string, r runner.Runner) int { return runValidate(args) },
+	"examples": func(args []string, r runner.Runner) int { return runExamples(args) },
+	"help":     func(args []string, r runner.Runner) int { usage(); return 0 },
+}
+
+// dispatch resolves args[0] against verbHandlers. -h/--help are aliases of the
+// modeled "help" verb, handled before the lookup since they are not spellable
+// as args[0] in the model itself.
+func dispatch(args []string, r runner.Runner) int {
 	if len(args) == 0 {
 		usage()
 		return 2
 	}
-	switch args[0] {
-	case "generate":
-		return runGenerate(args[1:])
-	case "deploy":
-		return runAction(runner.ActionDeploy, args[1:])
-	case "delete":
-		return runAction(runner.ActionDelete, args[1:])
-	case "validate":
-		return runValidate(args[1:])
-	case "examples":
-		return runExamples(args[1:])
-	case "-h", "--help", "help":
+	if args[0] == "-h" || args[0] == "--help" {
 		usage()
 		return 0
-	default:
+	}
+	h, ok := verbHandlers[args[0]]
+	if !ok {
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", args[0])
 		usage()
 		return 2
 	}
+	return h(args[1:], r)
+}
+
+// targetNames returns the modeled target/platform names for verb, in the order
+// cliVerbs declares them ("" for a leaf verb with none).
+func targetNames(verb string) []string {
+	for _, v := range cliVerbs {
+		if v.Name != verb {
+			continue
+		}
+		names := make([]string, 0, len(v.Targets))
+		for _, tg := range v.Targets {
+			names = append(names, tg.Name)
+		}
+		return names
+	}
+	return nil
+}
+
+// pipeList joins names as "a|b|c", matching the wording of the existing
+// "missing target/platform" messages.
+func pipeList(names []string) string { return strings.Join(names, "|") }
+
+// wantList joins names as "a, b, or c" (or "a or b" for two), matching the
+// wording of the existing "unknown target/platform" messages.
+func wantList(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	case 2:
+		return names[0] + " or " + names[1]
+	default:
+		return strings.Join(names[:len(names)-1], ", ") + ", or " + names[len(names)-1]
+	}
 }
 
 // ---- generate ----------------------------------------------------------------
+
+// genTargets maps each modeled "generate" target (cliVerbs in commands.go) to
+// its renderer, so runGenerate's accepted set can never drift from the model --
+// see TestDispatchHandlersMatchModel.
+var genTargets = map[string]func(envPath, out string) int{
+	tgtConfig:     genConfig,
+	tgtKubernetes: genKubernetes,
+	tgtDocker:     genDocker,
+	tgtPodman:     genPodman,
+}
 
 func runGenerate(args []string) int {
 	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
@@ -81,23 +137,16 @@ func runGenerate(args []string) int {
 		return 2
 	}
 	if len(pos) == 0 {
-		fmt.Fprintln(os.Stderr, "generate: missing target (config|kubernetes|docker|podman)")
+		fmt.Fprintf(os.Stderr, "generate: missing target (%s)\n", pipeList(targetNames("generate")))
 		usage()
 		return 2
 	}
-	switch pos[0] {
-	case tgtConfig:
-		return genConfig(*env, *out)
-	case tgtKubernetes:
-		return genKubernetes(*env, *out)
-	case tgtDocker:
-		return genDocker(*env, *out)
-	case tgtPodman:
-		return genPodman(*env, *out)
-	default:
-		fmt.Fprintf(os.Stderr, "generate: unknown target %q (want config, kubernetes, docker, or podman)\n", pos[0])
+	h, ok := genTargets[pos[0]]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "generate: unknown target %q (want %s)\n", pos[0], wantList(targetNames("generate")))
 		return 2
 	}
+	return h(*env, *out)
 }
 
 func genConfig(envPath, out string) int {
@@ -105,12 +154,12 @@ func genConfig(envPath, out string) int {
 	if err != nil {
 		return errExit(err)
 	}
-	docs, errs, warns := gen.Config(req, resolver(envDir))
+	doc, errs, warns := gen.Config(req, resolver(envDir))
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs) // config: stop at the first error
 	}
-	return emitConfigs(out, docs)
+	return emit(out, doc)
 }
 
 func genKubernetes(envPath, out string) int {
@@ -150,29 +199,23 @@ func genPodman(envPath, out string) int {
 		return failFast(errs)
 	}
 	if plan.Mode == spec.PodmanModeQuadlet {
-		return emit(out, joinUnits(plan.Units))
+		return emit(out, plan.Unit.Content)
 	}
 	return emit(out, plan.RunScript)
 }
 
-// joinUnits concatenates quadlet units into one previewable document, each
-// preceded by a filename banner so `generate podman` (quadlet mode) shows every
-// unit at once. Deploy writes them to disk as separate files instead.
-func joinUnits(units []podmangen.Unit) string {
-	var b strings.Builder
-	for i, u := range units {
-		if i > 0 {
-			b.WriteString("\n")
-		}
-		b.WriteString("# === " + u.Filename + " ===\n")
-		b.WriteString(u.Content)
-	}
-	return b.String()
-}
-
 // ---- deploy / delete ---------------------------------------------------------
 
-func runAction(action string, args []string) int {
+// actTargets maps each modeled deploy/delete platform (cliVerbs in
+// commands.go) to its implementation, so runAction's accepted set can never
+// drift from the model -- see TestDispatchHandlersMatchModel.
+var actTargets = map[string]func(action, envPath string, r runner.Runner) int{
+	tgtKubernetes: actKubernetes,
+	tgtDocker:     actDocker,
+	tgtPodman:     actPodman,
+}
+
+func runAction(action string, args []string, r runner.Runner) int {
 	fs := flag.NewFlagSet(action, flag.ContinueOnError)
 	env := envFlag(fs)
 	pos, err := collectFlagsAndDirs(fs, args)
@@ -180,24 +223,19 @@ func runAction(action string, args []string) int {
 		return 2
 	}
 	if len(pos) == 0 {
-		fmt.Fprintf(os.Stderr, "%s: missing platform (kubernetes|docker|podman)\n", action)
+		fmt.Fprintf(os.Stderr, "%s: missing platform (%s)\n", action, pipeList(targetNames(action)))
 		usage()
 		return 2
 	}
-	switch pos[0] {
-	case tgtKubernetes:
-		return actKubernetes(action, *env)
-	case tgtDocker:
-		return actDocker(action, *env)
-	case tgtPodman:
-		return actPodman(action, *env)
-	default:
-		fmt.Fprintf(os.Stderr, "%s: unknown platform %q (want kubernetes, docker, or podman)\n", action, pos[0])
+	h, ok := actTargets[pos[0]]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "%s: unknown platform %q (want %s)\n", action, pos[0], wantList(targetNames(action)))
 		return 2
 	}
+	return h(action, *env, r)
 }
 
-func actKubernetes(action, envPath string) int {
+func actKubernetes(action, envPath string, r runner.Runner) int {
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
 		return errExit(err)
@@ -210,11 +248,11 @@ func actKubernetes(action, envPath string) int {
 	if len(errs) > 0 {
 		return failFast(errs)
 	}
-	out, rerr := runner.Kubernetes(newRunner(), e.Kubernetes.Command, action, manifest)
+	out, rerr := runner.Kubernetes(r, e.Kubernetes.Command, action, manifest)
 	return report(action, tgtKubernetes, out, rerr)
 }
 
-func actDocker(action, envPath string) int {
+func actDocker(action, envPath string, r runner.Runner) int {
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
 		return errExit(err)
@@ -228,18 +266,38 @@ func actDocker(action, envPath string) int {
 	if len(errs) > 0 {
 		return failFast(errs)
 	}
+	// Resolve before writing anything: an unset credential should fail with a
+	// named variable, not leave a compose file behind for a run that never began.
+	kvs, cerr := gen.ResolveCredentials(plan.Secrets, res)
+	if cerr != nil {
+		return errExit(cerr)
+	}
 	path := filepath.Join(envDir, composeFile)
 	if werr := runner.WriteFile(path, plan.Compose, 0o644); werr != nil {
 		return errExit(werr)
 	}
-	if werr := writeCredEnvFile(envDir, plan.EnvFileName, e.Docker.Secrets.Credentials, res); werr != nil {
-		return errExit(werr)
+	out, rerr := runner.Docker(r, e.Docker.Command, action, path, envPairs(kvs))
+	// The compose file is regenerated by every deploy and delete, so it is
+	// scratch. It is kept after a failure: a half-started `up` still needs a
+	// compose file to `down` with.
+	if rerr == nil {
+		_ = os.Remove(path)
 	}
-	out, rerr := runner.Docker(newRunner(), e.Docker.Command, action, path)
 	return report(action, tgtDocker, out, rerr)
 }
 
-func actPodman(action, envPath string) int {
+// envPairs renders resolved credentials as KEY=VALUE entries for a child
+// process's environment. The result is secret material: it goes straight to the
+// runner and is never printed.
+func envPairs(kvs []gen.KV) []string {
+	out := make([]string, 0, len(kvs))
+	for _, kv := range kvs {
+		out = append(out, kv.Key+"="+kv.Val)
+	}
+	return out
+}
+
+func actPodman(action, envPath string, r runner.Runner) int {
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
 		return errExit(err)
@@ -260,61 +318,54 @@ func actPodman(action, envPath string) int {
 		return failFast(errs)
 	}
 	if action == runner.ActionDelete {
-		return podmanDelete(sc, plan, e.Podman.Secrets.Credentials)
+		return podmanDelete(sc, plan, e.Podman, r)
 	}
-	return podmanDeploy(sc, plan, e.Podman.Secrets.Credentials, res)
+	return podmanDeploy(sc, plan, e.Podman, res, r)
 }
 
-func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, creds *spec.CredentialsSecret, res gen.Resolver) int {
-	for _, d := range plan.AppYAMLs {
-		if err := runner.WriteFile(filepath.Join(sc.Dir, d.Name), d.Data, 0o644); err != nil {
-			return errExit(err)
+func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, res gen.Resolver, r runner.Runner) int {
+	// Credentials first: a missing one should stop the deploy before any unit is
+	// written, and the units reference secrets that must already exist.
+	kvs, cerr := gen.ResolveCredentials(plan.Secrets, res)
+	if cerr != nil {
+		return errExit(cerr)
+	}
+	for _, kv := range kvs {
+		out, err := runner.PodmanSecretCreate(r, p.Command, gen.PodmanSecretStoreName(p.Name, kv.Key), kv.Val)
+		if err != nil {
+			return report(runner.ActionDeploy, tgtPodman, out, err)
 		}
 	}
-	if err := writeCredEnvFile(sc.Dir, plan.EnvFileName, creds, res); err != nil {
+	// application.yml and the unit carry only stable secret names, never values,
+	// so they are readable by the container user and by systemd (0644).
+	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.AppYAML.Name), plan.AppYAML.Data, 0o644); err != nil {
 		return errExit(err)
 	}
-	for _, u := range plan.Units {
-		if err := runner.WriteFile(filepath.Join(sc.Dir, u.Filename), u.Content, 0o644); err != nil {
-			return errExit(err)
-		}
+	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.Unit.Filename), plan.Unit.Content, 0o644); err != nil {
+		return errExit(err)
 	}
-	out, rerr := runner.PodmanDeploy(newRunner(), sc, plan.Services)
+	out, rerr := runner.PodmanDeploy(r, sc, []string{plan.Service})
 	return report(runner.ActionDeploy, tgtPodman, out, rerr)
 }
 
-func podmanDelete(sc runner.QuadletScope, plan gen.PodmanPlan, creds *spec.CredentialsSecret) int {
-	units := make([]string, 0, len(plan.Units))
-	for _, u := range plan.Units {
-		units = append(units, u.Filename)
+func podmanDelete(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r runner.Runner) int {
+	out, rerr := runner.PodmanDelete(r, sc, []string{plan.Service}, []string{plan.Unit.Filename})
+	// Best-effort cleanup of the file we generated.
+	_ = os.Remove(filepath.Join(sc.Dir, plan.AppYAML.Name))
+	// Credentials are removed from podman's store last, after the units that
+	// referenced them are gone. Leaving credential material behind is worth
+	// reporting even when the teardown itself succeeded, so a failure here
+	// surfaces rather than being swallowed like the file cleanup above.
+	names := make([]string, 0, len(plan.Secrets))
+	for _, s := range plan.Secrets {
+		names = append(names, gen.PodmanSecretStoreName(p.Name, s.Stable))
 	}
-	out, rerr := runner.PodmanDelete(newRunner(), sc, plan.Services, units)
-	// Best-effort cleanup of the files we generated (never a user-supplied
-	// existing env-file).
-	for _, d := range plan.AppYAMLs {
-		_ = os.Remove(filepath.Join(sc.Dir, d.Name))
-	}
-	if plan.EnvFileName != "" && creds != nil && creds.Create != nil {
-		_ = os.Remove(filepath.Join(sc.Dir, plan.EnvFileName))
+	so, serr := runner.PodmanSecretRemove(r, p.Command, names)
+	out += so
+	if rerr == nil {
+		rerr = serr
 	}
 	return report(runner.ActionDelete, tgtPodman, out, rerr)
-}
-
-// writeCredEnvFile resolves a created credentials block and writes its env-file
-// (0600, never logged). A nil/existing block writes nothing: an existing env-file
-// is the user's to manage.
-func writeCredEnvFile(dir, name string, creds *spec.CredentialsSecret, res gen.Resolver) error {
-	if name == "" {
-		return nil
-	}
-	kvs, err := gen.ResolveCredentials(creds, res)
-	if err != nil {
-		return err
-	}
-	if kvs == nil {
-		return nil // existing env-file
-	}
-	return runner.WriteFile(filepath.Join(dir, name), gen.EnvFileContent(kvs), 0o600)
 }
 
 // ---- validate / examples -----------------------------------------------------
@@ -343,7 +394,7 @@ func runValidate(args []string) int {
 }
 
 // runExamples writes the embedded starter env.yaml + workflows to dir (default
-// "examples").
+// the current directory).
 func runExamples(args []string) int {
 	fs := flag.NewFlagSet("examples", flag.ContinueOnError)
 	force := fs.Bool("f", false, "overwrite existing files")
@@ -352,7 +403,7 @@ func runExamples(args []string) int {
 	if err != nil {
 		return 2
 	}
-	dir := "examples"
+	dir := "."
 	if len(pos) > 0 {
 		dir = pos[0]
 	}
@@ -472,42 +523,6 @@ func emit(out, content string) int {
 		return errExit(err)
 	}
 	return 0
-}
-
-// emitConfigs writes the per-instance application.yml documents. A single
-// instance behaves exactly like emit (plain stdout / one -o file). With several
-// instances, stdout gets a banner before each doc and -o writes <base>-<n><ext>.
-func emitConfigs(out string, docs []string) int {
-	if len(docs) == 1 {
-		return emit(out, docs[0])
-	}
-	if out == "" {
-		for i, doc := range docs {
-			fmt.Print(instanceBanner(i+1, len(docs)))
-			fmt.Print(doc)
-		}
-		return 0
-	}
-	for i, doc := range docs {
-		if code := emit(suffixBeforeExt(out, i+1), doc); code != 0 {
-			return code
-		}
-	}
-	return 0
-}
-
-// instanceBanner is the separator printed before each instance's config when
-// several are streamed to stdout.
-func instanceBanner(n, total int) string {
-	bar := "# " + strings.Repeat("=", 60)
-	return fmt.Sprintf("%s\n%s\n#  CONNECTOR INSTANCE %d OF %d  --  application.yml\n%s\n%s\n", bar, bar, n, total, bar, bar)
-}
-
-// suffixBeforeExt inserts -<n> before the file extension: out.yml -> out-1.yml,
-// out -> out-1.
-func suffixBeforeExt(path string, n int) string {
-	ext := filepath.Ext(path)
-	return fmt.Sprintf("%s-%d%s", strings.TrimSuffix(path, ext), n, ext)
 }
 
 // report prints a deployer's combined output and a final ok/error line.

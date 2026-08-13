@@ -11,7 +11,13 @@ import (
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/yamlwriter"
 )
+
+// SecretsMountPath is where the credentials Secret is mounted, one file per key.
+// It matches the docker/podman mount point and the connector's configtree import,
+// so one application.yml resolves its credentials identically on every platform.
+const SecretsMountPath = "/run/secrets"
 
 // KV is one resolved credential entry (plaintext; K8s base64-encodes stringData).
 type KV struct{ Key, Val string }
@@ -22,35 +28,24 @@ type StoreFile struct {
 	Base64 string // base64 of the file bytes
 }
 
-// Instance is one connector instance: its own ConfigMap + Deployment + Service.
-// A folder with more than MaxWorkflowsPerInstance workflows is sharded into
-// several instances that share one namespace, secrets, and libs volume.
+// Instance is the connector: its ConfigMap + Deployment + Service.
 type Instance struct {
-	Name    string             // deployment name: the base name, or base-N when sharded
-	AppYAML string             // this instance's rendered application.yml (trailing newline)
-	Model   *consolidate.Model // this instance's model (drives per-instance MQTLS etc.)
+	Name    string             // deployment name
+	AppYAML string             // the rendered application.yml (trailing newline)
+	Model   *consolidate.Model // the consolidated model (drives MQTLS etc.)
 }
 
-// Input is everything needed to render the manifests. Shared objects (namespace,
-// secrets, libs PV/PVC) are emitted once; ConfigMap/Deployment/Service are
-// emitted per Instance.
+// Input is everything needed to render the manifests.
 type Input struct {
-	Kube      *spec.Kubernetes
-	Defaults  *spec.Defaults
-	CredKVs   []KV        // resolved credential values (only when credentials.create)
-	Stores    []StoreFile // resolved .jks files (only when stores.create)
-	Instances []Instance  // one or more connector instances
+	Kube     *spec.Kubernetes
+	Defaults *spec.Defaults
+	CredKVs  []KV        // resolved credential values (only when credentials.create)
+	Stores   []StoreFile // resolved .jks files (only when stores.create)
+	Instance Instance
 }
 
-type yw struct{ b strings.Builder }
-
-func (w *yw) line(indent int, s string) {
-	w.b.WriteString(strings.Repeat(" ", indent))
-	w.b.WriteString(s)
-	w.b.WriteByte('\n')
-}
-func (w *yw) raw(s string)   { w.b.WriteString(s) }
-func (w *yw) String() string { return w.b.String() }
+// yw is the indentation-aware line writer used by every renderer here.
+type yw = yamlwriter.Writer
 
 var intOnly = regexp.MustCompile(`^[0-9]+$`)
 
@@ -149,32 +144,13 @@ func syslogOf(k *spec.Kubernetes) *spec.Syslog {
 	return k.Logging.Syslog
 }
 
-// baseName returns the final path element of a URL. It deliberately does NOT
-// normalize backslashes the way gen.baseName does: its only caller,
-// renderDeployment, feeds it entries from Libs.Download.URLs, and
-// internal/validate's safeLibsURL rejects any libs.download url containing a
-// backslash (along with quotes, control chars, etc.) before GenerateKubernetes
-// ever calls Render -- see gen.GenerateKubernetes, which runs validate.Run and
-// returns on the first error without rendering. So a Windows-style path can
-// never reach this function through the CLI. If a future caller feeds it an
-// unvalidated string, normalize backslashes here first, to match gen.baseName.
-func baseName(p string) string {
-	if i := strings.LastIndexByte(p, '/'); i >= 0 {
-		return p[i+1:]
-	}
-	return p
-}
-
-// Render produces the full multi-doc manifest set. Shared objects (Namespace,
-// Secrets, libs PV/PVC) are emitted once; the ConfigMap, Deployment, and Service
-// are emitted per instance. The emission order (Namespace, all ConfigMaps, shared
-// Secrets, PV/PVC, all Deployments, all Services) is chosen so that a single
-// instance reproduces the historical byte-for-byte layout.
+// Render produces the full multi-doc manifest set, in the order Namespace,
+// ConfigMap, Secrets, libs PV/PVC, Deployment, Service.
 func Render(in Input) string {
 	dep := in.Kube.Deployment
 	ns := dep.Namespace
 
-	// Secret references / emission flags (shared across instances).
+	// Secret references / emission flags.
 	credRef, emitCred := "", false
 	if c := in.Kube.Secrets.Credentials; c != nil {
 		if c.Create != nil {
@@ -198,7 +174,7 @@ func Render(in Input) string {
 	docs := 0
 	sep := func() {
 		if docs > 0 {
-			w.raw("---\n")
+			w.Raw("---\n")
 		}
 		docs++
 	}
@@ -206,121 +182,122 @@ func Render(in Input) string {
 	// 0. Namespace: emitted first so the objects below land in a namespace that
 	// exists in the same apply (applying it when it already exists is a no-op).
 	sep()
-	w.line(0, "apiVersion: v1")
-	w.line(0, "kind: Namespace")
-	w.line(0, "metadata:")
-	w.line(2, "name: "+ns)
+	w.Line(0, "apiVersion: v1")
+	w.Line(0, "kind: Namespace")
+	w.Line(0, "metadata:")
+	w.Line(2, "name: "+ns)
 
-	// 1. ConfigMap — one per instance.
-	for _, inst := range in.Instances {
-		sep()
-		renderConfigMap(w, inst.Name+"-config", ns, inst.AppYAML, syslogOf(in.Kube))
-	}
+	// 1. ConfigMap.
+	sep()
+	renderConfigMap(w, in.Instance.Name+"-config", ns, in.Instance.AppYAML, syslogOf(in.Kube))
 
-	// 2. credentials Secret (stringData) — shared.
+	// 2. credentials Secret (stringData).
 	if emitCred {
 		sep()
-		w.line(0, "apiVersion: v1")
-		w.line(0, "kind: Secret")
-		w.line(0, "metadata:")
-		w.line(2, "name: "+credRef)
-		w.line(2, "namespace: "+ns)
-		w.line(0, "type: Opaque")
-		w.line(0, "stringData:")
+		w.Line(0, "apiVersion: v1")
+		w.Line(0, "kind: Secret")
+		w.Line(0, "metadata:")
+		w.Line(2, "name: "+credRef)
+		w.Line(2, "namespace: "+ns)
+		w.Line(0, "type: Opaque")
+		w.Line(0, "stringData:")
 		for _, kv := range in.CredKVs {
-			w.line(2, kv.Key+": "+strconv.Quote(kv.Val))
+			w.Line(2, kv.Key+": "+strconv.Quote(kv.Val))
 		}
 	}
 
-	// 3. stores Secret (base64 data) — shared.
+	// 3. stores Secret (base64 data).
 	if emitStores {
 		sep()
-		w.line(0, "apiVersion: v1")
-		w.line(0, "kind: Secret")
-		w.line(0, "metadata:")
-		w.line(2, "name: "+storeRef)
-		w.line(2, "namespace: "+ns)
-		w.line(0, "type: Opaque")
-		w.line(0, "data:")
+		w.Line(0, "apiVersion: v1")
+		w.Line(0, "kind: Secret")
+		w.Line(0, "metadata:")
+		w.Line(2, "name: "+storeRef)
+		w.Line(2, "namespace: "+ns)
+		w.Line(0, "type: Opaque")
+		w.Line(0, "data:")
 		for _, sf := range in.Stores {
-			w.line(2, sf.Name+": "+sf.Base64)
+			w.Line(2, sf.Name+": "+sf.Base64)
 		}
 	}
 
-	// 3b. libs PV + PVC — shared (only for libs.pvc.create; PV is cluster-scoped).
+	// 3b. libs PV + PVC (only for libs.pvc.create; PV is cluster-scoped).
 	if lb := in.Kube.Libs; lb != nil && lb.PVC != nil && lb.PVC.Create != nil {
 		c := lb.PVC.Create
 		sep()
-		w.line(0, "apiVersion: v1")
-		w.line(0, "kind: PersistentVolume")
-		w.line(0, "metadata:")
-		w.line(2, "name: "+c.Name+"-pv")
-		w.line(0, "spec:")
-		w.line(2, "capacity:")
-		w.line(4, "storage: "+c.Storage)
-		w.line(2, "accessModes:")
-		w.line(4, "- ReadWriteMany")
-		w.line(2, "nfs:")
-		w.line(4, "server: "+c.NFS.Server)
-		w.line(4, "path: "+c.NFS.Path)
-		w.line(4, "readOnly: true")
+		w.Line(0, "apiVersion: v1")
+		w.Line(0, "kind: PersistentVolume")
+		w.Line(0, "metadata:")
+		w.Line(2, "name: "+c.Name+"-pv")
+		w.Line(0, "spec:")
+		w.Line(2, "capacity:")
+		w.Line(4, "storage: "+c.Storage)
+		w.Line(2, "accessModes:")
+		w.Line(4, "- ReadWriteMany")
+		w.Line(2, "nfs:")
+		w.Line(4, "server: "+c.NFS.Server)
+		w.Line(4, "path: "+c.NFS.Path)
+		w.Line(4, "readOnly: true")
 		sep()
-		w.line(0, "apiVersion: v1")
-		w.line(0, "kind: PersistentVolumeClaim")
-		w.line(0, "metadata:")
-		w.line(2, "name: "+c.Name)
-		w.line(2, "namespace: "+ns)
-		w.line(0, "spec:")
-		w.line(2, `storageClassName: ""`)
-		w.line(2, "volumeName: "+c.Name+"-pv")
-		w.line(2, "accessModes:")
-		w.line(4, "- ReadWriteMany")
-		w.line(2, "resources:")
-		w.line(4, "requests:")
-		w.line(6, "storage: "+c.Storage)
+		w.Line(0, "apiVersion: v1")
+		w.Line(0, "kind: PersistentVolumeClaim")
+		w.Line(0, "metadata:")
+		w.Line(2, "name: "+c.Name)
+		w.Line(2, "namespace: "+ns)
+		w.Line(0, "spec:")
+		w.Line(2, `storageClassName: ""`)
+		w.Line(2, "volumeName: "+c.Name+"-pv")
+		w.Line(2, "accessModes:")
+		w.Line(4, "- ReadWriteMany")
+		w.Line(2, "resources:")
+		w.Line(4, "requests:")
+		w.Line(6, "storage: "+c.Storage)
 	}
 
-	// 4. Deployment — one per instance.
-	for _, inst := range in.Instances {
-		sep()
-		renderDeployment(w, in, inst, ns, credRef, storeRef, hasStores, mgmtPort)
-	}
+	// 4. Deployment.
+	sep()
+	renderDeployment(w, in, in.Instance, ns, credRef, storeRef, hasStores, mgmtPort)
 
-	// 5. Service — one per instance (when enabled).
+	// 5. Service (when enabled). An unset service.port follows the same fallback
+	// chain as the container port, so `service: {enabled: true}` on its own
+	// publishes the management port instead of rendering `port: 0`, which the API
+	// server rejects at apply time.
 	if in.Kube.Service.Enabled {
-		for _, inst := range in.Instances {
-			sep()
-			renderService(w, inst.Name, ns, in.Kube.Service.Port, mgmtPort)
+		svcPort := in.Kube.Service.Port
+		if svcPort == 0 {
+			svcPort = mgmtPort
 		}
+		sep()
+		renderService(w, in.Instance.Name, ns, svcPort, mgmtPort)
 	}
 
 	return w.String()
 }
 
-// renderConfigMap emits one ConfigMap embedding this instance's application.yml
+// renderConfigMap emits the ConfigMap embedding the application.yml
 // and, when syslog is configured, the shared logback-spring.xml.
 func renderConfigMap(w *yw, cmName, ns, appYAML string, sys *spec.Syslog) {
-	w.line(0, "apiVersion: v1")
-	w.line(0, "kind: ConfigMap")
-	w.line(0, "metadata:")
-	w.line(2, "name: "+cmName)
-	w.line(2, "namespace: "+ns)
-	w.line(0, "data:")
-	w.line(2, "application.yml: |")
-	for _, ln := range splitLines(appYAML) {
+	w.Line(0, "apiVersion: v1")
+	w.Line(0, "kind: ConfigMap")
+	w.Line(0, "metadata:")
+	w.Line(2, "name: "+cmName)
+	w.Line(2, "namespace: "+ns)
+	w.Line(0, "data:")
+	w.Line(2, "application.yml: |")
+	for _, ln := range yamlwriter.SplitLines(appYAML) {
 		if ln == "" {
-			w.raw("\n")
+			w.Raw("\n")
 		} else {
-			w.line(4, ln)
+			w.Line(4, ln)
 		}
 	}
 	if sys != nil {
-		w.line(2, "logback-spring.xml: |")
-		for _, ln := range splitLines(LogbackXML(sys.Protocol)) {
+		w.Line(2, "logback-spring.xml: |")
+		for _, ln := range yamlwriter.SplitLines(LogbackXML(sys.Protocol)) {
 			if ln == "" {
-				w.raw("\n")
+				w.Raw("\n")
 			} else {
-				w.line(4, ln)
+				w.Line(4, ln)
 			}
 		}
 	}
@@ -330,122 +307,135 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 	dep := in.Kube.Deployment
 	name := inst.Name
 	cmName := inst.Name + "-config"
-	w.line(0, "apiVersion: apps/v1")
-	w.line(0, "kind: Deployment")
-	w.line(0, "metadata:")
-	w.line(2, "name: "+name)
-	w.line(2, "namespace: "+ns)
-	w.line(0, "spec:")
-	w.line(2, "replicas: "+strconv.Itoa(dep.Replicas))
-	w.line(2, "selector:")
-	w.line(4, "matchLabels:")
-	w.line(6, "app: "+name)
-	w.line(2, "template:")
-	w.line(4, "metadata:")
-	w.line(6, "labels:")
-	w.line(8, "app: "+name)
-	w.line(4, "spec:")
+	w.Line(0, "apiVersion: apps/v1")
+	w.Line(0, "kind: Deployment")
+	w.Line(0, "metadata:")
+	w.Line(2, "name: "+name)
+	w.Line(2, "namespace: "+ns)
+	w.Line(0, "spec:")
+	w.Line(2, "replicas: "+strconv.Itoa(dep.Replicas))
+	w.Line(2, "selector:")
+	w.Line(4, "matchLabels:")
+	w.Line(6, "app: "+name)
+	w.Line(2, "template:")
+	w.Line(4, "metadata:")
+	w.Line(6, "labels:")
+	w.Line(8, "app: "+name)
+	w.Line(4, "spec:")
+	// The connector never calls the Kubernetes API, and an automounted service
+	// account token would land under the same /run/secrets tree the configtree
+	// import reads -- turning the token into stray connector properties.
+	w.Line(6, "automountServiceAccountToken: false")
 	lb := in.Kube.Libs
 	if lb != nil && lb.Download != nil {
 		d := lb.Download
 		cmds := make([]string, 0, len(d.URLs))
 		for _, u := range d.URLs {
-			cmds = append(cmds, "wget -O '/libs/"+baseName(u)+"' '"+u+"'")
+			cmds = append(cmds, "wget -O '/libs/"+spec.BaseName(u)+"' '"+u+"'")
 		}
-		w.line(6, "initContainers:")
-		w.line(8, "- name: libs-download")
-		w.line(10, "image: "+d.Image)
-		w.line(10, `command: ["sh", "-c", `+strconv.Quote(strings.Join(cmds, " && "))+`]`)
-		w.line(10, "volumeMounts:")
-		w.line(12, "- name: libs")
-		w.line(14, "mountPath: /libs")
+		w.Line(6, "initContainers:")
+		w.Line(8, "- name: libs-download")
+		w.Line(10, "image: "+d.Image)
+		w.Line(10, `command: ["sh", "-c", `+strconv.Quote(strings.Join(cmds, " && "))+`]`)
+		w.Line(10, "volumeMounts:")
+		w.Line(12, "- name: libs")
+		w.Line(14, "mountPath: /libs")
 	}
-	w.line(6, "containers:")
-	w.line(8, "- name: connector")
-	w.line(10, "image: "+dep.Image)
-	w.line(10, "ports:")
-	w.line(12, "- name: management")
-	w.line(14, "containerPort: "+strconv.Itoa(mgmtPort))
+	w.Line(6, "containers:")
+	w.Line(8, "- name: connector")
+	w.Line(10, "image: "+dep.Image)
+	w.Line(10, "ports:")
+	w.Line(12, "- name: management")
+	w.Line(14, "containerPort: "+strconv.Itoa(mgmtPort))
 	// env
-	w.line(10, "env:")
-	w.line(12, "- name: TZ")
-	w.line(14, "value: "+dep.Timezone)
+	w.Line(10, "env:")
+	w.Line(12, "- name: TZ")
+	w.Line(14, "value: "+dep.Timezone)
 	if inst.Model.MQTLS {
-		w.line(12, "- name: JAVA_TOOL_OPTIONS")
-		w.line(14, `value: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"`)
+		w.Line(12, "- name: JAVA_TOOL_OPTIONS")
+		w.Line(14, `value: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"`)
 	}
 	if sys := syslogOf(in.Kube); sys != nil {
-		w.line(12, "- name: LOGGING_SYSLOG_APPNAME")
-		w.line(14, "value: "+name)
-		w.line(12, "- name: LOGGING_SYSLOG_HOST")
-		w.line(14, "value: "+sys.Host)
-		w.line(12, "- name: LOGGING_SYSLOG_PORT")
-		w.line(14, `value: "`+strconv.Itoa(sys.Port)+`"`)
-	}
-	if credRef != "" {
-		w.line(10, "envFrom:")
-		w.line(12, "- secretRef:")
-		w.line(16, "name: "+credRef) // child of secretRef (nested map in list item)
+		w.Line(12, "- name: LOGGING_SYSLOG_APPNAME")
+		w.Line(14, "value: "+name)
+		w.Line(12, "- name: LOGGING_SYSLOG_HOST")
+		w.Line(14, "value: "+sys.Host)
+		w.Line(12, "- name: LOGGING_SYSLOG_PORT")
+		w.Line(14, `value: "`+strconv.Itoa(sys.Port)+`"`)
 	}
 	// volumeMounts
-	w.line(10, "volumeMounts:")
-	w.line(12, "- name: config")
-	w.line(14, "mountPath: /app/external/spring/config/application.yml")
-	w.line(14, "subPath: application.yml")
-	w.line(14, "readOnly: true")
+	w.Line(10, "volumeMounts:")
+	if credRef != "" {
+		// Credentials are mounted as one file per key, which the connector reads
+		// through its configtree import -- never injected as environment
+		// variables, where any child process or crash dump would see them.
+		w.Line(12, "- name: secrets")
+		w.Line(14, "mountPath: "+SecretsMountPath)
+		w.Line(14, "readOnly: true")
+	}
+	w.Line(12, "- name: config")
+	w.Line(14, "mountPath: /app/external/spring/config/application.yml")
+	w.Line(14, "subPath: application.yml")
+	w.Line(14, "readOnly: true")
 	if syslogOf(in.Kube) != nil {
-		w.line(12, "- name: config")
-		w.line(14, "mountPath: /app/external/classpath/logback-spring.xml")
-		w.line(14, "subPath: logback-spring.xml")
-		w.line(14, "readOnly: true")
+		w.Line(12, "- name: config")
+		w.Line(14, "mountPath: /app/external/classpath/logback-spring.xml")
+		w.Line(14, "subPath: logback-spring.xml")
+		w.Line(14, "readOnly: true")
 	}
 	if hasStores {
-		w.line(12, "- name: stores")
-		w.line(14, "mountPath: /app/external/classpath/truststores")
-		w.line(14, "readOnly: true")
+		w.Line(12, "- name: stores")
+		w.Line(14, "mountPath: /app/external/classpath/truststores")
+		w.Line(14, "readOnly: true")
 	}
 	if lb != nil {
-		w.line(12, "- name: libs")
-		w.line(14, "mountPath: /app/external/libs")
-		w.line(14, "readOnly: true")
+		w.Line(12, "- name: libs")
+		w.Line(14, "mountPath: /app/external/libs")
+		w.Line(14, "readOnly: true")
 	}
 	// probes (tcpSocket — see prompt.md "Probes"; keep isolated for a later switch)
-	w.line(10, "livenessProbe:")
-	w.line(12, "tcpSocket:")
-	w.line(14, "port: "+strconv.Itoa(mgmtPort))
-	w.line(12, "initialDelaySeconds: 30")
-	w.line(12, "periodSeconds: 15")
-	w.line(10, "readinessProbe:")
-	w.line(12, "tcpSocket:")
-	w.line(14, "port: "+strconv.Itoa(mgmtPort))
-	w.line(12, "initialDelaySeconds: 15")
-	w.line(12, "periodSeconds: 10")
+	w.Line(10, "livenessProbe:")
+	w.Line(12, "tcpSocket:")
+	w.Line(14, "port: "+strconv.Itoa(mgmtPort))
+	w.Line(12, "initialDelaySeconds: 30")
+	w.Line(12, "periodSeconds: 15")
+	w.Line(10, "readinessProbe:")
+	w.Line(12, "tcpSocket:")
+	w.Line(14, "port: "+strconv.Itoa(mgmtPort))
+	w.Line(12, "initialDelaySeconds: 15")
+	w.Line(12, "periodSeconds: 10")
 	// resources
 	renderResources(w, dep.Resources)
 	// volumes
-	w.line(6, "volumes:")
-	w.line(8, "- name: config")
-	w.line(10, "configMap:")
-	w.line(12, "name: "+cmName)
+	w.Line(6, "volumes:")
+	w.Line(8, "- name: config")
+	w.Line(10, "configMap:")
+	w.Line(12, "name: "+cmName)
+	if credRef != "" {
+		w.Line(8, "- name: secrets")
+		w.Line(10, "secret:")
+		w.Line(12, "secretName: "+credRef)
+		w.Line(12, "defaultMode: 0400")
+	}
 	if hasStores {
-		w.line(8, "- name: stores")
-		w.line(10, "secret:")
-		w.line(12, "secretName: "+storeRef)
+		w.Line(8, "- name: stores")
+		w.Line(10, "secret:")
+		w.Line(12, "secretName: "+storeRef)
 	}
 	if lb != nil {
-		w.line(8, "- name: libs")
+		w.Line(8, "- name: libs")
 		switch {
 		case lb.PVC != nil && lb.PVC.Existing != "":
-			w.line(10, "persistentVolumeClaim:")
-			w.line(12, "claimName: "+lb.PVC.Existing)
+			w.Line(10, "persistentVolumeClaim:")
+			w.Line(12, "claimName: "+lb.PVC.Existing)
 		case lb.PVC != nil && lb.PVC.Create != nil:
-			w.line(10, "persistentVolumeClaim:")
-			w.line(12, "claimName: "+lb.PVC.Create.Name)
+			w.Line(10, "persistentVolumeClaim:")
+			w.Line(12, "claimName: "+lb.PVC.Create.Name)
 		case lb.Download != nil && lb.Download.PVC != "":
-			w.line(10, "persistentVolumeClaim:")
-			w.line(12, "claimName: "+lb.Download.PVC)
+			w.Line(10, "persistentVolumeClaim:")
+			w.Line(12, "claimName: "+lb.Download.PVC)
 		default:
-			w.line(10, "emptyDir: {}")
+			w.Line(10, "emptyDir: {}")
 		}
 	}
 }
@@ -454,32 +444,32 @@ func renderResources(w *yw, r spec.Resources) {
 	if r.CPU == "" && r.Memory == "" {
 		return
 	}
-	w.line(10, "resources:")
+	w.Line(10, "resources:")
 	// requests and limits are set identically (guaranteed QoS).
 	for _, kind := range []string{"requests", "limits"} {
-		w.line(12, kind+":")
+		w.Line(12, kind+":")
 		if r.CPU != "" {
-			w.line(14, "cpu: "+quoteRes(r.CPU))
+			w.Line(14, "cpu: "+quoteRes(r.CPU))
 		}
 		if r.Memory != "" {
-			w.line(14, "memory: "+quoteRes(r.Memory))
+			w.Line(14, "memory: "+quoteRes(r.Memory))
 		}
 	}
 }
 
 func renderService(w *yw, name, ns string, port, targetPort int) {
-	w.line(0, "apiVersion: v1")
-	w.line(0, "kind: Service")
-	w.line(0, "metadata:")
-	w.line(2, "name: "+name)
-	w.line(2, "namespace: "+ns)
-	w.line(0, "spec:")
-	w.line(2, "selector:")
-	w.line(4, "app: "+name)
-	w.line(2, "ports:")
-	w.line(4, "- name: management")
-	w.line(6, "port: "+strconv.Itoa(port))
-	w.line(6, "targetPort: "+strconv.Itoa(targetPort))
+	w.Line(0, "apiVersion: v1")
+	w.Line(0, "kind: Service")
+	w.Line(0, "metadata:")
+	w.Line(2, "name: "+name)
+	w.Line(2, "namespace: "+ns)
+	w.Line(0, "spec:")
+	w.Line(2, "selector:")
+	w.Line(4, "app: "+name)
+	w.Line(2, "ports:")
+	w.Line(4, "- name: management")
+	w.Line(6, "port: "+strconv.Itoa(port))
+	w.Line(6, "targetPort: "+strconv.Itoa(targetPort))
 }
 
 // managementPort prefers the configured management port, then the service port,
@@ -492,14 +482,4 @@ func managementPort(in Input) int {
 		return in.Kube.Service.Port
 	}
 	return 8090
-}
-
-// splitLines splits s on '\n' and drops a single trailing empty element that a
-// terminating newline produces, so the block scalar keeps exactly one final newline.
-func splitLines(s string) []string {
-	lines := strings.Split(s, "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	return lines
 }

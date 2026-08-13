@@ -1,4 +1,6 @@
 spring:
+  config:
+    import: optional:configtree:/run/secrets/
   ssl:
     bundle:
       jks:
@@ -29,8 +31,8 @@ spring:
                 queue-manager: QM_CORE
                 channel: DSU.SVRCONN
                 conn-name: mqhost-core.internal(1414)
-                user: appuser
-                password: ${MQ_CORE_PASSWORD}
+                user: ${MQ_CONN_1_USER}
+                password: ${MQ_CONN_1_PASSWORD}
                 ssl-bundle: mq-conn-1-bundle
                 additional-properties:
                   WMQ_SSL_CIPHER_SUITE: TLS_RSA_WITH_AES_256_CBC_SHA256
@@ -41,8 +43,8 @@ spring:
               java:
                 host: tcps://broker.internal:55443
                 msg-vpn: prod
-                client-username: connector
-                client-password: ${SOL_PASSWORD}
+                client-username: ${PROD_SOLACE_CLIENT_USERNAME}
+                client-password: ${PROD_SOLACE_CLIENT_PASSWORD}
                 connect-retries: -1
                 reconnect-retries: -1
                 api-properties:
@@ -63,7 +65,7 @@ spring:
                 queue-manager: QM_ARCHIVE
                 channel: DSU.SVRCONN
                 conn-name: mqhost-archive.internal(1414)
-                user: appuser
+                user: ${MQ_ARCHIVE_USER}
                 password: ${MQ_ARCHIVE_PASSWORD}
                 ssl-bundle: mq-archive-bundle
                 additional-properties:
@@ -75,8 +77,8 @@ spring:
               java:
                 host: tcp://edge-broker.internal:55555
                 msg-vpn: edge
-                client-username: bridge
-                client-password: ${EDGE_SOL_PASSWORD}
+                client-username: ${SOL_CONN_1_CLIENT_USERNAME}
+                client-password: ${SOL_CONN_1_CLIENT_PASSWORD}
                 connect-retries: -1
                 reconnect-retries: -1
         undefined:
@@ -136,7 +138,7 @@ solace:
       enabled: true
       users:
         - name: healthcheck
-          password: ${HEALTHCHECK_PASSWORD}
+          password: ${SECURITY_USER_HEALTHCHECK_PASSWORD}
     management:
       leader-election:
         mode: active_standby
@@ -149,8 +151,8 @@ solace:
       session:
         host: tcps://broker.internal:55443
         msg-vpn: prod
-        client-username: connector
-        client-password: ${SOL_PASSWORD}
+        client-username: ${LEADER_ELECTION_CLIENT_USERNAME}
+        client-password: ${LEADER_ELECTION_CLIENT_PASSWORD}
         api-properties:
           SSL_VALIDATE_CERTIFICATE: true
           SSL_TRUST_STORE: ./certs/truststore.jks

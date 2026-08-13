@@ -43,10 +43,10 @@ var cliVerbs = []cliVerb{
 		Name: "generate", Args: "[-e env.yaml] [-o out]", Flags: []string{"-e", "-o"}, InUsage: true,
 		Detail: "Renders the target's artifacts from " + bt + "env.yaml" + bt + " and prints them to stdout (or " + bt + "-o" + bt + "). Fails fast: stops at the first error and writes nothing; output is buffered, so a failed run never leaves a half-written " + bt + "-o" + bt + " file.",
 		Targets: []cliTarget{
-			{Name: "config", Summary: "Emit application.yml (per instance)", Example: "solmq-conn generate config -e env.yaml -o application.yml"},
+			{Name: "config", Summary: "Emit application.yml", Example: "solmq-conn generate config -e env.yaml -o application.yml"},
 			{Name: "kubernetes", Summary: "Emit ConfigMap+Deployment+Service (+Secrets)", Example: "solmq-conn generate kubernetes -e env.yaml -o k8s.yaml"},
 			{Name: "docker", Summary: "Emit docker-compose.yml (application.yml inlined)", Example: "solmq-conn generate docker -e env.yaml -o docker-compose.yml"},
-			{Name: "podman", Summary: "Emit a podman run script or quadlet unit(s)", Example: "solmq-conn generate podman -e env.yaml -o run.sh"},
+			{Name: "podman", Summary: "Emit a podman run script or quadlet unit", Example: "solmq-conn generate podman -e env.yaml -o run.sh"},
 		},
 	},
 	{
@@ -55,7 +55,7 @@ var cliVerbs = []cliVerb{
 		Targets: []cliTarget{
 			{Name: "kubernetes", Summary: "kubectl/oc apply -f - (manifest on stdin)", Example: "solmq-conn deploy kubernetes -e env.yaml"},
 			{Name: "docker", Summary: "docker compose up -d", Example: "solmq-conn deploy docker -e env.yaml"},
-			{Name: "podman", Summary: "write quadlet unit(s); systemctl start", Example: "solmq-conn deploy podman -e env.yaml"},
+			{Name: "podman", Summary: "write the quadlet unit; systemctl start", Example: "solmq-conn deploy podman -e env.yaml"},
 		},
 	},
 	{
@@ -64,7 +64,7 @@ var cliVerbs = []cliVerb{
 		Targets: []cliTarget{
 			{Name: "kubernetes", Summary: "kubectl/oc delete -f -", Example: "solmq-conn delete kubernetes -e env.yaml"},
 			{Name: "docker", Summary: "docker compose down", Example: "solmq-conn delete docker -e env.yaml"},
-			{Name: "podman", Summary: "systemctl stop; remove unit(s)", Example: "solmq-conn delete podman -e env.yaml"},
+			{Name: "podman", Summary: "systemctl stop; remove the unit", Example: "solmq-conn delete podman -e env.yaml"},
 		},
 	},
 	{
@@ -218,16 +218,16 @@ func usageText() string {
 	return `solmq-conn -- Solace PubSub+ Connector for IBM MQ config generator + deployer
 
 Usage:
-  solmq-conn generate config     [-e env.yaml] [-o out]   Emit application.yml (per instance)
+  solmq-conn generate config     [-e env.yaml] [-o out]   Emit application.yml
   solmq-conn generate kubernetes [-e env.yaml] [-o out]   Emit ConfigMap+Deployment+Service (+Secrets)
   solmq-conn generate docker     [-e env.yaml] [-o out]   Emit docker-compose.yml (application.yml inlined)
-  solmq-conn generate podman     [-e env.yaml] [-o out]   Emit a podman run script or quadlet unit(s)
+  solmq-conn generate podman     [-e env.yaml] [-o out]   Emit a podman run script or quadlet unit
   solmq-conn deploy  kubernetes  [-e env.yaml]            kubectl/oc apply -f - (manifest on stdin)
   solmq-conn delete  kubernetes  [-e env.yaml]            kubectl/oc delete -f -
   solmq-conn deploy  docker      [-e env.yaml]            docker compose up -d
   solmq-conn delete  docker      [-e env.yaml]            docker compose down
-  solmq-conn deploy  podman      [-e env.yaml]            write quadlet unit(s); systemctl start
-  solmq-conn delete  podman      [-e env.yaml]            systemctl stop; remove unit(s)
+  solmq-conn deploy  podman      [-e env.yaml]            write the quadlet unit; systemctl start
+  solmq-conn delete  podman      [-e env.yaml]            systemctl stop; remove the unit
   solmq-conn validate            [-e env.yaml]            Lint the whole env.yaml + workflows
   solmq-conn examples [dir] [-f]                          Write a starter env.yaml + workflows
 

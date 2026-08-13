@@ -2,11 +2,11 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Grep",
         "hooks": [
           {
             "type": "command",
-            "command": "graphify hook-guard search"
+            "command": "C:/Users/hamly/scoop/apps/python/current/Scripts/graphify.EXE hook-guard search"
           }
         ]
       },
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "graphify hook-guard read"
+            "command": "C:/Users/hamly/scoop/apps/python/current/Scripts/graphify.EXE hook-guard read"
           }
         ]
       }

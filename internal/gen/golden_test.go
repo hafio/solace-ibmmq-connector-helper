@@ -48,6 +48,23 @@ func envWithKube(t *testing.T, kubeBlock string) []byte {
 	return append(base, kubeBlock...)
 }
 
+// setGoldenCredEnv sets the seven host environment variables the golden
+// spec's -env credential positions name. validate checks every -env
+// reference resolves to a set variable regardless of target (S4a: catch a
+// missing/misspelled name while linting rather than only at deploy time), so
+// even TestGoldenConfig -- which never reads the values -- needs them set.
+func setGoldenCredEnv(t *testing.T) {
+	t.Helper()
+	for k, v := range map[string]string{
+		"SOL_PASSWORD": "sol-pw", "MQ_CORE_PASSWORD": "mqcore-pw",
+		"MQ_ARCHIVE_PASSWORD": "mqarchive-pw", "EDGE_SOL_PASSWORD": "edge-pw",
+		"TRUSTSTORE_PASSWORD": "ts-pw", "KEYSTORE_PASSWORD": "ks-pw",
+		"HEALTHCHECK_PASSWORD": "hc-pw",
+	} {
+		t.Setenv(k, v)
+	}
+}
+
 func dirReader() func(string) ([]byte, error) {
 	return func(p string) ([]byte, error) {
 		if !filepath.IsAbs(p) {
@@ -72,30 +89,22 @@ func mustRead(t *testing.T, p string) []byte {
 func norm(s string) string { return strings.ReplaceAll(s, "\r\n", "\n") }
 
 func TestGoldenConfig(t *testing.T) {
+	setGoldenCredEnv(t)
 	req := loadSpecs(t)
-	outs, errs, _ := gen.Config(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()})
+	out, errs, _ := gen.Config(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()})
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	if len(outs) != 1 {
-		t.Fatalf("golden specs (4 workflows) should be one instance, got %d", len(outs))
-	}
 	want := norm(string(mustRead(t, "../../testdata/golden/application.yml")))
-	if norm(outs[0]) != want {
-		t.Errorf("config output mismatch\n%s", lineDiff(want, norm(outs[0])))
+	if norm(out) != want {
+		t.Errorf("config output mismatch\n%s", lineDiff(want, norm(out)))
 	}
 }
 
 func TestGoldenKubernetesCreate(t *testing.T) {
-	// source: env -- provide the seven credential values.
-	for k, v := range map[string]string{
-		"SOL_PASSWORD": "sol-pw", "MQ_CORE_PASSWORD": "mqcore-pw",
-		"MQ_ARCHIVE_PASSWORD": "mqarchive-pw", "EDGE_SOL_PASSWORD": "edge-pw",
-		"TRUSTSTORE_PASSWORD": "ts-pw", "KEYSTORE_PASSWORD": "ks-pw",
-		"HEALTHCHECK_PASSWORD": "hc-pw",
-	} {
-		t.Setenv(k, v)
-	}
+	// source: env -- provide the seven -env credential values (the literal
+	// positions -- usernames -- need no environment at all).
+	setGoldenCredEnv(t)
 	req := loadSpecs(t)
 	out, errs, _ := gen.GenerateKubernetes(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()})
 	if len(errs) > 0 {
@@ -125,6 +134,7 @@ func TestGoldenKubernetesCreate(t *testing.T) {
 }
 
 func TestGoldenKubernetesNoSecrets(t *testing.T) {
+	setGoldenCredEnv(t)
 	req := loadSpecs(t)
 	// Swap in a secrets/syslog/libs-free kubernetes: section (defaults unchanged).
 	req.Env = &gen.File{Name: "env.yaml", Data: envWithKube(t, kubeNoSecrets)}
@@ -183,6 +193,14 @@ func configMapDoc(appYAML string, logback bool) string {
 	return b.String()
 }
 
+// credDoc lists every credential the golden spec's config references, in
+// first-use order: the two mq-conn-1 positions, the two shared store
+// passwords (referenced first by the mq-conn-1 bundle), prod-solace,
+// mq-archive, sol-conn-1, the leader-election session (a distinct secret
+// from prod-solace even though it carries the same underlying value), and
+// finally the healthcheck management user. Usernames are literal in the
+// spec, so their values are the literal text; passwords are -env, so their
+// values are the seven t.Setenv values set by setGoldenCredEnv.
 const credDoc = `apiVersion: v1
 kind: Secret
 metadata:
@@ -190,13 +208,19 @@ metadata:
   namespace: solace-connectors
 type: Opaque
 stringData:
-  SOL_PASSWORD: "sol-pw"
-  MQ_CORE_PASSWORD: "mqcore-pw"
-  MQ_ARCHIVE_PASSWORD: "mqarchive-pw"
-  EDGE_SOL_PASSWORD: "edge-pw"
+  MQ_CONN_1_USER: "appuser"
+  MQ_CONN_1_PASSWORD: "mqcore-pw"
   TRUSTSTORE_PASSWORD: "ts-pw"
   KEYSTORE_PASSWORD: "ks-pw"
-  HEALTHCHECK_PASSWORD: "hc-pw"
+  PROD_SOLACE_CLIENT_USERNAME: "connector"
+  PROD_SOLACE_CLIENT_PASSWORD: "sol-pw"
+  MQ_ARCHIVE_USER: "appuser"
+  MQ_ARCHIVE_PASSWORD: "mqarchive-pw"
+  SOL_CONN_1_CLIENT_USERNAME: "bridge"
+  SOL_CONN_1_CLIENT_PASSWORD: "edge-pw"
+  LEADER_ELECTION_CLIENT_USERNAME: "connector"
+  LEADER_ELECTION_CLIENT_PASSWORD: "sol-pw"
+  SECURITY_USER_HEALTHCHECK_PASSWORD: "hc-pw"
 `
 
 const storesDoc = `apiVersion: v1
@@ -254,7 +278,14 @@ spec:
       targetPort: 8090
 `
 
-func deploymentDoc(envFrom, stores, syslog, libs bool) string {
+// deploymentDoc builds the expected Deployment manifest. hasCreds controls
+// the credentials Secret's volume + mount: no envFrom exists any more --
+// credentials are mounted as files under /run/secrets (matching the
+// connector's spring.config.import configtree, S3: no secret in an env var a
+// child process or crash dump could see) -- and automountServiceAccountToken
+// is always false regardless of hasCreds (the connector never calls the
+// Kubernetes API).
+func deploymentDoc(hasCreds, stores, syslog, libs bool) string {
 	var b strings.Builder
 	b.WriteString(`apiVersion: apps/v1
 kind: Deployment
@@ -271,6 +302,7 @@ spec:
       labels:
         app: solmq-connector
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: connector
           image: solace/solace-pubsub-connector-ibmmq:2.13.0
@@ -292,11 +324,11 @@ spec:
               value: "514"
 `)
 	}
-	if envFrom {
-		b.WriteString("          envFrom:\n            - secretRef:\n                name: solmq-credentials\n")
+	b.WriteString("          volumeMounts:\n")
+	if hasCreds {
+		b.WriteString("            - name: secrets\n              mountPath: /run/secrets\n              readOnly: true\n")
 	}
-	b.WriteString(`          volumeMounts:
-            - name: config
+	b.WriteString(`            - name: config
               mountPath: /app/external/spring/config/application.yml
               subPath: application.yml
               readOnly: true
@@ -336,6 +368,9 @@ spec:
           configMap:
             name: solmq-connector-config
 `)
+	if hasCreds {
+		b.WriteString("        - name: secrets\n          secret:\n            secretName: solmq-credentials\n            defaultMode: 0400\n")
+	}
 	if stores {
 		b.WriteString("        - name: stores\n          secret:\n            secretName: solmq-tls\n")
 	}

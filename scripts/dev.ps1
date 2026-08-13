@@ -22,7 +22,12 @@ function Ok   { param($m) Write-Host "ok: $m"    -ForegroundColor Green }
 function Warn { param($m) Write-Host "warn: $m"  -ForegroundColor Yellow }
 function Die  { param($m) Write-Host "error: $m" -ForegroundColor Red; exit 1 }
 
-function Get-Now { (Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz') }
+# Offset with no colon, matching dev.sh's `date +%z` (+0800, not +08:00) so both
+# scripts write byte-identical footer shapes.
+function Get-Now {
+  $d = Get-Date
+  '{0}{1}' -f $d.ToString('yyyy-MM-ddTHH:mm:ss'), ($d.ToString('zzz') -replace ':', '')
+}
 function Get-Log { param($Task) Join-Path $LogDir "$Task.log" }
 
 function Start-TaskLog {

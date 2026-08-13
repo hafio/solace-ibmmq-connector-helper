@@ -13,11 +13,17 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
-// MaxWorkflowsPerInstance is the connector runtime's cap on workflow IDs
-// (0..19) per application.yml. Folders with more workflows are sharded across
-// that many connector instances by the gen layer, so this is a per-instance
-// size — not a hard folder cap.
-const MaxWorkflowsPerInstance = 20
+// MaxWorkflows is the connector runtime's cap on workflow IDs (0..19) per
+// application.yml, and therefore the most one connector instance can run. The
+// Spring Boot app binds ids 0..19 only: a workflow numbered 20 or higher is
+// silently ignored, not rejected.
+//
+// That silence is why exceeding this is a hard error here rather than a warning.
+// A 21st workflow would otherwise generate cleanly, deploy cleanly, and simply
+// never run -- with nothing in the config or the connector's own output saying
+// so. Splitting the folder is the user's call, since only they know which flows
+// belong on which connector.
+const MaxWorkflows = 20
 
 // fileEnv is the single config file label on every issue (everything now lives
 // in env.yaml; the message body carries the section path).
@@ -47,23 +53,21 @@ type Context struct {
 	// Target gates: enable the deploy-grade checks for the selected target
 	// (secret/store wiring, image required, command safe). `validate` sets all
 	// three so it lints every section present in env.yaml.
-	Deploy      bool // kubernetes checks
-	CheckDocker bool // docker checks
-	CheckPodman bool // podman checks
+	CheckKubernetes bool // kubernetes checks
+	CheckDocker     bool // docker checks
+	CheckPodman     bool // podman checks
 
-	// Env, when non-nil, is used to check that credentials.create source:env
-	// variables are present (the CLI supplies os.LookupEnv; nil skips the check).
+	// Env, when non-nil, looks up a host environment variable so a `-env`
+	// credential reference can be checked for presence at validate time (the CLI
+	// supplies os.LookupEnv; nil skips the check).
 	Env func(string) (string, bool)
-	// ValuesFileKeys is the set of keys available from a source:file values-file
-	// (nil when not applicable).
-	ValuesFileKeys map[string]bool
 }
 
 var (
 	connNameRE = regexp.MustCompile(`^[^()\s,]+\(\d+\)(,[^()\s,]+\(\d+\))*$`)
 	dns1123RE  = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
-	varRE      = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(:[^}]*)?\}`)
 	hostRE     = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
+	envNameRE  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
 // Run executes all checks, returning fatal errors and non-fatal warnings.
@@ -85,12 +89,16 @@ func Run(ctx Context) (errs, warns []Issue) {
 		resolved[i].Target = d.Resolve(wf.Target)
 	}
 
-	// Reusable connection definitions + per-workflow structural checks.
-	checkConnections(add, d, haveKeystore)
-	checkWorkflowSides(add, warn, ctx.Workflows, haveKeystore, d.Connections)
+	checkWorkflowCount(add, len(ctx.Workflows))
 
-	// Cross-workflow (on resolved tuples): key-alias conflicts and duplicate sources.
+	// Reusable connection definitions + per-workflow structural checks.
+	checkConnections(add, warn, ctx.Env, d, haveKeystore)
+	checkWorkflowSides(add, warn, ctx.Env, ctx.Workflows, haveKeystore, d.Connections)
+	checkDefaultsCredentials(add, warn, ctx, d)
+
+	// Cross-workflow (on resolved tuples): binder-level conflicts and duplicate sources.
 	checkKeyAliasConflicts(add, resolved)
+	checkPasswordConflicts(add, resolved)
 	checkDuplicateSources(warn, resolved)
 
 	// Leader-election (standalone | active_active | active_standby).
@@ -102,9 +110,21 @@ func Run(ctx Context) (errs, warns []Issue) {
 	return errs, warns
 }
 
+// checkWorkflowCount rejects a folder holding more workflows than one connector
+// instance can run. The tool does not split them: which flows belong on which
+// connector is a deployment decision (they share a leader election, a set of
+// credentials, and a resource budget), so it names the remedy instead of guessing.
+func checkWorkflowCount(add func(string, string, ...any), n int) {
+	if n <= MaxWorkflows {
+		return
+	}
+	add(fileEnv, "%d workflows found, but one connector instance runs at most %d (workflow ids 0..%d). Split them across separate folders, each with its own env.yaml and its own deployment.name/docker.name/podman.name, and deploy each as its own connector",
+		n, MaxWorkflows, MaxWorkflows-1)
+}
+
 // checkWorkflowSides runs the per-workflow structural + semantic checks on the
 // raw sides (so conn-ref rules apply before resolution).
-func checkWorkflowSides(add, warn func(string, string, ...any), wfs []spec.Workflow, haveKeystore bool, conns map[string]spec.Side) {
+func checkWorkflowSides(add, warn func(string, string, ...any), env func(string) (string, bool), wfs []spec.Workflow, haveKeystore bool, conns map[string]spec.Side) {
 	for _, wf := range wfs {
 		if !wf.SourceSet {
 			add(wf.File, "missing 'source'")
@@ -113,10 +133,10 @@ func checkWorkflowSides(add, warn func(string, string, ...any), wfs []spec.Workf
 			add(wf.File, "missing 'target'")
 		}
 		if wf.SourceSet {
-			checkSide(add, warn, wf.File, "source", wf.Source, true, haveKeystore, conns)
+			checkSide(add, warn, env, wf.File, "source", wf.Source, true, haveKeystore, conns)
 		}
 		if wf.TargetSet {
-			checkSide(add, warn, wf.File, "target", wf.Target, false, haveKeystore, conns)
+			checkSide(add, warn, env, wf.File, "target", wf.Target, false, haveKeystore, conns)
 		}
 	}
 }
@@ -125,7 +145,7 @@ func checkWorkflowSides(add, warn func(string, string, ...any), wfs []spec.Workf
 // gate is independent so `config` skips them all, a per-target command lints
 // only its section, and `validate` enables every section present.
 func checkTargets(add, warn func(string, string, ...any), ctx Context, resolved []spec.Workflow) {
-	if ctx.Deploy && ctx.Kube != nil {
+	if ctx.CheckKubernetes && ctx.Kube != nil {
 		checkKube(add, warn, ctx)
 		// Warn: TLS/mTLS in use but the stores Secret is not wired.
 		if usesTLS(resolved) && !storesWired(ctx.Kube) {
@@ -151,11 +171,12 @@ func checkTargets(add, warn func(string, string, ...any), ctx Context, resolved 
 // checkSide validates one workflow side. A conn-ref side is strict (only the
 // destination); an inline side is checked as a full connection tuple. Both emit
 // the EDA advisories for Solace topic-source / queue-destination.
-func checkSide(add, warn func(string, string, ...any), file, which string, s spec.Side, isSource, haveKeystore bool, conns map[string]spec.Side) {
+func checkSide(add, warn func(string, string, ...any), env func(string) (string, bool), file, which string, s spec.Side, isSource, haveKeystore bool, conns map[string]spec.Side) {
 	if !s.HasSystem() {
 		add(file, "%s must specify exactly one of 'solace:' or 'mq:'", which)
 		return
 	}
+	checkSideCredentials(add, warn, env, file, which, s)
 	if s.DestKind == "" {
 		add(file, "%s (%s) must specify exactly one of 'queue:' or 'topic:'", which, s.System)
 		return
@@ -174,6 +195,64 @@ func checkSide(add, warn func(string, string, ...any), file, which string, s spe
 	}
 	checkTuple(add, file, which, s, haveKeystore)
 	edaAdvisory(warn, file, s, isSource)
+}
+
+// checkCred validates one credential position: the literal and `-env` forms are
+// mutually exclusive, an `-env` value must be an environment-variable name (not
+// a `${...}` reference or a value), and a `${` in the literal form is almost
+// always someone reaching for the `-env` key.
+//
+// env, when non-nil, also confirms the named variable is actually set, so a
+// missing credential is caught while linting rather than mid-deploy.
+func checkCred(add, warn func(string, string, ...any), env func(string) (string, bool), file, label string, c spec.Cred) {
+	if c.Both() {
+		add(file, "%s sets both a literal value and %s-env; use one or the other", label, label)
+		return
+	}
+	if c.EnvVar != "" {
+		switch {
+		case strings.Contains(c.EnvVar, "${"):
+			add(file, "%s-env %q must be a bare variable name, not a ${...} reference", label, c.EnvVar)
+		case !envNameRE.MatchString(c.EnvVar):
+			add(file, "%s-env %q is not a valid environment variable name (letters, digits and underscore; not starting with a digit)", label, c.EnvVar)
+		case env != nil:
+			// Advisory only. Authoring a spec, generating a config, or linting on
+			// a laptop must not require every production credential to be
+			// exported; the deploy path resolves values and fails hard there.
+			if _, ok := env(c.EnvVar); !ok {
+				warn(file, "%s-env names %s, which is not set in this environment; deploying will fail until it is exported", label, c.EnvVar)
+			}
+		}
+		return
+	}
+	if strings.Contains(c.Literal, "${") {
+		warn(file, "%s looks like a variable reference; it is used as a literal value. Use %s-env: VAR to read it from the environment instead", label, label)
+	}
+}
+
+// checkSideCredentials validates both credential positions of one side.
+func checkSideCredentials(add, warn func(string, string, ...any), env func(string) (string, bool), file, label string, s spec.Side) {
+	userKey, passKey := "client-username", "client-password"
+	if s.System == spec.SystemMQ {
+		userKey, passKey = "user", "password"
+	}
+	checkCred(add, warn, env, file, label+" "+userKey, s.Username())
+	checkCred(add, warn, env, file, label+" "+passKey, s.Secret())
+}
+
+// checkDefaultsCredentials covers the credential positions that live in env.yaml
+// itself rather than on a workflow side: the two store passwords, the management
+// users, and the leader-election session.
+func checkDefaultsCredentials(add, warn func(string, string, ...any), ctx Context, d *spec.Defaults) {
+	checkCred(add, warn, ctx.Env, fileEnv, "tls.truststore.password", d.TLS.Truststore.Secret())
+	checkCred(add, warn, ctx.Env, fileEnv, "tls.keystore.password", d.TLS.Keystore.Secret())
+	for i, u := range d.Security.Users {
+		label := fmt.Sprintf("security.users[%d].password", i)
+		checkCred(add, warn, ctx.Env, fileEnv, label, u.Secret())
+	}
+	if s := d.LeaderElection.Session; s != nil {
+		checkSideCredentials(add, warn, ctx.Env, fileEnv, "leader-election session", *s)
+	}
 }
 
 // checkTuple validates the connection fields of a side (no destination), shared
@@ -249,7 +328,7 @@ func edaAdvisory(warn func(string, string, ...any), file string, s spec.Side, is
 
 // checkConnections validates each reusable connection definition (no destination,
 // no nested conn-ref, complete tuple), in sorted order for stable messages.
-func checkConnections(add func(string, string, ...any), d *spec.Defaults, haveKeystore bool) {
+func checkConnections(add, warn func(string, string, ...any), env func(string) (string, bool), d *spec.Defaults, haveKeystore bool) {
 	names := make([]string, 0, len(d.Connections))
 	for name := range d.Connections {
 		names = append(names, name)
@@ -269,6 +348,7 @@ func checkConnections(add func(string, string, ...any), d *spec.Defaults, haveKe
 			add(fileEnv, "%s must not define queue/topic (a connection carries only connection details)", label)
 		}
 		checkTuple(add, fileEnv, label, c, haveKeystore)
+		checkSideCredentials(add, warn, env, fileEnv, label, c)
 	}
 }
 
@@ -316,7 +396,7 @@ func checkKeyAliasConflicts(add func(string, string, ...any), wfs []spec.Workflo
 		if !s.HasSystem() || s.KeyAlias == "" {
 			return
 		}
-		key := dedupKey(s)
+		key := s.DedupKey()
 		if prev, ok := byKey[key]; ok {
 			if prev.alias != s.KeyAlias {
 				add(file, "conflicting key-alias %q vs %q for the same binder (also in %s)", s.KeyAlias, prev.alias, prev.file)
@@ -324,6 +404,39 @@ func checkKeyAliasConflicts(add func(string, string, ...any), wfs []spec.Workflo
 			return
 		}
 		byKey[key] = seen{s.KeyAlias, file}
+	}
+	for _, wf := range wfs {
+		visit(wf.File, wf.Source)
+		visit(wf.File, wf.Target)
+	}
+}
+
+// checkPasswordConflicts flags binders (same dedup tuple) whose sides declare
+// different passwords. The dedup tuple deliberately omits the password, so two
+// sides that disagree still collapse into one binder and consolidate keeps only
+// the first (by filename) -- silently authenticating every workflow on that
+// binder with a credential the later file never asked for. An auth mismatch on
+// one connection is a real misconfiguration, so unlike the cipher conflict
+// (last-wins warning) this is fatal.
+func checkPasswordConflicts(add func(string, string, ...any), wfs []spec.Workflow) {
+	type seen struct{ pass, file string }
+	byKey := map[string]seen{}
+	visit := func(file string, s spec.Side) {
+		if !s.HasSystem() {
+			return
+		}
+		c := s.Secret()
+		if c.Empty() {
+			return
+		}
+		key := s.DedupKey()
+		if prev, ok := byKey[key]; ok {
+			if prev.pass != c.Key() {
+				add(file, "conflicting password for the same binder: this side uses %s, %s uses a different one — one connection cannot authenticate two ways, so give it a single password or make the tuples distinct", c.Describe(), prev.file)
+			}
+			return
+		}
+		byKey[key] = seen{c.Key(), file}
 	}
 	for _, wf := range wfs {
 		visit(wf.File, wf.Source)
@@ -339,7 +452,7 @@ func checkDuplicateSources(warn func(string, string, ...any), wfs []spec.Workflo
 		if !s.HasSystem() {
 			continue
 		}
-		key := dedupKey(s) + "|" + s.Dest
+		key := s.DedupKey() + "|" + s.Dest
 		if prev, ok := byKey[key]; ok {
 			warn(wf.File, "source %q is also consumed in %s (duplicate source on the same binder)", s.Dest, prev.file)
 			continue
@@ -354,12 +467,10 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 		add(fileEnv, "deployment.name is required")
 	} else if !isDNS1123(dep.Name) {
 		add(fileEnv, "deployment.name %q is not a valid DNS-1123 label", dep.Name)
-	} else if instances := shardCount(len(ctx.Workflows)); instances > 1 {
-		// With >1 instance the name is suffixed -<n>; the ConfigMap (<name>-<n>-config)
-		// is the longest derived name and must stay within the 63-char DNS-1123 limit.
-		if longest := fmt.Sprintf("%s-%d-config", dep.Name, instances); len(longest) > 63 {
-			add(fileEnv, "deployment.name %q is too long: %d instances generate names up to %q which exceeds the 63-char DNS-1123 limit", dep.Name, instances, longest)
-		}
+	} else if longest := dep.Name + "-config"; len(longest) > 63 {
+		// The ConfigMap name is the longest object derived from deployment.name
+		// and must still be a valid DNS-1123 label.
+		add(fileEnv, "deployment.name %q is too long: it derives the ConfigMap name %q, which exceeds the 63-char DNS-1123 limit", dep.Name, longest)
 	}
 	if dep.Namespace == "" {
 		add(fileEnv, "deployment.namespace is required")
@@ -376,21 +487,36 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 		add(fileEnv, "leader-election standalone requires replicas: 1 (got %d)", dep.Replicas)
 	}
 
-	// Secret wiring checks.
-	if c := ctx.Kube.Secrets.Credentials; c != nil && c.Create != nil {
-		checkCredentialsCreate(add, ctx.Env, "kubernetes", c.Create)
+	// Secret wiring checks. Every name here is emitted verbatim as a manifest
+	// metadata.name / secretRef, so it is held to the same DNS-1123 rule the
+	// cluster would apply anyway -- caught at the gate with a readable message
+	// instead of by kubectl mid-apply (libs.pvc.create.name is checked the same
+	// way in checkLibs).
+	if c := ctx.Kube.Secrets.Credentials; c != nil {
+		if c.Create != nil {
+			checkSecretName(add, "kubernetes.secrets.credentials.create.name", c.Create.Name)
+			if removed := c.Create.RemovedKeys(); len(removed) > 0 {
+				add(fileEnv, "kubernetes.secrets.credentials.create no longer takes %s: the Secret's keys are every credential the config references, and their values come from the literals and -env variables those fields name. Remove %s", strings.Join(removed, "/"), strings.Join(removed, ", "))
+			}
+		}
+		if c.Existing != "" {
+			checkSecretName(add, "kubernetes.secrets.credentials.existing", c.Existing)
+		}
 	}
-	if s := ctx.Kube.Secrets.Stores; s != nil && s.Create != nil {
-		if ctx.Defaults.TLS.Truststore == nil {
-			add(fileEnv, "kubernetes.secrets.stores.create requires tls.truststore")
+	if s := ctx.Kube.Secrets.Stores; s != nil {
+		if s.Create != nil {
+			if ctx.Defaults.TLS.Truststore == nil {
+				add(fileEnv, "kubernetes.secrets.stores.create requires tls.truststore")
+			}
+			checkSecretName(add, "kubernetes.secrets.stores.create.name", s.Create.Name)
+		}
+		if s.Existing != "" {
+			checkSecretName(add, "kubernetes.secrets.stores.existing", s.Existing)
 		}
 	}
 
 	checkSyslog(add, warn, ctx.Kube)
 	checkLibs(add, ctx.Kube)
-
-	// Warn: ${VAR} used in config but not supplied by the credentials Secret.
-	checkUnsuppliedVars(warn, ctx)
 }
 
 // checkSyslog validates the optional logging.syslog block.
@@ -448,6 +574,15 @@ func checkLibs(add func(string, string, ...any), k *spec.Kubernetes) {
 			}
 			if c.NFS.Server == "" || c.NFS.Path == "" {
 				add(fileEnv, "libs.pvc.create requires nfs.server and nfs.path")
+			} else {
+				// Both land unquoted in the PersistentVolume manifest piped to
+				// kubectl, so a newline would inject a sibling key.
+				if !hostRE.MatchString(c.NFS.Server) {
+					add(fileEnv, "libs.pvc.create nfs.server %q may only contain letters, digits, '.', ':', '_' and '-'", c.NFS.Server)
+				}
+				if !safeHostPath(c.NFS.Path) {
+					add(fileEnv, "libs.pvc.create nfs.path %q contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", c.NFS.Path)
+				}
 			}
 		}
 	case lb.Download != nil:
@@ -492,67 +627,24 @@ func safeShellChars(s string) bool {
 	return true
 }
 
-// checkUnsuppliedVars warns when a ${VAR} placeholder used by the workflows or
-// defaults has no matching key in the credentials Secret (create only).
-func checkUnsuppliedVars(warn func(string, string, ...any), ctx Context) {
-	c := ctx.Kube.Secrets.Credentials
-	if c == nil || c.Create == nil {
-		return
-	}
-	supplied := map[string]bool{}
-	switch c.Create.Source {
-	case spec.SourceEnv:
-		for _, v := range c.Create.Variables {
-			supplied[v] = true
-		}
-	case spec.SourceFile:
-		for k := range ctx.ValuesFileKeys {
-			supplied[k] = true
-		}
-	}
-	seen := map[string]bool{}
-	for v := range collectVars(ctx) {
-		if !supplied[v] && !seen[v] {
-			seen[v] = true
-			warn(fileEnv, "${%s} is used but not supplied by the credentials Secret", v)
+// safeHostPath gates a config-declared host path that a docker/podman renderer
+// concatenates unquoted into a mount argument (`-v src:dst:ro` in the run script,
+// `Volume=` in a quadlet unit, a compose `volumes:` entry). It rejects whitespace,
+// control characters, quotes, backtick and '$' plus the shell metacharacters: a
+// newline would open a new script line, unit directive, or YAML key, and a space
+// would split the mount argument in two.
+//
+// Unlike safeShellChars it permits '\' and ':' so a Windows-authored path
+// (C:\certs\truststore.jks) still validates -- neither can escape any of those
+// three sinks. Only the value as written in env.yaml is checked, never the
+// absolute path it resolves to, which is the developer's own working directory.
+func safeHostPath(s string) bool {
+	for _, r := range s {
+		if r <= 0x20 || r == 0x7f || r == '\'' || r == '"' || r == '`' || r == '$' {
+			return false
 		}
 	}
-}
-
-// collectVars gathers ${VAR} names referenced by workflow secret fields and the
-// defaults store passwords (placeholders that must be resolved at runtime).
-func collectVars(ctx Context) map[string]bool {
-	out := map[string]bool{}
-	scan := func(s string) {
-		for _, m := range varRE.FindAllStringSubmatch(s, -1) {
-			out[m[1]] = true
-		}
-	}
-	for _, wf := range ctx.Workflows {
-		for _, s := range []spec.Side{ctx.Defaults.Resolve(wf.Source), ctx.Defaults.Resolve(wf.Target)} {
-			scan(s.ClientPass)
-			scan(s.Password)
-		}
-	}
-	if d := ctx.Defaults; d != nil {
-		if d.TLS.Truststore != nil {
-			scan(d.TLS.Truststore.Password)
-		}
-		if d.TLS.Keystore != nil {
-			scan(d.TLS.Keystore.Password)
-		}
-		for _, u := range d.Security.Users {
-			scan(u.Password)
-		}
-		if le := d.LeaderElection; le.ConnRef != "" {
-			if c, ok := d.Connections[le.ConnRef]; ok {
-				scan(c.ClientPass)
-			}
-		} else if le.Session != nil {
-			scan(le.Session.ClientPass)
-		}
-	}
-	return out
+	return !strings.ContainsAny(s, shellMeta)
 }
 
 func usesTLS(wfs []spec.Workflow) bool {
@@ -578,41 +670,16 @@ func storesWired(k *spec.Kubernetes) bool {
 
 func isDNS1123(s string) bool { return len(s) <= 63 && dns1123RE.MatchString(s) }
 
-// shardCount is the number of connector instances n workflows split into
-// (ceil(n / MaxWorkflowsPerInstance)); 0 for an empty folder.
-func shardCount(n int) int {
-	return (n + MaxWorkflowsPerInstance - 1) / MaxWorkflowsPerInstance
-}
-
-func dedupKey(s spec.Side) string {
-	if s.System == spec.SystemSolace {
-		return "S|" + s.Host + "|" + s.MsgVPN + "|" + s.ClientUser
+// checkSecretName gates a Secret name that is emitted verbatim into the manifest
+// (metadata.name, secretRef.name, volumes[].secret.secretName). An empty name is
+// its own message: a create block without one renders a nameless object.
+func checkSecretName(add func(string, string, ...any), field, name string) {
+	if name == "" {
+		add(fileEnv, "%s is required", field)
+		return
 	}
-	return "M|" + s.ConnName + "|" + s.QueueManager + "|" + s.Channel + "|" + s.User
-}
-
-// checkCredentialsCreate validates a credentials Secret's create block for any
-// target section (kubernetes/docker/podman). env, when non-nil, confirms each
-// source:env variable is actually present in the process environment.
-func checkCredentialsCreate(add func(string, string, ...any), env func(string) (string, bool), section string, c *spec.CredCreate) {
-	switch c.Source {
-	case spec.SourceEnv:
-		if len(c.Variables) == 0 {
-			add(fileEnv, "%s.secrets.credentials.create source: env requires a non-empty 'variables' list", section)
-		}
-		if env != nil {
-			for _, v := range c.Variables {
-				if _, ok := env(v); !ok {
-					add(fileEnv, "%s.secrets.credentials variable %q is not set in the environment", section, v)
-				}
-			}
-		}
-	case spec.SourceFile:
-		if c.ValuesFile == "" {
-			add(fileEnv, "%s.secrets.credentials.create source: file requires 'values-file'", section)
-		}
-	default:
-		add(fileEnv, "%s.secrets.credentials.create source must be %q or %q", section, spec.SourceEnv, spec.SourceFile)
+	if !isDNS1123(name) {
+		add(fileEnv, "%s %q is not a valid DNS-1123 label", field, name)
 	}
 }
 
@@ -634,61 +701,165 @@ func checkPorts(add func(string, string, ...any), section string, ports []spec.P
 // the authoritative quote-aware parse. A command with spaces in its path is
 // intentionally unsupported (the safe charset rejects space/quote/backslash).
 func checkCommand(add func(string, string, ...any), field, cmd string) {
-	tokens := strings.Fields(cmd)
-	if len(tokens) == 0 {
+	_, bad := Tokenize(cmd)
+	if bad == nil {
+		return
+	}
+	if len(bad) == 0 {
 		add(fileEnv, "%s must not be empty", field)
 		return
 	}
-	for _, tok := range tokens {
-		if !SafeToken(tok) {
-			add(fileEnv, "%s token %q contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)", field, tok)
-		}
+	for _, tok := range bad {
+		add(fileEnv, "%s token %q contains an unsafe character (%s)", field, tok, UnsafeTokenReason)
 	}
 }
+
+// UnsafeTokenReason describes the safe-token charset, shared so the validator and
+// the runner reject a token with the same words.
+const UnsafeTokenReason = "no spaces, quotes, backslash, control chars, or shell metacharacters"
+
+// Tokenize splits a command string into argv on whitespace and reports which
+// tokens fail the safe charset. It is the single definition of "how a command:
+// becomes argv", used by the validator (which reports every bad token) and by
+// the runner (which refuses to start a process on the first one) -- so what
+// validation accepts and what actually executes can never drift apart.
+//
+// bad is nil when every token is safe; a non-nil, empty bad means the command
+// was empty.
+func Tokenize(cmd string) (tokens, bad []string) {
+	tokens = strings.Fields(cmd)
+	if len(tokens) == 0 {
+		return nil, []string{}
+	}
+	for _, t := range tokens {
+		if !SafeToken(t) {
+			bad = append(bad, t)
+		}
+	}
+	return tokens, bad
+}
+
+// containerTarget is one docker/podman section flattened to the fields the shared
+// checks need. Grouping them keeps checkContainerTarget's call sites named rather
+// than positional, so a new shared attribute is one struct field instead of a
+// wider signature at three places.
+type containerTarget struct {
+	Section  string
+	Name     string
+	Command  string
+	Image    string
+	Restart  string
+	Timezone string
+	Ports    []spec.Port
+	Secrets  *spec.Secrets // removed from the schema; non-nil is rejected
+	Stores   *spec.StoresMount
+	Libs     *spec.LibsMount
+}
+
+// secretsMountPath is where credentials are mounted on every platform. It is
+// named here for error messages; internal/deploy owns the manifest-side constant.
+const secretsMountPath = "/run/secrets"
 
 // checkContainerTarget runs the checks common to the docker and podman sections:
 // a DNS-1123 name (it flows into filesystem paths and a systemctl unit token), a
 // safe non-empty command, a required image, valid ports, credentials wiring, and
 // host-provided stores/libs paths.
-func checkContainerTarget(add func(string, string, ...any), ctx Context, section, name, command, image string, ports []spec.Port, creds *spec.CredentialsSecret, stores *spec.StoresMount, libs *spec.LibsMount) {
-	if !isDNS1123(name) {
-		add(fileEnv, "%s.name %q is not a valid DNS-1123 label", section, name)
+//
+// image/restart/timezone and the host paths are gated here because both renderers
+// concatenate them unquoted into artifacts that are later executed or parsed --
+// a `podman run` script line, a quadlet directive, a compose YAML line -- so an
+// embedded newline or metacharacter would add content the spec never declared.
+func checkContainerTarget(add func(string, string, ...any), ctx Context, t containerTarget) {
+	section := t.Section
+	// The section is gone: credentials are derived from the config's own
+	// credential fields and delivered as platform secrets. yaml ignores unknown
+	// keys, so without this an old env.yaml would parse and silently drop them.
+	if t.Secrets != nil {
+		add(fileEnv, "%s.secrets is no longer configured: credentials come from the connection fields themselves (client-password / client-password-env, password / password-env, ...) and are mounted at %s. Remove the %s.secrets section", section, secretsMountPath, section)
 	}
-	checkCommand(add, section+".command", command)
-	if image == "" {
+	if !isDNS1123(t.Name) {
+		add(fileEnv, "%s.name %q is not a valid DNS-1123 label", section, t.Name)
+	}
+	checkCommand(add, section+".command", t.Command)
+	if t.Image == "" {
 		add(fileEnv, "%s.image is required", section)
+	} else if !SafeToken(t.Image) {
+		add(fileEnv, "%s.image %q contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)", section, t.Image)
 	}
-	checkPorts(add, section, ports)
-	if creds != nil && creds.Create != nil {
-		checkCredentialsCreate(add, ctx.Env, section, creds.Create)
+	if t.Restart != "" && !SafeToken(t.Restart) {
+		add(fileEnv, "%s.restart %q contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)", section, t.Restart)
 	}
-	if stores != nil {
+	if t.Timezone != "" && !SafeToken(t.Timezone) {
+		add(fileEnv, "%s.timezone %q contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)", section, t.Timezone)
+	}
+	checkPorts(add, section, t.Ports)
+	if t.Stores != nil {
 		if ctx.Defaults.TLS.Truststore == nil {
 			add(fileEnv, "%s.stores requires tls.truststore", section)
 		}
 		// The in-container store path is fixed (application.yml always points at
 		// it); stores only chooses the host source to bind-mount onto it. A custom
 		// mount-path would silently break TLS, so reject it (S4a fail-loud).
-		if stores.MountPath != spec.DefaultStoresMountPath {
-			add(fileEnv, "%s.stores.mount-path %q is not supported; the in-container store path is fixed at %q", section, stores.MountPath, spec.DefaultStoresMountPath)
+		if t.Stores.MountPath != spec.DefaultStoresMountPath {
+			add(fileEnv, "%s.stores.mount-path %q is not supported; the in-container store path is fixed at %q", section, t.Stores.MountPath, spec.DefaultStoresMountPath)
+		}
+		// Only when stores opts in do the tls.*.file paths become bind-mount
+		// sources in a generated artifact; the kubernetes path embeds their
+		// content instead, so it is not gated here.
+		for _, st := range []struct {
+			field string
+			store *spec.Store
+		}{{"tls.truststore.file", ctx.Defaults.TLS.Truststore}, {"tls.keystore.file", ctx.Defaults.TLS.Keystore}} {
+			if st.store == nil || st.store.File == "" {
+				continue
+			}
+			if !safeHostPath(st.store.File) {
+				add(fileEnv, "%s.stores bind-mounts %s %q, which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", section, st.field, st.store.File)
+			}
 		}
 	}
-	if libs != nil && libs.Dir == "" {
-		add(fileEnv, "%s.libs.dir is required when libs is set", section)
+	if t.Libs != nil {
+		if t.Libs.Dir == "" {
+			add(fileEnv, "%s.libs.dir is required when libs is set", section)
+		} else if !safeHostPath(t.Libs.Dir) {
+			add(fileEnv, "%s.libs.dir %q contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", section, t.Libs.Dir)
+		}
 	}
 }
 
 // checkDocker validates the docker (compose) section.
 func checkDocker(add func(string, string, ...any), ctx Context) {
 	d := ctx.Docker
-	checkContainerTarget(add, ctx, "docker", d.Name, d.Command, d.Image, d.Ports, d.Secrets.Credentials, d.Stores, d.Libs)
+	checkContainerTarget(add, ctx, containerTarget{
+		Section:  "docker",
+		Name:     d.Name,
+		Command:  d.Command,
+		Image:    d.Image,
+		Restart:  d.Restart,
+		Timezone: d.Timezone,
+		Ports:    d.Ports,
+		Secrets:  d.Secrets,
+		Stores:   d.Stores,
+		Libs:     d.Libs,
+	})
 }
 
 // checkPodman validates the podman section, including the generate mode and the
 // quadlet scope (deploy/delete are always quadlet + systemctl).
 func checkPodman(add func(string, string, ...any), ctx Context) {
 	p := ctx.Podman
-	checkContainerTarget(add, ctx, "podman", p.Name, p.Command, p.Image, p.Ports, p.Secrets.Credentials, p.Stores, p.Libs)
+	checkContainerTarget(add, ctx, containerTarget{
+		Section:  "podman",
+		Name:     p.Name,
+		Command:  p.Command,
+		Image:    p.Image,
+		Restart:  p.Restart,
+		Timezone: p.Timezone,
+		Ports:    p.Ports,
+		Secrets:  p.Secrets,
+		Stores:   p.Stores,
+		Libs:     p.Libs,
+	})
 	switch p.Mode {
 	case spec.PodmanModeRun, spec.PodmanModeQuadlet:
 	default:

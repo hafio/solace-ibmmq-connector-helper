@@ -22,18 +22,20 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 218 test functions, 449 cases across 13 packages._
+_Snapshot: 255 test functions, 462 cases across 14 packages._
 
 ## internal/spec
 
 Parse env.yaml into the typed model -- workflows, defaults, named connections, the kubernetes/docker/podman target sections, and ports -- and apply section defaults.
 
-Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/spec/env_test.go), [targets_test.go](../internal/spec/targets_test.go)
+Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/spec/env_test.go), [targets_test.go](../internal/spec/targets_test.go), [expand_test.go](../internal/spec/expand_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
 | TestParseWorkflowSolaceAndMQ | - | parses full solace source and mq target with dest kind, tls, key alias, props |
 | TestParseWorkflowConnRef | - | mq source with conn-ref resolves ConnRef, DestKind queue, Dest A.IN; SetsConnFields false |
+| TestBaseName | url / posix / windows / bare / empty | one shared BaseName splits on both separators, so a Windows-authored path resolves identically on Linux |
+| TestConnRefSideMayTuneBinding | - | consumer block parses on a conn-ref side, SetsConnFields ignores it, and Resolve keeps it alongside the referenced tuple and destination |
 | TestParseDefaultsConnectionsAndLeaderElection | - | parses 2 named connections and leader-election active_standby with fail-over |
 | TestResolveConnRef | known ref edge | resolves host/msg-vpn/key-alias from connections map, keeps dest |
 | TestResolveConnRef | unknown ref nope | returned unchanged with ConnRef nope and empty Host |
@@ -71,6 +73,15 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestApplyPodmanDefaultsOverrideWins | - | explicit command/mode quadlet/name/restart/ports/quadlet scope+dir override defaults exactly |
 | TestApplyMountDefaultsFillsMissing | - | stores mount-path defaults, libs dir kept and mount-path defaulted |
 | TestApplyMountDefaultsOverrideWins | - | explicit stores and libs mount-path overrides retained |
+| TestExpandBracedVar | - | `${HOST}` in Side.Host expands from Lookup |
+| TestExpandDefaultVarSetUsesValue | - | `${VPN:fallback}` uses the looked-up value when VPN is set |
+| TestExpandDefaultVarUnsetUsesDefault | - | `${VPN:fallback}` falls back to the default when VPN is unset |
+| TestExpandUnsetNoDefaultPassesThroughWithWarning | - | unset defaultless `${TYPO}` passes through verbatim and Warn is called exactly once naming TYPO |
+| TestExpandBareDollarVarUntouched | - | bare `$VPN` (no braces) is left untouched even though VPN is set |
+| TestExpandCredentialFieldLeftAlone | - | Side.Password/PasswordEnv (`expand:"no"`) never expand |
+| TestExpandYAMLNodePassthroughLeftAlone | - | a `*yaml.Node` field (APIProps) is never walked or rewritten |
+| TestExpandDefaultsConnectionsMapEntry | - | a `${HOST}` value inside Defaults.Connections (map[string]Side) expands via read-modify-write |
+| TestExpandNilLookupDisablesEverything | - | nil Lookup makes Expand a no-op, leaving `${HOST}` untouched |
 
 ## internal/validate
 
@@ -80,6 +91,12 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 
 | Test | Case | Verifies |
 |------|------|----------|
+| TestBinderIdentityUsesTheCredentialPair | different -env usernames | two -env usernames on one host are different binders, so no false key-alias conflict |
+| TestBinderIdentityUsesTheCredentialPair | same -env username | one binder with two key-aliases still conflicts |
+| TestWorkflowCap | 21 workflows | fatal error naming the count, the 20 cap, and the split-into-separate-folders remedy |
+| TestWorkflowCap | 20 workflows | exactly at the cap does not error |
+| TestDeployNameTooLong | 57-char name | deployment.name + "-config" exceeds the 63-char DNS-1123 limit |
+| TestDeployNameTooLong | short name | a short deployment name has no length error |
 | TestValidGoldenLikeInputPasses | - | valid solace->mq queue workflow produces no errors |
 | TestMissingSourceTarget | - | workflow with neither side set errors missing 'source' and missing 'target' |
 | TestExactlyOneSystem | - | side with empty system errors exactly one of 'solace:' or 'mq:' |
@@ -88,9 +105,6 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestConnNameFormat | - | bad mq conn-name errors host(port) format message |
 | TestKeyAliasNeedsKeystore | - | solace key-alias without keystore errors no keystore defined |
 | TestKeyAliasConflict | - | same solace tuple with different key-alias errors conflicting key-alias |
-| TestNoWorkflowCap | - | workflow count above cap no longer errors too many workflows |
-| TestDeployNameTooLongWhenSharded | long-name-sharded | 60-char name sharded to 2 instances errors exceeds 63-char DNS-1123 limit |
-| TestDeployNameTooLongWhenSharded | short-name-sharded | short deployment name with same workflow count has no length error |
 | TestLeaderElectionActiveStandbyValid | - | valid active_standby leader election config passes with no errors |
 | TestLeaderElectionActiveMissingQueueAndSession | - | active_active mode missing queue/conn-ref errors requires a 'queue' and requires a solace session |
 | TestLeaderElectionConnRefMustBeSolace | - | leader-election conn-ref pointing to mq connection errors must be a solace connection |
@@ -194,6 +208,28 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestUsesTLS | plain-tcp-mq-false | plain tcp solace and mq tls false returns usesTLS false |
 | TestMQOnlyTLSStoresOmittedWarning | - | mq-only TLS workflow with docker stores omitted still warns store files missing at runtime |
 | TestPlainTCPStoresOmittedNoWarning | - | plain-tcp workflow with stores omitted has no store-files-missing warning |
+| TestCheckContainerImageRestartTimezoneUnsafe | newline in image | rejected for both docker.image and podman.image |
+| TestCheckContainerImageRestartTimezoneUnsafe | metacharacter in image | `img; rm -rf /` and `img $(evil)` rejected for both targets |
+| TestCheckContainerImageRestartTimezoneUnsafe | space in image | rejected for both targets |
+| TestCheckContainerImageRestartTimezoneUnsafe | newline in restart | docker.restart rejected |
+| TestCheckContainerImageRestartTimezoneUnsafe | backtick in timezone | podman.timezone rejected |
+| TestCheckContainerImageRestartTimezoneUnsafe | realistic values | tagged registry image, Asia/Singapore and on-failure:5 all accepted |
+| TestCheckContainerHostPathsUnsafe | newline in tls.truststore.file | bind-mounted store path rejected once docker.stores opts in |
+| TestCheckContainerHostPathsUnsafe | space in libs.dir | podman.libs.dir rejected |
+| TestCheckContainerHostPathsUnsafe | windows paths | `C:\certs\...` store paths and `C:\libs` accepted (backslash and colon permitted) |
+| TestCheckKubeSecretNames | cred create bad | non-DNS-1123 credentials create.name rejected |
+| TestCheckKubeSecretNames | cred create empty | missing credentials create.name reported as required |
+| TestCheckKubeSecretNames | cred existing bad | non-DNS-1123 credentials existing rejected |
+| TestCheckKubeSecretNames | stores create bad | non-DNS-1123 stores create.name rejected |
+| TestCheckKubeSecretNames | stores existing bad | non-DNS-1123 stores existing rejected |
+| TestCheckKubeSecretNames | valid names | solmq-credentials and solmq-tls produce no name error |
+| TestCheckLibsNFSFields | newline in nfs.server | rejected against the host charset |
+| TestCheckLibsNFSFields | newline in nfs.path | rejected against the host-path charset |
+| TestCheckLibsNFSFields | valid server and path | nfs1.corp.example and /solace-libs accepted |
+| TestPasswordConflictOnSameBinder | differing passwords | same MQ tuple with two passwords errors conflicting password for the same binder |
+| TestPasswordConflictOnSameBinder | identical passwords | same tuple sharing one password passes |
+| TestPasswordConflictOnSameBinder | distinct tuples | different queue-manager means different binders, so passwords may differ |
+| TestPasswordConflictSolaceSide | - | the solace branch keys on client-password and errors on a conflict |
 
 ## internal/consolidate
 
@@ -260,6 +296,21 @@ Tests: [tls_test.go](../internal/tls/tls_test.go)
 | TestStorePathConfigVsDeploy | mount=true | StorePath returns MountDir/t.jks base name from backslash input |
 | TestSolacePropsRawPathWhenNotMounted | - | mount=false keeps SSL_TRUST_STORE as raw ./certs/truststore.jks path |
 
+## internal/yamlwriter
+
+The indentation-aware line writer every generated artifact is built from. Four packages carried private copies that drifted; one definition keeps their indentation identical.
+
+Tests: [yamlwriter_test.go](../internal/yamlwriter/yamlwriter_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestWriterLineIndent | - | Line indents by the given level across several nesting depths |
+| TestWriterRawPassthrough | - | Raw writes pre-formatted text between Line calls without indenting it |
+| TestSplitLines | trailing newline | a terminating newline does not yield a trailing empty element |
+| TestSplitLines | no trailing newline | the final line is kept |
+| TestSplitLines | empty string | yields no lines |
+| TestSplitLines | blank line inside | interior blank lines are preserved |
+
 ## internal/render
 
 Render application.yml from the consolidated model via the deterministic ordered emitter.
@@ -284,6 +335,12 @@ Tests: [render_test.go](../internal/render/render_test.go)
 | TestApplicationOmitsEmptyCredentials | password: | empty password credential line omitted, no null value emitted |
 | TestApplicationOmitsEmptyCredentials | client-username: | empty client-username credential line omitted, no null value emitted |
 | TestApplicationOmitsEmptyCredentials | client-password: | empty client-password credential line omitted, no null value emitted |
+| TestApplicationQuotesRiskyScalars | password: "p@ss #1" | a value containing " #" is double-quoted so it is not read as a comment |
+| TestApplicationQuotesRiskyScalars | client-username: "no" | a bool-lookalike is double-quoted so it stays a string |
+| TestApplicationQuotesRiskyScalars | client-password: "key: value" | a value containing ": " is double-quoted so it does not open a nested mapping |
+| TestApplicationQuotesRiskyScalars | plain values | ordinary hosts, conn-names, users and destinations stay unquoted |
+| TestApplicationBlockScalarPassthrough | - | a literal (\|) passthrough value is re-emitted as an indented block scalar, never flattened onto the key line |
+| TestApplicationSkipsBundleWithoutTruststore | - | tls: true with no tls.truststore emits no ssl bundle or ssl-bundle reference, keeps MQTLS set, and warns |
 
 ## internal/deploy
 
@@ -303,7 +360,6 @@ Tests: [deploy_test.go](../internal/deploy/deploy_test.go)
 | TestRenderLibsDownload | emptyDir | init container wgets each jar url into /libs, mounted via emptyDir |
 | TestRenderLibsDownload | existing PVC download | download target uses claimName dl-pvc instead of emptyDir |
 | TestRenderNamespaceAlwaysFirst | - | Namespace doc is first in output and precedes ConfigMap |
-| TestRenderMultiInstance | - | shared Namespace/Secret appear once; 2 ConfigMaps/Deployments/Services with per-instance names solmq-1/solmq-2 |
 | TestRenderExistingSecrets | - | existing creds/tls secrets produce no Secret doc, referencing my-creds and secretName my-tls |
 | TestManagementPortFallback | defaults.Management.Present true Port 9999 | managementPort returns 9999 from defaults |
 | TestManagementPortFallback | empty Defaults | managementPort returns 8090 from service port |
@@ -312,11 +368,9 @@ Tests: [deploy_test.go](../internal/deploy/deploy_test.go)
 | TestQuoteRes | 250m | quoteRes("250m") returns unquoted 250m |
 | TestQuoteRes | 512Mi | quoteRes("512Mi") returns unquoted 512Mi |
 | TestRenderNoResources | - | empty Resources produces no resources: block in output |
-| TestBaseName | https://repo/a.jar | baseName returns a.jar |
-| TestBaseName | noslash | baseName returns noslash unchanged |
-| TestBaseName | a\b\c.jar | baseName leaves backslash path unchanged (no normalization) |
-| TestSplitLines | a\nb\n | splitLines returns ["a","b"] |
-| TestSplitLines | empty string | splitLines returns empty slice |
+| TestServicePortDefaultsToManagementPort | unset follows the management port | service.port omitted renders port/targetPort 9000 from defaults.management.port |
+| TestServicePortDefaultsToManagementPort | unset with no management port | falls back to the connector default 8090, never port: 0 |
+| TestServicePortDefaultsToManagementPort | explicit port is kept verbatim | service.port 8081 rendered as given |
 
 ## internal/dockergen
 
@@ -328,19 +382,6 @@ Tests: [dockergen_test.go](../internal/dockergen/dockergen_test.go)
 |------|------|----------|
 | TestRenderFull_WithEverything | - | full golden output with creds, store, libs, MQTLS, ports, timezone matches exactly |
 | TestRenderFull_Minimal | - | minimal golden output omits restart, ports, environment, env_file, volumes blocks |
-| TestRenderMultiInstance | service header solmq-1 | service header 'solmq-1:' appears exactly once |
-| TestRenderMultiInstance | service header solmq-2 | service header 'solmq-2:' appears exactly once |
-| TestRenderMultiInstance | config key solmq-1-app | top-level config key 'solmq-1-app:' appears exactly once |
-| TestRenderMultiInstance | config key solmq-2-app | top-level config key 'solmq-2-app:' appears exactly once |
-| TestRenderMultiInstance | content blocks count | 'content: \|' appears exactly 2 times |
-| TestRenderMultiInstance | config sources count | '- source: ' appears exactly 2 times |
-| TestRenderMultiInstance | service ordering | solmq-1: appears before solmq-2: in services |
-| TestRenderMultiInstance | config ordering | solmq-1-app: appears before solmq-2-app: in configs |
-| TestRenderMultiInstance | port 8090 repeated | '- "8090:8090"' appears exactly 2 times |
-| TestRenderMultiInstance | port 9090 repeated | '- "9090:9090"' appears exactly 2 times |
-| TestRenderMultiInstance | env_file repeated | '- creds.env' appears exactly 2 times |
-| TestRenderMultiInstance | TZ repeated | 'TZ: UTC' appears exactly 2 times |
-| TestRenderMultiInstance | JAVA_TOOL_OPTIONS only shard 1 | 'JAVA_TOOL_OPTIONS:' appears exactly 1 time |
 | TestEnvironmentBranches | TZ only, MQTLS false | environment block contains only TZ: UTC, no JAVA_TOOL_OPTIONS |
 | TestEnvironmentBranches | MQTLS only, no timezone | environment block contains only JAVA_TOOL_OPTIONS line, no TZ |
 | TestContentIndentationAndBlankLines | nested key indentation | nested line gets extra indent on top of 6-space block indent |
@@ -348,7 +389,6 @@ Tests: [dockergen_test.go](../internal/dockergen/dockergen_test.go)
 | TestContentIndentationAndBlankLines | no trailing spaces | no rendered line has trailing spaces |
 | TestStoresOnlyAndLibsOnly | stores only | volumes block contains only the store mount line |
 | TestStoresOnlyAndLibsOnly | libs only | volumes block contains only the libs mount line |
-| TestRenderNoInstances | - | Render with no instances returns exactly 'services:\n', configs map omitted |
 | TestSplitLinesNoTrailingNewline | - | app.yml lacking trailing newline still renders content line with no dropped element |
 
 ## internal/podmangen
@@ -361,14 +401,12 @@ Tests: [podmangen_test.go](../internal/podmangen/podmangen_test.go)
 |------|------|----------|
 | TestRenderRunScriptFull | - | full input renders run script matching exact golden string byte-for-byte |
 | TestRenderRunScriptMinimal | - | minimal input renders run script matching exact golden string byte-for-byte |
-| TestRenderRunScriptMultiInstance | - | two instances render two podman run blocks concatenated matching golden string |
 | TestRenderQuadletFull | - | full input yields 1 unit named solmq-connector.container with content matching golden string |
 | TestRenderQuadletMinimal | - | minimal input yields 1 unit with content matching golden string (no Service section, no restart) |
-| TestRenderQuadletMultiInstance | - | two instances yield 2 units named solmq-connector-1.container and solmq-connector-2.container |
 
 ## internal/gen
 
-Orchestrate parse -> validate -> consolidate -> render, resolve credentials/stores, shard workflows, and assert the byte-for-byte golden fixtures.
+Orchestrate parse -> validate -> consolidate -> render, resolve credentials/stores, and assert the byte-for-byte golden fixtures.
 
 Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](../internal/gen/golden_test.go)
 
@@ -393,8 +431,6 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestResolveStores | no ReadFile provided | missing ReadFile returns error |
 | TestResolveStores | ReadFile returns error | read error propagates |
 | TestResolveStores | no stores configured | empty Defaults yields 0 stores, no error |
-| TestBaseNameB64ToIssues | baseName paths | strips backslash/forward-slash dirs; bare name unchanged |
-| TestBaseNameB64ToIssues | toIssues([a,b]) | produces 2 issues with Msg fields set from strings |
 | TestNamesAndPaths | credEnvFileName nil creds | returns empty string |
 | TestNamesAndPaths | credEnvFileName Existing set | existing filename wins, returns e.env |
 | TestNamesAndPaths | credEnvFileName Create set | returns <name>.env |
@@ -405,29 +441,6 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestResolveCredentialsAndEnvFileContent | nil CredentialsSecret | returns nil,nil |
 | TestResolveCredentialsAndEnvFileContent | Existing set | returns nil,nil (no creation needed) |
 | TestResolveCredentialsAndEnvFileContent | Create with env source | resolves 2 KVs and EnvFileContent renders "A=1\nB=2\n" |
-| TestShardWorkflows | n=0 | 1 chunk |
-| TestShardWorkflows | n=1 | 1 chunk |
-| TestShardWorkflows | n=20 | 1 chunk |
-| TestShardWorkflows | n=21 | 2 chunks |
-| TestShardWorkflows | n=40 | 2 chunks |
-| TestShardWorkflows | n=41 | 3 chunks |
-| TestShardWorkflows | 21 synthesized workflows | chunk sizes 20 and 1; second chunk starts at wf-20.yaml |
-| TestBuildShardsLeaderQueueSuffix | 21 workflows, 2 shards | leader queue suffixed mgmt-q-1 and mgmt-q-2 |
-| TestBuildShardsLeaderQueueSuffix | 3 workflows, 1 shard | leader queue left unchanged as mgmt-q |
-| TestBuildShardsLeaderActiveActive | 21 workflows, mode active_active | both shards keep LeaderElection.Mode active_active |
-| TestBuildShardsLeaderActiveActive | queue suffixing | queues suffixed mgmt-q-1 and mgmt-q-2 regardless of mode |
-| TestBuildShardsLeaderActiveActive | rendered appYAML | contains "mode: active_active" and not "active_standby" |
-| TestKubernetesSharding | kind: Namespace | count = 1 |
-| TestKubernetesSharding | kind: ConfigMap | count = 2 |
-| TestKubernetesSharding | kind: Deployment | count = 2 |
-| TestKubernetesSharding | kind: Service | count = 2 |
-| TestKubernetesSharding | name: solmq-1 | present in output |
-| TestKubernetesSharding | name: solmq-2 | present in output |
-| TestKubernetesSharding | name: solmq-1-config | present in output |
-| TestKubernetesSharding | name: solmq-2-config | present in output |
-| TestConfigSharding | 21 workflows | produces 2 instances, no errors |
-| TestConfigSharding | instance 1 | contains input-19 but not input-20 |
-| TestConfigSharding | instance 2 | renumbers lone workflow to input-0, not input-1 |
 | TestGenerateDockerBasics | - | generates non-empty compose containing image, uses existing env-file name solmq.env |
 | TestGeneratePodmanRunAndQuadlet | mode: run | produces run script, no units, env-file solmq-connector.env, 1 app yaml, 1 service |
 | TestGeneratePodmanRunAndQuadlet | ForceQuadlet true | produces quadlet units, no run script |
@@ -437,9 +450,11 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestGenValidateAndValuesFileKeys | Validate with TLS but no secrets.stores | no errors, exactly one warning about missing store files at runtime |
 | TestGenValidateAndValuesFileKeys | valuesFileKeys with kubernetes create/file source | returns keys map with SOL=true, no issues |
 | TestGenValidateAndValuesFileKeys | valuesFileKeys nil kubernetes | returns nil,nil |
+| TestGeneratorPageGoldenInSync | - | the golden embedded in solmq-conn-generator.html matches testdata/golden/application.yml (regenerate with -update-html-golden) |
 | TestGoldenConfig | - | generated config output matches testdata/golden/application.yml byte-for-byte, one instance |
 | TestGoldenKubernetesCreate | - | generated kubernetes manifests (namespace, configmap, secret, stores, pv, pvc, deployment with envFrom/stores/syslog/libs, service) match golden fixture byte-for-byte |
 | TestGoldenKubernetesNoSecrets | - | generated manifests without secrets/syslog/libs (namespace, configmap, deployment, service) match golden fixture byte-for-byte |
+| TestParseExpandsNonCredentialAndWarnsOnUnsetDefaultless | - | parse() expands host/msg-vpn from Lookup, leaves client-password-env verbatim, and returns exactly one warning naming TYPO for the unset defaultless conn-name variable |
 
 ## internal/runner
 
@@ -543,6 +558,7 @@ Tests: [main_test.go](../cmd/solmq-conn/main_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
+| TestDispatchHandlersMatchModel | verbs / generate targets / deploy platforms | the dispatch handler sets and cliVerbs agree in BOTH directions, so a command added to one cannot drift from the other |
 | TestExitCodeContract | nil args | run(nil) returns exit code 2 |
 | TestExitCodeContract | unknown command | run([bogus]) returns exit code 2 |
 | TestExitCodeContract | help short -h | run([-h]) returns exit code 0 |
@@ -553,14 +569,8 @@ Tests: [main_test.go](../cmd/solmq-conn/main_test.go)
 | TestExitCodeContract | invalid spec | run returns exit code 1 for structurally invalid workflow |
 | TestGenerateConfigStdoutAndFileMatch | stdout run | exit 0 and stdout contains 'spring:' |
 | TestGenerateConfigStdoutAndFileMatch | file run | exit 0 and written file content equals prior stdout exactly |
-| TestGenerateConfigShardedFiles | 21 workflows -> 2 shards | exit 0, out-1.yml and out-2.yml written, unsuffixed out.yml not written |
-| TestGenerateConfigShardedStdout | 21 workflows stdout | exit 0 and stdout contains banners for instance 1 of 2 and 2 of 2 |
 | TestGenerateFlagsBeforeAndAfterPositional | flags before positional target | exit 0 and output file written |
 | TestGenerateFlagsBeforeAndAfterPositional | flags after positional target | exit 0 and output file written |
-| TestSuffixBeforeExt | out.yml,1 | suffixBeforeExt returns out-1.yml |
-| TestSuffixBeforeExt | out,1 | suffixBeforeExt returns out-1 |
-| TestSuffixBeforeExt | a.tar.gz,1 | suffixBeforeExt returns a.tar-1.gz |
-| TestSuffixBeforeExt | .env,1 | suffixBeforeExt returns -1.env (pinned dot-file quirk) |
 | TestWriteCredEnvFile | empty name | no error and no file written when name is empty |
 | TestWriteCredEnvFile | resolver error | error returned and no creds.env file written for unset variable |
 | TestWriteCredEnvFile | nil kvs existing env-file | no error and existing.env content PRESERVE=1 left untouched |
@@ -581,8 +591,6 @@ Tests: [main_test.go](../cmd/solmq-conn/main_test.go)
 | TestGenerateKubernetesStdout | - | exit 0 and stdout contains kind: Deployment |
 | TestGenerateDockerToFile | - | exit 0 and compose file contains services: and image: img:1 |
 | TestGeneratePodmanQuadletStdout | - | exit 0 and stdout contains unit banner '# === solmq-conn.container ===' |
-| TestJoinUnits | two units | joinUnits joins with banner per unit and blank line separator between |
-| TestJoinUnits | single unit | joinUnits produces no separator, just banner+content |
 | TestDeployDockerSeamWritesComposeAndRuns | - | exit 0, compose file written, 1 runner call argv [docker compose -f <compose> up -d] |
 | TestDeleteDockerSeam | - | exit 0, 1 runner call argv [docker compose -f <compose> down] |
 | TestDeployPodmanSeamWritesUnitsAndStarts | - | exit 0, app yaml and container unit written to quadlet dir, systemctl daemon-reload then start calls |

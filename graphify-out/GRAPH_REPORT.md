@@ -1,36 +1,36 @@
-# Graph Report - solace-ibmmq-connector-helper  (2026-08-10)
+# Graph Report - solace-ibmmq-connector-helper  (2026-08-13)
 
 ## Corpus Check
-- 51 files · ~87,430 words
+- 58 files · ~101,912 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 829 nodes · 2187 edges · 52 communities (41 shown, 11 thin omitted)
-- Extraction: 83% EXTRACTED · 17% INFERRED · 0% AMBIGUOUS · INFERRED: 363 edges (avg confidence: 0.8)
+- 889 nodes · 2430 edges · 52 communities (41 shown, 11 thin omitted)
+- Extraction: 85% EXTRACTED · 15% INFERRED · 0% AMBIGUOUS · INFERRED: 354 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `bd40661e`
+- Built from commit: `8d8964d0`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
 - Build
 - validate.go
-- .Run
+- testing.T
 - runner_test.go
 - Render
 - gen.go
-- Application
+- spec_test.go
 - solmq-conn test catalogue
 - dev.sh
 - dev.ps1
 - golden_test.go
 - Scan
-- TLS Store Paths
+- SolaceProps
 - podmangen.go
-- Durable UUID Naming
-- main.go
+- DurableName
+- Expand
 - solmq-conn -- User Guide
 - Project Instructions
 - Render
@@ -57,36 +57,36 @@
 - internal/validate
 - application.yml (Golden)
 - main_test.go
-- 5. Workflow file
+- solmq-conn command reference
 - solmq-conn -- Development Guide
 - solmq-conn -- Solace IBM MQ Connector config generator and deployer
-- 7. Deploy targets (`kubernetes:`, `docker:`, `podman:`)
+- generate
 - Command details
-- spec_test.go
 - commands.go
+- deploy
 
 ## God Nodes (most connected - your core abstractions)
-1. `hasErr()` - 43 edges
-2. `wf()` - 32 edges
-3. `Build()` - 31 edges
-4. `run()` - 30 edges
-5. `vMQ()` - 29 edges
-6. `ParseEnv()` - 25 edges
-7. `vSolace()` - 25 edges
-8. `Solace PubSub+ Connector for IBM MQ — Configuration Guide` - 24 edges
-9. `Defaults` - 23 edges
-10. `Side` - 23 edges
+1. `hasErr()` - 51 edges
+2. `Build()` - 39 edges
+3. `wf()` - 36 edges
+4. `vMQ()` - 33 edges
+5. `vSolace()` - 29 edges
+6. `Side` - 25 edges
+7. `Defaults` - 24 edges
+8. `ParseEnv()` - 24 edges
+9. `Solace PubSub+ Connector for IBM MQ — Configuration Guide` - 24 edges
+10. `GeneratePodman()` - 21 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `TestCommandsDocInSync()` --calls--> `WriteFile()`  [INFERRED]
-  cmd/solmq-conn/commands_doc_test.go → internal/runner/runner.go
+- `TestCheckKubeCredentialCreateRemovedKeys()` --calls--> `run()`  [INFERRED]
+  internal/validate/validate_extra_test.go → cmd/solmq-conn/main.go
 - `TestCheckLibs()` --calls--> `run()`  [INFERRED]
   internal/validate/validate_extra_test.go → cmd/solmq-conn/main.go
 - `TestCheckSyslog()` --calls--> `run()`  [INFERRED]
   internal/validate/validate_extra_test.go → cmd/solmq-conn/main.go
-- `genConfig()` --calls--> `Config()`  [INFERRED]
-  cmd/solmq-conn/main.go → internal/gen/gen.go
-- `genKubernetes()` --calls--> `GenerateKubernetes()`  [INFERRED]
+- `dispatch()` --references--> `Runner`  [EXTRACTED]
+  cmd/solmq-conn/main.go → internal/runner/runner.go
+- `genConfig()` --calls--> `Config()`  [EXTRACTED]
   cmd/solmq-conn/main.go → internal/gen/gen.go
 
 ## Import Cycles
@@ -95,36 +95,36 @@
 ## Communities (52 total, 11 thin omitted)
 
 ### Community 0 - "Build"
-Cohesion: 0.08
-Nodes (56): acc, Binder, Binding, Bundle, JMSBinding, LeaderElectionModel, MQBinder, Prop (+48 more)
+Cohesion: 0.05
+Nodes (94): acc, Binder, Binding, JMSBinding, MQBinder, Opts, secretFn, Session (+86 more)
 
 ### Community 1 - "validate.go"
-Cohesion: 0.08
-Nodes (54): defaultsFromRaw(), Node, applyDest(), Node, nodePtr(), checkCommand(), checkConnections(), checkContainerTarget() (+46 more)
+Cohesion: 0.07
+Nodes (59): defaultsFromRaw(), Defaults, Management, Security, TLSConfig, yaml.Node, applyDest(), Cred (+51 more)
 
-### Community 2 - ".Run"
-Cohesion: 0.16
-Nodes (61): baseKubeDeploy(), connDefaults(), dockerOK(), T, podmanOK(), TestCheckCommandMultiToken(), TestCheckContainerNameRejected(), TestCheckDocker() (+53 more)
+### Community 2 - "testing.T"
+Cohesion: 0.15
+Nodes (68): testing.T, baseKubeDeploy(), connDefaults(), dockerOK(), podmanOK(), TestBinderIdentityUsesTheCredentialPair(), TestCheckCommandMultiToken(), TestCheckContainerHostPathsUnsafe() (+60 more)
 
 ### Community 3 - "runner_test.go"
-Cohesion: 0.11
-Nodes (39): FileMode, Docker(), Kubernetes(), kubeVerb(), ParseCommand(), PodmanDelete(), PodmanDeploy(), ResolveQuadletScope() (+31 more)
+Cohesion: 0.06
+Nodes (81): absPath(), absResolver(), actDocker(), actKubernetes(), actPodman(), collectFlagsAndDirs(), emit(), envFlag() (+73 more)
 
 ### Community 4 - "Render"
-Cohesion: 0.12
-Nodes (41): Input, Instance, KV, StoreFile, yw, Instance, baseName(), Builder (+33 more)
+Cohesion: 0.14
+Nodes (35): Input, Instance, KV, Instance, StoreFile, yw, LogbackXML(), managementPort() (+27 more)
 
 ### Community 5 - "gen.go"
-Cohesion: 0.09
-Nodes (61): DockerPlan, File, mount, NamedDoc, PodmanOpts, PodmanPlan, Request, Resolver (+53 more)
+Cohesion: 0.10
+Nodes (48): built, DockerPlan, File, mount, NamedDoc, PodmanOpts, SecretRef, b64() (+40 more)
 
-### Community 6 - "Application"
-Cohesion: 0.21
-Nodes (23): Application(), Builder, Model, Node, renderBundles(), renderCloudStream(), renderConnector(), renderContainer() (+15 more)
+### Community 6 - "spec_test.go"
+Cohesion: 0.11
+Nodes (27): ParseDefaults(), applyKubeDefaults(), ParseKubernetes(), ParseWorkflow(), TestBaseName(), TestConnRefSideMayTuneBinding(), TestCredCreateRemovedKeys(), TestCredEmptyBothKeyDescribe() (+19 more)
 
 ### Community 7 - "solmq-conn test catalogue"
-Cohesion: 0.13
-Nodes (15): cmd/solmq-conn, How the suite is built, internal/consolidate, internal/deploy, internal/dockergen, internal/examples, internal/gen, internal/podmangen (+7 more)
+Cohesion: 0.12
+Nodes (16): cmd/solmq-conn, How the suite is built, internal/consolidate, internal/deploy, internal/dockergen, internal/examples, internal/gen, internal/podmangen (+8 more)
 
 ### Community 8 - "dev.sh"
 Cohesion: 0.16
@@ -135,44 +135,44 @@ Cohesion: 0.20
 Nodes (12): Get-Log(), Get-Now(), Invoke-Logged(), Task-build(), Task-cov(), Task-graphify(), Task-scan(), Task-test() (+4 more)
 
 ### Community 10 - "golden_test.go"
-Cohesion: 0.41
-Nodes (14): configMapDoc(), deploymentDoc(), dirReader(), envWithKube(), T, itoa(), lineDiff(), loadSpecs() (+6 more)
+Cohesion: 0.31
+Nodes (16): configMapDoc(), deploymentDoc(), dirReader(), envWithKube(), itoa(), lineDiff(), loadSpecs(), mustRead() (+8 more)
 
 ### Community 11 - "Scan"
-Cohesion: 0.26
-Nodes (20): isYAML(), matchStar(), sameFile(), Scan(), bases(), T, TestIsYAML(), TestMatchStar() (+12 more)
+Cohesion: 0.15
+Nodes (25): mustWrite(), testResolver(), TestShippedExamplesGenerateConfig(), TestWriteCreatesSkipsForces(), TestWriteMkdirError(), Write(), isYAML(), matchStar() (+17 more)
 
-### Community 12 - "TLS Store Paths"
-Cohesion: 0.32
-Nodes (10): base(), MountPath(), SolaceProps(), StorePath(), T, TestMountPathSeparatorAgnostic(), TestSolacePropsRawPathWhenNotMounted(), TestSolacePropsUseMountedBaseName() (+2 more)
+### Community 12 - "SolaceProps"
+Cohesion: 0.29
+Nodes (10): MountPath(), SolaceProps(), StorePath(), TestMountPathSeparatorAgnostic(), TestSolacePropsRawPathWhenNotMounted(), TestSolacePropsSkipsSecretRefWhenStoreMissing(), TestSolacePropsStorePasswordIsStablePlaceholderNeverLiteral(), TestSolacePropsUseMountedBaseName() (+2 more)
 
 ### Community 13 - "podmangen.go"
-Cohesion: 0.19
-Nodes (19): Builder, RenderQuadlet(), RenderRunScript(), runArgs(), fullInput(), Input, T, minimalInput() (+11 more)
+Cohesion: 0.20
+Nodes (19): Mount, SecretRef, Unit, RenderQuadlet(), RenderRunScript(), renderSecretPreamble(), runArgs(), fullInput() (+11 more)
 
-### Community 14 - "Durable UUID Naming"
-Cohesion: 0.39
-Nodes (6): DurableName(), mustParseUUID(), T, TestDurableNameDeterministic(), TestDurableNameGolden(), uuidv5()
+### Community 14 - "DurableName"
+Cohesion: 0.43
+Nodes (5): DurableName(), mustParseUUID(), TestDurableNameDeterministic(), TestDurableNameGolden(), uuidv5()
 
-### Community 15 - "main.go"
-Cohesion: 0.14
-Nodes (40): absPath(), absResolver(), actDocker(), actKubernetes(), actPodman(), collectFlagsAndDirs(), emit(), emitConfigs() (+32 more)
+### Community 15 - "Expand"
+Cohesion: 0.27
+Nodes (16): reflect.Value, Expand(), expandMap(), expandString(), expandValue(), lookupOf(), TestExpandBareDollarVarUntouched(), TestExpandBracedVar() (+8 more)
 
 ### Community 17 - "solmq-conn -- User Guide"
-Cohesion: 0.18
-Nodes (11): 10. `examples`, 11. Notes and gotchas, 1. Running solmq-conn, 2. Quick start, 3. Commands, 4. The config file and workflow discovery, 6. Connector defaults (`env.yaml` top level), 8. Secrets model (+3 more)
+Cohesion: 0.08
+Nodes (26): 10. `examples`, 11. Notes and gotchas, 1. Running solmq-conn, 2. Quick start, 3. Commands, 4.1 Variable expansion (`${VAR}`), 4. The config file and workflow discovery, 5.1 Top-level (+18 more)
 
 ### Community 18 - "Project Instructions"
 Cohesion: 0.12
 Nodes (15): 11. Spring SSL Bundles, 13. Logging, 14. JVM System Properties, 15. Environment Variable Overrides, 3. Spring Cloud Stream — Binders, 4. Spring Cloud Stream — Bindings (Workflows), 5. JMS Binder Options, 8. Solace Connector — Workflow Configuration (+7 more)
 
 ### Community 19 - "Render"
-Cohesion: 0.20
-Nodes (18): Input, Instance, Mount, yw, Builder, Render(), renderConfig(), renderService() (+10 more)
+Cohesion: 0.12
+Nodes (21): Input, Instance, strings.Builder, Mount, yw, Render(), renderConfig(), renderSecrets() (+13 more)
 
 ### Community 21 - "ParseEnv"
-Cohesion: 0.08
-Nodes (50): syslogOf(), ParseEnv(), T, TestParseEnvEmpty(), TestParseEnvUnknownKeyIgnored(), TestParseEnvWrongScalarTypeErrors(), TestWorkflowsFromRawDefaultWhenAbsent(), TestWorkflowsFromRawDirOverride() (+42 more)
+Cohesion: 0.07
+Nodes (50): TestKubernetesDeleteUsesDeleteVerb(), TestKubernetesDeployApplyOnStdin(), TestKubernetesRejectsUnsafeCommand(), TestKubernetesUnknownAction(), Env, ParseEnv(), TestParseEnvEmpty(), TestParseEnvUnknownKeyIgnored() (+42 more)
 
 ### Community 23 - "YAML & Spring Boot Essentials (For Non-Spring Users)"
 Cohesion: 0.25
@@ -215,12 +215,12 @@ Cohesion: 0.67
 Nodes (3): Solace Binder Headers (`solace_scst_*`), Solace Message Headers Reference, Solace Message Headers (`solace_*`)
 
 ### Community 43 - "main_test.go"
-Cohesion: 0.18
-Nodes (36): main(), run(), captureStdout(), T, manyWorkflowsDir(), podmanEnv(), TestAbsPath(), TestDeleteDockerSeam() (+28 more)
+Cohesion: 0.12
+Nodes (40): dispatch(), main(), run(), assertSameNameSet(), captureStderr(), captureStdout(), keySet(), manyWorkflowsDir() (+32 more)
 
-### Community 44 - "5. Workflow file"
-Cohesion: 0.29
-Nodes (7): 5.1 Top-level, 5.2 `solace:` options, 5.3 `mq:` options, 5.4 Destinations, durable names, passthrough, 5.5 Event-driven guidance (warnings), 5.6 Reusable connections (`conn-ref`), 5. Workflow file
+### Community 44 - "solmq-conn command reference"
+Cohesion: 0.40
+Nodes (5): All commands, Command tree, Exit codes, Flags, solmq-conn command reference
 
 ### Community 45 - "solmq-conn -- Development Guide"
 Cohesion: 0.33
@@ -230,41 +230,41 @@ Nodes (6): Build, Design notes, Release (CI), solmq-conn -- Development Guide, T
 Cohesion: 0.40
 Nodes (5): Commands, Documentation, Minimal working example, Quick start, solmq-conn -- Solace IBM MQ Connector config generator and deployer
 
-### Community 48 - "7. Deploy targets (`kubernetes:`, `docker:`, `podman:`)"
-Cohesion: 0.50
-Nodes (4): 7.1 kubernetes, 7.2 docker, 7.3 podman, 7. Deploy targets (`kubernetes:`, `docker:`, `podman:`)
+### Community 48 - "generate"
+Cohesion: 0.40
+Nodes (5): generate, `solmq-conn generate config [-e env.yaml] [-o out]`, `solmq-conn generate docker [-e env.yaml] [-o out]`, `solmq-conn generate kubernetes [-e env.yaml] [-o out]`, `solmq-conn generate podman [-e env.yaml] [-o out]`
 
 ### Community 49 - "Command details"
-Cohesion: 0.09
-Nodes (22): All commands, Command details, Command tree, delete, deploy, examples, Exit codes, Flags (+14 more)
+Cohesion: 0.25
+Nodes (8): Command details, delete, examples, help, `solmq-conn delete docker [-e env.yaml]`, `solmq-conn delete kubernetes [-e env.yaml]`, `solmq-conn delete podman [-e env.yaml]`, validate
 
-### Community 50 - "spec_test.go"
-Cohesion: 0.22
-Nodes (20): ParseDefaults(), ParseKubernetes(), ParseWorkflow(), T, TestParseDefaultsConnectionsAndLeaderElection(), TestParseDefaultsEmpty(), TestParseDefaultsError(), TestParseDefaultsFull() (+12 more)
+### Community 50 - "commands.go"
+Cohesion: 0.27
+Nodes (10): normLF(), TestCommandsDocInSync(), TestCommandsModelMatchesUsage(), flagsLine(), invocation(), renderCommandsDoc(), usageText(), cliFlag (+2 more)
 
-### Community 51 - "commands.go"
-Cohesion: 0.26
-Nodes (11): T, normLF(), TestCommandsDocInSync(), TestCommandsModelMatchesUsage(), flagsLine(), invocation(), renderCommandsDoc(), usageText() (+3 more)
+### Community 51 - "deploy"
+Cohesion: 0.50
+Nodes (4): deploy, `solmq-conn deploy docker [-e env.yaml]`, `solmq-conn deploy kubernetes [-e env.yaml]`, `solmq-conn deploy podman [-e env.yaml]`
 
 ## Knowledge Gaps
-- **116 isolated node(s):** `cliFlag`, `github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn`, `Model`, `NO_COLOR`, `graphify` (+111 more)
+- **119 isolated node(s):** `cliFlag`, `github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn`, `Model`, `NO_COLOR`, `graphify` (+114 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **11 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Defaults` connect `validate.go` to `Build`, `.Run`, `Render`, `gen.go`, `TLS Store Paths`, `spec_test.go`, `ParseEnv`?**
-  _High betweenness centrality (0.120) - this node is a cross-community bridge._
-- **Why does `Build()` connect `Build` to `validate.go`, `TLS Store Paths`, `gen.go`, `Application`?**
-  _High betweenness centrality (0.086) - this node is a cross-community bridge._
-- **Why does `Kubernetes` connect `ParseEnv` to `validate.go`, `runner_test.go`, `Render`, `gen.go`, `spec_test.go`?**
-  _High betweenness centrality (0.071) - this node is a cross-community bridge._
-- **Are the 26 inferred relationships involving `hasErr()` (e.g. with `TestCheckCommandMultiToken()` and `TestCheckContainerNameRejected()`) actually correct?**
-  _`hasErr()` has 26 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 17 inferred relationships involving `wf()` (e.g. with `TestCheckSideMQMissingFields()` and `TestCheckSideSolaceMissingAndBadScheme()`) actually correct?**
-  _`wf()` has 17 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 17 inferred relationships involving `Build()` (e.g. with `SolaceProps()` and `TestBuildCipherConflictWarning()`) actually correct?**
-  _`Build()` has 17 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 23 inferred relationships involving `run()` (e.g. with `TestDeleteDockerSeam()` and `TestDeleteKubernetesSeamHappyPath()`) actually correct?**
-  _`run()` has 23 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `Defaults` connect `validate.go` to `Build`, `testing.T`, `Render`, `gen.go`, `spec_test.go`, `SolaceProps`, `ParseEnv`?**
+  _High betweenness centrality (0.033) - this node is a cross-community bridge._
+- **Why does `Build()` connect `Build` to `validate.go`, `SolaceProps`, `gen.go`?**
+  _High betweenness centrality (0.031) - this node is a cross-community bridge._
+- **Why does `Kubernetes` connect `ParseEnv` to `validate.go`, `Render`, `spec_test.go`?**
+  _High betweenness centrality (0.028) - this node is a cross-community bridge._
+- **Are the 32 inferred relationships involving `hasErr()` (e.g. with `TestBinderIdentityUsesTheCredentialPair()` and `TestCheckCommandMultiToken()`) actually correct?**
+  _`hasErr()` has 32 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 16 inferred relationships involving `Build()` (e.g. with `assignBinderNames()` and `securityUserPasswordName()`) actually correct?**
+  _`Build()` has 16 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 19 inferred relationships involving `wf()` (e.g. with `TestBinderIdentityUsesTheCredentialPair()` and `TestCheckSideMQMissingFields()`) actually correct?**
+  _`wf()` has 19 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 17 inferred relationships involving `vMQ()` (e.g. with `TestBinderIdentityUsesTheCredentialPair()` and `TestCheckSideSolaceMissingAndBadScheme()`) actually correct?**
+  _`vMQ()` has 17 INFERRED edges - model-reasoned connections that need verification._

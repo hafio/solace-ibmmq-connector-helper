@@ -13,11 +13,23 @@ const (
 	LeaderActiveStby   = "active_standby"
 )
 
-// Store is one JKS/PKCS12 truststore or keystore definition.
+// Store is one JKS/PKCS12 truststore or keystore definition. The tags are
+// explicit because `password-env` cannot be reached by yaml.v3's default
+// lowercase-the-field-name mapping; the other three keep the names they always
+// had.
 type Store struct {
-	File     string
-	Password string
-	Type     string
+	File        string `yaml:"file"`
+	Password    string `yaml:"password" expand:"no"`     // credential: out of scope (rule 5)
+	PasswordEnv string `yaml:"password-env" expand:"no"` // names a host var; expanding it would defeat the -env indirection
+	Type        string `yaml:"type"`
+}
+
+// Secret is the store's password credential.
+func (s *Store) Secret() Cred {
+	if s == nil {
+		return Cred{}
+	}
+	return Cred{s.Password, s.PasswordEnv}
 }
 
 // TLSConfig is the single shared truststore (+ optional keystore) used by both
@@ -27,11 +39,16 @@ type TLSConfig struct {
 	Keystore   *Store
 }
 
-// User is a management-endpoint basic-auth user.
+// User is a management-endpoint basic-auth user. Name is an identity, not a
+// credential, so it stays a plain literal; only the password is a Cred pair.
 type User struct {
-	Name     string `yaml:"name"`
-	Password string `yaml:"password"`
+	Name        string `yaml:"name"`
+	Password    string `yaml:"password" expand:"no"`     // credential: out of scope (rule 5)
+	PasswordEnv string `yaml:"password-env" expand:"no"` // names a host var; expanding it would defeat the -env indirection
 }
+
+// Secret is the user's password credential.
+func (u User) Secret() Cred { return Cred{u.Password, u.PasswordEnv} }
 
 // Security mirrors solace.connector.security.
 type Security struct {

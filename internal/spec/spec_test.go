@@ -9,8 +9,8 @@ source:
   solace:
     host: tcps://b:55443
     msg-vpn: prod
-    client-username: u
-    client-password: ${P}
+    client-username-env: EDGE_SOLACE_USER
+    client-password-env: EDGE_SOLACE_PASS
     key-alias: sc
     queue: Q.IN
     api-properties:
@@ -20,8 +20,8 @@ target:
     conn-name: h(1414)
     queue-manager: QM1
     channel: CH
-    user: app
-    password: ${MQ}
+    user-env: EDGE_MQ_USER
+    password-env: EDGE_MQ_PASS
     tls: true
     cipher: TLS_X
     key-alias: mc
@@ -43,9 +43,15 @@ target:
 	if s.System != SystemSolace || s.DestKind != DestQueue || s.Dest != "Q.IN" || s.KeyAlias != "sc" || s.APIProps == nil {
 		t.Fatalf("source: %+v (apiprops nil=%v)", s, s.APIProps == nil)
 	}
+	if s.Username().EnvVar != "EDGE_SOLACE_USER" || s.Secret().EnvVar != "EDGE_SOLACE_PASS" {
+		t.Fatalf("source solace -env fields not parsed: %+v", s)
+	}
 	m := wf.Target
 	if m.System != SystemMQ || m.DestKind != DestTopic || m.Dest != "T/1" || !m.TLS || m.Cipher != "TLS_X" || m.AddlProps == nil {
 		t.Fatalf("target: %+v", m)
+	}
+	if m.Username().EnvVar != "EDGE_MQ_USER" || m.Secret().EnvVar != "EDGE_MQ_PASS" {
+		t.Fatalf("target mq -env fields not parsed: %+v", m)
 	}
 }
 
@@ -63,6 +69,38 @@ func TestParseWorkflowConnRef(t *testing.T) {
 	}
 }
 
+func TestConnRefSideMayTuneBinding(t *testing.T) {
+	// consumer:/producer: tune one binding, not the connection, so a conn-ref
+	// side may set them: SetsConnFields ignores both, and Resolve carries them
+	// onto the resolved side alongside the referenced tuple.
+	wf, err := ParseWorkflow([]byte("source:\n  mq:\n    conn-ref: my-mq\n    queue: A.IN\n    consumer:\n      concurrency: 4\n"), "10.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := wf.Source
+	if s.Consumer == nil {
+		t.Fatal("consumer block should parse on a conn-ref side")
+	}
+	if s.SetsConnFields() {
+		t.Error("consumer/producer are per-binding, so they must not count as connection fields")
+	}
+
+	d := &Defaults{Connections: map[string]Side{"my-mq": {
+		System: SystemMQ, ConnName: "h(1414)", QueueManager: "QM1", Channel: "CH",
+		UserEnv: "MY_MQ_USER", PasswordEnv: "MY_MQ_PASS",
+	}}}
+	r := d.Resolve(s)
+	if r.ConnName != "h(1414)" || r.QueueManager != "QM1" {
+		t.Errorf("resolved side lost the referenced tuple: %+v", r)
+	}
+	if r.Consumer == nil {
+		t.Error("resolved side must keep the referring side's consumer block")
+	}
+	if r.Dest != "A.IN" || r.DestKind != DestQueue {
+		t.Errorf("resolved side lost its destination: %+v", r)
+	}
+}
+
 func TestParseDefaultsConnectionsAndLeaderElection(t *testing.T) {
 	d, err := ParseDefaults([]byte(`
 connections:
@@ -71,7 +109,7 @@ connections:
       host: tcps://b:55443
       msg-vpn: prod
       client-username: u
-      client-password: ${P}
+      client-password-env: EDGE_SOLACE_PASS
       key-alias: sc
   qm:
     mq:
@@ -79,7 +117,7 @@ connections:
       queue-manager: QM1
       channel: C
       user: u
-      password: ${MQ}
+      password-env: QM_PASS
 leader-election:
   mode: active_standby
   queue: mgmt-q
@@ -97,8 +135,14 @@ leader-election:
 	if e := d.Connections["edge"]; e.System != SystemSolace || e.Host != "tcps://b:55443" || e.KeyAlias != "sc" {
 		t.Fatalf("edge connection: %+v", e)
 	}
+	if e := d.Connections["edge"]; e.Username().Literal != "u" || e.Secret().EnvVar != "EDGE_SOLACE_PASS" {
+		t.Fatalf("edge connection credentials: username=%+v secret=%+v", e.Username(), e.Secret())
+	}
 	if q := d.Connections["qm"]; q.System != SystemMQ || q.QueueManager != "QM1" {
 		t.Fatalf("qm connection: %+v", q)
+	}
+	if q := d.Connections["qm"]; q.Username().Literal != "u" || q.Secret().EnvVar != "QM_PASS" {
+		t.Fatalf("qm connection credentials: username=%+v secret=%+v", q.Username(), q.Secret())
 	}
 	le := d.LeaderElection
 	if !le.Present || le.Mode != LeaderActiveStby || le.Queue != "mgmt-q" || le.ConnRef != "edge" || le.FailOver == nil {
@@ -108,7 +152,7 @@ leader-election:
 
 func TestResolveConnRef(t *testing.T) {
 	d := &Defaults{Connections: map[string]Side{
-		"edge": {System: SystemSolace, Host: "tcps://b", MsgVPN: "v", ClientUser: "u", ClientPass: "${P}", KeyAlias: "sc"},
+		"edge": {System: SystemSolace, Host: "tcps://b", MsgVPN: "v", ClientUser: "u", ClientPassEnv: "EDGE_PASS", KeyAlias: "sc"},
 	}}
 	r := d.Resolve(Side{System: SystemSolace, ConnRef: "edge", DestKind: DestQueue, Dest: "Q"})
 	if r.Host != "tcps://b" || r.MsgVPN != "v" || r.KeyAlias != "sc" || r.Dest != "Q" || r.DestKind != DestQueue {
@@ -162,11 +206,11 @@ func TestParseDefaultsFull(t *testing.T) {
 tls:
   truststore:
     file: ./t.jks
-    password: ${T}
+    password-env: TRUSTSTORE_PASS
     type: JKS
   keystore:
     file: ./k.jks
-    password: ${K}
+    password: keystore-literal-pw
     type: JKS
 logging:
   level: {root: INFO}
@@ -178,7 +222,7 @@ security:
   enabled: false
   users:
     - name: hc
-      password: ${H}
+      password-env: HEALTHCHECK_PASS
 leader-election:
   mode: standalone
 solace-defaults:
@@ -190,11 +234,20 @@ solace-defaults:
 	if d.TLS.Truststore == nil || d.TLS.Keystore == nil {
 		t.Fatal("stores not parsed")
 	}
+	if d.TLS.Truststore.Secret().EnvVar != "TRUSTSTORE_PASS" {
+		t.Errorf("truststore secret = %+v", d.TLS.Truststore.Secret())
+	}
+	if d.TLS.Keystore.Secret().Literal != "keystore-literal-pw" {
+		t.Errorf("keystore secret = %+v", d.TLS.Keystore.Secret())
+	}
 	if !d.Management.Present || d.Management.Port != 8090 {
 		t.Errorf("management: %+v", d.Management)
 	}
 	if !d.Security.Present || d.Security.Enabled || len(d.Security.Users) != 1 {
 		t.Errorf("security: %+v", d.Security)
+	}
+	if d.Security.Users[0].Secret().EnvVar != "HEALTHCHECK_PASS" {
+		t.Errorf("user secret = %+v", d.Security.Users[0].Secret())
 	}
 	if !d.LeaderElection.Present || d.LeaderElection.Mode != LeaderStandalone {
 		t.Errorf("leader: %+v", d.LeaderElection)
@@ -256,8 +309,13 @@ secrets:
 	if k.Deployment.Replicas != 2 || !k.Service.Enabled || k.Service.Port != 8090 {
 		t.Errorf("kube: %+v", k)
 	}
-	if k.Secrets.Credentials == nil || k.Secrets.Credentials.Create == nil || k.Secrets.Credentials.Create.Source != SourceEnv {
+	if k.Secrets.Credentials == nil || k.Secrets.Credentials.Create == nil || k.Secrets.Credentials.Create.Name != "s" {
 		t.Errorf("cred: %+v", k.Secrets.Credentials)
+	}
+	// source/variables are removed keys: they still parse (so RemovedKeys can see
+	// them) but no longer carry meaning -- RemovedKeys is how a caller rejects them.
+	if rk := k.Secrets.Credentials.Create.RemovedKeys(); len(rk) != 2 || rk[0] != "source" || rk[1] != "variables" {
+		t.Errorf("removed keys = %v", rk)
 	}
 	if k.Secrets.Stores == nil || k.Secrets.Stores.Create == nil {
 		t.Errorf("stores: %+v", k.Secrets.Stores)
@@ -314,5 +372,143 @@ libs:
 	}
 	if k3.Logging != nil || k3.Libs != nil {
 		t.Error("absent logging/libs blocks must stay nil")
+	}
+}
+
+func TestCredEmptyBothKeyDescribe(t *testing.T) {
+	tests := []struct {
+		name      string
+		c         Cred
+		wantEmpty bool
+		wantBoth  bool
+		wantKey   string
+		wantDesc  string
+	}{
+		{"unset", Cred{}, true, false, "", "nothing"},
+		{"literal only", Cred{Literal: "s3cret"}, false, false, "L:s3cret", "a literal value"},
+		{"env only", Cred{EnvVar: "EDGE_PASS"}, false, false, "E:EDGE_PASS", "the environment variable EDGE_PASS"},
+		// Both set is an over-specification validate rejects, but Key/Describe must
+		// still resolve deterministically (env wins) rather than panic.
+		{"both set", Cred{Literal: "s3cret", EnvVar: "EDGE_PASS"}, false, true, "E:EDGE_PASS", "the environment variable EDGE_PASS"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.c.Empty(); got != tt.wantEmpty {
+				t.Errorf("Empty() = %v want %v", got, tt.wantEmpty)
+			}
+			if got := tt.c.Both(); got != tt.wantBoth {
+				t.Errorf("Both() = %v want %v", got, tt.wantBoth)
+			}
+			if got := tt.c.Key(); got != tt.wantKey {
+				t.Errorf("Key() = %q want %q", got, tt.wantKey)
+			}
+			if got := tt.c.Describe(); got != tt.wantDesc {
+				t.Errorf("Describe() = %q want %q", got, tt.wantDesc)
+			}
+		})
+	}
+}
+
+func TestSideUsernameSecretBothSystems(t *testing.T) {
+	solace := Side{
+		System:        SystemSolace,
+		ClientUser:    "sol-user",
+		ClientPassEnv: "SOLACE_PASS",
+		// MQ fields are set too, to prove dispatch is by System, not by whichever
+		// pair happens to be non-empty.
+		User:        "mq-user",
+		PasswordEnv: "MQ_PASS",
+	}
+	if got := solace.Username(); got.Literal != "sol-user" {
+		t.Errorf("solace Username() = %+v want literal sol-user", got)
+	}
+	if got := solace.Secret(); got.EnvVar != "SOLACE_PASS" {
+		t.Errorf("solace Secret() = %+v want env SOLACE_PASS", got)
+	}
+
+	mq := Side{
+		System:        SystemMQ,
+		User:          "mq-user",
+		PasswordEnv:   "MQ_PASS",
+		ClientUser:    "sol-user",
+		ClientPassEnv: "SOLACE_PASS",
+	}
+	if got := mq.Username(); got.Literal != "mq-user" {
+		t.Errorf("mq Username() = %+v want literal mq-user", got)
+	}
+	if got := mq.Secret(); got.EnvVar != "MQ_PASS" {
+		t.Errorf("mq Secret() = %+v want env MQ_PASS", got)
+	}
+}
+
+func TestStoreSecretNilSafe(t *testing.T) {
+	var nilStore *Store
+	if got := nilStore.Secret(); !got.Empty() {
+		t.Errorf("nil *Store Secret() = %+v want empty", got)
+	}
+
+	literal := &Store{Password: "lit-pw"}
+	if got := literal.Secret(); got.Literal != "lit-pw" || got.EnvVar != "" {
+		t.Errorf("literal store Secret() = %+v", got)
+	}
+
+	env := &Store{PasswordEnv: "STORE_PASS"}
+	if got := env.Secret(); got.EnvVar != "STORE_PASS" {
+		t.Errorf("env store Secret() = %+v want env STORE_PASS", got)
+	}
+}
+
+func TestUserSecretLiteralAndEnv(t *testing.T) {
+	literal := User{Name: "hc", Password: "lit-pw"}
+	if got := literal.Secret(); got.Literal != "lit-pw" {
+		t.Errorf("literal user Secret() = %+v", got)
+	}
+	env := User{Name: "hc", PasswordEnv: "HC_PASS"}
+	if got := env.Secret(); got.EnvVar != "HC_PASS" {
+		t.Errorf("env user Secret() = %+v want env HC_PASS", got)
+	}
+}
+
+func TestCredCreateRemovedKeys(t *testing.T) {
+	var nilCreate *CredCreate
+	if got := nilCreate.RemovedKeys(); got != nil {
+		t.Errorf("nil *CredCreate RemovedKeys() = %v want nil", got)
+	}
+	if got := (&CredCreate{Name: "s"}).RemovedKeys(); got != nil {
+		t.Errorf("no removed keys set, RemovedKeys() = %v want nil", got)
+	}
+	if got := (&CredCreate{Source: "env"}).RemovedKeys(); len(got) != 1 || got[0] != "source" {
+		t.Errorf("source only RemovedKeys() = %v want [source]", got)
+	}
+	if got := (&CredCreate{Variables: []string{"A"}}).RemovedKeys(); len(got) != 1 || got[0] != "variables" {
+		t.Errorf("variables only RemovedKeys() = %v want [variables]", got)
+	}
+	if got := (&CredCreate{ValuesFile: "vals.env"}).RemovedKeys(); len(got) != 1 || got[0] != "values-file" {
+		t.Errorf("values-file only RemovedKeys() = %v want [values-file]", got)
+	}
+	all := &CredCreate{Source: "env", Variables: []string{"A", "B"}, ValuesFile: "vals.env"}
+	if got := all.RemovedKeys(); len(got) != 3 || got[0] != "source" || got[1] != "variables" || got[2] != "values-file" {
+		t.Errorf("all removed keys = %v want [source variables values-file]", got)
+	}
+}
+
+func TestBaseName(t *testing.T) {
+	// One definition serves the store mount path, the Kubernetes stores-Secret
+	// data key, and the libs download filename, so it must resolve a
+	// Windows-authored path the same way wherever the CLI runs. The deploy copy
+	// used to leave backslashes alone, which only stayed safe because validation
+	// happened to reject them upstream.
+	cases := []struct{ in, want string }{
+		{"https://repo/a.jar", "a.jar"},
+		{"a/b/c.jks", "c.jks"},
+		{`a\b\c.jks`, "c.jks"},
+		{`C:\certs\truststore.jks`, "truststore.jks"},
+		{"noslash", "noslash"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := BaseName(c.in); got != c.want {
+			t.Errorf("BaseName(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

@@ -18,6 +18,26 @@ func containsSub(ss []string, sub string) bool {
 	return false
 }
 
+// testSecretRef mirrors the bookkeeping Build's own secretRef closure does
+// (see consolidate.go), for white-box tests that call buildLeaderElection
+// directly: one entry per stable name, "" for an unset credential, the same
+// stable name collapsing repeats onto the first recording.
+func testSecretRef() (secretFn, func() []SecretRef) {
+	seen := map[string]bool{}
+	var secrets []SecretRef
+	fn := func(stable string, c spec.Cred) string {
+		if c.Empty() {
+			return ""
+		}
+		if !seen[stable] {
+			seen[stable] = true
+			secrets = append(secrets, SecretRef{Stable: stable, Literal: c.Literal, EnvVar: c.EnvVar})
+		}
+		return "${" + stable + "}"
+	}
+	return fn, func() []SecretRef { return secrets }
+}
+
 func TestFormatScalarQuoting(t *testing.T) {
 	cases := []struct {
 		name string
@@ -117,13 +137,13 @@ func TestNodeToProps(t *testing.T) {
 }
 
 func TestBuildMQmTLSBundle(t *testing.T) {
-	mq := spec.Side{System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM1", Channel: "CH", User: "u", Password: "${MQ}", TLS: true, Cipher: "CIPH", KeyAlias: "mc", DestKind: spec.DestQueue, Dest: "IN"}
-	sol := spec.Side{System: spec.SystemSolace, Host: "tcps://b", MsgVPN: "v", ClientUser: "u", ClientPass: "${S}", DestKind: spec.DestQueue, Dest: "OUT"}
+	mq := spec.Side{System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM1", Channel: "CH", UserEnv: "MQ_USER", PasswordEnv: "MQ_PASSWORD", TLS: true, Cipher: "CIPH", KeyAlias: "mc", DestKind: spec.DestQueue, Dest: "IN"}
+	sol := spec.Side{System: spec.SystemSolace, Host: "tcps://b", MsgVPN: "v", ClientUserEnv: "SOL_USER", ClientPassEnv: "SOL_PASSWORD", DestKind: spec.DestQueue, Dest: "OUT"}
 	d := &spec.Defaults{TLS: spec.TLSConfig{
-		Truststore: &spec.Store{File: "t.jks", Password: "${T}", Type: "JKS"},
-		Keystore:   &spec.Store{File: "k.jks", Password: "${K}", Type: "PKCS12"},
+		Truststore: &spec.Store{File: "t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"},
+		Keystore:   &spec.Store{File: "k.jks", PasswordEnv: "KEYSTORE_PASSWORD_ENV", Type: "PKCS12"},
 	}}
-	m, _ := Build([]spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mq, Target: sol}}, d, true)
+	m, _ := Build([]spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mq, Target: sol}}, d, Opts{MountStores: true})
 	if !m.MQTLS || len(m.Bundles) != 1 {
 		t.Fatalf("MQTLS=%v bundles=%d", m.MQTLS, len(m.Bundles))
 	}
@@ -131,35 +151,55 @@ func TestBuildMQmTLSBundle(t *testing.T) {
 	if !b.HasKeystore || b.KeyAlias != "mc" || b.KeystoreTyp != "PKCS12" || b.TruststoreTyp != "JKS" {
 		t.Fatalf("bundle=%+v", b)
 	}
+	// The truststore password is referenced twice -- once by the MQ SSL bundle,
+	// once by the Solace binder's tcps:// api-properties (both TLS-enabled sides
+	// share the one truststore in d.TLS) -- and must collapse to a single
+	// Model.Secrets entry, not be mounted/resolved twice under the same name.
+	var truststoreRefs int
+	for _, s := range m.Secrets {
+		if s.Stable == TruststorePasswordName {
+			truststoreRefs++
+			if s.EnvVar != "TRUSTSTORE_PASSWORD_ENV" {
+				t.Errorf("truststore secret EnvVar = %q, want TRUSTSTORE_PASSWORD_ENV", s.EnvVar)
+			}
+		}
+	}
+	if truststoreRefs != 1 {
+		t.Fatalf("truststore password referenced by bundle + api-properties should collapse to 1 Secrets entry, got %d in %+v", truststoreRefs, m.Secrets)
+	}
+	// mq user/password, mq bundle truststore+keystore, sol client-user/pass: 6 distinct secrets.
+	if len(m.Secrets) != 6 {
+		t.Fatalf("Secrets = %+v, want 6 distinct entries", m.Secrets)
+	}
 }
 
 func TestBuildCipherConflictWarning(t *testing.T) {
 	mk := func(cipher, dest string) spec.Side {
-		return spec.Side{System: spec.SystemMQ, ConnName: "h(1)", QueueManager: "QM1", Channel: "CH", User: "u", Password: "p", TLS: true, Cipher: cipher, DestKind: spec.DestQueue, Dest: dest}
+		return spec.Side{System: spec.SystemMQ, ConnName: "h(1)", QueueManager: "QM1", Channel: "CH", UserEnv: "MQ_USER", PasswordEnv: "MQ_PASSWORD", TLS: true, Cipher: cipher, DestKind: spec.DestQueue, Dest: dest}
 	}
-	sol := spec.Side{System: spec.SystemSolace, Host: "tcp://b", MsgVPN: "v", ClientUser: "u", ClientPass: "p", DestKind: spec.DestQueue, Dest: "X"}
+	sol := spec.Side{System: spec.SystemSolace, Host: "tcp://b", MsgVPN: "v", ClientUserEnv: "SOL_USER", ClientPassEnv: "SOL_PASSWORD", DestKind: spec.DestQueue, Dest: "X"}
 	wfs := []spec.Workflow{
 		{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mk("C1", "A"), Target: sol},
 		{File: "20.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mk("C2", "B"), Target: sol},
 	}
-	_, warns := Build(wfs, nil, true)
+	_, warns := Build(wfs, nil, Opts{MountStores: true})
 	if !containsSub(warns, "conflicting cipher") {
 		t.Fatalf("want cipher conflict, got %v", warns)
 	}
 }
 
 func TestBuildMessageLoopWarning(t *testing.T) {
-	s := spec.Side{System: spec.SystemMQ, ConnName: "h(1)", QueueManager: "QM1", Channel: "CH", User: "u", Password: "p", DestKind: spec.DestQueue, Dest: "SAME"}
-	_, warns := Build([]spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: s, Target: s}}, nil, true)
+	s := spec.Side{System: spec.SystemMQ, ConnName: "h(1)", QueueManager: "QM1", Channel: "CH", UserEnv: "MQ_USER", PasswordEnv: "MQ_PASSWORD", DestKind: spec.DestQueue, Dest: "SAME"}
+	_, warns := Build([]spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: s, Target: s}}, nil, Opts{MountStores: true})
 	if !containsSub(warns, "message loop") {
 		t.Fatalf("want loop warn, got %v", warns)
 	}
 }
 
 func TestBuildSolaceTopicSourceEmitsConsumerTopic(t *testing.T) {
-	src := spec.Side{System: spec.SystemSolace, Host: "tcps://b", MsgVPN: "v", ClientUser: "u", ClientPass: "p", DestKind: spec.DestTopic, Dest: "evt/in"}
-	tgt := spec.Side{System: spec.SystemMQ, ConnName: "h(1)", QueueManager: "QM", Channel: "C", User: "u", Password: "p", DestKind: spec.DestQueue, Dest: "OUT"}
-	m, _ := Build([]spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: src, Target: tgt}}, nil, true)
+	src := spec.Side{System: spec.SystemSolace, Host: "tcps://b", MsgVPN: "v", ClientUserEnv: "SOL_USER", ClientPassEnv: "SOL_PASSWORD", DestKind: spec.DestTopic, Dest: "evt/in"}
+	tgt := spec.Side{System: spec.SystemMQ, ConnName: "h(1)", QueueManager: "QM", Channel: "C", UserEnv: "MQ_USER", PasswordEnv: "MQ_PASSWORD", DestKind: spec.DestQueue, Dest: "OUT"}
+	m, _ := Build([]spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: src, Target: tgt}}, nil, Opts{MountStores: true})
 	var in0 *SolaceBinding
 	for _, sb := range m.SolaceBindings {
 		if sb.Name == "input-0" {
@@ -172,18 +212,18 @@ func TestBuildSolaceTopicSourceEmitsConsumerTopic(t *testing.T) {
 }
 
 func TestBuildStorePathsRawVsMount(t *testing.T) {
-	mq := spec.Side{System: spec.SystemMQ, ConnName: "h(1)", QueueManager: "QM", Channel: "C", User: "u", Password: "p", TLS: true, KeyAlias: "mc", DestKind: spec.DestQueue, Dest: "IN"}
-	sol := spec.Side{System: spec.SystemSolace, Host: "tcps://b", MsgVPN: "v", ClientUser: "u", ClientPass: "p", DestKind: spec.DestQueue, Dest: "OUT"}
+	mq := spec.Side{System: spec.SystemMQ, ConnName: "h(1)", QueueManager: "QM", Channel: "C", UserEnv: "MQ_USER", PasswordEnv: "MQ_PASSWORD", TLS: true, KeyAlias: "mc", DestKind: spec.DestQueue, Dest: "IN"}
+	sol := spec.Side{System: spec.SystemSolace, Host: "tcps://b", MsgVPN: "v", ClientUserEnv: "SOL_USER", ClientPassEnv: "SOL_PASSWORD", DestKind: spec.DestQueue, Dest: "OUT"}
 	d := &spec.Defaults{TLS: spec.TLSConfig{
-		Truststore: &spec.Store{File: "./certs/t.jks", Password: "${T}", Type: "JKS"},
-		Keystore:   &spec.Store{File: "./certs/k.jks", Password: "${K}", Type: "JKS"},
+		Truststore: &spec.Store{File: "./certs/t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"},
+		Keystore:   &spec.Store{File: "./certs/k.jks", PasswordEnv: "KEYSTORE_PASSWORD_ENV", Type: "JKS"},
 	}}
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mq, Target: sol}}
-	raw, _ := Build(wfs, d, false) // config: reflect the env.yaml path verbatim
+	raw, _ := Build(wfs, d, Opts{MountStores: false}) // config: reflect the env.yaml path verbatim
 	if raw.Bundles[0].TruststoreLoc != "./certs/t.jks" {
 		t.Fatalf("config (mount=false) truststore loc = %q, want ./certs/t.jks", raw.Bundles[0].TruststoreLoc)
 	}
-	mnt, _ := Build(wfs, d, true) // deploy: rewrite to the container mount path
+	mnt, _ := Build(wfs, d, Opts{MountStores: true}) // deploy: rewrite to the container mount path
 	if mnt.Bundles[0].TruststoreLoc != "/app/external/classpath/truststores/t.jks" {
 		t.Fatalf("deploy (mount=true) truststore loc = %q", mnt.Bundles[0].TruststoreLoc)
 	}
@@ -209,10 +249,11 @@ func TestBuildLeaderElection(t *testing.T) {
 	// dangling conn-ref: validate.go:291 (checkLeaderElection) catches an unknown
 	// conn-ref before Build ever runs; buildLeaderElection itself has no guard and
 	// emits no warning, so a dangling ref silently leaves Session nil.
+	noopSecretRef, _ := testSecretRef()
 	dangling := &spec.Defaults{LeaderElection: spec.LeaderElection{
 		Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q", ConnRef: "missing",
 	}}
-	le := buildLeaderElection(dangling, true)
+	le := buildLeaderElection(dangling, true, noopSecretRef)
 	if le == nil || le.Mode != spec.LeaderActiveStby || le.Queue != "mgmt-q" {
 		t.Fatalf("dangling conn-ref: le = %+v", le)
 	}
@@ -225,16 +266,27 @@ func TestBuildLeaderElection(t *testing.T) {
 	happy := &spec.Defaults{
 		LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveActive, Queue: "mgmt-q", ConnRef: "edge"},
 		Connections: map[string]spec.Side{
-			"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUser: "u", ClientPass: "p", KeyAlias: "sc"},
+			"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUserEnv: "EDGE_USER", ClientPassEnv: "EDGE_PASS", KeyAlias: "sc"},
 		},
 		TLS: spec.TLSConfig{
-			Truststore: &spec.Store{File: "./certs/truststore.jks", Password: "${T}", Type: "JKS"},
-			Keystore:   &spec.Store{File: "./certs/keystore.jks", Password: "${K}", Type: "JKS"},
+			Truststore: &spec.Store{File: "./certs/truststore.jks", PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"},
+			Keystore:   &spec.Store{File: "./certs/keystore.jks", PasswordEnv: "KEYSTORE_PASSWORD_ENV", Type: "JKS"},
 		},
 	}
-	le = buildLeaderElection(happy, true)
+	happySecretRef, happySecrets := testSecretRef()
+	le = buildLeaderElection(happy, true, happySecretRef)
 	if le == nil || le.Session == nil || le.Session.Host != "tcps://b:55443" || le.Session.MsgVPN != "prod" {
 		t.Fatalf("conn-ref happy path: le = %+v", le)
+	}
+	// No credential value or host env-var name ever reaches the rendered
+	// session: ClientUser/ClientPass carry the stable placeholder, not "u"/"p"
+	// or the env-var name, and the leader-election secrets are recorded under
+	// their own fixed stable names.
+	if le.Session.ClientUser != "${"+LeaderUsernameName+"}" {
+		t.Errorf("conn-ref happy path: Session.ClientUser = %q, want the %s placeholder", le.Session.ClientUser, LeaderUsernameName)
+	}
+	if le.Session.ClientPass != "${"+LeaderPasswordName+"}" {
+		t.Errorf("conn-ref happy path: Session.ClientPass = %q, want the %s placeholder", le.Session.ClientPass, LeaderPasswordName)
 	}
 	got := map[string]string{}
 	for _, p := range le.Session.APIProps {
@@ -250,15 +302,33 @@ func TestBuildLeaderElection(t *testing.T) {
 			t.Errorf("conn-ref happy path: APIProps[%s] = %q, want %q", k, got[k], w)
 		}
 	}
+	secrets := happySecrets()
+	byStable := map[string]SecretRef{}
+	for _, s := range secrets {
+		byStable[s.Stable] = s
+	}
+	if s := byStable[LeaderUsernameName]; s.EnvVar != "EDGE_USER" {
+		t.Errorf("Secrets[%s].EnvVar = %q, want EDGE_USER", LeaderUsernameName, s.EnvVar)
+	}
+	if s := byStable[LeaderPasswordName]; s.EnvVar != "EDGE_PASS" {
+		t.Errorf("Secrets[%s].EnvVar = %q, want EDGE_PASS", LeaderPasswordName, s.EnvVar)
+	}
+	if s := byStable[TruststorePasswordName]; s.EnvVar != "TRUSTSTORE_PASSWORD_ENV" {
+		t.Errorf("Secrets[%s].EnvVar = %q, want TRUSTSTORE_PASSWORD_ENV", TruststorePasswordName, s.EnvVar)
+	}
 
 	// inline session (no conn-ref), non-tcps host: no TLS APIProps are added.
 	inline := &spec.Defaults{LeaderElection: spec.LeaderElection{
 		Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q",
-		Session: &spec.Side{System: spec.SystemSolace, Host: "tcp://b:55555", MsgVPN: "v", ClientUser: "u", ClientPass: "p"},
+		Session: &spec.Side{System: spec.SystemSolace, Host: "tcp://b:55555", MsgVPN: "v", ClientUserEnv: "INLINE_USER", ClientPassEnv: "INLINE_PASS"},
 	}}
-	le = buildLeaderElection(inline, true)
-	if le == nil || le.Session == nil || le.Session.Host != "tcp://b:55555" || le.Session.ClientUser != "u" {
+	inlineSecretRef, _ := testSecretRef()
+	le = buildLeaderElection(inline, true, inlineSecretRef)
+	if le == nil || le.Session == nil || le.Session.Host != "tcp://b:55555" {
 		t.Fatalf("inline session: le = %+v", le)
+	}
+	if le.Session.ClientUser != "${"+LeaderUsernameName+"}" {
+		t.Errorf("inline session: Session.ClientUser = %q, want the %s placeholder (never the literal/env source)", le.Session.ClientUser, LeaderUsernameName)
 	}
 	if len(le.Session.APIProps) != 0 {
 		t.Errorf("inline session: non-tcps host should have no TLS APIProps, got %+v", le.Session.APIProps)
@@ -269,12 +339,14 @@ func TestBuildLeaderElection(t *testing.T) {
 	mountable := &spec.Defaults{
 		LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q", ConnRef: "edge"},
 		Connections: map[string]spec.Side{
-			"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUser: "u", ClientPass: "p"},
+			"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUserEnv: "EDGE_USER", ClientPassEnv: "EDGE_PASS"},
 		},
-		TLS: spec.TLSConfig{Truststore: &spec.Store{File: "./certs/truststore.jks", Password: "${T}", Type: "JKS"}},
+		TLS: spec.TLSConfig{Truststore: &spec.Store{File: "./certs/truststore.jks", PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"}},
 	}
-	raw := buildLeaderElection(mountable, false)
-	mnt := buildLeaderElection(mountable, true)
+	rawSecretRef, _ := testSecretRef()
+	mntSecretRef, _ := testSecretRef()
+	raw := buildLeaderElection(mountable, false, rawSecretRef)
+	mnt := buildLeaderElection(mountable, true, mntSecretRef)
 	if rawTS := trustStoreVal(raw); rawTS != "./certs/truststore.jks" {
 		t.Errorf("config (mount=false) truststore = %q, want ./certs/truststore.jks", rawTS)
 	}

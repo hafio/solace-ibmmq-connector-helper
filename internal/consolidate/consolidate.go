@@ -7,6 +7,7 @@ package consolidate
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -23,10 +24,13 @@ type acc struct {
 	kind string // spec.SystemSolace | spec.SystemMQ
 	name string // resolved after all accs are known
 
-	// Solace tuple.
-	host, vpn, user, pass string
+	// Solace tuple. Credentials are Cred pairs (literal or host env var); the
+	// rendered config carries neither, only a stable secret name.
+	host, vpn  string
+	user, pass spec.Cred
 	// MQ tuple.
-	conn, qm, ch, mqUser, mqPass string
+	conn, qm, ch   string
+	mqUser, mqPass spec.Cred
 
 	tls      bool   // TLS on this binder (Solace: tcps:// host; MQ: tls:true)
 	keyAlias string // mTLS client key alias ("" = none)
@@ -39,19 +43,49 @@ type acc struct {
 	binder *Binder
 }
 
+// Opts tunes one Build.
+type Opts struct {
+	MountStores  bool
+	ConfigImport string
+}
+
 // Build consolidates workflows (in the caller's sorted order) with defaults.
 // Returns the ordered Model and any non-fatal warnings.
-func Build(wfs []spec.Workflow, d *spec.Defaults, mountStores bool) (*Model, []string) {
+func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) {
 	if d == nil {
 		d = &spec.Defaults{}
 	}
+	mountStores := opts.MountStores
 	m := &Model{
 		Security:     d.Security,
 		Management:   d.Management,
 		LoggingLevel: d.LoggingLevel,
+		ConfigImport: opts.ConfigImport,
 	}
 	var warns []string
 	warn := func(format string, a ...any) { warns = append(warns, fmt.Sprintf(format, a...)) }
+
+	// secretRef records one credential under its stable in-container name and
+	// returns the placeholder the config should carry. An unset credential
+	// contributes nothing and renders as "" so the caller's emptiness gate still
+	// omits the line. Repeated positions (a store password referenced by both an
+	// SSL bundle and the Solace api-properties) collapse onto one entry.
+	seenSecret := map[string]bool{}
+	secretRef := func(stable string, c spec.Cred) string {
+		if c.Empty() {
+			return ""
+		}
+		// A name seen twice is the same credential reached from two places (a
+		// store password used by both an SSL bundle and the Solace
+		// api-properties), so it contributes one entry. Two *different* sources
+		// competing for one name is a conflict validate rejects upstream; keeping
+		// the first here stays deterministic either way.
+		if !seenSecret[stable] {
+			seenSecret[stable] = true
+			m.Secrets = append(m.Secrets, SecretRef{Stable: stable, Literal: c.Literal, EnvVar: c.EnvVar})
+		}
+		return "${" + stable + "}"
+	}
 
 	// Materialise conn-ref sides once, up front, so conn-ref and inline sides that
 	// resolve to the same connection tuple consolidate into a single binder.
@@ -69,16 +103,18 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, mountStores bool) (*Model, []s
 	byKey := map[string]*acc{}
 	var accs []*acc
 	register := func(s spec.Side) *acc {
-		key := dedupKey(s)
+		key := s.DedupKey()
 		a := byKey[key]
 		if a == nil {
 			a = &acc{key: key, kind: s.System}
 			switch s.System {
 			case spec.SystemSolace:
-				a.host, a.vpn, a.user, a.pass = s.Host, s.MsgVPN, s.ClientUser, s.ClientPass
+				a.host, a.vpn = s.Host, s.MsgVPN
+				a.user, a.pass = s.Username(), s.Secret()
 				a.tls = isTCPS(s.Host)
 			case spec.SystemMQ:
-				a.conn, a.qm, a.ch, a.mqUser, a.mqPass = s.ConnName, s.QueueManager, s.Channel, s.User, s.Password
+				a.conn, a.qm, a.ch = s.ConnName, s.QueueManager, s.Channel
+				a.mqUser, a.mqPass = s.Username(), s.Secret()
 				a.tls = s.TLS
 			}
 			byKey[key] = a
@@ -118,43 +154,23 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, mountStores bool) (*Model, []s
 		register(w.tgt)
 	}
 
-	// ---- assign binder names: the contributing connection name when present, else a
-	//      generated sol-conn-N / mq-conn-N; then disambiguate any clash between two
-	//      *different* binders with -2/-3. (Dedup by tuple already happened above.) ----
-	used := map[string]int{}
-	assign := func(base string) string {
-		if used[base] == 0 {
-			used[base] = 1
-			return base
-		}
-		used[base]++
-		return fmt.Sprintf("%s-%d", base, used[base])
-	}
-	var solN, mqN int
-	for _, a := range accs {
-		var base string
-		switch {
-		case a.connName != "":
-			base = sanitize(a.connName)
-		case a.kind == spec.SystemSolace:
-			solN++
-			base = fmt.Sprintf("sol-conn-%d", solN)
-		default:
-			mqN++
-			base = fmt.Sprintf("mq-conn-%d", mqN)
-		}
-		a.name = assign(base)
-	}
+	// ---- assign binder names ---------------------------------------------------
+	assignBinderNames(accs)
 
 	// ---- finalize binder + bundle objects -------------------------------------
 	for _, a := range accs {
 		switch a.kind {
 		case spec.SystemSolace:
-			sb := &SolaceBinder{Host: a.host, MsgVPN: a.vpn, ClientUser: a.user, ClientPass: a.pass}
+			sb := &SolaceBinder{
+				Host:       a.host,
+				MsgVPN:     a.vpn,
+				ClientUser: secretRef(stableName(a.name, "CLIENT_USERNAME"), a.user),
+				ClientPass: secretRef(stableName(a.name, "CLIENT_PASSWORD"), a.pass),
+			}
 			sb.Extras = nodeToProps(d.SolaceDefaults)
 			var props []Prop
 			if a.tls {
-				for _, kv := range tls.SolaceProps(d, a.keyAlias, mountStores) {
+				for _, kv := range tls.SolaceProps(d, a.keyAlias, mountStores, storeSecret(secretRef)) {
 					props = append(props, Prop{Key: kv.Key, Val: kv.Val})
 				}
 			}
@@ -162,11 +178,24 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, mountStores bool) (*Model, []s
 			sb.APIProps = props
 			a.binder = &Binder{Name: a.name, Kind: spec.SystemSolace, Solace: sb}
 		case spec.SystemMQ:
-			mb := &MQBinder{QueueManager: a.qm, Channel: a.ch, ConnName: a.conn, User: a.mqUser, Password: a.mqPass}
+			mb := &MQBinder{
+				QueueManager: a.qm,
+				Channel:      a.ch,
+				ConnName:     a.conn,
+				User:         secretRef(stableName(a.name, "USER"), a.mqUser),
+				Password:     secretRef(stableName(a.name, "PASSWORD"), a.mqPass),
+			}
 			if a.tls {
-				mb.SSLBundle = a.name + "-bundle"
 				m.MQTLS = true
-				m.Bundles = append(m.Bundles, buildBundle(a, d, mountStores))
+				// No truststore configured means no bundle to reference: the
+				// connection still negotiates TLS, it just trusts the JVM's
+				// default store. Referencing an empty bundle would break it.
+				if b := buildBundle(a, d, mountStores, secretRef); b != nil {
+					mb.SSLBundle = b.Name
+					m.Bundles = append(m.Bundles, b)
+				} else {
+					warn("binder %q: tls is enabled but tls.truststore is not configured; no SSL bundle is emitted and the connection falls back to the JVM default truststore", a.name)
+				}
 			}
 			var props []Prop
 			if a.cipher != "" {
@@ -185,8 +214,8 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, mountStores bool) (*Model, []s
 	for i, w := range rwfs {
 		in := fmt.Sprintf("input-%d", i)
 		out := fmt.Sprintf("output-%d", i)
-		srcAcc := byKey[dedupKey(w.src)]
-		tgtAcc := byKey[dedupKey(w.tgt)]
+		srcAcc := byKey[w.src.DedupKey()]
+		tgtAcc := byKey[w.tgt.DedupKey()]
 		m.Bindings = append(m.Bindings,
 			&Binding{Name: in, Dest: w.src.Dest, Binder: srcAcc.binder.Name},
 			&Binding{Name: out, Dest: w.tgt.Dest, Binder: tgtAcc.binder.Name},
@@ -201,7 +230,22 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, mountStores bool) (*Model, []s
 	}
 
 	// leader-election block (active_active / active_standby); standalone/absent ⇒ nil.
-	m.LeaderElection = buildLeaderElection(d, mountStores)
+	m.LeaderElection = buildLeaderElection(d, mountStores, secretRef)
+
+	// Management users authenticate against the actuator endpoint, so their
+	// passwords are credentials like any other. The slice is copied first:
+	// m.Security shares d.Security's backing array, and Build runs once per shard
+	// against the same Defaults, so substituting in place would let the second
+	// shard read the first shard's placeholder as a literal value.
+	if len(d.Security.Users) > 0 {
+		users := make([]spec.User, len(d.Security.Users))
+		copy(users, d.Security.Users)
+		for i, u := range users {
+			users[i].Password = secretRef(securityUserPasswordName(u.Name), u.Secret())
+			users[i].PasswordEnv = ""
+		}
+		m.Security.Users = users
+	}
 
 	return m, warns
 }
@@ -245,13 +289,6 @@ func (m *Model) emitBindingOptions(name string, s spec.Side, isInput bool, file 
 
 // ---- helpers -----------------------------------------------------------------
 
-func dedupKey(s spec.Side) string {
-	if s.System == spec.SystemSolace {
-		return "S|" + s.Host + "|" + s.MsgVPN + "|" + s.ClientUser
-	}
-	return "M|" + s.ConnName + "|" + s.QueueManager + "|" + s.Channel + "|" + s.User
-}
-
 // displayName is a stable label for warnings emitted before names are assigned.
 func displayName(a *acc) string {
 	switch {
@@ -282,18 +319,25 @@ func sanitize(s string) string {
 	return b.String()
 }
 
-func buildBundle(a *acc, d *spec.Defaults, mount bool) *Bundle {
-	b := &Bundle{Name: a.name + "-bundle"}
-	if ts := d.TLS.Truststore; ts != nil {
-		b.TruststoreLoc = tls.StorePath(ts.File, mount)
-		b.TruststorePwd = ts.Password
-		b.TruststoreTyp = ts.Type
+// buildBundle assembles the JKS SSL bundle for one TLS-enabled MQ binder, or nil
+// when there is no truststore to point it at. A bundle exists to name a
+// truststore: emitting one without would put empty location/password/type values
+// into application.yml, which the connector reads as a configured-but-broken
+// trust store rather than as "not configured".
+func buildBundle(a *acc, d *spec.Defaults, mount bool, secretRef secretFn) *Bundle {
+	ts := d.TLS.Truststore
+	if ts == nil || ts.File == "" {
+		return nil
 	}
+	b := &Bundle{Name: a.name + "-bundle"}
+	b.TruststoreLoc = tls.StorePath(ts.File, mount)
+	b.TruststorePwd = secretRef(TruststorePasswordName, ts.Secret())
+	b.TruststoreTyp = ts.Type
 	if a.keyAlias != "" {
 		if ks := d.TLS.Keystore; ks != nil {
 			b.HasKeystore = true
 			b.KeystoreLoc = tls.StorePath(ks.File, mount)
-			b.KeystorePwd = ks.Password
+			b.KeystorePwd = secretRef(KeystorePasswordName, ks.Secret())
 			b.KeystoreTyp = ks.Type
 			b.KeyAlias = a.keyAlias
 		}
@@ -305,7 +349,7 @@ func buildBundle(a *acc, d *spec.Defaults, mount bool) *Bundle {
 // active_standby (nil for standalone/absent). The management session's TLS
 // api-properties reuse the shared truststore/keystore wiring (config vs deploy
 // path via mount).
-func buildLeaderElection(d *spec.Defaults, mount bool) *LeaderElectionModel {
+func buildLeaderElection(d *spec.Defaults, mount bool, secretRef secretFn) *LeaderElectionModel {
 	le := d.LeaderElection
 	if !le.Present || le.Mode == "" || le.Mode == spec.LeaderStandalone {
 		return nil
@@ -320,9 +364,14 @@ func buildLeaderElection(d *spec.Defaults, mount bool) *LeaderElectionModel {
 		sess = le.Session
 	}
 	if sess != nil {
-		s := &Session{Host: sess.Host, MsgVPN: sess.MsgVPN, ClientUser: sess.ClientUser, ClientPass: sess.ClientPass}
+		s := &Session{
+			Host:       sess.Host,
+			MsgVPN:     sess.MsgVPN,
+			ClientUser: secretRef(LeaderUsernameName, sess.Username()),
+			ClientPass: secretRef(LeaderPasswordName, sess.Secret()),
+		}
 		if isTCPS(sess.Host) {
-			for _, kv := range tls.SolaceProps(d, sess.KeyAlias, mount) {
+			for _, kv := range tls.SolaceProps(d, sess.KeyAlias, mount, storeSecret(secretRef)) {
 				s.APIProps = append(s.APIProps, Prop{Key: kv.Key, Val: kv.Val})
 			}
 		}
@@ -354,6 +403,10 @@ func nodeToProps(node *yaml.Node) []Prop {
 // it so verbatim passthrough (e.g. a quoted DN) survives faithfully. Shared with
 // the render package, which calls it while walking nested (Sub) passthrough
 // trees at arbitrary depth.
+//
+// A literal (|) or folded (>) source scalar keeps its embedded newlines here;
+// the render layer re-emits those as a block scalar, since only it knows the
+// indent (see render.writeScalar).
 func FormatScalar(n *yaml.Node) string {
 	switch n.Style {
 	case yaml.DoubleQuotedStyle:
@@ -363,6 +416,51 @@ func FormatScalar(n *yaml.Node) string {
 	default:
 		return n.Value
 	}
+}
+
+// yamlIndicators are the characters that, in first position, give a plain scalar
+// a meaning other than "this text": block/flow structure, anchors, tags, comments.
+const yamlIndicators = "-?:,[]{}#&*!|>'\"%@`"
+
+// plainNotString matches the plain scalars a YAML parser reads back as a bool,
+// null, or number rather than a string -- so a password of "0123" or "no" needs
+// quoting to survive as text.
+var plainNotString = regexp.MustCompile(`^(?i:true|false|yes|no|on|off|y|n|null|~|[-+]?(\.inf|\.nan)|[-+]?[0-9][0-9_]*(\.[0-9_]*)?([eE][-+]?[0-9]+)?|0[xXbBoO][0-9a-fA-F_]+)$`)
+
+// QuoteScalar renders a Go string as a YAML scalar, double-quoting it only when
+// a plain scalar would not read back as the same string.
+//
+// The renderer builds application.yml by concatenating "key: " with a value, so
+// an unquoted value carrying ": ", " #", a leading indicator, or an embedded
+// newline silently restructures the document -- a realistic connector password
+// ("p@ss #1") is enough to do it. Quoting only when required keeps every ordinary
+// value (hosts, ${VAR} placeholders, queue names) byte-for-byte as before.
+func QuoteScalar(s string) string {
+	if !needsQuote(s) {
+		return s
+	}
+	return strconv.Quote(s)
+}
+
+func needsQuote(s string) bool {
+	if s == "" {
+		return true
+	}
+	// Leading/trailing whitespace is stripped by the parser, and control
+	// characters cannot appear in a plain scalar at all.
+	if strings.TrimSpace(s) != s {
+		return true
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	if strings.IndexByte(yamlIndicators, s[0]) >= 0 || plainNotString.MatchString(s) {
+		return true
+	}
+	// ": " opens a nested mapping, a trailing ':' a mapping key, " #" a comment.
+	return strings.Contains(s, ": ") || strings.Contains(s, " #") || strings.HasSuffix(s, ":")
 }
 
 // mergeProp appends p unless its key already exists, in which case the value is

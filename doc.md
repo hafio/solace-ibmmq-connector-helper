@@ -397,7 +397,7 @@ Bindings define the **data flow paths** between source and target systems. Each 
 | `output-<N>.destination` | String | Target destination name |
 | `output-<N>.binder` | String | Name of the binder to use for the target |
 
-- `<N>` is a **workflow ID** from `0` to `19` — up to 20 workflows **per connector instance**. (`solmq-conn` shards a folder of more than 20 workflows across additional instances, each renumbering `0..19`.)
+- `<N>` is a **workflow ID** from `0` to `19` — up to 20 workflows **per connector instance**. The Spring Boot application binds `0..19` only, and an id of `20` or higher is **silently ignored** (no error, no log — the flow simply never runs), so exceeding the limit is not self-diagnosing.
 - The connector **does not** auto-provision queues. They must exist on the broker before starting
 
 **Example:**

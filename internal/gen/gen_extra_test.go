@@ -6,81 +6,57 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/podmangen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
-func TestLooksDotenv(t *testing.T) {
-	if !looksDotenv("A=1\nB=2\n") {
-		t.Error("dotenv")
+// TestParseExpandsNonCredentialAndWarnsOnUnsetDefaultless pins the wiring:
+// parse() must call spec.Expand after ParseWorkflow/ParseEnv, expanding
+// non-credential fields, leaving credential fields verbatim, and surfacing
+// one warning per unset defaultless variable in the returned warns list.
+func TestParseExpandsNonCredentialAndWarnsOnUnsetDefaultless(t *testing.T) {
+	env := File{Name: "env.yaml", Data: nil}
+	wf := File{Name: "workflow-0.yaml", Data: []byte(`
+source:
+  solace:
+    host: tcps://${HOST}:55443
+    msg-vpn: ${VPN:fallback-vpn}
+    client-username: literal-user
+    client-password-env: ${TYPO_CRED}
+    queue: Q.IN
+target:
+  mq:
+    conn-name: ${TYPO}(1414)
+    queue-manager: QM1
+    channel: CH
+    queue: Q.OUT
+`)}
+	lookup := func(name string) (string, bool) {
+		if name == "HOST" {
+			return "broker.internal", true
+		}
+		return "", false
 	}
-	if looksDotenv("a: 1\n") {
-		t.Error("yaml mapping should not be dotenv")
+	wfs, _, issues, warns := parse(Request{Env: &env, Workflows: []File{wf}}, Resolver{Env: lookup})
+	if len(issues) != 0 {
+		t.Fatalf("unexpected parse issues: %v", issues)
 	}
-	if looksDotenv("# c\n\n") {
-		t.Error("comments/blank only -> false")
+	src := wfs[0].Source
+	if got, want := src.Host, "tcps://broker.internal:55443"; got != want {
+		t.Errorf("Host = %q, want %q", got, want)
 	}
-	if !looksDotenv("URL=http://x:1\n") {
-		t.Error("value with colon after = is dotenv")
+	if got, want := src.MsgVPN, "fallback-vpn"; got != want {
+		t.Errorf("MsgVPN = %q, want %q", got, want)
 	}
-	if looksDotenv("KEY: v=1\n") {
-		t.Error("colon before = -> yaml")
+	if got, want := src.ClientPassEnv, "${TYPO_CRED}"; got != want {
+		t.Errorf("credential field must never expand: got %q, want %q", got, want)
 	}
-}
-
-func TestParseValuesDotenv(t *testing.T) {
-	kvs, err := parseValues([]byte("# c\nA=1\n\nB = two \n"))
-	if err != nil {
-		t.Fatal(err)
+	if got, want := wfs[0].Target.ConnName, "${TYPO}(1414)"; got != want {
+		t.Errorf("unset defaultless var must pass through verbatim: got %q, want %q", got, want)
 	}
-	if len(kvs) != 2 || kvs[0] != (deploy.KV{Key: "A", Val: "1"}) || kvs[1].Key != "B" || kvs[1].Val != "two" {
-		t.Fatalf("kvs=%+v", kvs)
-	}
-}
-
-func TestParseValuesYAML(t *testing.T) {
-	kvs, err := parseValues([]byte("A: 1\nB: two\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(kvs) != 2 || kvs[0].Key != "A" || kvs[1].Val != "two" {
-		t.Fatalf("kvs=%+v", kvs)
-	}
-	if _, err := parseValues([]byte("- just\n- a\n")); err == nil {
-		t.Error("sequence should error (not a mapping)")
-	}
-}
-
-func TestResolveCredEnv(t *testing.T) {
-	c := &spec.CredCreate{Source: spec.SourceEnv, Variables: []string{"X", "Y"}}
-	env := map[string]string{"X": "1", "Y": "2"}
-	kvs, err := resolveCred(c, Resolver{Env: func(k string) (string, bool) { v, ok := env[k]; return v, ok }})
-	if err != nil || len(kvs) != 2 {
-		t.Fatalf("kvs=%v err=%v", kvs, err)
-	}
-	if _, err := resolveCred(c, Resolver{Env: func(string) (string, bool) { return "", false }}); err == nil {
-		t.Error("missing env var should error")
-	}
-	kvs3, err := resolveCred(c, Resolver{})
-	if err != nil || len(kvs3) != 2 || kvs3[0].Val != "" {
-		t.Fatalf("nil env: %v %v", kvs3, err)
-	}
-}
-
-func TestResolveCredFileAndBadSource(t *testing.T) {
-	c := &spec.CredCreate{Source: spec.SourceFile, ValuesFile: "v.env"}
-	kvs, err := resolveCred(c, Resolver{ReadFile: func(string) ([]byte, error) { return []byte("A=1\n"), nil }})
-	if err != nil || len(kvs) != 1 || kvs[0].Key != "A" {
-		t.Fatalf("kvs=%v err=%v", kvs, err)
-	}
-	if _, err := resolveCred(c, Resolver{}); err == nil {
-		t.Error("no ReadFile should error")
-	}
-	if _, err := resolveCred(c, Resolver{ReadFile: func(string) ([]byte, error) { return nil, errors.New("boom") }}); err == nil {
-		t.Error("read error should propagate")
-	}
-	if _, err := resolveCred(&spec.CredCreate{Source: "weird"}, Resolver{}); err == nil {
-		t.Error("unknown source should error")
+	if len(warns) != 1 || !strings.Contains(warns[0].Msg, "TYPO") {
+		t.Fatalf("warns = %v, want exactly 1 warning naming TYPO", warns)
 	}
 }
 
@@ -104,10 +80,8 @@ func TestResolveStores(t *testing.T) {
 	}
 }
 
-func TestBaseNameB64ToIssues(t *testing.T) {
-	if baseName(`a\b\c.jks`) != "c.jks" || baseName("a/b/c.jks") != "c.jks" || baseName("x") != "x" {
-		t.Error("baseName")
-	}
+func TestToIssues(t *testing.T) {
+	// The path-basename cases moved to spec.TestBaseName with the helper itself.
 	if iss := toIssues([]string{"a", "b"}); len(iss) != 2 || iss[0].Msg != "a" {
 		t.Errorf("toIssues=%v", iss)
 	}
@@ -116,20 +90,8 @@ func TestBaseNameB64ToIssues(t *testing.T) {
 // ---- names, paths, mounts (docker/podman plumbing) --------------------------
 
 func TestNamesAndPaths(t *testing.T) {
-	if credEnvFileName("n", nil) != "" {
-		t.Error("nil creds -> empty")
-	}
-	if credEnvFileName("n", &spec.CredentialsSecret{Existing: "e.env"}) != "e.env" {
-		t.Error("existing wins")
-	}
-	if credEnvFileName("n", &spec.CredentialsSecret{Create: &spec.CredCreate{}}) != "n.env" {
-		t.Error("create -> <name>.env")
-	}
 	if pathIn("", "a") != "a" || pathIn("/base/", "a") != "/base/a" || pathIn("/base", "a") != "/base/a" {
 		t.Error("pathIn")
-	}
-	if instanceName("b", 0, 1) != "b" || instanceName("b", 0, 2) != "b-1" || instanceName("b", 1, 2) != "b-2" {
-		t.Error("instanceName")
 	}
 }
 
@@ -161,21 +123,52 @@ func TestTargetMounts(t *testing.T) {
 	}
 }
 
-func TestResolveCredentialsAndEnvFileContent(t *testing.T) {
-	if kvs, err := ResolveCredentials(nil, Resolver{}); err != nil || kvs != nil {
-		t.Errorf("nil creds -> nil,nil: %v %v", kvs, err)
+// TestResolveCredentials covers the three behaviors ResolveCredentials must
+// get right: a literal reference passes its value straight through, an -env
+// reference is read from the resolver's environment, and an unset variable
+// fails loud with a message that names the stable secret and the variable --
+// never a value (S3).
+func TestResolveCredentials(t *testing.T) {
+	if kvs, err := ResolveCredentials(nil, Resolver{}); err != nil || len(kvs) != 0 {
+		t.Errorf("nil refs -> no kvs, no error: %v %v", kvs, err)
 	}
-	if kvs, err := ResolveCredentials(&spec.CredentialsSecret{Existing: "x.env"}, Resolver{}); err != nil || kvs != nil {
-		t.Errorf("existing -> nil,nil: %v %v", kvs, err)
+
+	refs := []consolidate.SecretRef{
+		{Stable: "PROD_SOLACE_CLIENT_USERNAME", Literal: "connector"},
+		{Stable: "PROD_SOLACE_CLIENT_PASSWORD", EnvVar: "SOL_PASSWORD"},
 	}
-	creds := &spec.CredentialsSecret{Create: &spec.CredCreate{Source: spec.SourceEnv, Variables: []string{"A", "B"}}}
-	env := map[string]string{"A": "1", "B": "2"}
-	kvs, err := ResolveCredentials(creds, Resolver{Env: func(k string) (string, bool) { v, ok := env[k]; return v, ok }})
-	if err != nil || len(kvs) != 2 {
-		t.Fatalf("kvs=%v err=%v", kvs, err)
+	env := map[string]string{"SOL_PASSWORD": "s3cr3t"}
+	kvs, err := ResolveCredentials(refs, Resolver{Env: func(k string) (string, bool) { v, ok := env[k]; return v, ok }})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if EnvFileContent(kvs) != "A=1\nB=2\n" {
-		t.Errorf("env-file = %q", EnvFileContent(kvs))
+	want := []KV{
+		{Key: "PROD_SOLACE_CLIENT_USERNAME", Val: "connector"},
+		{Key: "PROD_SOLACE_CLIENT_PASSWORD", Val: "s3cr3t"},
+	}
+	if len(kvs) != len(want) || kvs[0] != want[0] || kvs[1] != want[1] {
+		t.Fatalf("kvs = %+v, want %+v", kvs, want)
+	}
+
+	// Unset -env variable: fail loud, naming the stable secret and the variable.
+	_, err = ResolveCredentials(
+		[]consolidate.SecretRef{{Stable: "MQ_CONN_1_PASSWORD", EnvVar: "MQ_PW"}},
+		Resolver{Env: func(string) (string, bool) { return "", false }},
+	)
+	if err == nil {
+		t.Fatal("expected an error for an unset environment variable")
+	}
+	if !strings.Contains(err.Error(), "MQ_CONN_1_PASSWORD") || !strings.Contains(err.Error(), "MQ_PW") {
+		t.Errorf("error %q should name the stable secret and the variable", err.Error())
+	}
+
+	// No environment access at all: also fails loud, not silently.
+	_, err = ResolveCredentials(
+		[]consolidate.SecretRef{{Stable: "MQ_CONN_1_PASSWORD", EnvVar: "MQ_PW"}},
+		Resolver{},
+	)
+	if err == nil {
+		t.Fatal("expected an error when the resolver has no environment access")
 	}
 }
 
@@ -219,108 +212,57 @@ target:
 	return fs
 }
 
-func TestShardWorkflows(t *testing.T) {
-	for _, c := range []struct{ n, want int }{{0, 1}, {1, 1}, {20, 1}, {21, 2}, {40, 2}, {41, 3}} {
-		if got := len(shardWorkflows(make([]spec.Workflow, c.n))); got != c.want {
-			t.Errorf("n=%d chunks=%d want %d", c.n, got, c.want)
-		}
+// TestConfigWorkflowCap pins the new hard cap: a folder holding more than
+// validate.MaxWorkflows workflows is a fatal error through the real
+// gen.Config path (no sharding, no output).
+func TestConfigWorkflowCap(t *testing.T) {
+	out, errs, _ := Config(Request{Workflows: synthWorkflowFiles(21)}, Resolver{})
+	if out != "" {
+		t.Errorf("expected no output over the cap, got:\n%s", out)
 	}
-	chunks := shardWorkflows(synthWorkflows(21))
-	if len(chunks) != 2 || len(chunks[0]) != 20 || len(chunks[1]) != 1 {
-		t.Fatalf("chunk sizes = %d then %d,%d", len(chunks), len(chunks[0]), len(chunks[1]))
+	want := "21 workflows found, but one connector instance runs at most 20 (workflow ids 0..19). Split them across separate folders, each with its own env.yaml and its own deployment.name/docker.name/podman.name, and deploy each as its own connector"
+	if !issuesContain(errs, want) {
+		t.Fatalf("errs = %v, want one containing %q", errs, want)
 	}
-	if chunks[1][0].File != "wf-20.yaml" {
-		t.Errorf("chunk 2 first workflow = %q, want wf-20.yaml", chunks[1][0].File)
-	}
-}
-
-func TestBuildShardsLeaderQueueSuffix(t *testing.T) {
-	d := &spec.Defaults{LeaderElection: spec.LeaderElection{
-		Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q",
-		Session: &spec.Side{System: spec.SystemSolace, Host: "tcp://b", MsgVPN: "v", ClientUser: "u", ClientPass: "p"},
-	}}
-	shards, _ := buildShards(synthWorkflows(21), d, true)
-	if len(shards) != 2 {
-		t.Fatalf("shards=%d want 2", len(shards))
-	}
-	if shards[0].model.LeaderElection.Queue != "mgmt-q-1" || shards[1].model.LeaderElection.Queue != "mgmt-q-2" {
-		t.Errorf("queues = %q, %q want mgmt-q-1, mgmt-q-2", shards[0].model.LeaderElection.Queue, shards[1].model.LeaderElection.Queue)
-	}
-	// Single instance keeps the queue unchanged.
-	single, _ := buildShards(synthWorkflows(3), d, true)
-	if len(single) != 1 || single[0].model.LeaderElection.Queue != "mgmt-q" {
-		t.Errorf("single-instance queue = %q want mgmt-q", single[0].model.LeaderElection.Queue)
+	// At the cap is still fine.
+	if _, errs, _ := Config(Request{Workflows: synthWorkflowFiles(20)}, Resolver{}); len(errs) > 0 {
+		t.Errorf("20 workflows should not hit the cap: %v", errs)
 	}
 }
 
-// TestBuildShardsLeaderActiveActive pins the one field that actually
-// distinguishes active_active from active_standby: the literal mode string
-// carried through the model and into the rendered application.yml (queue
-// suffixing is mode-agnostic; buildShards never branches on Mode).
-func TestBuildShardsLeaderActiveActive(t *testing.T) {
-	d := &spec.Defaults{LeaderElection: spec.LeaderElection{
-		Present: true, Mode: spec.LeaderActiveActive, Queue: "mgmt-q",
-		Session: &spec.Side{System: spec.SystemSolace, Host: "tcp://b", MsgVPN: "v", ClientUser: "u", ClientPass: "p"},
-	}}
-	shards, _ := buildShards(synthWorkflows(21), d, true)
-	if len(shards) != 2 {
-		t.Fatalf("shards=%d want 2", len(shards))
-	}
-	for i, s := range shards {
-		if s.model.LeaderElection == nil || s.model.LeaderElection.Mode != spec.LeaderActiveActive {
-			t.Errorf("shard %d LeaderElection = %+v want mode %q", i, s.model.LeaderElection, spec.LeaderActiveActive)
-		}
-	}
-	if shards[0].model.LeaderElection.Queue != "mgmt-q-1" || shards[1].model.LeaderElection.Queue != "mgmt-q-2" {
-		t.Errorf("queues = %q, %q want mgmt-q-1, mgmt-q-2", shards[0].model.LeaderElection.Queue, shards[1].model.LeaderElection.Queue)
-	}
-	if !strings.Contains(shards[0].appYAML, "mode: active_active") {
-		t.Errorf("rendered appYAML missing 'mode: active_active':\n%s", shards[0].appYAML)
-	}
-	if strings.Contains(shards[0].appYAML, "active_standby") {
-		t.Errorf("rendered appYAML should not mention active_standby:\n%s", shards[0].appYAML)
-	}
-}
-
-func TestKubernetesSharding(t *testing.T) {
+// TestGenerateKubernetesWorkflowCap covers the same cap through the
+// kubernetes target: over the limit is fatal and produces no manifest.
+func TestGenerateKubernetesWorkflowCap(t *testing.T) {
 	envData := "kubernetes:\n  deployment:\n    name: solmq\n    namespace: ns\n    image: img\n  service:\n    enabled: true\n    port: 8090\n"
 	req := Request{
 		Env:       &File{Name: "env.yaml", Data: []byte(envData)},
 		Workflows: synthWorkflowFiles(21),
 	}
 	out, errs, _ := GenerateKubernetes(req, Resolver{})
-	if len(errs) > 0 {
-		t.Fatalf("unexpected errors: %v", errs)
+	if out != "" {
+		t.Errorf("expected no manifest over the cap, got:\n%s", out)
 	}
-	for _, c := range []struct {
-		kind string
-		want int
-	}{{"kind: Namespace", 1}, {"kind: ConfigMap", 2}, {"kind: Deployment", 2}, {"kind: Service", 2}} {
-		if got := strings.Count(out, c.kind); got != c.want {
-			t.Errorf("%q count = %d, want %d", c.kind, got, c.want)
-		}
-	}
-	for _, want := range []string{"name: solmq-1\n", "name: solmq-2\n", "name: solmq-1-config", "name: solmq-2-config"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %q", want)
-		}
+	if !issuesContain(errs, "21 workflows found, but one connector instance runs at most 20") {
+		t.Fatalf("errs = %v, want the workflow-cap message", errs)
 	}
 }
 
-func TestConfigSharding(t *testing.T) {
-	outs, errs, _ := Config(Request{Workflows: synthWorkflowFiles(21)}, Resolver{})
+// Every generated application.yml must import the mounted secret files and
+// must never carry a credential value or a host variable name -- only the
+// ${STABLE} placeholder. This guards that invariant end-to-end through Config.
+func TestConfigNoSecretsLeak(t *testing.T) {
+	out, errs, _ := Config(Request{Workflows: synthWorkflowFiles(1)}, Resolver{})
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	if len(outs) != 2 {
-		t.Fatalf("instances = %d, want 2", len(outs))
+	if !strings.HasPrefix(out, "spring:\n  config:\n    import: "+ConfigImport+"\n") {
+		t.Errorf("application.yml must start with the config-tree import:\n%s", out)
 	}
-	if !strings.Contains(outs[0], "input-19") || strings.Contains(outs[0], "input-20") {
-		t.Errorf("instance 1 should hold workflows 0..19")
+	if strings.Contains(out, "client-username: u") || strings.Contains(out, "user: u") {
+		t.Errorf("rendered config leaks a literal credential value:\n%s", out)
 	}
-	// Instance 2 renumbers its lone workflow from 0.
-	if !strings.Contains(outs[1], "input-0") || strings.Contains(outs[1], "input-1") {
-		t.Errorf("instance 2 should renumber from 0:\n%s", outs[1])
+	if !strings.Contains(out, "${SOL_CONN_1_CLIENT_USERNAME}") || !strings.Contains(out, "${MQ_CONN_1_USER}") {
+		t.Errorf("rendered config missing expected ${STABLE} placeholders:\n%s", out)
 	}
 }
 
@@ -340,9 +282,6 @@ docker:
   ports:
     - 8090
   timezone: UTC
-  secrets:
-    credentials:
-      existing: solmq.env
   stores:
     mount-path: /app/external/classpath/truststores
 `
@@ -354,11 +293,36 @@ docker:
 	if plan.Compose == "" {
 		t.Fatal("empty compose")
 	}
-	if plan.EnvFileName != "solmq.env" {
-		t.Errorf("env-file = %q want solmq.env (existing)", plan.EnvFileName)
-	}
 	if !strings.Contains(plan.Compose, "solace/connector:9.9") {
 		t.Errorf("compose missing image:\n%s", plan.Compose)
+	}
+
+	// One workflow, inline solace source (auto sol-conn-1) + inline mq target
+	// (auto mq-conn-1): four credential positions, all literal.
+	want := []consolidate.SecretRef{
+		{Stable: "SOL_CONN_1_CLIENT_USERNAME", Literal: "u"},
+		{Stable: "SOL_CONN_1_CLIENT_PASSWORD", Literal: "p"},
+		{Stable: "MQ_CONN_1_USER", Literal: "u"},
+		{Stable: "MQ_CONN_1_PASSWORD", Literal: "p"},
+	}
+	if len(plan.Secrets) != len(want) {
+		t.Fatalf("secrets = %+v, want %+v", plan.Secrets, want)
+	}
+	for i, w := range want {
+		if plan.Secrets[i] != w {
+			t.Errorf("secrets[%d] = %+v, want %+v", i, plan.Secrets[i], w)
+		}
+	}
+
+	// Every declared secret is a compose top-level secret (environment provider)
+	// and is listed under the service's own secrets:, never written as a value.
+	for _, s := range want {
+		if !strings.Contains(plan.Compose, s.Stable+":\n") {
+			t.Errorf("compose missing top-level secret %q:\n%s", s.Stable, plan.Compose)
+		}
+		if strings.Contains(plan.Compose, s.Stable+": "+s.Literal) {
+			t.Errorf("compose must never carry a secret value inline (%q):\n%s", s.Stable, plan.Compose)
+		}
 	}
 }
 
@@ -372,42 +336,49 @@ func TestGeneratePodmanRunAndQuadlet(t *testing.T) {
   ports:
     - 8090
   timezone: UTC
-  secrets:
-    credentials:
-      create:
-        name: solmq-credentials
-        source: env
-        variables:
-          - FOO
 `
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
 	res := Resolver{Env: func(string) (string, bool) { return "v", true }}
 
-	// mode: run -> a run script, no quadlet units.
+	// mode: run -> a run script, no quadlet unit.
 	plan, errs, _ := GeneratePodman(req, res, PodmanOpts{})
 	if len(errs) > 0 {
 		t.Fatalf("run: unexpected errors: %v", errs)
 	}
-	if plan.Mode != spec.PodmanModeRun || plan.RunScript == "" || len(plan.Units) != 0 {
-		t.Errorf("run plan mode=%q script=%d units=%d", plan.Mode, len(plan.RunScript), len(plan.Units))
+	if plan.Mode != spec.PodmanModeRun || plan.RunScript == "" || plan.Unit != (podmangen.Unit{}) {
+		t.Errorf("run plan mode=%q script=%d unit=%+v", plan.Mode, len(plan.RunScript), plan.Unit)
 	}
-	if plan.EnvFileName != "solmq-connector.env" {
-		t.Errorf("env-file = %q want solmq-connector.env", plan.EnvFileName)
+	if plan.AppYAML.Name != "solmq-connector-application.yml" {
+		t.Errorf("app yaml = %+v", plan.AppYAML)
 	}
-	if len(plan.AppYAMLs) != 1 || plan.AppYAMLs[0].Name != "solmq-connector-application.yml" {
-		t.Errorf("app yamls = %+v", plan.AppYAMLs)
+	if plan.Service != "solmq-connector.service" {
+		t.Errorf("service = %q", plan.Service)
 	}
-	if len(plan.Services) != 1 || plan.Services[0] != "solmq-connector.service" {
-		t.Errorf("services = %+v", plan.Services)
+	if len(plan.Secrets) != 4 {
+		t.Fatalf("secrets = %+v, want 4 entries", plan.Secrets)
+	}
+	// The run script loads each secret into podman's store, namespaced by the
+	// container, before any `podman run`; it never carries the value itself.
+	for _, s := range plan.Secrets {
+		store := PodmanSecretStoreName("solmq-connector", s.Stable)
+		if !strings.Contains(plan.RunScript, "podman secret create "+store) {
+			t.Errorf("run script missing secret-create for %q:\n%s", store, plan.RunScript)
+		}
+		if !strings.Contains(plan.RunScript, "--secret "+store+",type=mount,target="+s.Stable) {
+			t.Errorf("run script missing --secret mount for %q:\n%s", store, plan.RunScript)
+		}
 	}
 
-	// ForceQuadlet -> quadlet units, no run script (deploy path).
+	// ForceQuadlet -> a quadlet unit, no run script (deploy path).
 	q, errs, _ := GeneratePodman(req, res, PodmanOpts{ForceQuadlet: true, BaseDir: "/base"})
 	if len(errs) > 0 {
 		t.Fatalf("quadlet: unexpected errors: %v", errs)
 	}
-	if q.Mode != spec.PodmanModeQuadlet || len(q.Units) == 0 || q.RunScript != "" {
-		t.Errorf("quadlet plan mode=%q units=%d script=%d", q.Mode, len(q.Units), len(q.RunScript))
+	if q.Mode != spec.PodmanModeQuadlet || q.Unit == (podmangen.Unit{}) || q.RunScript != "" {
+		t.Errorf("quadlet plan mode=%q unit=%+v script=%d", q.Mode, q.Unit, len(q.RunScript))
+	}
+	if len(q.Secrets) != 4 {
+		t.Errorf("quadlet secrets = %+v, want 4 entries", q.Secrets)
 	}
 }
 
@@ -451,7 +422,11 @@ func TestGenerateMissingTargetSection(t *testing.T) {
 	}
 }
 
-func TestGenValidateAndValuesFileKeys(t *testing.T) {
+// TestGenValidateStoresWarning covers the kubernetes credentials-secret path
+// (create.name only -- the removed source/variables/values-file fields are
+// covered by validate's own tests) together with the TLS-without-stores
+// advisory warning.
+func TestGenValidateStoresWarning(t *testing.T) {
 	wfData := `
 source:
   solace:
@@ -478,31 +453,17 @@ target:
     credentials:
       create:
         name: s
-        source: file
-        values-file: v.env
 `
 	req := Request{
 		Env:       &File{Name: "env.yaml", Data: []byte(envData)},
 		Workflows: []File{{Name: "10.yaml", Data: []byte(wfData)}},
 	}
-	res := Resolver{ReadFile: func(string) ([]byte, error) { return []byte("SOL=x\n"), nil }}
-	errs, warns := Validate(req, res)
+	errs, warns := Validate(req, Resolver{})
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	wantWarn := "a TLS/mTLS connection exists but secrets.stores is omitted; the store files will be missing at runtime"
 	if len(warns) != 1 || warns[0].File != fileEnv || warns[0].Msg != wantWarn {
 		t.Fatalf("warns = %+v, want exactly one {%q, %q}", warns, fileEnv, wantWarn)
-	}
-	e, err := spec.ParseEnv([]byte(envData))
-	if err != nil {
-		t.Fatal(err)
-	}
-	keys, iss := valuesFileKeys(e.Kubernetes, res)
-	if iss != nil || !keys["SOL"] {
-		t.Fatalf("keys=%v iss=%v", keys, iss)
-	}
-	if kk, ii := valuesFileKeys(nil, res); kk != nil || ii != nil {
-		t.Error("nil kube -> nil,nil")
 	}
 }

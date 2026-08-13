@@ -5,8 +5,6 @@
 package tls
 
 import (
-	"strings"
-
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
@@ -24,16 +22,7 @@ type KV struct{ Key, Val string }
 // mounted base name when the CLI runs on Linux/Mac, matching the stores-Secret
 // data key so the bundle location always points at a file the volume mounts.
 func MountPath(storeFile string) string {
-	return MountDir + "/" + base(storeFile)
-}
-
-// base returns the final path element, splitting on both '/' and '\'.
-func base(p string) string {
-	p = strings.ReplaceAll(p, "\\", "/")
-	if i := strings.LastIndexByte(p, '/'); i >= 0 {
-		return p[i+1:]
-	}
-	return p
+	return MountDir + "/" + spec.BaseName(storeFile)
 }
 
 // StorePath is where generated config references a store file: the path exactly as
@@ -47,17 +36,28 @@ func StorePath(storeFile string, mount bool) string {
 	return storeFile
 }
 
+// Stable secret names for the two shared store passwords. They are declared here
+// and re-exported by internal/consolidate so this package and the SSL-bundle
+// builder cannot drift into naming the same password two different things.
+const (
+	TruststorePasswordName = "TRUSTSTORE_PASSWORD"
+	KeystorePasswordName   = "KEYSTORE_PASSWORD"
+)
+
 // SolaceProps returns the ordered tool-managed Solace api-properties for a TLS
 // (tcps://) binder. keyAlias != "" adds the mTLS keystore selection. Missing
 // stores are skipped (validate warns) so the connection falls back to the JVM
 // default trust store rather than emitting broken references.
-func SolaceProps(d *spec.Defaults, keyAlias string, mount bool) []KV {
+//
+// secretRef records a store password under its stable name and returns the
+// placeholder to emit, so the password itself never reaches api-properties.
+func SolaceProps(d *spec.Defaults, keyAlias string, mount bool, secretRef func(string, spec.Cred) string) []KV {
 	var out []KV
 	if ts := d.TLS.Truststore; ts != nil {
 		out = append(out,
 			KV{"SSL_VALIDATE_CERTIFICATE", "true"},
 			KV{"SSL_TRUST_STORE", StorePath(ts.File, mount)},
-			KV{"SSL_TRUST_STORE_PASSWORD", ts.Password},
+			KV{"SSL_TRUST_STORE_PASSWORD", secretRef(TruststorePasswordName, ts.Secret())},
 			KV{"SSL_TRUST_STORE_FORMAT", ts.Type},
 		)
 	}
@@ -65,7 +65,7 @@ func SolaceProps(d *spec.Defaults, keyAlias string, mount bool) []KV {
 		if ks := d.TLS.Keystore; ks != nil {
 			out = append(out,
 				KV{"SSL_KEY_STORE", StorePath(ks.File, mount)},
-				KV{"SSL_KEY_STORE_PASSWORD", ks.Password},
+				KV{"SSL_KEY_STORE_PASSWORD", secretRef(KeystorePasswordName, ks.Secret())},
 				KV{"SSL_KEY_STORE_FORMAT", ks.Type},
 				KV{"SSL_PRIVATE_KEY_ALIAS", keyAlias},
 			)

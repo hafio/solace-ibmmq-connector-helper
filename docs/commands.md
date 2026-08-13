@@ -24,16 +24,16 @@ takes a second argument it names the **target** (`generate`) or **platform**
 
 | Command | Summary |
 |---------|---------|
-| `solmq-conn generate config [-e env.yaml] [-o out]` | Emit application.yml (per instance) |
+| `solmq-conn generate config [-e env.yaml] [-o out]` | Emit application.yml |
 | `solmq-conn generate kubernetes [-e env.yaml] [-o out]` | Emit ConfigMap+Deployment+Service (+Secrets) |
 | `solmq-conn generate docker [-e env.yaml] [-o out]` | Emit docker-compose.yml (application.yml inlined) |
-| `solmq-conn generate podman [-e env.yaml] [-o out]` | Emit a podman run script or quadlet unit(s) |
+| `solmq-conn generate podman [-e env.yaml] [-o out]` | Emit a podman run script or quadlet unit |
 | `solmq-conn deploy kubernetes [-e env.yaml]` | kubectl/oc apply -f - (manifest on stdin) |
 | `solmq-conn deploy docker [-e env.yaml]` | docker compose up -d |
-| `solmq-conn deploy podman [-e env.yaml]` | write quadlet unit(s); systemctl start |
+| `solmq-conn deploy podman [-e env.yaml]` | write the quadlet unit; systemctl start |
 | `solmq-conn delete kubernetes [-e env.yaml]` | kubectl/oc delete -f - |
 | `solmq-conn delete docker [-e env.yaml]` | docker compose down |
-| `solmq-conn delete podman [-e env.yaml]` | systemctl stop; remove unit(s) |
+| `solmq-conn delete podman [-e env.yaml]` | systemctl stop; remove the unit |
 | `solmq-conn validate [-e env.yaml]` | Lint the whole env.yaml + workflows |
 | `solmq-conn examples [dir] [-f]` | Write a starter env.yaml + workflows |
 | `solmq-conn help` | Print the usage summary (also -h, --help) |
@@ -66,7 +66,7 @@ Flags: `-e`, `--env`; `-o`, `--out`.
 
 #### `solmq-conn generate config [-e env.yaml] [-o out]`
 
-Emit application.yml (per instance).
+Emit application.yml.
 
 ```sh
 solmq-conn generate config -e env.yaml -o application.yml
@@ -90,7 +90,7 @@ solmq-conn generate docker -e env.yaml -o docker-compose.yml
 
 #### `solmq-conn generate podman [-e env.yaml] [-o out]`
 
-Emit a podman run script or quadlet unit(s).
+Emit a podman run script or quadlet unit.
 
 ```sh
 solmq-conn generate podman -e env.yaml -o run.sh
@@ -120,7 +120,7 @@ solmq-conn deploy docker -e env.yaml
 
 #### `solmq-conn deploy podman [-e env.yaml]`
 
-write quadlet unit(s); systemctl start.
+write the quadlet unit; systemctl start.
 
 ```sh
 solmq-conn deploy podman -e env.yaml
@@ -150,7 +150,7 @@ solmq-conn delete docker -e env.yaml
 
 #### `solmq-conn delete podman [-e env.yaml]`
 
-systemctl stop; remove unit(s).
+systemctl stop; remove the unit.
 
 ```sh
 solmq-conn delete podman -e env.yaml

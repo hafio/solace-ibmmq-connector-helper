@@ -31,7 +31,7 @@ source:
     queue-manager: QM_CORE
     channel: DSU.SVRCONN
     user: appuser
-    password: ${MQ_CORE_PASSWORD}
+    password-env: MQ_CORE_PASSWORD
     tls: true                             # MQ has no URL scheme; opt into TLS explicitly
     cipher: TLS_RSA_WITH_AES_256_CBC_SHA256
     key-alias: mq-client                  # presence => mTLS (needs the keystore in env.yaml)

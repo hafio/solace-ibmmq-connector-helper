@@ -28,25 +28,42 @@ const (
 	ActionDelete = "delete"
 )
 
-// Runner runs one process. argv[0] is the program and argv[1:] its arguments;
-// stdin, when non-empty, is written to the process's standard input. It returns
-// the combined stdout+stderr (for error context) and the process error.
+// Cmd is one process invocation. Argv[0] is the program and Argv[1:] its
+// arguments; Stdin, when non-empty, is written to the process's standard input.
+//
+// Env carries extra KEY=VALUE entries for the child's environment only. It is
+// the channel credential values travel on -- they never appear in Argv (where
+// `ps` would show them) and never in a file. Nothing in this package logs Env,
+// and callers must not echo it.
+type Cmd struct {
+	Argv  []string
+	Stdin string
+	Env   []string
+}
+
+// Runner runs one process, returning the combined stdout+stderr (for error
+// context) and the process error.
 type Runner interface {
-	Run(argv []string, stdin string) (string, error)
+	Run(cmd Cmd) (string, error)
 }
 
 // OS is the production Runner: it runs argv via os/exec with no shell.
 type OS struct{}
 
-// Run starts argv[0] with argv[1:], feeds stdin when non-empty, and returns the
+// Run starts Argv[0] with Argv[1:], feeds Stdin when non-empty, and returns the
 // combined output. It never passes the string through a shell.
-func (OS) Run(argv []string, stdin string) (string, error) {
-	if len(argv) == 0 {
+func (OS) Run(c Cmd) (string, error) {
+	if len(c.Argv) == 0 {
 		return "", fmt.Errorf("empty command")
 	}
-	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // argv tokens are SafeToken-validated upstream; no shell is involved
-	if stdin != "" {
-		cmd.Stdin = strings.NewReader(stdin)
+	cmd := exec.Command(c.Argv[0], c.Argv[1:]...) //nolint:gosec // argv tokens are SafeToken-validated upstream; no shell is involved
+	if c.Stdin != "" {
+		cmd.Stdin = strings.NewReader(c.Stdin)
+	}
+	if len(c.Env) > 0 {
+		// Appended after the inherited environment so a supplied value wins over
+		// an ambient one of the same name.
+		cmd.Env = append(os.Environ(), c.Env...)
 	}
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
@@ -61,14 +78,12 @@ func (OS) Run(argv []string, stdin string) (string, error) {
 // SafeToken-clean. Quoted arguments containing spaces are intentionally
 // unsupported: a token with a space or quote fails the safe-charset gate.
 func ParseCommand(s string) ([]string, error) {
-	tokens := strings.Fields(s)
-	if len(tokens) == 0 {
-		return nil, fmt.Errorf("command is empty")
+	tokens, bad := validate.Tokenize(s)
+	if len(bad) > 0 {
+		return nil, fmt.Errorf("command token %q contains an unsafe character (%s)", bad[0], validate.UnsafeTokenReason)
 	}
-	for _, t := range tokens {
-		if !validate.SafeToken(t) {
-			return nil, fmt.Errorf("command token %q contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)", t)
-		}
+	if bad != nil {
+		return nil, fmt.Errorf("command is empty")
 	}
 	return tokens, nil
 }
@@ -101,7 +116,7 @@ func Kubernetes(r Runner, command, action, manifest string) (string, error) {
 		return "", err
 	}
 	argv = append(argv, verb, "-f", "-")
-	return r.Run(argv, manifest)
+	return r.Run(Cmd{Argv: argv, Stdin: manifest})
 }
 
 func kubeVerb(action string) (string, error) {
@@ -116,9 +131,14 @@ func kubeVerb(action string) (string, error) {
 }
 
 // Docker runs `<command> compose -f <composeFile> up -d` (deploy) or
-// `<command> compose -f <composeFile> down` (delete). The compose file and any
-// credential env-file must already be written by the caller.
-func Docker(r Runner, command, action, composeFile string) (string, error) {
+// `<command> compose -f <composeFile> down` (delete). The compose file must
+// already be written by the caller.
+//
+// env carries the credential values the compose file's environment-provider
+// secrets read, in this child process only -- which is why no secret material is
+// ever written to disk for docker. It is passed on both actions: `down` resolves
+// the same secret declarations `up` did.
+func Docker(r Runner, command, action, composeFile string, env []string) (string, error) {
 	argv, err := ParseCommand(command)
 	if err != nil {
 		return "", err
@@ -132,7 +152,48 @@ func Docker(r Runner, command, action, composeFile string) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown action %q (want %q or %q)", action, ActionDeploy, ActionDelete)
 	}
-	return r.Run(argv, "")
+	return r.Run(Cmd{Argv: argv, Env: env})
+}
+
+// PodmanSecretCreate stores one credential in podman's secret store, replacing
+// any previous entry of that name.
+//
+// The value crosses on stdin, never in argv. It is a remove-then-create rather
+// than `create --replace` because --replace needs podman 4.7 and the rest of the
+// quadlet secret wiring only needs 4.5.
+func PodmanSecretCreate(r Runner, command, name, value string) (string, error) {
+	argv, err := ParseCommand(command)
+	if err != nil {
+		return "", err
+	}
+	out, err := r.Run(Cmd{Argv: append(append([]string(nil), argv...), "secret", "rm", "--ignore", name)})
+	if err != nil {
+		return out, fmt.Errorf("podman secret rm %s: %w", name, err)
+	}
+	o, err := r.Run(Cmd{Argv: append(append([]string(nil), argv...), "secret", "create", name, "-"), Stdin: value})
+	out += o
+	if err != nil {
+		return out, fmt.Errorf("podman secret create %s: %w", name, err)
+	}
+	return out, nil
+}
+
+// PodmanSecretRemove deletes the named secrets, ignoring any that are already
+// gone so a repeated delete stays quiet.
+func PodmanSecretRemove(r Runner, command string, names []string) (string, error) {
+	if len(names) == 0 {
+		return "", nil
+	}
+	argv, err := ParseCommand(command)
+	if err != nil {
+		return "", err
+	}
+	argv = append(argv, "secret", "rm", "--ignore")
+	out, err := r.Run(Cmd{Argv: append(argv, names...)})
+	if err != nil {
+		return out, fmt.Errorf("podman secret rm: %w", err)
+	}
+	return out, nil
 }
 
 // ---- podman quadlet ----------------------------------------------------------
@@ -197,13 +258,13 @@ func (sc QuadletScope) systemctlArgs(args ...string) []string {
 // unit names to start, e.g. "solmq-connector.service".
 func PodmanDeploy(r Runner, sc QuadletScope, services []string) (string, error) {
 	var out strings.Builder
-	o, err := r.Run(sc.systemctlArgs("daemon-reload"), "")
+	o, err := r.Run(Cmd{Argv: sc.systemctlArgs("daemon-reload")})
 	out.WriteString(o)
 	if err != nil {
 		return out.String(), fmt.Errorf("systemctl daemon-reload: %w", err)
 	}
 	for _, s := range services {
-		o, err = r.Run(sc.systemctlArgs("start", s), "")
+		o, err = r.Run(Cmd{Argv: sc.systemctlArgs("start", s)})
 		out.WriteString(o)
 		if err != nil {
 			return out.String(), fmt.Errorf("systemctl start %s: %w", s, err)
@@ -222,7 +283,7 @@ func PodmanDeploy(r Runner, sc QuadletScope, services []string) (string, error) 
 func PodmanDelete(r Runner, sc QuadletScope, services, units []string) (string, error) {
 	var out strings.Builder
 	for _, s := range services {
-		o, err := r.Run(sc.systemctlArgs("stop", s), "")
+		o, err := r.Run(Cmd{Argv: sc.systemctlArgs("stop", s)})
 		out.WriteString(o)
 		if err != nil {
 			return out.String(), fmt.Errorf("systemctl stop %s: %w", s, err)
@@ -233,7 +294,7 @@ func PodmanDelete(r Runner, sc QuadletScope, services, units []string) (string, 
 			return out.String(), fmt.Errorf("removing unit %s: %w", u, err)
 		}
 	}
-	o, err := r.Run(sc.systemctlArgs("daemon-reload"), "")
+	o, err := r.Run(Cmd{Argv: sc.systemctlArgs("daemon-reload")})
 	out.WriteString(o)
 	if err != nil {
 		return out.String(), fmt.Errorf("systemctl daemon-reload: %w", err)

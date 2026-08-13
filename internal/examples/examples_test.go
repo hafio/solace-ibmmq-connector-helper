@@ -116,17 +116,12 @@ func TestShippedExamplesGenerateConfig(t *testing.T) {
 		req.Workflows = append(req.Workflows, gen.File{Name: filepath.Base(p), Data: wd})
 	}
 
-	outs, errs, _ := gen.Config(req, testResolver(dir))
+	out, errs, _ := gen.Config(req, testResolver(dir))
 	if len(errs) != 0 {
 		t.Fatalf("shipped examples must generate config with no errors, got: %v", errs)
 	}
-	if len(outs) == 0 {
-		t.Fatal("expected at least one rendered application.yml")
-	}
-	for i, out := range outs {
-		if strings.TrimSpace(out) == "" {
-			t.Errorf("instance %d: rendered application.yml is empty", i)
-		}
+	if strings.TrimSpace(out) == "" {
+		t.Fatal("rendered application.yml is empty")
 	}
 }
 

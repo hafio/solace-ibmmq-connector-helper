@@ -14,7 +14,7 @@ func wfOK() []spec.Workflow {
 // exercising the usesTLS negative path, where no side has a tcps:// Solace host.
 func vSolacePlainTCP(dest, kind string) spec.Side {
 	return spec.Side{System: spec.SystemSolace, Host: "tcp://b:55443", MsgVPN: "prod",
-		ClientUser: "u", ClientPass: "${P}", DestKind: kind, Dest: dest}
+		ClientUser: "u", ClientPassEnv: "SOLACE_CLIENT_PASSWORD", DestKind: kind, Dest: dest}
 }
 
 func TestCheckSideMQMissingFields(t *testing.T) {
@@ -74,7 +74,7 @@ func TestMQKeyAliasRequiresKeystore(t *testing.T) {
 
 func TestCheckKubeRequiredAndReplicas(t *testing.T) {
 	k := &spec.Kubernetes{Deployment: spec.Deployment{Replicas: 3}}
-	errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, Deploy: true})
+	errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
 	// deployment.image-required is already pinned by TestDeployKubeChecks (validate_test.go).
 	for _, sub := range []string{"deployment.name is required", "deployment.namespace is required", "replicas: 1"} {
 		if !hasErr(errs, sub) {
@@ -83,32 +83,40 @@ func TestCheckKubeRequiredAndReplicas(t *testing.T) {
 	}
 }
 
-func TestCheckKubeCredentialSources(t *testing.T) {
+// TestCheckKubeCredentialCreateRemovedKeys covers CredCreate.RemovedKeys(): the
+// values-file/env-var-list mechanism is gone (the Secret's keys are now derived
+// from the config's own credential fields), so a config still setting
+// source/variables/values-file must fail loudly instead of silently losing its
+// credentials.
+func TestCheckKubeCredentialCreateRemovedKeys(t *testing.T) {
 	base := spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1}
-	k1 := &spec.Kubernetes{Deployment: base, Secrets: spec.Secrets{Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "s", Source: spec.SourceEnv}}}}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k1, Deploy: true}); !hasErr(e, "non-empty 'variables'") {
-		t.Errorf("want empty-variables, got %v", e)
+	run := func(c *spec.CredCreate) []Issue {
+		k := &spec.Kubernetes{Deployment: base, Secrets: spec.Secrets{Credentials: &spec.CredentialsSecret{Create: c}}}
+		errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
+		return errs
 	}
-	k2 := &spec.Kubernetes{Deployment: base, Secrets: spec.Secrets{Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "s", Source: spec.SourceFile}}}}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k2, Deploy: true}); !hasErr(e, "requires 'values-file'") {
-		t.Errorf("want values-file, got %v", e)
+	if e := run(&spec.CredCreate{Name: "s", Source: "env", Variables: []string{"P"}, ValuesFile: "vals.yaml"}); !hasErr(e, "no longer takes source/variables/values-file") || !hasErr(e, "Remove source, variables, values-file") {
+		t.Errorf("want removed-keys error naming all three, got %v", e)
 	}
-	k3 := &spec.Kubernetes{Deployment: base, Secrets: spec.Secrets{Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "s", Source: "weird"}}}}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k3, Deploy: true}); !hasErr(e, "source must be") {
-		t.Errorf("want bad-source, got %v", e)
+	if e := run(&spec.CredCreate{Name: "s", Source: "file"}); !hasErr(e, "no longer takes source") || !hasErr(e, "Remove source") {
+		t.Errorf("want removed-keys error naming source alone, got %v", e)
+	}
+	// The new shape -- just a name -- takes no removed keys.
+	if e := run(&spec.CredCreate{Name: "s"}); hasErr(e, "no longer takes") {
+		t.Errorf("a bare create.name should not trip the removed-keys check, got %v", e)
 	}
 }
 
 func TestCheckKubeStoresRequireTruststore(t *testing.T) {
 	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1}, Secrets: spec.Secrets{Stores: &spec.StoresSecret{Create: &spec.StoreCreate{Name: "t"}}}}
-	if errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, Deploy: true}); !hasErr(errs, "requires tls.truststore") {
+	if errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true}); !hasErr(errs, "requires tls.truststore") {
 		t.Errorf("want truststore requirement, got %v", errs)
 	}
 }
 
 func TestStoresNotWiredWarning(t *testing.T) {
 	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1}}
-	_, warns := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}, Defaults: defsWithStores(), Kube: k, Deploy: true})
+	_, warns := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}, Defaults: defsWithStores(), Kube: k, CheckKubernetes: true})
 	if !hasErr(warns, "secrets.stores is omitted") {
 		t.Errorf("want stores-omitted warning, got %v", warns)
 	}
@@ -116,25 +124,9 @@ func TestStoresNotWiredWarning(t *testing.T) {
 
 func TestStoresWiredExistingNoWarning(t *testing.T) {
 	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1}, Secrets: spec.Secrets{Stores: &spec.StoresSecret{Existing: "my-tls"}}}
-	_, warns := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}, Defaults: defsWithStores(), Kube: k, Deploy: true})
+	_, warns := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}, Defaults: defsWithStores(), Kube: k, CheckKubernetes: true})
 	if hasErr(warns, "secrets.stores is omitted") {
 		t.Errorf("stores wired via existing should not warn: %v", warns)
-	}
-}
-
-func TestUnsuppliedVarsWarning(t *testing.T) {
-	src := vSolace("Q", spec.DestQueue, "")
-	tgt := vMQ("M", spec.DestQueue, false)
-	d := defsWithStores()
-	d.Security = spec.Security{Present: true, Enabled: true, Users: []spec.User{{Name: "hc", Password: "${HC}"}}}
-	k := &spec.Kubernetes{
-		Deployment: spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1},
-		Secrets:    spec.Secrets{Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "s", Source: spec.SourceEnv, Variables: []string{"P"}}}},
-	}
-	env := func(string) (string, bool) { return "x", true }
-	_, warns := Run(Context{Workflows: []spec.Workflow{wf("10.yaml", src, tgt)}, Defaults: d, Kube: k, Deploy: true, Env: env})
-	if !hasErr(warns, "${T} is used but not supplied") || !hasErr(warns, "${HC} is used but not supplied") {
-		t.Errorf("want unsupplied warnings, got %v", warns)
 	}
 }
 
@@ -166,8 +158,8 @@ func TestIdiomaticSolaceCombosNoEDAWarn(t *testing.T) {
 func connDefaults() *spec.Defaults {
 	d := defsWithStores()
 	d.Connections = map[string]spec.Side{
-		"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUser: "u", ClientPass: "${P}"},
-		"qm":   {System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM", Channel: "C", User: "u", Password: "${MQ}"},
+		"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUser: "u", ClientPassEnv: "EDGE_CLIENT_PASSWORD"},
+		"qm":   {System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM", Channel: "C", User: "u", PasswordEnv: "QM_PASSWORD"},
 	}
 	return d
 }
@@ -211,7 +203,7 @@ func baseKubeDeploy() spec.Deployment {
 func TestCheckSyslog(t *testing.T) {
 	run := func(sys *spec.Syslog) (errs, warns []Issue) {
 		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Logging: &spec.Logging{Syslog: sys}}
-		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, Deploy: true})
+		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
 	}
 	if e, _ := run(&spec.Syslog{Port: 514, Protocol: spec.SyslogUDP}); !hasErr(e, "logging.syslog.host is required") {
 		t.Errorf("want missing host, got %v", e)
@@ -239,7 +231,7 @@ func TestCheckSyslog(t *testing.T) {
 func TestCheckLibs(t *testing.T) {
 	run := func(lb *spec.Libs) (errs, warns []Issue) {
 		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Libs: lb}
-		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, Deploy: true})
+		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
 	}
 	if e, _ := run(&spec.Libs{}); !hasErr(e, "exactly one of 'pvc' or 'download'") {
 		t.Errorf("want zero-modes error, got %v", e)
@@ -322,11 +314,24 @@ func TestCheckDocker(t *testing.T) {
 	}
 }
 
-func TestCheckDockerCredentials(t *testing.T) {
+// TestCheckDockerPodmanSecretsRemoved covers the docker/podman `.secrets`
+// removal: credentials now come from the connection fields themselves and are
+// delivered as platform secrets, so a config still setting `.secrets` (old
+// env-var-list shape) must fail loudly instead of silently dropping it.
+func TestCheckDockerPodmanSecretsRemoved(t *testing.T) {
 	d := dockerOK()
-	d.Secrets = spec.Secrets{Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "s", Source: spec.SourceEnv}}}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true}); !hasErr(e, "docker.secrets.credentials.create source: env requires a non-empty 'variables'") {
-		t.Errorf("want docker credential error, got %v", e)
+	d.Secrets = &spec.Secrets{Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "s"}}}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true}); !hasErr(e, "docker.secrets is no longer configured") {
+		t.Errorf("want docker secrets-removed error, got %v", e)
+	}
+	p := podmanOK()
+	p.Secrets = &spec.Secrets{Stores: &spec.StoresSecret{Existing: "x"}}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p, CheckPodman: true}); !hasErr(e, "podman.secrets is no longer configured") {
+		t.Errorf("want podman secrets-removed error, got %v", e)
+	}
+	// Nil secrets -- the new default shape -- trips no such error.
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: dockerOK(), CheckDocker: true}); hasErr(e, "secrets is no longer configured") {
+		t.Errorf("nil docker.secrets should not be rejected, got %v", e)
 	}
 }
 
@@ -529,5 +534,208 @@ func TestPlainTCPStoresOmittedNoWarning(t *testing.T) {
 	_, warns := Run(Context{Workflows: plainTCP, Defaults: &spec.Defaults{}, Docker: dockerOK(), CheckDocker: true})
 	if hasErr(warns, "store files will be missing at runtime") {
 		t.Errorf("plain-tcp workflow with no TLS should not warn about missing store files, got %v", warns)
+	}
+}
+
+func TestBinderIdentityUsesTheCredentialPair(t *testing.T) {
+	// Regression: validate and consolidate each kept a private dedupKey, and the
+	// copies drifted once credentials became literal/-env pairs -- validate went
+	// on keying off the literal username, so every side using client-username-env
+	// keyed as if it had no username at all. Two DIFFERENT connections then
+	// collapsed to one key here while staying separate in the renderer, and the
+	// binder-level checks reported conflicts that do not exist. Both now share
+	// spec.Side.DedupKey.
+	a := vSolace("Q1", spec.DestQueue, "alias-a")
+	a.ClientUser, a.ClientUserEnv = "", "TEAM_A_USER"
+	b := vSolace("Q2", spec.DestQueue, "alias-b")
+	b.ClientUser, b.ClientUserEnv = "", "TEAM_B_USER"
+	wfs := []spec.Workflow{
+		wf("0.yaml", a, vMQ("M1", spec.DestQueue, false)),
+		wf("1.yaml", b, vMQ("M2", spec.DestQueue, false)),
+	}
+	if e, _ := Run(Context{Workflows: wfs, Defaults: defsWithStores()}); hasErr(e, "conflicting key-alias") {
+		t.Errorf("different -env usernames are different binders, so their key-aliases cannot conflict: %v", e)
+	}
+
+	// The same -env username on the same host IS one binder, so a differing
+	// key-alias there is still a real conflict.
+	c := vSolace("Q3", spec.DestQueue, "alias-c")
+	c.ClientUser, c.ClientUserEnv = "", "TEAM_A_USER"
+	same := []spec.Workflow{
+		wf("0.yaml", a, vMQ("M1", spec.DestQueue, false)),
+		wf("1.yaml", c, vMQ("M2", spec.DestQueue, false)),
+	}
+	if e, _ := Run(Context{Workflows: same, Defaults: defsWithStores()}); !hasErr(e, "conflicting key-alias") {
+		t.Errorf("one binder with two key-aliases must still conflict, got %v", e)
+	}
+}
+
+func TestCheckContainerImageRestartTimezoneUnsafe(t *testing.T) {
+	// image/restart/timezone are concatenated unquoted into the podman run script,
+	// the quadlet unit and the compose YAML, so an embedded newline or shell
+	// metacharacter is rejected at the gate for both targets. A realistic value
+	// (registry image with a tag, tz with a slash) must still pass.
+	bad := []string{"img\nprivileged: true", "img; rm -rf /", "img $(evil)", "im g"}
+	for _, v := range bad {
+		d := dockerOK()
+		d.Image = v
+		if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true}); !hasErr(e, "docker.image") {
+			t.Errorf("docker.image %q should be rejected, got %v", v, e)
+		}
+		p := podmanOK()
+		p.Image = v
+		if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p, CheckPodman: true}); !hasErr(e, "podman.image") {
+			t.Errorf("podman.image %q should be rejected, got %v", v, e)
+		}
+	}
+	dR := dockerOK()
+	dR.Restart = "unless-stopped\nprivileged: true"
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: dR, CheckDocker: true}); !hasErr(e, "docker.restart") {
+		t.Errorf("want docker.restart rejection, got %v", e)
+	}
+	pT := podmanOK()
+	pT.Timezone = "Asia/Singapore`id`"
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: pT, CheckPodman: true}); !hasErr(e, "podman.timezone") {
+		t.Errorf("want podman.timezone rejection, got %v", e)
+	}
+	// Real-world values pass: a tagged registry image, a tz region, on-failure:N.
+	dOK := dockerOK()
+	dOK.Image = "solace/solace-pubsub-connector-ibmmq:2.13.0"
+	dOK.Timezone = "Asia/Singapore"
+	dOK.Restart = "on-failure:5"
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: dOK, CheckDocker: true}); len(e) != 0 {
+		t.Errorf("realistic image/timezone/restart should pass, got %v", e)
+	}
+}
+
+func TestCheckContainerHostPathsUnsafe(t *testing.T) {
+	// The tls.*.file paths become bind-mount sources once stores opts in, and
+	// libs.dir always is one: whitespace or a metacharacter would split or extend
+	// the `-v src:dst:ro` argument, so both are gated. A Windows-style path keeps
+	// validating -- '\' and ':' cannot escape any of the three sinks.
+	badStores := defsWithStores()
+	badStores.TLS.Truststore.File = "t.jks\nprivileged: true"
+	d := dockerOK()
+	d.Stores = &spec.StoresMount{MountPath: spec.DefaultStoresMountPath}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: badStores, Docker: d, CheckDocker: true}); !hasErr(e, "tls.truststore.file") {
+		t.Errorf("want unsafe truststore path rejection, got %v", e)
+	}
+	p := podmanOK()
+	p.Libs = &spec.LibsMount{Dir: "/opt/my libs", MountPath: spec.DefaultLibsMountPath}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p, CheckPodman: true}); !hasErr(e, "podman.libs.dir") {
+		t.Errorf("want unsafe libs.dir rejection, got %v", e)
+	}
+	winStores := defsWithStores()
+	winStores.TLS.Truststore.File = `C:\certs\truststore.jks`
+	winStores.TLS.Keystore.File = `C:\certs\keystore.jks`
+	dWin := dockerOK()
+	dWin.Stores = &spec.StoresMount{MountPath: spec.DefaultStoresMountPath}
+	dWin.Libs = &spec.LibsMount{Dir: `C:\libs`, MountPath: spec.DefaultLibsMountPath}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: winStores, Docker: dWin, CheckDocker: true}); hasErr(e, "unsafe character") {
+		t.Errorf("Windows-style host paths should validate, got %v", e)
+	}
+}
+
+func TestCheckKubeSecretNames(t *testing.T) {
+	// Every Secret name is emitted verbatim as metadata.name / secretRef, so a
+	// non-DNS-1123 or missing name is rejected before the manifest is built.
+	base := spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1}
+	cases := []struct {
+		name string
+		sec  spec.Secrets
+		want string
+	}{
+		{"cred create bad", spec.Secrets{Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "Bad_Name"}}}, "kubernetes.secrets.credentials.create.name"},
+		{"cred create empty", spec.Secrets{Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{}}}, "kubernetes.secrets.credentials.create.name is required"},
+		{"cred existing bad", spec.Secrets{Credentials: &spec.CredentialsSecret{Existing: "my secret\nfoo: bar"}}, "kubernetes.secrets.credentials.existing"},
+		{"stores create bad", spec.Secrets{Stores: &spec.StoresSecret{Create: &spec.StoreCreate{Name: "../evil"}}}, "kubernetes.secrets.stores.create.name"},
+		{"stores existing bad", spec.Secrets{Stores: &spec.StoresSecret{Existing: "UPPER"}}, "kubernetes.secrets.stores.existing"},
+	}
+	for _, c := range cases {
+		k := &spec.Kubernetes{Deployment: base, Secrets: c.sec}
+		e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Kube: k, CheckKubernetes: true, Env: func(string) (string, bool) { return "v", true }})
+		if !hasErr(e, c.want) {
+			t.Errorf("%s: want %q, got %v", c.name, c.want, e)
+		}
+	}
+	// Valid names produce no name error.
+	k := &spec.Kubernetes{Deployment: base, Secrets: spec.Secrets{
+		Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "solmq-credentials"}},
+		Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{Name: "solmq-tls"}},
+	}}
+	e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Kube: k, CheckKubernetes: true, Env: func(string) (string, bool) { return "v", true }})
+	if hasErr(e, "DNS-1123") || hasErr(e, "is required") {
+		t.Errorf("valid secret names should pass, got %v", e)
+	}
+}
+
+func TestCheckLibsNFSFields(t *testing.T) {
+	// nfs.server/path land unquoted in the PersistentVolume manifest piped to
+	// kubectl, so a newline (which would inject a sibling key) is rejected.
+	base := spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1}
+	kube := func(server, path string) *spec.Kubernetes {
+		return &spec.Kubernetes{Deployment: base, Libs: &spec.Libs{PVC: &spec.LibsPVC{
+			Create: &spec.PVCCreate{Name: "libs-pvc", Storage: "1Gi", NFS: spec.NFS{Server: server, Path: path}},
+		}}}
+	}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: kube("nfs1.corp\nreadOnly: false", "/libs"), CheckKubernetes: true}); !hasErr(e, "nfs.server") {
+		t.Errorf("want nfs.server rejection, got %v", e)
+	}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: kube("nfs1.corp.example", "/libs\nreadOnly: false"), CheckKubernetes: true}); !hasErr(e, "nfs.path") {
+		t.Errorf("want nfs.path rejection, got %v", e)
+	}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: kube("nfs1.corp.example", "/solace-libs"), CheckKubernetes: true}); hasErr(e, "nfs.") {
+		t.Errorf("valid nfs server/path should pass, got %v", e)
+	}
+}
+
+func TestPasswordConflictOnSameBinder(t *testing.T) {
+	// Two files declaring the same connection tuple with different passwords
+	// collapse into one binder, so only the first password would survive. That is
+	// an auth mismatch, not a preference -- it is fatal.
+	a := vMQ("Q1", spec.DestQueue, false)
+	b := vMQ("Q2", spec.DestQueue, false)
+	b.PasswordEnv = "OTHER_MQ_PASSWORD"
+	wfs := []spec.Workflow{
+		wf("0.yaml", vSolace("S1", spec.DestQueue, ""), a),
+		wf("1.yaml", vSolace("S2", spec.DestQueue, ""), b),
+	}
+	e, _ := Run(Context{Workflows: wfs, Defaults: &spec.Defaults{}})
+	if !hasErr(e, "conflicting password for the same binder") {
+		t.Errorf("want password-conflict error, got %v", e)
+	}
+	// The same tuple with the same password is the normal shared-binder case.
+	same := []spec.Workflow{
+		wf("0.yaml", vSolace("S1", spec.DestQueue, ""), vMQ("Q1", spec.DestQueue, false)),
+		wf("1.yaml", vSolace("S2", spec.DestQueue, ""), vMQ("Q2", spec.DestQueue, false)),
+	}
+	if e, _ := Run(Context{Workflows: same, Defaults: defsWithStores()}); hasErr(e, "conflicting password") {
+		t.Errorf("identical passwords on one binder should pass, got %v", e)
+	}
+	// Distinct tuples (different queue-manager) are distinct binders, so their
+	// passwords are free to differ.
+	other := vMQ("Q2", spec.DestQueue, false)
+	other.QueueManager = "QM2"
+	other.PasswordEnv = "OTHER_MQ_PASSWORD"
+	distinct := []spec.Workflow{
+		wf("0.yaml", vSolace("S1", spec.DestQueue, ""), vMQ("Q1", spec.DestQueue, false)),
+		wf("1.yaml", vSolace("S2", spec.DestQueue, ""), other),
+	}
+	if e, _ := Run(Context{Workflows: distinct, Defaults: defsWithStores()}); hasErr(e, "conflicting password") {
+		t.Errorf("different binders may hold different passwords, got %v", e)
+	}
+}
+
+func TestPasswordConflictSolaceSide(t *testing.T) {
+	// The Solace branch keys on client-password rather than password.
+	a := vSolace("Q1", spec.DestQueue, "")
+	b := vSolace("Q2", spec.DestQueue, "")
+	b.ClientPassEnv = "OTHER_SOLACE_PASSWORD"
+	wfs := []spec.Workflow{
+		wf("0.yaml", a, vMQ("M1", spec.DestQueue, false)),
+		wf("1.yaml", b, vMQ("M2", spec.DestQueue, false)),
+	}
+	if e, _ := Run(Context{Workflows: wfs, Defaults: defsWithStores()}); !hasErr(e, "conflicting password for the same binder") {
+		t.Errorf("want solace password-conflict error, got %v", e)
 	}
 }

@@ -9,14 +9,15 @@ import (
 func solaceSide(vpn, dest, destKind, keyAlias string) spec.Side {
 	return spec.Side{
 		System: spec.SystemSolace, Host: "tcps://broker:55443", MsgVPN: vpn,
-		ClientUser: "connector", ClientPass: "${SOL}", DestKind: destKind, Dest: dest, KeyAlias: keyAlias,
+		ClientUserEnv: "SOLACE_CLIENT_USERNAME", ClientPassEnv: "SOLACE_CLIENT_PASSWORD",
+		DestKind: destKind, Dest: dest, KeyAlias: keyAlias,
 	}
 }
 
 func mqSide(qm, dest, destKind string, tls bool) spec.Side {
 	return spec.Side{
 		System: spec.SystemMQ, ConnName: "host(1414)", QueueManager: qm, Channel: "CH",
-		User: "app", Password: "${MQ}", TLS: tls, DestKind: destKind, Dest: dest,
+		UserEnv: "MQ_USER", PasswordEnv: "MQ_PASSWORD", TLS: tls, DestKind: destKind, Dest: dest,
 	}
 }
 
@@ -56,7 +57,7 @@ func TestBinderDedupAcrossWorkflows(t *testing.T) {
 		{File: "20.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 			Source: mqSide("QM1", "MQ2", spec.DestQueue, false), Target: solaceSide("prod", "Q2", spec.DestQueue, "")},
 	}
-	m, _ := Build(wfs, nil, true)
+	m, _ := Build(wfs, nil, Opts{MountStores: true})
 	// Inline (no conn-ref) sides get generated names, numbered per system by appearance.
 	if got, want := binderNames(m), []string{"sol-conn-1", "mq-conn-1", "undefined"}; !eqStrs(got, want) {
 		t.Fatalf("binders = %v, want %v", got, want)
@@ -66,7 +67,7 @@ func TestBinderDedupAcrossWorkflows(t *testing.T) {
 func TestSolaceToSolaceSingleBinder(t *testing.T) {
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 		Source: solaceSide("prod", "IN", spec.DestQueue, ""), Target: solaceSide("prod", "OUT", spec.DestQueue, "")}}
-	m, _ := Build(wfs, nil, true)
+	m, _ := Build(wfs, nil, Opts{MountStores: true})
 	if got, want := binderNames(m), []string{"sol-conn-1", "undefined"}; !eqStrs(got, want) {
 		t.Fatalf("binders = %v, want %v", got, want)
 	}
@@ -78,7 +79,7 @@ func TestSolaceToSolaceSingleBinder(t *testing.T) {
 func TestMQToMQSingleBinder(t *testing.T) {
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 		Source: mqSide("QM1", "IN", spec.DestQueue, false), Target: mqSide("QM1", "OUT", spec.DestQueue, false)}}
-	m, _ := Build(wfs, nil, true)
+	m, _ := Build(wfs, nil, Opts{MountStores: true})
 	if got, want := binderNames(m), []string{"mq-conn-1", "undefined"}; !eqStrs(got, want) {
 		t.Fatalf("binders = %v, want %v", got, want)
 	}
@@ -90,13 +91,13 @@ func TestMQToMQSingleBinder(t *testing.T) {
 func TestConnRefNamingAndClashSuffix(t *testing.T) {
 	// Two differently-keyed connections that sanitize to the same binder base.
 	d := &spec.Defaults{Connections: map[string]spec.Side{
-		"svc.a": {System: spec.SystemSolace, Host: "tcps://h1", MsgVPN: "v1", ClientUser: "u", ClientPass: "p"},
-		"svc/a": {System: spec.SystemSolace, Host: "tcps://h2", MsgVPN: "v2", ClientUser: "u", ClientPass: "p"},
+		"svc.a": {System: spec.SystemSolace, Host: "tcps://h1", MsgVPN: "v1", ClientUserEnv: "SVC_USER", ClientPassEnv: "SVC_PASS"},
+		"svc/a": {System: spec.SystemSolace, Host: "tcps://h2", MsgVPN: "v2", ClientUserEnv: "SVC_USER", ClientPassEnv: "SVC_PASS"},
 	}}
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 		Source: spec.Side{System: spec.SystemSolace, ConnRef: "svc.a", DestKind: spec.DestQueue, Dest: "A"},
 		Target: spec.Side{System: spec.SystemSolace, ConnRef: "svc/a", DestKind: spec.DestQueue, Dest: "B"}}}
-	m, _ := Build(wfs, d, true)
+	m, _ := Build(wfs, d, Opts{MountStores: true})
 	// Binders take the sanitized connection name; the second (same base) is disambiguated.
 	if got, want := binderNames(m), []string{"svc-a", "svc-a-2", "undefined"}; !eqStrs(got, want) {
 		t.Fatalf("clash names = %v", got)
@@ -106,8 +107,8 @@ func TestConnRefNamingAndClashSuffix(t *testing.T) {
 func TestConnRefDedupCollapsesToOneBinder(t *testing.T) {
 	// Two workflows referencing the same connection collapse to a single binder.
 	d := &spec.Defaults{Connections: map[string]spec.Side{
-		"edge": {System: spec.SystemSolace, Host: "tcps://h", MsgVPN: "v", ClientUser: "u", ClientPass: "p"},
-		"qm":   {System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM", Channel: "C", User: "u", Password: "p"},
+		"edge": {System: spec.SystemSolace, Host: "tcps://h", MsgVPN: "v", ClientUserEnv: "EDGE_USER", ClientPassEnv: "EDGE_PASS"},
+		"qm":   {System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM", Channel: "C", UserEnv: "QM_USER", PasswordEnv: "QM_PASS"},
 	}}
 	ref := func(sys, ref, dest string) spec.Side {
 		return spec.Side{System: sys, ConnRef: ref, DestKind: spec.DestQueue, Dest: dest}
@@ -116,7 +117,7 @@ func TestConnRefDedupCollapsesToOneBinder(t *testing.T) {
 		{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: ref(spec.SystemSolace, "edge", "A"), Target: ref(spec.SystemMQ, "qm", "B")},
 		{File: "20.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: ref(spec.SystemSolace, "edge", "C"), Target: ref(spec.SystemMQ, "qm", "D")},
 	}
-	m, _ := Build(wfs, d, true)
+	m, _ := Build(wfs, d, Opts{MountStores: true})
 	if got, want := binderNames(m), []string{"edge", "qm", "undefined"}; !eqStrs(got, want) {
 		t.Fatalf("binders = %v, want %v", got, want)
 	}
@@ -131,7 +132,7 @@ func TestDerivedDestinationTypes(t *testing.T) {
 		{File: "20.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 			Source: solaceSide("prod", "Q.IN", spec.DestQueue, ""), Target: mqSide("QM1", "MQ.OUT", spec.DestQueue, false)},
 	}
-	m, _ := Build(wfs, nil, true)
+	m, _ := Build(wfs, nil, Opts{MountStores: true})
 
 	// jms input-0 consumer topic + durable
 	var in0 *JMSBinding

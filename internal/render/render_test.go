@@ -93,7 +93,7 @@ func buildRich(t *testing.T) *consolidate.Model {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", richSrcYAML)}, d, true)
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", richSrcYAML)}, d, consolidate.Opts{MountStores: true})
 	return m
 }
 
@@ -132,11 +132,11 @@ const richApplicationWant = `spring:
         mq-conn-1-bundle:
           truststore:
             location: /app/external/classpath/truststores/truststore.jks
-            password: ${T}
+            password: ${TRUSTSTORE_PASSWORD}
             type: JKS
           keystore:
             location: /app/external/classpath/truststores/keystore.jks
-            password: ${K}
+            password: ${KEYSTORE_PASSWORD}
             type: JKS
           key:
             alias: mc
@@ -151,8 +151,8 @@ const richApplicationWant = `spring:
                 queue-manager: QM1
                 channel: CH
                 conn-name: h(1414)
-                user: app
-                password: ${MQ}
+                user: ${MQ_CONN_1_USER}
+                password: ${MQ_CONN_1_PASSWORD}
                 ssl-bundle: mq-conn-1-bundle
                 additional-properties:
                   WMQ_SSL_CIPHER_SUITE: TLS_X
@@ -164,16 +164,16 @@ const richApplicationWant = `spring:
               java:
                 host: tcps://b:55443
                 msg-vpn: prod
-                client-username: connector
-                client-password: ${SOL}
+                client-username: ${SOL_CONN_1_CLIENT_USERNAME}
+                client-password: ${SOL_CONN_1_CLIENT_PASSWORD}
                 connect-retries: -1
                 api-properties:
                   SSL_VALIDATE_CERTIFICATE: true
                   SSL_TRUST_STORE: /app/external/classpath/truststores/truststore.jks
-                  SSL_TRUST_STORE_PASSWORD: ${T}
+                  SSL_TRUST_STORE_PASSWORD: ${TRUSTSTORE_PASSWORD}
                   SSL_TRUST_STORE_FORMAT: JKS
                   SSL_KEY_STORE: /app/external/classpath/truststores/keystore.jks
-                  SSL_KEY_STORE_PASSWORD: ${K}
+                  SSL_KEY_STORE_PASSWORD: ${KEYSTORE_PASSWORD}
                   SSL_KEY_STORE_FORMAT: JKS
                   SSL_PRIVATE_KEY_ALIAS: sc
                   REAPPLY_SUBSCRIPTIONS: true
@@ -217,7 +217,7 @@ solace:
       enabled: true
       users:
         - name: hc
-          password: ${H}
+          password: ${SECURITY_USER_HC_PASSWORD}
 management:
   server:
     port: 8090
@@ -284,7 +284,7 @@ target:
     client-password: x
     queue: OUT
 `
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, true)
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{MountStores: true})
 	out := Application(m)
 	for _, no := range []string{"ssl:", "management:", "logging:", "security:"} {
 		if strings.Contains(out, no) {
@@ -340,13 +340,13 @@ leader-election:
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, true)
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{MountStores: true})
 	out := Application(m)
 	for _, w := range []string{
 		"management:", "leader-election:", "mode: active_standby",
 		"fail-over:", "max-attempts: 5", "back-off-multiplier: 1.5",
 		"queue: mgmt-q", "session:", "host: tcps://b:55443", "msg-vpn: prod",
-		"client-username: u", "client-password: ${SOL}",
+		"client-username: ${LEADER_ELECTION_CLIENT_USERNAME}", "client-password: ${LEADER_ELECTION_CLIENT_PASSWORD}",
 		"SSL_TRUST_STORE: /app/external/classpath/truststores/truststore.jks",
 		"SSL_PRIVATE_KEY_ALIAS: sc",
 	} {
@@ -372,7 +372,7 @@ target:
     msg-vpn: v
     topic: OUT
 `
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, true)
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{MountStores: true})
 	out := Application(m)
 	// Binders still render their identity...
 	for _, want := range []string{"conn-name: h(1414)", "queue-manager: QM1", "host: tcp://b:55555", "msg-vpn: v"} {
@@ -385,5 +385,168 @@ target:
 		if strings.Contains(out, no) {
 			t.Errorf("empty credential line %q should be omitted\n---\n%s", no, out)
 		}
+	}
+}
+
+func TestApplicationQuotesRiskyScalars(t *testing.T) {
+	// A value carrying ": ", " #", a leading indicator, or a YAML bool/number
+	// lookalike would silently restructure or retype the document if emitted
+	// plain, so the renderer double-quotes exactly those. Credentials never
+	// reach render as literal text any more -- consolidate substitutes a
+	// ${STABLE} placeholder for every credential position -- so this now
+	// exercises the other spec-sourced scalars that still flow through q()
+	// unchanged: MQ conn-name, a destination, and a security user's name.
+	src := `
+source:
+  mq:
+    conn-name: "h(1414) #1"
+    queue-manager: QM1
+    channel: CH
+    queue: "key: value"
+target:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: v
+    topic: OUT
+`
+	defs := `
+security:
+  enabled: true
+  users:
+    - name: "no"
+      password: x
+`
+	d, err := spec.ParseDefaults([]byte(defs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{MountStores: true})
+	out := Application(m)
+	for _, want := range []string{
+		`conn-name: "h(1414) #1"`,   // " #" would start a comment
+		`destination: "key: value"`, // ": " would open a nested mapping
+		`- name: "no"`,              // reads back as false when plain
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q\n---\n%s", want, out)
+		}
+	}
+	// Ordinary values stay plain, so existing output is byte-for-byte unchanged.
+	for _, want := range []string{"queue-manager: QM1", "host: tcp://b:55555"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("plain value should not be quoted: missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
+func TestApplicationBlockScalarPassthrough(t *testing.T) {
+	// A literal (|) passthrough value keeps its newlines through consolidate, so
+	// the renderer must re-emit it as a block scalar; concatenating it into
+	// "key: value" would push every line after the first to the document root.
+	src := `
+source:
+  mq:
+    conn-name: h(1414)
+    queue-manager: QM1
+    channel: CH
+    queue: IN
+    additional-properties:
+      CERT: |
+        -----BEGIN CERTIFICATE-----
+        MIIBpayload
+        -----END CERTIFICATE-----
+target:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: v
+    topic: OUT
+`
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{MountStores: true})
+	out := Application(m)
+	want := `                  CERT: |
+                    -----BEGIN CERTIFICATE-----
+                    MIIBpayload
+                    -----END CERTIFICATE-----
+`
+	if !strings.Contains(out, want) {
+		t.Errorf("literal block not re-emitted as a block scalar\nwant:\n%s\ngot:\n%s", want, out)
+	}
+	// The naive form (everything on the key's line) must not appear.
+	if strings.Contains(out, "CERT: -----BEGIN") {
+		t.Errorf("multi-line value was flattened onto the key line\n---\n%s", out)
+	}
+}
+
+func TestApplicationSkipsBundleWithoutTruststore(t *testing.T) {
+	// MQ tls: true with no tls.truststore has no store to point a bundle at.
+	// Emitting one anyway wrote empty location/password/type lines, which the
+	// connector reads as a configured-but-broken store.
+	src := `
+source:
+  mq:
+    conn-name: h(1414)
+    queue-manager: QM1
+    channel: CH
+    tls: true
+    queue: IN
+target:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: v
+    topic: OUT
+`
+	m, warns := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{MountStores: true})
+	out := Application(m)
+	for _, no := range []string{"ssl:", "bundle:", "ssl-bundle:", "location: ", "truststore:"} {
+		if strings.Contains(out, no) {
+			t.Errorf("no truststore configured, so %q should not be emitted\n---\n%s", no, out)
+		}
+	}
+	if !m.MQTLS {
+		t.Error("the connection still uses TLS, so MQTLS must stay set")
+	}
+	var found bool
+	for _, w := range warns {
+		if strings.Contains(w, "tls.truststore is not configured") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want a warning that no bundle was emitted, got %v", warns)
+	}
+}
+
+// TestApplicationConfigImport verifies Application() leads with
+// spring.config.import when Model.ConfigImport is set (so the mounted secret
+// files under /run/secrets are read back as properties), and omits the block
+// entirely when it is empty (matches gen.ConfigImport, the constant every
+// production caller passes through consolidate.Opts.ConfigImport).
+func TestApplicationConfigImport(t *testing.T) {
+	src := `
+source:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: v
+    queue: IN
+target:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: v
+    queue: OUT
+`
+	const configImport = "optional:configtree:/run/secrets/"
+
+	withImport, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{},
+		consolidate.Opts{MountStores: true, ConfigImport: configImport})
+	out := Application(withImport)
+	want := "spring:\n  config:\n    import: " + configImport + "\n"
+	if !strings.HasPrefix(out, want) {
+		t.Errorf("want Application to lead with %q when ConfigImport is set\n---\n%s", want, out)
+	}
+
+	noImport, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{MountStores: true})
+	out2 := Application(noImport)
+	if strings.Contains(out2, "config:") || strings.Contains(out2, "import:") {
+		t.Errorf("want no config.import block when ConfigImport is empty\n---\n%s", out2)
 	}
 }

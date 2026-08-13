@@ -6,12 +6,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Secret sources.
-const (
-	SourceEnv  = "env"
-	SourceFile = "file"
-)
-
 // Syslog protocols.
 const (
 	SyslogUDP = "udp"
@@ -41,12 +35,38 @@ type Service struct {
 	Port    int  `yaml:"port"`
 }
 
-// CredCreate builds the credentials Secret.
+// CredCreate builds the credentials Secret. Its contents are no longer declared
+// here: the keys are every credential the config references, derived from the
+// spec itself, and their values come from the literals and `-env` variables
+// those positions name.
 type CredCreate struct {
-	Name       string   `yaml:"name"`
-	Source     string   `yaml:"source"`      // SourceEnv | SourceFile
-	Variables  []string `yaml:"variables"`   // required when Source == env
-	ValuesFile string   `yaml:"values-file"` // required when Source == file
+	Name string `yaml:"name"`
+
+	// Removed keys, kept only to fail loudly. yaml.v3 ignores unknown fields, so
+	// without these an old env.yaml would parse cleanly and silently drop its
+	// entire credential configuration.
+	Source     string   `yaml:"source"`
+	Variables  []string `yaml:"variables"`
+	ValuesFile string   `yaml:"values-file"`
+}
+
+// RemovedKeys names any key that no longer has meaning, so the caller can reject
+// a stale config instead of quietly ignoring it.
+func (c *CredCreate) RemovedKeys() []string {
+	if c == nil {
+		return nil
+	}
+	var out []string
+	if c.Source != "" {
+		out = append(out, "source")
+	}
+	if len(c.Variables) > 0 {
+		out = append(out, "variables")
+	}
+	if c.ValuesFile != "" {
+		out = append(out, "values-file")
+	}
+	return out
 }
 
 // CredentialsSecret is the env-var Secret (envFrom). Create XOR Existing.

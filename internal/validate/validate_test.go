@@ -10,19 +10,19 @@ import (
 
 func vSolace(dest, kind, keyAlias string) spec.Side {
 	return spec.Side{System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod",
-		ClientUser: "u", ClientPass: "${P}", DestKind: kind, Dest: dest, KeyAlias: keyAlias}
+		ClientUser: "u", ClientPassEnv: "SOLACE_CLIENT_PASSWORD", DestKind: kind, Dest: dest, KeyAlias: keyAlias}
 }
 func vMQ(dest, kind string, tls bool) spec.Side {
 	return spec.Side{System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM1", Channel: "CH",
-		User: "u", Password: "${P}", TLS: tls, DestKind: kind, Dest: dest}
+		User: "u", PasswordEnv: "MQ_PASSWORD", TLS: tls, DestKind: kind, Dest: dest}
 }
 func wf(file string, src, tgt spec.Side) spec.Workflow {
 	return spec.Workflow{File: file, Enabled: true, SourceSet: true, TargetSet: true, Source: src, Target: tgt}
 }
 func defsWithStores() *spec.Defaults {
 	return &spec.Defaults{TLS: spec.TLSConfig{
-		Truststore: &spec.Store{File: "t.jks", Password: "${T}", Type: "JKS"},
-		Keystore:   &spec.Store{File: "k.jks", Password: "${K}", Type: "JKS"},
+		Truststore: &spec.Store{File: "t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD", Type: "JKS"},
+		Keystore:   &spec.Store{File: "k.jks", PasswordEnv: "KEYSTORE_PASSWORD", Type: "JKS"},
 	}}
 }
 func hasErr(errs []Issue, sub string) bool {
@@ -115,25 +115,39 @@ func manyWorkflows(n int) []spec.Workflow {
 	return wfs
 }
 
-func TestNoWorkflowCap(t *testing.T) {
-	// >MaxWorkflowsPerInstance workflows no longer fail: the gen layer shards them.
-	errs, _ := Run(Context{Workflows: manyWorkflows(MaxWorkflowsPerInstance + 1), Defaults: &spec.Defaults{}})
-	if hasErr(errs, "too many workflows") {
-		t.Fatalf("workflow cap should be gone, got %v", errs)
+// TestWorkflowCap pins the new fatal cap: a folder holding more than
+// MaxWorkflows workflows is rejected outright (no sharding survives to split
+// them), and the message names the remedy (separate folders, each its own
+// deployment.name/docker.name/podman.name, each deployed as its own connector).
+func TestWorkflowCap(t *testing.T) {
+	errs, _ := Run(Context{Workflows: manyWorkflows(MaxWorkflows + 1), Defaults: &spec.Defaults{}})
+	if !hasErr(errs, "21 workflows found, but one connector instance runs at most 20 (workflow ids 0..19)") {
+		t.Fatalf("want workflow cap error, got %v", errs)
+	}
+	if !hasErr(errs, "Split them across separate folders, each with its own env.yaml and its own deployment.name/docker.name/podman.name, and deploy each as its own connector") {
+		t.Fatalf("want cap error to name the remedy, got %v", errs)
+	}
+
+	// Exactly MaxWorkflows must not trip the cap.
+	errs2, _ := Run(Context{Workflows: manyWorkflows(MaxWorkflows), Defaults: &spec.Defaults{}})
+	if hasErr(errs2, "workflows found") {
+		t.Fatalf("MaxWorkflows workflows should not trip the cap, got %v", errs2)
 	}
 }
 
-func TestDeployNameTooLongWhenSharded(t *testing.T) {
-	// 21 workflows -> 2 instances -> longest generated name is "<name>-2-config".
-	longName := strings.Repeat("a", 60) // 60 + len("-2-config")=9 -> 69 > 63
+// TestDeployNameTooLong pins the kube ConfigMap name-length guard now that
+// there is no per-shard instance suffix: it is simply deployment.name +
+// "-config" <= 63.
+func TestDeployNameTooLong(t *testing.T) {
+	longName := strings.Repeat("a", 57) // 57 + len("-config")=7 -> 64 > 63
 	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: longName, Namespace: "ns", Image: "img", Replicas: 1}}
-	errs, _ := Run(Context{Workflows: manyWorkflows(MaxWorkflowsPerInstance + 1), Defaults: &spec.Defaults{}, Kube: k, Deploy: true})
+	errs, _ := Run(Context{Workflows: leWorkflows(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
 	if !hasErr(errs, "exceeds the 63-char DNS-1123 limit") {
-		t.Fatalf("want too-long suffixed name error, got %v", errs)
+		t.Fatalf("want too-long name error, got %v", errs)
 	}
-	// A short name with the same workflow count is fine.
+	// A short name is fine.
 	k.Deployment.Name = "solmq"
-	errs2, _ := Run(Context{Workflows: manyWorkflows(MaxWorkflowsPerInstance + 1), Defaults: &spec.Defaults{}, Kube: k, Deploy: true})
+	errs2, _ := Run(Context{Workflows: leWorkflows(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
 	if hasErr(errs2, "exceeds the 63-char DNS-1123 limit") {
 		t.Fatalf("short name should not trip the length guard, got %v", errs2)
 	}
@@ -145,7 +159,7 @@ func leWorkflows() []spec.Workflow {
 
 func TestLeaderElectionActiveStandbyValid(t *testing.T) {
 	d := defsWithStores()
-	d.Connections = map[string]spec.Side{"mgmt": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUser: "u", ClientPass: "${P}"}}
+	d.Connections = map[string]spec.Side{"mgmt": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUser: "u", ClientPassEnv: "MGMT_CLIENT_PASSWORD"}}
 	d.LeaderElection = spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q", ConnRef: "mgmt"}
 	if errs, _ := Run(Context{Workflows: leWorkflows(), Defaults: d}); len(errs) != 0 {
 		t.Fatalf("valid active_standby should pass, got %v", errs)
@@ -191,7 +205,7 @@ func TestDeployKubeChecks(t *testing.T) {
 	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "Bad_Name", Namespace: "ns", Image: ""}}
 	errs, _ := Run(Context{
 		Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("MQ", spec.DestQueue, false))},
-		Defaults:  &spec.Defaults{}, Kube: k, Deploy: true,
+		Defaults:  &spec.Defaults{}, Kube: k, CheckKubernetes: true,
 	})
 	if !hasErr(errs, "not a valid DNS-1123 label") {
 		t.Fatalf("want DNS-1123 error, got %v", errs)
@@ -201,19 +215,96 @@ func TestDeployKubeChecks(t *testing.T) {
 	}
 }
 
+// TestCredentialsEnvChecks covers checkDefaultsCredentials: a store password-env
+// that names a variable absent from the environment is a WARNING, not an error:
+// authoring a spec or generating a config must not require every production
+// credential to be exported. The deploy path resolves values and fails hard there.
 func TestCredentialsEnvChecks(t *testing.T) {
-	k := &spec.Kubernetes{
-		Deployment: spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1},
-		Secrets: spec.Secrets{Credentials: &spec.CredentialsSecret{
-			Create: &spec.CredCreate{Name: "s", Source: spec.SourceEnv, Variables: []string{"MISSING_VAR"}},
-		}},
-	}
+	d := &spec.Defaults{TLS: spec.TLSConfig{
+		Truststore: &spec.Store{File: "t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD"},
+	}}
 	env := func(string) (string, bool) { return "", false } // nothing set
-	errs, _ := Run(Context{
+	errs, warns := Run(Context{
 		Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("MQ", spec.DestQueue, false))},
-		Defaults:  &spec.Defaults{}, Kube: k, Deploy: true, Env: env,
+		Defaults:  d, Env: env,
 	})
-	if !hasErr(errs, `variable "MISSING_VAR" is not set`) {
-		t.Fatalf("want missing-env-var error, got %v", errs)
+	if !hasErr(warns, `tls.truststore.password-env names TRUSTSTORE_PASSWORD, which is not set in this environment`) {
+		t.Fatalf("want missing-env-var warning, got %v", warns)
+	}
+	if hasErr(errs, "TRUSTSTORE_PASSWORD") {
+		t.Fatalf("an unset -env variable must not be fatal at validate time, got %v", errs)
+	}
+}
+
+// TestCheckCredRules pins the checkCred rules for one credential position: the
+// literal/-env forms are mutually exclusive, an -env value must be a bare
+// variable name (not a ${...} reference), it must be a valid identifier, and --
+// when Context.Env is supplied -- it must actually be set.
+func TestCheckCredRules(t *testing.T) {
+	side := func(mutate func(*spec.Side)) spec.Side {
+		s := vMQ("MQ", spec.DestQueue, false)
+		mutate(&s)
+		return s
+	}
+	cases := []struct {
+		name string
+		s    spec.Side
+		env  func(string) (string, bool)
+		want string
+		// asWarning marks the one case that is advisory rather than fatal: an
+		// -env variable that is simply not exported on this machine.
+		asWarning bool
+	}{
+		{
+			name: "both literal and env set",
+			s:    side(func(s *spec.Side) { s.Password = "secret" }), // PasswordEnv already set by vMQ
+			want: "sets both a literal value and target password-env",
+		},
+		{
+			name: "env value is a ${...} reference, not a bare name",
+			s:    side(func(s *spec.Side) { s.PasswordEnv = "${MQ_PASSWORD}" }),
+			want: "must be a bare variable name, not a ${...} reference",
+		},
+		{
+			name: "env value is not a valid identifier",
+			s:    side(func(s *spec.Side) { s.PasswordEnv = "1-bad-name" }),
+			want: "is not a valid environment variable name",
+		},
+		{
+			name:      "env var unset when Env is supplied",
+			s:         side(func(s *spec.Side) {}),
+			env:       func(string) (string, bool) { return "", false },
+			want:      "which is not set in this environment",
+			asWarning: true,
+		},
+	}
+	for _, c := range cases {
+		errs, warns := Run(Context{
+			Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), c.s)},
+			Defaults:  &spec.Defaults{}, Env: c.env,
+		})
+		got := errs
+		if c.asWarning {
+			got = warns
+		}
+		if !hasErr(got, c.want) {
+			t.Errorf("%s: want %q, got errs=%v warns=%v", c.name, c.want, errs, warns)
+		}
+	}
+}
+
+// TestCheckCredLiteralLooksLikeEnvRefWarns covers the last checkCred branch: a
+// literal containing "${" is almost always someone reaching for the -env key, so
+// it warns (not errors) naming the -env key to use instead.
+func TestCheckCredLiteralLooksLikeEnvRefWarns(t *testing.T) {
+	m := vMQ("MQ", spec.DestQueue, false)
+	m.PasswordEnv = ""
+	m.Password = "${SOME_VAR}"
+	_, warns := Run(Context{
+		Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), m)},
+		Defaults:  &spec.Defaults{},
+	})
+	if !hasErr(warns, "target password looks like a variable reference; it is used as a literal value. Use target password-env: VAR") {
+		t.Fatalf("want literal-looks-like-env-ref warning, got %v", warns)
 	}
 }

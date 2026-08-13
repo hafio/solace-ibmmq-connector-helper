@@ -1,0 +1,108 @@
+package consolidate
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/tls"
+)
+
+// Stable secret names for the credential positions that belong to env.yaml as a
+// whole rather than to one binder. The two store passwords are re-exported from
+// internal/tls, which names them for the api-properties path, so the SSL bundle
+// and api-properties can never disagree about one password's name.
+const (
+	TruststorePasswordName = tls.TruststorePasswordName
+	KeystorePasswordName   = tls.KeystorePasswordName
+	LeaderUsernameName     = "LEADER_ELECTION_CLIENT_USERNAME"
+	LeaderPasswordName     = "LEADER_ELECTION_CLIENT_PASSWORD"
+)
+
+// secretFn records a credential under a stable name and returns the placeholder
+// the rendered config carries ("" for an unset credential).
+type secretFn func(stable string, c spec.Cred) string
+
+// storeSecret adapts a secretFn to the narrower callback internal/tls needs, so
+// a store password mounted for the SSL bundle and the same password referenced
+// from the Solace api-properties resolve to one name and one mounted file.
+func storeSecret(secretRef secretFn) func(string, spec.Cred) string {
+	return func(stable string, c spec.Cred) string { return secretRef(stable, c) }
+}
+
+// stableName is the in-container secret name for a binder-scoped credential.
+func stableName(binder, suffix string) string {
+	return stableToken(binder) + "_" + suffix
+}
+
+// stableToken folds an arbitrary name into the character set every consumer of a
+// stable name accepts at once: an environment-variable identifier
+// ([A-Za-z_][A-Za-z0-9_]*), which is also a valid file name, a valid Spring
+// property segment, a valid Kubernetes Secret data key ([-._a-zA-Z0-9]+), and a
+// valid podman secret name component. Anything outside it folds to '_', runs of
+// '_' collapse, and a leading digit is prefixed so the result is never a bare
+// number.
+func stableToken(s string) string {
+	var b strings.Builder
+	prevUnderscore := false
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r - 32) // upper-snake by convention
+			prevUnderscore = false
+		case (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevUnderscore = false
+		default:
+			if !prevUnderscore && b.Len() > 0 {
+				b.WriteByte('_')
+				prevUnderscore = true
+			}
+		}
+	}
+	out := strings.TrimRight(b.String(), "_")
+	if out == "" {
+		return "X"
+	}
+	if out[0] >= '0' && out[0] <= '9' {
+		return "X" + out
+	}
+	return out
+}
+
+// securityUserPasswordName is the stable secret name for one management user's
+// password, keyed by the user's name so adding a user never renumbers another.
+func securityUserPasswordName(user string) string {
+	return "SECURITY_USER_" + stableToken(user) + "_PASSWORD"
+}
+
+// assignBinderNames maps each accumulated connection to its binder name: the
+// contributing connection name when there is one, else a generated
+// sol-conn-N / mq-conn-N, with a -2/-3 suffix disambiguating any clash between
+// two different binders.
+func assignBinderNames(accs []*acc) {
+	used := map[string]int{}
+	assign := func(base string) string {
+		if used[base] == 0 {
+			used[base] = 1
+			return base
+		}
+		used[base]++
+		return fmt.Sprintf("%s-%d", base, used[base])
+	}
+	var solN, mqN int
+	for _, a := range accs {
+		var base string
+		switch {
+		case a.connName != "":
+			base = sanitize(a.connName)
+		case a.kind == spec.SystemSolace:
+			solN++
+			base = fmt.Sprintf("sol-conn-%d", solN)
+		default:
+			mqN++
+			base = fmt.Sprintf("mq-conn-%d", mqN)
+		}
+		a.name = assign(base)
+	}
+}

@@ -13,7 +13,7 @@ source:
     queue-manager: QM_CORE
     channel: DSU.SVRCONN
     user: appuser
-    password: ${MQ_CORE_PASSWORD}
+    password-env: MQ_CORE_PASSWORD
     tls: true
     cipher: TLS_RSA_WITH_AES_256_CBC_SHA256
     key-alias: mq-client
@@ -23,5 +23,5 @@ target:
     host: tcp://edge-broker.internal:55555  # tcp:// => plaintext (no TLS)
     msg-vpn: edge
     client-username: bridge
-    client-password: ${EDGE_SOL_PASSWORD}
+    client-password-env: EDGE_SOL_PASSWORD
     topic: events/from-mq                 # publish to a Solace topic (EDA pub/sub)

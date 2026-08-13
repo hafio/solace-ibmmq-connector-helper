@@ -106,6 +106,18 @@ type LeaderElectionModel struct {
 	Session  *Session   // nil when no session configured
 }
 
+// SecretRef is one credential the connector needs at runtime, named by the
+// stable in-container name it is mounted under. Exactly one of Literal/EnvVar
+// carries the source: a literal value from the spec, or the name of a host
+// environment variable read at deploy time. Neither ever reaches a generated
+// artifact -- the config references only Stable, and the value is resolved
+// straight into the platform's secret store.
+type SecretRef struct {
+	Stable  string // e.g. PROD_SOLACE_CLIENT_PASSWORD
+	Literal string
+	EnvVar  string
+}
+
 // Model is the fully-ordered result of consolidation, consumed by render/deploy.
 type Model struct {
 	Bundles        []*Bundle
@@ -119,6 +131,15 @@ type Model struct {
 	Management     spec.Management
 	LoggingLevel   *yaml.Node
 	LeaderElection *LeaderElectionModel // nil for standalone/absent
+
+	// Secrets is every credential this instance references, in first-use order.
+	// The rendered config carries `${Stable}` placeholders; the deploy layer turns
+	// this list into mounted files under /run/secrets.
+	Secrets []SecretRef
+
+	// ConfigImport, when set, emits spring.config.import so the connector reads
+	// the mounted secret files as properties.
+	ConfigImport string
 
 	// MQTLS is true when any MQ binder uses TLS (drives JAVA_TOOL_OPTIONS in deploy).
 	MQTLS bool

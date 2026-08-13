@@ -6,8 +6,8 @@ MQ**, generates the Kubernetes, Docker Compose, or Podman artifacts that run it,
 can apply or tear those down for you. You describe each message flow as its own small
 file; the tool deduplicates connections into shared **binders**, numbers the
 workflows, derives each binding's destination-type, wires **TLS/mTLS** from one
-shared truststore/keystore, and passes secrets through as `${VAR}` placeholders
-(never inlining real values).
+shared truststore/keystore, and turns every credential into a file mounted at
+`/run/secrets/` -- so no credential value ever reaches a generated file (section 8).
 
 All YAML shown here uses block style. Flow style (`{ }` / `[ ]`) also parses, but
 `${VAR}` placeholders are invalid inside YAML flow `{ }`, so block style is
@@ -63,16 +63,14 @@ It builds the whole spec folder for you:
   (section 5), so a `conn-ref` is picked from a list rather than typed;
 - live findings using the same rules and wording as `solmq-conn validate`
   (section 3), including the EDA advisories;
-- a preview of the `application.yml` the spec consolidates into, sharded exactly
-  as the CLI shards it past 20 workflows (section 9);
+- a preview of the `application.yml` the spec consolidates into (section 9);
 - **Download all (.zip)** writes `specs/env.yaml` plus one file per workflow,
   ready to unzip and hand to `-e specs/env.yaml`; **Load sample** fills in the
   same starter set `examples` writes (section 10).
 
-Secrets are never entered as values: every password field takes a `${VAR}`
-placeholder (section 8), and a literal value is reported as a finding so the
-generated `env.yaml` stays safe to commit. The preview is a convenience --
-`solmq-conn generate config` remains authoritative.
+Credentials are entered as the name of an environment variable (the `-env` form,
+section 8) rather than as values, so the generated `env.yaml` stays safe to commit.
+The preview is a convenience -- `solmq-conn generate config` remains authoritative.
 
 ---
 
@@ -82,16 +80,16 @@ The first argument is a **verb**; the second names the **target** (for `generate
 or **platform** (for `deploy`/`delete`).
 
 ```text
-solmq-conn generate config     [-e env.yaml] [-o out]        Emit application.yml (per instance)
+solmq-conn generate config     [-e env.yaml] [-o out]        Emit application.yml
 solmq-conn generate kubernetes [-e env.yaml] [-o out]        Emit ConfigMap+Deployment+Service (+Secrets)
 solmq-conn generate docker     [-e env.yaml] [-o out]        Emit docker-compose.yml (application.yml inlined)
-solmq-conn generate podman     [-e env.yaml] [-o out]        Emit a podman run script or quadlet unit(s)
+solmq-conn generate podman     [-e env.yaml] [-o out]        Emit a podman run script or quadlet unit
 solmq-conn deploy  kubernetes  [-e env.yaml]                 kubectl/oc apply -f - (manifest on stdin)
 solmq-conn delete  kubernetes  [-e env.yaml]                 kubectl/oc delete -f -
 solmq-conn deploy  docker      [-e env.yaml]                 docker compose up -d
 solmq-conn delete  docker      [-e env.yaml]                 docker compose down
-solmq-conn deploy  podman      [-e env.yaml]                 write quadlet unit(s); systemctl start
-solmq-conn delete  podman      [-e env.yaml]                 systemctl stop; remove unit(s)
+solmq-conn deploy  podman      [-e env.yaml]                 write the quadlet unit; systemctl start
+solmq-conn delete  podman      [-e env.yaml]                 systemctl stop; remove the unit
 solmq-conn validate            [-e env.yaml]                 Lint the whole env.yaml + workflows
 solmq-conn examples [dir] [-f]                               Write a starter env.yaml + workflows
 ```
@@ -162,10 +160,48 @@ order matters. Filtering with `file_pattern` happens **before** numbering, so th
 surviving files are numbered `0..N` among themselves.
 
 The connector runtime holds **up to 20 workflows** (ids `0..19`) per
-`application.yml`. With more than 20 workflows the tool automatically **splits them
-across multiple connector instances** -- fill-to-20 in sorted order (instance 1 =
-workflows 0-19, instance 2 = 20-39, ...). Each instance renumbers its own workflows
-from `0`, and `generate` emits one set of artifacts per instance (see section 7).
+`application.yml`, so **one folder is one connector instance**. A folder holding more
+than 20 is rejected with an error naming the count and the cap: split the workflows
+across separate folders, each with its own `env.yaml` and its own
+`deployment.name` / `docker.name` / `podman.name`, and deploy each as its own
+connector. The tool does not split them for you -- which flows belong together is a
+deployment decision, since an instance shares one leader election, one set of
+credentials, and one resource budget.
+
+This is an error rather than a warning because the connector does **not** complain
+about the extra workflows: it binds ids `0..19` and silently ignores anything
+numbered higher. A 21st workflow would generate cleanly, deploy cleanly, and simply
+never run, with nothing at runtime saying why -- so the tool refuses up front
+instead.
+
+### 4.1 Variable expansion (`${VAR}`)
+
+Any non-credential string field -- hosts, `msg-vpn`, `conn-name`, `queue-manager`,
+`channel`, `cipher`, `key-alias`, destinations, names, namespaces, images, dirs,
+mount paths, the syslog host, URLs, ... -- may reference the tool's own environment
+at generate time:
+
+```yaml
+host: tcps://${BROKER_HOST}:55443
+msg-vpn: ${VPN:prod}          # ${VAR:default} -- default used when VAR is unset
+```
+
+- `${VAR}` and `${VAR:default}` expand from the environment `solmq-conn` runs in.
+  Only the braced form expands -- a bare `$VAR` is left as literal text.
+- If `VAR` is unset and a default is given, the default is used.
+- If `VAR` is unset and there is **no default**, the text is left **verbatim** and
+  a **warning** names the variable. A typo must not vanish silently.
+- **Credential fields never expand** (`client-username`/`-env`,
+  `client-password`/`-env`, `user`/`-env`, `password`/`-env`, and the TLS store
+  passwords): a credential is either a literal value or the name of a host
+  variable in the matching `-env` field (see section 8.1) -- use that form instead of
+  `${...}` inside a credential. A `${...}` inside a literal credential already
+  triggers its own warning telling you to switch to `-env`.
+- **Determinism caveat**: the tool's core promise is byte-for-byte reproducible
+  output. Variable expansion is the one exception -- the rendered output now
+  depends on the environment `solmq-conn` runs in, so the same `env.yaml` can
+  render differently across machines or CI runs unless the referenced variables
+  are pinned identically everywhere it runs.
 
 ---
 
@@ -242,8 +278,8 @@ permitted (two Solace patterns emit an advisory **warning**, see §5.5). You nev
 | `consumer` / `producer` | no | verbatim per-binding tuning |
 
 > A `solace:`/`mq:` side may instead set **`conn-ref: <name>`** to reuse a connection
-> from `env.yaml` (§5.6). A conn-ref side then sets *only* its `queue:`/`topic:` —
-> any other field is an error.
+> from `env.yaml` (§5.6). A conn-ref side then sets *only* its `queue:`/`topic:` plus
+> the per-binding `consumer:`/`producer:` tuning — any *connection* field is an error.
 
 ### 5.4 Destinations, durable names, passthrough
 
@@ -295,9 +331,10 @@ target:
     topic: archive/from-mq
 ```
 
-- A `conn-ref` side is **strict**: it may set only `conn-ref` + one `queue:`/`topic:`.
-  Any connection field (host, creds, tls, cipher, key-alias, api/additional-properties)
-  or per-binding tuning alongside `conn-ref` is an **error**.
+- A `conn-ref` side is **strict** about *connection* fields: host, creds, tls, cipher,
+  key-alias and api/additional-properties alongside `conn-ref` are an **error** — they
+  belong on the connection itself. `queue:`/`topic:` and the per-binding
+  `consumer:`/`producer:` blocks are the side's own and stay allowed.
 - The referenced connection must exist and its system must match the side's
   `solace:`/`mq:` block.
 - **Consolidation is by connection *details*.** Two sides that resolve to the same
@@ -438,7 +475,7 @@ kubernetes:
     timezone: Asia/Singapore     # -> container TZ env var
   service:
     enabled: true
-    port: 8090
+    port: 8090                   # optional; defaults to the management port (§below)
   logging:                       # entirely optional
     syslog:
       host: syslog.corp
@@ -486,9 +523,9 @@ kubernetes:
 
 | section | option | notes |
 |---------|--------|-------|
-| `deployment` | `name`, `namespace` | required; must be valid DNS-1123 labels; a `kind: Namespace` doc for `namespace` is always emitted first. With **>20 workflows** the name is suffixed `-1`, `-2`, ... per instance (single instance keeps the bare name); keep the base short enough that `<name>-<n>-config` stays within 63 chars |
+| `deployment` | `name`, `namespace` | required; must be valid DNS-1123 labels; a `kind: Namespace` doc for `namespace` is always emitted first. Keep `name` short enough that the derived `<name>-config` stays within 63 chars |
 | `deployment` | `image` | required |
-| `deployment` | `replicas` | default `1`; `standalone` leader-election requires `1`, `active_*` allow more. **Replicas** are copies of one instance (leader-election picks the active one); **instances** are the separate Deployments created when workflows exceed 20 |
+| `deployment` | `replicas` | default `1`; `standalone` leader-election requires `1`, `active_*` allow more. Replicas are copies of the one connector, and leader-election picks the active one |
 | `deployment` | `resources.cpu`, `resources.memory` | one value each; emitted as identical requests **and** limits (guaranteed QoS); a bare integer like `cpu: 1` is auto-quoted |
 | `deployment` | `timezone` | sets the container `TZ` env var |
 | `service` | `enabled`, `port` | emit a Service on this port |
@@ -547,8 +584,9 @@ docker:
 `quadlet` emits `.container` unit file(s). `deploy podman` / `delete podman` are
 **always quadlet + systemctl**, regardless of `mode`. Because a quadlet unit or run
 script cannot inline file content, `generate`/`deploy` also write the rendered
-`application.yml` and the credentials env-file next to the unit/script and
-bind-mount them in.
+`application.yml` next to the unit/script and bind-mount it in. Credentials do not
+go on disk: `deploy` loads each into **podman's secret store** and the unit mounts
+it (`Secret=<name>,type=mount,target=<KEY>`). Requires **podman 4.5+**.
 
 **Scope** (`quadlet.scope`) selects where units go and which systemd runs them:
 
@@ -557,8 +595,11 @@ bind-mount them in.
 - `user` / `system`: force one; `quadlet.dir` overrides the directory for the
   resolved scope.
 
-`deploy podman` writes the units, then `systemctl [--user] daemon-reload` and
-`start`; `delete podman` `stop`s, removes the units, and reloads.
+`deploy podman` loads the credentials into podman's secret store, writes the units,
+then `systemctl [--user] daemon-reload` and `start`; `delete podman` `stop`s,
+removes the units, reloads, and removes the secrets. A `generate podman` run script
+in `mode: run` carries a preamble that creates the same secrets from **your**
+environment (`${NAME:?...}`) -- so the script itself holds no credential values.
 
 ```yaml
 podman:
@@ -574,15 +615,7 @@ podman:
     - 8090                       # bare: publish to the same host port (8090:8090)
     - "8081:8090"                # or "host:container" to map a distinct host port
   timezone: Asia/Singapore
-  secrets:
-    credentials:                 # rendered as --env-file / EnvironmentFile=; never logged
-      create:
-        name: solmq-credentials
-        source: env
-        variables:
-          - SOL_PASSWORD
-          # ...one per ${VAR} used across the workflows + defaults
-      # existing: solmq-connector.env
+  # No secrets: section -- credentials come from the connection fields themselves.
   stores:                        # opt in to bind-mounting tls.*.file host paths
     mount-path: /app/external/classpath/truststores   # fixed in-container path; must be this value
   # libs:
@@ -590,54 +623,110 @@ podman:
 ```
 
 Common docker/podman options: `image` (required); `name` (a DNS-1123 label -- it flows
-into filenames and a systemctl unit); `restart`; `ports` (a bare port, or
-`host:container` to map a distinct host port; each 1-65535); `timezone` (container `TZ`);
-`secrets.credentials`; `stores` (opt in to bind-mounting the truststore/keystore; the
-in-container path is fixed); `libs.dir`.
+into filenames, a systemctl unit, and the podman secret-store namespace); `restart`;
+`ports` (a bare port, or `host:container` to map a distinct host port; each 1-65535);
+`timezone` (container `TZ`); `stores` (opt in to bind-mounting the truststore/keystore;
+the in-container path is fixed); `libs.dir`. Neither section takes a `secrets:` key --
+setting one is an error naming the credential fields that replaced it.
 
 ---
 
 ## 8. Secrets model
 
-Secret **values never appear** in `application.yml` -- the config keeps only
-`${VAR}` placeholders. The `secrets.credentials` and `stores` schema is **identical
-across all three targets**; only the rendering differs. Values are materialized at
-generate/deploy time:
+**One mechanism on every platform: each credential becomes a file under
+`/run/secrets/`, and the connector reads it as a property.** No credential value
+and no host variable name ever appears in `application.yml`, in a compose file, in
+a quadlet unit, or in any file this tool leaves on disk.
 
-- **credentials** (`secrets.credentials.create`): resolves each value from the
-  tool's environment (`source: env`) or a `values-file` (`source: file`).
-  Kubernetes emits them in a Secret's `stringData` (referenced via `envFrom`);
-  docker/podman write them to an **env-file** (`env_file:` / `--env-file` /
-  `EnvironmentFile=`), created mode **0600** and **never logged**. An `existing:`
-  reference names a Secret / env-file you manage yourself, so the tool writes
-  nothing for it.
-- **stores** (`secrets.stores`): the shared truststore/keystore. Kubernetes
-  base64-embeds the `.jks` files named in `env.yaml` `tls.truststore.file` /
-  `tls.keystore.file` into a Secret, volume-mounted at
-  `/app/external/classpath/truststores/`; docker/podman **bind-mount** those files
-  onto that same fixed dir instead (opt in with a `stores:` block; the path is not
-  configurable, so a non-default `mount-path` is rejected).
+### 8.1 Declaring a credential
 
-For a **`kubernetes:`** section, `validate` additionally warns if a `${VAR}` used by
-the workflows/defaults is not supplied by the credentials Secret, and if a TLS/mTLS
-connection exists but no stores Secret is wired. These two warnings are
-Kubernetes-specific.
+Every credential field is a pair -- give it a literal value, or name the host
+environment variable that holds it. Never both:
+
+| Literal | Environment reference |
+|---------|-----------------------|
+| `client-username` / `client-password` | `client-username-env` / `client-password-env` |
+| `user` / `password` (mq) | `user-env` / `password-env` |
+| `tls.truststore.password`, `tls.keystore.password` | `...password-env` |
+| `security.users[].password` | `...password-env` |
+
+```yaml
+connections:
+  prod-solace:
+    solace:
+      host: tcps://broker.internal:55443
+      msg-vpn: prod
+      client-username: connector          # not sensitive -> literal is fine
+      client-password-env: SOL_PASSWORD   # read from the environment at deploy
+```
+
+An `-env` value is a bare variable name (`SOL_PASSWORD`), not `${SOL_PASSWORD}`.
+Writing `${...}` there is an error, and a `${` inside the *literal* key produces a
+warning pointing you at the `-env` form.
+
+### 8.2 Stable names
+
+The container-side name is derived from the config, never from your variable name,
+so the same `application.yml` runs anywhere: `<BINDER>_CLIENT_USERNAME`,
+`<BINDER>_CLIENT_PASSWORD`, `<BINDER>_USER`, `<BINDER>_PASSWORD`,
+`TRUSTSTORE_PASSWORD`, `KEYSTORE_PASSWORD`, `SECURITY_USER_<NAME>_PASSWORD`,
+`LEADER_ELECTION_CLIENT_USERNAME` / `_CLIENT_PASSWORD`. The rendered config
+references `${PROD_SOLACE_CLIENT_PASSWORD}`; `SOL_PASSWORD` is only ever a
+deploy-time input on your host.
+
+Every generated `application.yml` therefore begins with:
+
+```yaml
+spring:
+  config:
+    import: optional:configtree:/run/secrets/
+```
+
+`optional:` keeps it inert where nothing is mounted. Note that OS environment
+variables still outrank configtree files in Spring's precedence, and that a bare
+`generate config` document is not runnable on its own -- nothing mounts the stable
+names until a deploy target does.
+
+### 8.3 How each platform delivers them
+
+- **kubernetes**: `secrets.credentials.create.name` (or `existing:`) is mounted as
+  a volume at `/run/secrets`, read-only, `defaultMode: 0400`. There is no `envFrom`
+  -- credentials are never environment variables. The pod also sets
+  `automountServiceAccountToken: false`, since the connector never calls the API and
+  an automounted token would land in the same tree configtree reads. An `existing:`
+  Secret must already use the stable names as its keys.
+- **docker**: compose `secrets:` using the **environment provider**, so values are
+  read from the environment `docker compose` itself runs with -- the CLI injects
+  them into that child process only. Nothing is written to disk. Requires
+  **Docker Compose v2.23.1+**.
+- **podman**: `deploy` loads each credential into **podman's secret store**
+  (values on stdin, never in argv) and units mount them with
+  `Secret=<name>,type=mount,target=<KEY>`. Store entries are namespaced by the
+  container name, since that store is shared across every project on the host.
+  `delete` removes them. Requires **podman 4.5+**.
+
+The `stores` wiring is unchanged and separate: the shared truststore/keystore is
+base64-embedded into a Kubernetes Secret mounted at
+`/app/external/classpath/truststores/`, or bind-mounted there from the host for
+docker/podman (opt in with a `stores:` block; the in-container path is fixed).
+
+There is **no `secrets:` section under `docker:` or `podman:`** -- credentials come
+from the connection fields, so there is nothing to configure. Setting one is an
+error, as is a `kubernetes.secrets.credentials.create` still carrying the removed
+`source` / `variables` / `values-file` keys.
 
 ---
 
 ## 9. What gets generated
 
-**`generate config` -> one multi-binder `application.yml` per instance:** deduplicated
+**`generate config` -> one multi-binder `application.yml`:** deduplicated
 binders (connections sharing a broker/queue-manager tuple collapse into one binder),
 numbered workflows, the mandatory `undefined` binder (always emitted, always last),
 derived destination-types, auto `durable-subscription-name` for MQ topic consumers,
 verbatim `api-properties` / `additional-properties`, `${VAR}` placeholders, and the
-Solace + MQ TLS/mTLS blocks. With <=20 workflows this is a single document. With more,
-it emits one `application.yml` per instance: to **stdout** each is preceded by a banner
-(`CONNECTOR INSTANCE n OF N`); with **`-o out.yml`** they are written to `out-1.yml`,
-`out-2.yml`, ... (a single instance still writes plain `out.yml`). Point `-o`
-**outside** the workflow folder when sharding, so the suffixed outputs are not
-re-scanned as workflows on the next run.
+Solace + MQ TLS/mTLS blocks. It is always a single document (a folder holding more
+than 20 workflows is rejected -- see section 4). Point `-o` **outside** the workflow
+folder so the output is not re-scanned as a workflow on the next run.
 
 **Store paths differ by target.** `generate config` writes each truststore/keystore
 `location` exactly as it appears in `env.yaml`, so you can run the connector wherever
@@ -648,13 +737,10 @@ Secret volume for kubernetes, a bind mount onto that same fixed dir for docker/p
 
 **`generate kubernetes` -> a multi-document manifest set:** a `Namespace` doc for
 `deployment.namespace` (emitted first; applying it when the namespace already
-exists is a no-op), then **per instance** a `ConfigMap` mounting `application.yml` at
-`/app/external/spring/config/application.yml` (via `subPath`), a `Deployment`, and an
-optional `Service`; the credentials/stores `Secret`s and any libs `PersistentVolume`/
-`PersistentVolumeClaim` are **shared** (emitted once). With >20 workflows the
-ConfigMap/Deployment/Service names are suffixed `-1`, `-2`, ... per instance, and each
-instance's leader-election coordination `queue` is suffixed to match (so the separate
-connector clusters don't contend for one election queue). Probes use a **tcpSocket**
+exists is a no-op), then a `ConfigMap` mounting `application.yml` at
+`/app/external/spring/config/application.yml` (via `subPath`), a `Deployment`, an
+optional `Service`, the credentials/stores `Secret`s, and any libs
+`PersistentVolume`/`PersistentVolumeClaim`. Probes use a **tcpSocket**
 check on the management port (basic-auth protects `/actuator/*`).
 When any MQ-TLS binder exists the Deployment sets
 `JAVA_TOOL_OPTIONS=-Dcom.ibm.mq.cfg.useIBMCipherMappings=false`. When
@@ -668,10 +754,10 @@ provisioned from an NFS PV+PVC) or an initContainer that `wget`s jars into an
 **`generate docker` -> a `docker-compose.yml`** with `application.yml` inlined under
 compose `configs:`, the credentials env-file written alongside, and bind mounts for
 stores/libs. **`generate podman` -> a `podman run` script** (`mode: run`) **or
-`.container` quadlet unit(s)** (`mode: quadlet`); because neither can inline file
-content, the rendered `application.yml` and the credentials env-file are written next
-to the script/unit and bind-mounted in. Both container targets shard past 20 workflows
-the same way (one artifact set per instance).
+a `.container` quadlet unit** (`mode: quadlet`); because neither can inline file
+content, the rendered `application.yml` is written next to the script/unit and
+bind-mounted in (credentials go to the platform's secret store, not to disk -- see
+section 8).
 
 ---
 
@@ -681,7 +767,7 @@ the same way (one artifact set per instance).
 solmq-conn examples [dir] [-f]
 ```
 
-Writes a ready-to-edit starter set into `<dir>` (default `examples/`):
+Writes a ready-to-edit starter set into `<dir>` (default: the current directory):
 
 | file | contents |
 |------|----------|
@@ -719,8 +805,8 @@ always generates cleanly:
   produces identical bytes (an ordered emitter, not generic YAML marshaling), so
   files diff cleanly in review.
 - **Workflow numbering is filename-driven**; sort order decides the ids and gaps in
-  your naming are fine. More than 20 workflows are auto-split into additional
-  connector instances (20 per instance), each renumbering from `0`.
+  your naming are fine. A folder is capped at 20 workflows (ids `0..19`) -- past that
+  the run fails and you split the folder yourself.
 - **Renaming a workflow file changes its MQ durable subscription name** (it is part
   of the UUIDv5 key). Rename deliberately, or the old durable subscription is
   orphaned.
@@ -728,5 +814,21 @@ always generates cleanly:
   authoring, `generate`/`deploy`/`delete` to produce or apply output.
 - **One shared truststore + keystore** for all connections; per-connection client
   certs are selected by `key-alias` within that one keystore.
+- **TLS without a truststore emits no SSL bundle.** `tls: true` (or a `tcps://`
+  host) with no `tls.truststore` still negotiates TLS, but falls back to the JVM's
+  default trust store and warns — rather than writing a bundle with empty
+  `location`/`password`/`type`, which the connector reads as configured-but-broken.
+- **Two sides that share a connection tuple must share its password.** They collapse
+  into one binder, so disagreeing passwords are an **error**, not a last-wins merge
+  (a differing `cipher` still warns and takes the last value).
+- **Values are quoted only when they need it.** A generated scalar carrying `": "`,
+  `" #"`, a leading YAML indicator, or something that reads back as a bool/number
+  (`no`, `0123`) is double-quoted; everything else stays plain, so output is stable.
+  Multi-line passthrough values keep their block form.
+- **The safe-charset gate covers more than `command:`.** `image`, `restart` and
+  `timezone` in the docker/podman sections, the `tls.*.file` paths those sections
+  bind-mount, `libs.dir`, the kubernetes Secret names, and `libs.pvc.create.nfs.*`
+  are all rejected when they carry whitespace, quotes, control characters, or shell
+  metacharacters — each one lands unquoted in a generated script, unit, or manifest.
 - Multi-binder syntax is always used and the `undefined` binder is always emitted —
   this is expected, not a bug.

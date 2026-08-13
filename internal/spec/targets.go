@@ -42,6 +42,19 @@ const (
 	DefaultLibsMountPath   = "/app/external/libs"
 )
 
+// BaseName returns the final element of a path, splitting on both '/' and '\'
+// so a config authored on Windows resolves to the same name when the CLI runs on
+// Linux. It is the single definition: the store-mount path, the Kubernetes
+// stores-Secret data key, and the libs download filename must all agree, and
+// separate copies previously disagreed about backslashes.
+func BaseName(p string) string {
+	p = strings.ReplaceAll(p, "\\", "/")
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[i+1:]
+	}
+	return p
+}
+
 // StoresMount bind-mounts the host tls.*.file directory into the container.
 type StoresMount struct {
 	MountPath string `yaml:"mount-path"` // default /app/external/classpath/truststores
@@ -98,6 +111,11 @@ func (p Port) String() string {
 }
 
 // Docker is the parsed docker section of env.yaml. Deploy uses `command compose`.
+//
+// There is no secrets: section: credentials are derived from the config's own
+// credential fields and delivered as compose secrets, so there is nothing left
+// to configure here. Secrets is kept unexported-in-spirit (parsed but rejected)
+// so an old env.yaml fails loudly instead of silently losing its credentials.
 type Docker struct {
 	Command  string       `yaml:"command"` // default docker; e.g. "podman" or "docker --context foo"
 	Image    string       `yaml:"image"`
@@ -105,7 +123,7 @@ type Docker struct {
 	Restart  string       `yaml:"restart"`
 	Ports    []Port       `yaml:"ports"`
 	Timezone string       `yaml:"timezone"`
-	Secrets  Secrets      `yaml:"secrets"` // only Credentials is used (rendered as env_file)
+	Secrets  *Secrets     `yaml:"secrets"` // removed; non-nil is a validation error
 	Stores   *StoresMount `yaml:"stores"`
 	Libs     *LibsMount   `yaml:"libs"`
 }
@@ -127,7 +145,7 @@ type Podman struct {
 	Ports    []Port       `yaml:"ports"`
 	Restart  string       `yaml:"restart"`
 	Timezone string       `yaml:"timezone"`
-	Secrets  Secrets      `yaml:"secrets"` // only Credentials is used (rendered as env-file)
+	Secrets  *Secrets     `yaml:"secrets"` // removed; non-nil is a validation error (see Docker)
 	Stores   *StoresMount `yaml:"stores"`
 	Libs     *LibsMount   `yaml:"libs"`
 }

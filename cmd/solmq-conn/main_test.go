@@ -6,14 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/podmangen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
 // ---- fixtures -----------------------------------------------------------------
@@ -34,6 +30,27 @@ target:
     msg-vpn: prod
     client-username: connector
     client-password: pw
+    queue: OUT
+`
+
+// envCredWF mixes a literal MQ credential with a -env Solace credential, so the
+// docker child-env test exercises both resolution paths through the real
+// resolver (os.LookupEnv), not just literal passthrough.
+const envCredWF = `
+source:
+  mq:
+    conn-name: mqhost(1414)
+    queue-manager: QM1
+    channel: CH
+    user: app
+    password: pw
+    queue: Q.IN
+target:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: prod
+    client-username-env: SOLACE_USER
+    client-password-env: SOLACE_PASS
     queue: OUT
 `
 
@@ -108,7 +125,8 @@ func workflowDir(t *testing.T, wf string) string {
 
 // manyWorkflowsDir writes a bare env.yaml plus n distinct, valid workflow files
 // (literal passwords, so no environment is needed) into a fresh temp dir --
-// enough to exercise sharding once n exceeds validate.MaxWorkflowsPerInstance (20).
+// used to push the workflow count past validate.MaxWorkflows (20), which is
+// now a fatal cap error rather than a sharding trigger.
 func manyWorkflowsDir(t *testing.T, n int) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -137,8 +155,8 @@ target:
 
 // captureStdout redirects os.Stdout for the duration of f and returns everything
 // written. The drain runs concurrently: os.Pipe has a small buffer, so output
-// larger than it (e.g. a multi-instance config) would block the writer if we
-// read only after f() returns.
+// larger than it (e.g. a config with many workflows) would block the writer if
+// we read only after f() returns.
 func captureStdout(t *testing.T, f func()) string {
 	t.Helper()
 	old := os.Stdout
@@ -158,10 +176,31 @@ func captureStdout(t *testing.T, f func()) string {
 	return <-done
 }
 
+// captureStderr redirects os.Stderr for the duration of f and returns everything
+// written (see captureStdout for why the drain runs concurrently).
+func captureStderr(t *testing.T, f func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+	f()
+	_ = w.Close()
+	os.Stderr = old
+	return <-done
+}
+
 // ---- deploy/delete seam helpers -------------------------------------------------
 
 // fakeRunner records every invocation reaching the deploy/delete seam so tests
-// can assert the exact argv/stdin without starting a process (mirrors
+// can assert the exact argv/stdin/env without starting a process (mirrors
 // internal/runner/runner_test.go's fakeRunner).
 type fakeRunner struct {
 	calls []fakeCall
@@ -171,23 +210,21 @@ type fakeRunner struct {
 type fakeCall struct {
 	argv  []string
 	stdin string
+	env   []string
 }
 
-func (f *fakeRunner) Run(argv []string, stdin string) (string, error) {
-	f.calls = append(f.calls, fakeCall{argv: argv, stdin: stdin})
+func (f *fakeRunner) Run(c runner.Cmd) (string, error) {
+	f.calls = append(f.calls, fakeCall{argv: c.Argv, stdin: c.Stdin, env: c.Env})
 	return "out", f.err
 }
 
-// useFakeRunner swaps newRunner for a fake that captures argv instead of
-// starting a process, restoring the original on cleanup. Tests using this seam
-// mutate package-level state, so they must not run in parallel with each other.
+// useFakeRunner returns a fake that captures argv instead of starting a
+// process. Callers pass it to dispatch (not run, which always uses the
+// production runner.OS{}) so the fake reaches the deploy/delete seam as an
+// explicit argument rather than through mutable package state.
 func useFakeRunner(t *testing.T) *fakeRunner {
 	t.Helper()
-	f := &fakeRunner{}
-	old := newRunner
-	newRunner = func() runner.Runner { return f }
-	t.Cleanup(func() { newRunner = old })
-	return f
+	return &fakeRunner{}
 }
 
 // ---- a) exit-code contract -----------------------------------------------------
@@ -195,6 +232,9 @@ func useFakeRunner(t *testing.T) *fakeRunner {
 func TestExitCodeContract(t *testing.T) {
 	validDir := workflowDir(t, validWF)
 	invalidDir := workflowDir(t, invalidWF)
+	// validDir's env.yaml (bareEnv) has no kubernetes:/docker:/podman: section, so
+	// it doubles as the fixture for the "missing section" deploy/delete cases below.
+	noSectionEnv := filepath.Join(validDir, "env.yaml")
 	cases := []struct {
 		name string
 		args []string
@@ -208,13 +248,79 @@ func TestExitCodeContract(t *testing.T) {
 		{"unknown flag", []string{"generate", "config", "-nope"}, 2},
 		{"missing env file", []string{"generate", "config", "-e", filepath.Join(validDir, "does-not-exist.yaml")}, 1},
 		{"invalid spec", []string{"generate", "config", "-e", filepath.Join(invalidDir, "env.yaml")}, 1},
+		{"generate no target", []string{"generate"}, 2},
+		{"generate bogus target", []string{"generate", "bogus"}, 2},
+		{"deploy no platform", []string{"deploy"}, 2},
+		{"deploy bogus platform", []string{"deploy", "bogus"}, 2},
+		{"deploy kubernetes no section", []string{"deploy", "kubernetes", "-e", noSectionEnv}, 1},
+		{"deploy docker no section", []string{"deploy", "docker", "-e", noSectionEnv}, 1},
+		{"deploy podman no section", []string{"deploy", "podman", "-e", noSectionEnv}, 1},
+		{"delete kubernetes no section", []string{"delete", "kubernetes", "-e", noSectionEnv}, 1},
+		{"delete docker no section", []string{"delete", "docker", "-e", noSectionEnv}, 1},
+		{"delete podman no section", []string{"delete", "podman", "-e", noSectionEnv}, 1},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := run(c.args); got != c.want {
-				t.Errorf("run(%v) = %d, want %d", c.args, got, c.want)
+			f := &fakeRunner{}
+			if got := dispatch(c.args, f); got != c.want {
+				t.Errorf("dispatch(%v) = %d, want %d", c.args, got, c.want)
+			}
+			// Every case here is a rejection (bad usage or a missing deploy section):
+			// none of them should ever reach the runner.
+			if len(f.calls) != 0 {
+				t.Errorf("dispatch(%v): runner must not be invoked on a rejection, got %d calls", c.args, len(f.calls))
 			}
 		})
+	}
+}
+
+// ---- a2) command-model / dispatch drift guard ------------------------------------
+
+// TestDispatchHandlersMatchModel guards against the class of drift task 2 fixed
+// by hand (examples' default dir: the model and docs agreed while the code
+// disagreed with both): the handler maps dispatch/runGenerate/runAction actually
+// use must name exactly the verbs/targets cliVerbs (commands.go) documents, in
+// both directions -- a modeled entry with no handler, or a handler with no
+// modeled entry, must fail.
+func TestDispatchHandlersMatchModel(t *testing.T) {
+	verbNames := make(map[string]bool, len(cliVerbs))
+	for _, v := range cliVerbs {
+		verbNames[v.Name] = true
+	}
+	assertSameNameSet(t, "verb", verbNames, keySet(verbHandlers))
+	assertSameNameSet(t, "generate target", nameSet(targetNames("generate")), keySet(genTargets))
+	assertSameNameSet(t, "deploy platform", nameSet(targetNames("deploy")), keySet(actTargets))
+	assertSameNameSet(t, "delete platform", nameSet(targetNames("delete")), keySet(actTargets))
+}
+
+func nameSet(names []string) map[string]bool {
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[n] = true
+	}
+	return m
+}
+
+func keySet[V any](m map[string]V) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for k := range m {
+		out[k] = true
+	}
+	return out
+}
+
+// assertSameNameSet fails if either set contains a name the other lacks.
+func assertSameNameSet(t *testing.T, label string, modeled, handlers map[string]bool) {
+	t.Helper()
+	for name := range modeled {
+		if !handlers[name] {
+			t.Errorf("%s %q is modeled (commands.go) but has no handler", label, name)
+		}
+	}
+	for name := range handlers {
+		if !modeled[name] {
+			t.Errorf("%s handler %q has no modeled (commands.go) entry", label, name)
+		}
 	}
 }
 
@@ -248,43 +354,33 @@ func TestGenerateConfigStdoutAndFileMatch(t *testing.T) {
 	}
 }
 
-// ---- c/d) sharded generate ------------------------------------------------------
+// ---- c) workflow count cap -------------------------------------------------------
 
-func TestGenerateConfigShardedFiles(t *testing.T) {
-	dir := manyWorkflowsDir(t, 21) // > MaxWorkflowsPerInstance (20) -> 2 shards
+// TestGenerateConfigWorkflowCapExceeded pins the new hard-validation behavior:
+// a folder with more than validate.MaxWorkflows (20) workflows is a fatal error
+// (checkWorkflowCount), not something the tool splits across instances, and
+// generate config must write no output file at all in that case.
+func TestGenerateConfigWorkflowCapExceeded(t *testing.T) {
+	dir := manyWorkflowsDir(t, 21) // > MaxWorkflows (20)
 	outDir := t.TempDir()          // outside the env dir, which the scanner reads wholesale
 	out := filepath.Join(outDir, "out.yml")
-	if code := run([]string{"generate", "config", "-e", filepath.Join(dir, "env.yaml"), "-o", out}); code != 0 {
-		t.Fatalf("exit=%d", code)
-	}
-	for _, f := range []string{"out-1.yml", "out-2.yml"} {
-		if _, err := os.Stat(filepath.Join(outDir, f)); err != nil {
-			t.Errorf("expected %s to be written: %v", f, err)
-		}
-	}
-	// emitConfigs' sharded path never writes the unsuffixed name.
-	if _, err := os.Stat(out); !os.IsNotExist(err) {
-		t.Errorf("unsuffixed %s should not be written when sharded", out)
-	}
-}
 
-func TestGenerateConfigShardedStdout(t *testing.T) {
-	dir := manyWorkflowsDir(t, 21)
 	var code int
-	stdout := captureStdout(t, func() {
-		code = run([]string{"generate", "config", "-e", filepath.Join(dir, "env.yaml")})
+	stderr := captureStderr(t, func() {
+		code = run([]string{"generate", "config", "-e", filepath.Join(dir, "env.yaml"), "-o", out})
 	})
-	if code != 0 {
-		t.Fatalf("exit=%d", code)
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
 	}
-	for _, w := range []string{"CONNECTOR INSTANCE 1 OF 2", "CONNECTOR INSTANCE 2 OF 2"} {
-		if !strings.Contains(stdout, w) {
-			t.Errorf("stdout banner missing %q", w)
-		}
+	if !strings.Contains(stderr, "21 workflows found") || !strings.Contains(stderr, "at most 20") {
+		t.Errorf("stderr missing cap error, got:\n%s", stderr)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("no output file should be written when the workflow cap is exceeded, stat err=%v", err)
 	}
 }
 
-// ---- e) flags before/after the positional target --------------------------------
+// ---- d) flags before/after the positional target --------------------------------
 
 func TestGenerateFlagsBeforeAndAfterPositional(t *testing.T) {
 	dir := workflowDir(t, validWF)
@@ -311,107 +407,7 @@ func TestGenerateFlagsBeforeAndAfterPositional(t *testing.T) {
 	}
 }
 
-// ---- f) suffixBeforeExt ---------------------------------------------------------
-
-func TestSuffixBeforeExt(t *testing.T) {
-	cases := []struct {
-		in   string
-		n    int
-		want string
-	}{
-		{"out.yml", 1, "out-1.yml"},
-		{"out", 1, "out-1"},
-		{"a.tar.gz", 1, "a.tar-1.gz"},
-		// filepath.Ext(".env") returns ".env" (the leading dot IS the extension
-		// marker to Ext, dot-files have no "base name"), so the whole name is
-		// trimmed and the suffix lands in front of it. Pinned current behavior --
-		// do not change suffixBeforeExt to "fix" this.
-		{".env", 1, "-1.env"},
-	}
-	for _, c := range cases {
-		if got := suffixBeforeExt(c.in, c.n); got != c.want {
-			t.Errorf("suffixBeforeExt(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
-		}
-	}
-}
-
-// ---- g) writeCredEnvFile ---------------------------------------------------------
-
-func TestWriteCredEnvFile(t *testing.T) {
-	t.Run("empty name writes nothing", func(t *testing.T) {
-		dir := t.TempDir()
-		creds := &spec.CredentialsSecret{Create: &spec.CredCreate{Source: spec.SourceEnv, Variables: []string{"X"}}}
-		if err := writeCredEnvFile(dir, "", creds, gen.Resolver{}); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(entries) != 0 {
-			t.Errorf("expected no file written, got %v", entries)
-		}
-	})
-
-	t.Run("resolver error propagates and writes nothing", func(t *testing.T) {
-		dir := t.TempDir()
-		creds := &spec.CredentialsSecret{Create: &spec.CredCreate{Source: spec.SourceEnv, Variables: []string{"MISSING"}}}
-		res := gen.Resolver{Env: func(string) (string, bool) { return "", false }}
-		if err := writeCredEnvFile(dir, "creds.env", creds, res); err == nil {
-			t.Fatal("expected an error for an unset credentials variable")
-		}
-		if _, err := os.Stat(filepath.Join(dir, "creds.env")); !os.IsNotExist(err) {
-			t.Error("no file should be written when the resolver errors")
-		}
-	})
-
-	t.Run("nil kvs leaves an existing env-file untouched", func(t *testing.T) {
-		dir := t.TempDir()
-		write(t, dir, "existing.env", "PRESERVE=1\n")
-		// Create == nil (Existing set instead) -> gen.ResolveCredentials returns a
-		// nil kvs slice, the "existing env-file" case.
-		creds := &spec.CredentialsSecret{Existing: "existing.env"}
-		if err := writeCredEnvFile(dir, "existing.env", creds, gen.Resolver{}); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		b, err := os.ReadFile(filepath.Join(dir, "existing.env"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(b) != "PRESERVE=1\n" {
-			t.Errorf("existing env-file was modified: %q", b)
-		}
-	})
-
-	t.Run("happy path writes ordered KVs at mode 0600", func(t *testing.T) {
-		dir := t.TempDir()
-		creds := &spec.CredentialsSecret{Create: &spec.CredCreate{Source: spec.SourceEnv, Variables: []string{"A", "B"}}}
-		vals := map[string]string{"A": "1", "B": "2"}
-		res := gen.Resolver{Env: func(k string) (string, bool) { v, ok := vals[k]; return v, ok }}
-		if err := writeCredEnvFile(dir, "creds.env", creds, res); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		p := filepath.Join(dir, "creds.env")
-		b, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(b) != "A=1\nB=2\n" {
-			t.Errorf("content = %q, want %q", b, "A=1\nB=2\n")
-		}
-		if runtime.GOOS != "windows" {
-			fi, err := os.Stat(p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if fi.Mode().Perm() != 0o600 {
-				t.Errorf("mode = %v, want 0600", fi.Mode().Perm())
-			}
-		}
-	})
-}
-
-// ---- h) emit write error via run() -----------------------------------------------
+// ---- e) emit write error via run() -----------------------------------------------
 
 func TestGenerateConfigEmitWriteError(t *testing.T) {
 	dir := workflowDir(t, validWF)
@@ -421,7 +417,7 @@ func TestGenerateConfigEmitWriteError(t *testing.T) {
 	}
 }
 
-// ---- i) loadEnv path resolution --------------------------------------------------
+// ---- f) loadEnv path resolution --------------------------------------------------
 
 func TestLoadEnvWorkflowsDirRelativeToEnvFile(t *testing.T) {
 	base := t.TempDir()
@@ -460,10 +456,10 @@ func TestLoadEnvExcludesEnvFileFromWorkflowSet(t *testing.T) {
 	}
 }
 
-// ---- j) deploy/delete via the runner seam ----------------------------------------
+// ---- g) deploy/delete via the runner seam ----------------------------------------
 //
-// These tests swap the package-level newRunner var, so none of them call
-// t.Parallel() and they must not run concurrently with each other.
+// These tests call dispatch directly (not run) so they can pass a fakeRunner
+// explicitly instead of mutating package-level state.
 
 func TestDeployKubernetesSeamHappyPath(t *testing.T) {
 	f := useFakeRunner(t)
@@ -471,7 +467,7 @@ func TestDeployKubernetesSeamHappyPath(t *testing.T) {
 	write(t, dir, "env.yaml", kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := run([]string{"deploy", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}); code != 0 {
+	if code := dispatch([]string{"deploy", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	if len(f.calls) != 1 {
@@ -492,7 +488,7 @@ func TestDeleteKubernetesSeamHappyPath(t *testing.T) {
 	write(t, dir, "env.yaml", kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := run([]string{"delete", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}); code != 0 {
+	if code := dispatch([]string{"delete", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	if len(f.calls) != 1 {
@@ -513,7 +509,7 @@ func TestDeployKubernetesSeamRejectsUnsafeCommand(t *testing.T) {
 	write(t, dir, "env.yaml", kubeEnvUnsafeCommand)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := run([]string{"deploy", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}); code != 1 {
+	if code := dispatch([]string{"deploy", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
 		t.Fatalf("unsafe kubernetes.command should exit 1, got %d", code)
 	}
 	if len(f.calls) != 0 {
@@ -521,7 +517,7 @@ func TestDeployKubernetesSeamRejectsUnsafeCommand(t *testing.T) {
 	}
 }
 
-// ---- k) validate subcommand -------------------------------------------------------
+// ---- h) validate subcommand -------------------------------------------------------
 
 func TestValidateOKAndErrors(t *testing.T) {
 	validDir := workflowDir(t, validWF)
@@ -534,9 +530,18 @@ func TestValidateOKAndErrors(t *testing.T) {
 	}
 }
 
-// ---- l) examples CLI contract ------------------------------------------------------
+// ---- i) examples CLI contract ------------------------------------------------------
 
 func TestExamplesWriteSkipForceThenGenerate(t *testing.T) {
+	// The shipped example's connections/workflows/tls/security all reference
+	// their credentials via -env (never a literal), so generating it for real
+	// needs every one of those host variables set.
+	for _, v := range []string{
+		"SOL_PASSWORD", "MQ_ARCHIVE_PASSWORD", "MQ_CORE_PASSWORD", "EDGE_SOL_PASSWORD",
+		"TRUSTSTORE_PASSWORD", "KEYSTORE_PASSWORD", "HEALTHCHECK_PASSWORD",
+	} {
+		t.Setenv(v, "x")
+	}
 	dir := filepath.Join(t.TempDir(), "ex")
 	if code := run([]string{"examples", dir}); code != 0 {
 		t.Fatalf("first exit=%d", code)
@@ -571,8 +576,8 @@ func TestExamplesDefaultDir(t *testing.T) {
 	if code := run([]string{"examples"}); code != 0 {
 		t.Fatalf("default-dir exit=%d", code)
 	}
-	if _, err := os.Stat(filepath.Join(tmp, "examples", "workflow-0.yaml")); err != nil {
-		t.Errorf("default dir 'examples' not created: %v", err)
+	if _, err := os.Stat(filepath.Join(tmp, "workflow-0.yaml")); err != nil {
+		t.Errorf("default dir '.' (current directory) not written to: %v", err)
 	}
 }
 
@@ -642,8 +647,9 @@ func TestGenerateDockerToFile(t *testing.T) {
 	}
 }
 
-// TestGeneratePodmanQuadletStdout drives genPodman's quadlet arm, which previews
-// every unit through joinUnits' filename banner.
+// TestGeneratePodmanQuadletStdout drives genPodman's quadlet arm, which now
+// prints the single rendered unit's content directly (no per-unit banner --
+// there is only ever one instance).
 func TestGeneratePodmanQuadletStdout(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", podmanEnv(t.TempDir()))
@@ -655,24 +661,10 @@ func TestGeneratePodmanQuadletStdout(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
-	if !strings.Contains(stdout, "# === solmq-conn.container ===") {
-		t.Errorf("quadlet preview missing unit banner:\n%s", stdout)
-	}
-}
-
-// TestJoinUnits pins the preview format directly: banner per unit, blank-line
-// separator only between units.
-func TestJoinUnits(t *testing.T) {
-	units := []podmangen.Unit{
-		{Filename: "a.container", Content: "A\n"},
-		{Filename: "b.container", Content: "B\n"},
-	}
-	want := "# === a.container ===\nA\n\n# === b.container ===\nB\n"
-	if got := joinUnits(units); got != want {
-		t.Errorf("joinUnits = %q, want %q", got, want)
-	}
-	if got := joinUnits(units[:1]); got != "# === a.container ===\nA\n" {
-		t.Errorf("single unit must have no separator, got %q", got)
+	for _, w := range []string{"[Container]", "ContainerName=solmq-conn"} {
+		if !strings.Contains(stdout, w) {
+			t.Errorf("quadlet preview missing %q:\n%s", w, stdout)
+		}
 	}
 }
 
@@ -684,12 +676,14 @@ func TestDeployDockerSeamWritesComposeAndRuns(t *testing.T) {
 	write(t, dir, "env.yaml", dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := run([]string{"deploy", "docker", "-e", filepath.Join(dir, "env.yaml")}); code != 0 {
+	if code := dispatch([]string{"deploy", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	compose := filepath.Join(dir, "docker-compose.yml")
-	if _, err := os.Stat(compose); err != nil {
-		t.Fatalf("compose file not written: %v", err)
+	// The compose file is scratch, regenerated by every deploy/delete, and is
+	// removed once a deploy succeeds.
+	if _, err := os.Stat(compose); !os.IsNotExist(err) {
+		t.Fatalf("compose file should be removed after a successful deploy, stat err=%v", err)
 	}
 	if len(f.calls) != 1 {
 		t.Fatalf("want 1 runner call, got %d", len(f.calls))
@@ -700,13 +694,62 @@ func TestDeployDockerSeamWritesComposeAndRuns(t *testing.T) {
 	}
 }
 
+// TestDeployDockerSeamComposeFileSurvivesFailedRun covers the other half of the
+// compose file's lifecycle: a half-started stack (docker compose up failed
+// partway through) still needs the compose file on disk to `down` with, so a
+// failed run must leave it in place instead of cleaning it up.
+func TestDeployDockerSeamComposeFileSurvivesFailedRun(t *testing.T) {
+	f := useFakeRunner(t)
+	f.err = fmt.Errorf("boom")
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", dockerEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	if code := dispatch([]string{"deploy", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
+		t.Fatalf("exit=%d, want 1 for a failed deploy", code)
+	}
+	compose := filepath.Join(dir, "docker-compose.yml")
+	if _, err := os.Stat(compose); err != nil {
+		t.Fatalf("compose file must survive a failed run: %v", err)
+	}
+}
+
+// TestDeployDockerSeamChildEnvCarriesCredentials asserts the credential values
+// reach the docker child process's environment as STABLE=value pairs (never in
+// argv or on disk), covering both a literal credential (mq) and a -env one
+// (solace) resolved from the real process environment.
+func TestDeployDockerSeamChildEnvCarriesCredentials(t *testing.T) {
+	t.Setenv("SOLACE_USER", "envuser")
+	t.Setenv("SOLACE_PASS", "envpass")
+	f := useFakeRunner(t)
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", dockerEnv)
+	write(t, dir, "10.yaml", envCredWF)
+
+	if code := dispatch([]string{"deploy", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("want 1 runner call, got %d", len(f.calls))
+	}
+	want := []string{
+		"MQ_CONN_1_USER=app",
+		"MQ_CONN_1_PASSWORD=pw",
+		"SOL_CONN_1_CLIENT_USERNAME=envuser",
+		"SOL_CONN_1_CLIENT_PASSWORD=envpass",
+	}
+	if !reflect.DeepEqual(f.calls[0].env, want) {
+		t.Errorf("child env = %v, want %v", f.calls[0].env, want)
+	}
+}
+
 func TestDeleteDockerSeam(t *testing.T) {
 	f := useFakeRunner(t)
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := run([]string{"delete", "docker", "-e", filepath.Join(dir, "env.yaml")}); code != 0 {
+	if code := dispatch([]string{"delete", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	want := []string{"docker", "compose", "-f", filepath.Join(dir, "docker-compose.yml"), "down"}
@@ -722,17 +765,28 @@ func TestDeployPodmanSeamWritesUnitsAndStarts(t *testing.T) {
 	write(t, dir, "env.yaml", podmanEnv(quadletDir))
 	write(t, dir, "10.yaml", validWF)
 
-	if code := run([]string{"deploy", "podman", "-e", filepath.Join(dir, "env.yaml")}); code != 0 {
+	if code := dispatch([]string{"deploy", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
-	// The app yaml and the quadlet unit land in the (overridden) quadlet dir;
-	// no credential env-file is written when there is no secrets section.
+	// The app yaml and the quadlet unit land in the (overridden) quadlet dir.
 	for _, name := range []string{"solmq-conn-application.yml", "solmq-conn.container"} {
 		if _, err := os.Stat(filepath.Join(quadletDir, name)); err != nil {
 			t.Errorf("%s not written to quadlet dir: %v", name, err)
 		}
 	}
+	// validWF's four credentials (mq user/password, solace
+	// client-username/client-password) must each be stored (secret rm --ignore,
+	// then secret create) BEFORE daemon-reload/start: the unit being started
+	// references these secrets by name, so they must already exist.
 	wantCalls := [][]string{
+		{"podman", "secret", "rm", "--ignore", "solmq-conn-MQ_CONN_1_USER"},
+		{"podman", "secret", "create", "solmq-conn-MQ_CONN_1_USER", "-"},
+		{"podman", "secret", "rm", "--ignore", "solmq-conn-MQ_CONN_1_PASSWORD"},
+		{"podman", "secret", "create", "solmq-conn-MQ_CONN_1_PASSWORD", "-"},
+		{"podman", "secret", "rm", "--ignore", "solmq-conn-SOL_CONN_1_CLIENT_USERNAME"},
+		{"podman", "secret", "create", "solmq-conn-SOL_CONN_1_CLIENT_USERNAME", "-"},
+		{"podman", "secret", "rm", "--ignore", "solmq-conn-SOL_CONN_1_CLIENT_PASSWORD"},
+		{"podman", "secret", "create", "solmq-conn-SOL_CONN_1_CLIENT_PASSWORD", "-"},
 		{"systemctl", "--user", "daemon-reload"},
 		{"systemctl", "--user", "start", "solmq-conn.service"},
 	}
@@ -757,12 +811,19 @@ func TestDeletePodmanSeamStopsRemovesReloads(t *testing.T) {
 	write(t, quadletDir, "solmq-conn.container", "[Container]\n")
 	write(t, quadletDir, "solmq-conn-application.yml", "x\n")
 
-	if code := run([]string{"delete", "podman", "-e", filepath.Join(dir, "env.yaml")}); code != 0 {
+	if code := dispatch([]string{"delete", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
+	// Secrets are removed from podman's store only AFTER the unit is stopped and
+	// the generator reloaded, mirroring deploy's create-before-start ordering in
+	// reverse: a failure removing them still surfaces (see main.go's
+	// podmanDelete), but the units referencing them are gone first.
 	wantCalls := [][]string{
 		{"systemctl", "--user", "stop", "solmq-conn.service"},
 		{"systemctl", "--user", "daemon-reload"},
+		{"podman", "secret", "rm", "--ignore",
+			"solmq-conn-MQ_CONN_1_USER", "solmq-conn-MQ_CONN_1_PASSWORD",
+			"solmq-conn-SOL_CONN_1_CLIENT_USERNAME", "solmq-conn-SOL_CONN_1_CLIENT_PASSWORD"},
 	}
 	if len(f.calls) != len(wantCalls) {
 		t.Fatalf("want %d runner calls, got %+v", len(wantCalls), f.calls)
