@@ -125,8 +125,8 @@
     "semantic_hash": ""
   },
   "internal/validate/validate.go": {
-    "mtime": 1786590586.4368398,
-    "ast_hash": "cf645f5a08684f91f81b30dce91a2f51",
+    "mtime": 1786614868.8571346,
+    "ast_hash": "85621fe11c2394eb799c135ef27ebc10",
     "semantic_hash": ""
   },
   "internal/validate/validate_extra_test.go": {
@@ -175,13 +175,13 @@
     "semantic_hash": ""
   },
   "userguide.md": {
-    "mtime": 1786613747.7831924,
-    "ast_hash": "de72749bed21edcb45ee30b0ad80a8cd",
+    "mtime": 1786614891.839342,
+    "ast_hash": "d6b3e4f977619a15827ca6f2f2bfd4d4",
     "semantic_hash": ""
   },
   "doc.md": {
-    "mtime": 1786578371.9451382,
-    "ast_hash": "3125716d66e0ffbce940681d83421023",
+    "mtime": 1786614872.2637763,
+    "ast_hash": "35b413018c3ea8830d1490d08827ffed",
     "semantic_hash": ""
   },
   "internal/examples/files/workflow-2.yaml": {

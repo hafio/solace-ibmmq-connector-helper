@@ -202,9 +202,15 @@ func captureStderr(t *testing.T, f func()) string {
 // fakeRunner records every invocation reaching the deploy/delete seam so tests
 // can assert the exact argv/stdin/env without starting a process (mirrors
 // internal/runner/runner_test.go's fakeRunner).
+//
+// err, when set, fails every call from index failFrom onward (0 by default, so
+// it fails from the very first call -- the preflight probe, now that one always
+// precedes the mutating command). A test that needs the probe to succeed but
+// the real deploy/delete call to fail sets failFrom to the index of that call.
 type fakeRunner struct {
-	calls []fakeCall
-	err   error
+	calls    []fakeCall
+	err      error
+	failFrom int
 }
 
 type fakeCall struct {
@@ -214,8 +220,12 @@ type fakeCall struct {
 }
 
 func (f *fakeRunner) Run(c runner.Cmd) (string, error) {
+	idx := len(f.calls)
 	f.calls = append(f.calls, fakeCall{argv: c.Argv, stdin: c.Stdin, env: c.Env})
-	return "out", f.err
+	if f.err != nil && idx >= f.failFrom {
+		return "out", f.err
+	}
+	return "out", nil
 }
 
 // useFakeRunner returns a fake that captures argv instead of starting a
@@ -470,15 +480,21 @@ func TestDeployKubernetesSeamHappyPath(t *testing.T) {
 	if code := dispatch([]string{"deploy", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
-	if len(f.calls) != 1 {
-		t.Fatalf("want 1 call to the runner, got %d", len(f.calls))
+	// Call 0 is the read-only preflight probe (runner.Preflight), which always
+	// precedes the mutating apply/delete call.
+	if len(f.calls) != 2 {
+		t.Fatalf("want 2 calls to the runner (preflight, apply), got %d: %+v", len(f.calls), f.calls)
+	}
+	wantPreflight := []string{"kubectl", "auth", "can-i", "create", "deployment", "--namespace", "solace-connectors"}
+	if !reflect.DeepEqual(f.calls[0].argv, wantPreflight) {
+		t.Errorf("preflight argv = %v, want %v", f.calls[0].argv, wantPreflight)
 	}
 	want := []string{"kubectl", "apply", "-f", "-"}
-	if !reflect.DeepEqual(f.calls[0].argv, want) {
-		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	if !reflect.DeepEqual(f.calls[1].argv, want) {
+		t.Errorf("argv = %v, want %v", f.calls[1].argv, want)
 	}
-	if !strings.Contains(f.calls[0].stdin, "kind: Deployment") {
-		t.Errorf("manifest on stdin missing kind: Deployment:\n%s", f.calls[0].stdin)
+	if !strings.Contains(f.calls[1].stdin, "kind: Deployment") {
+		t.Errorf("manifest on stdin missing kind: Deployment:\n%s", f.calls[1].stdin)
 	}
 }
 
@@ -491,12 +507,16 @@ func TestDeleteKubernetesSeamHappyPath(t *testing.T) {
 	if code := dispatch([]string{"delete", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
-	if len(f.calls) != 1 {
-		t.Fatalf("want 1 call to the runner, got %d", len(f.calls))
+	if len(f.calls) != 2 {
+		t.Fatalf("want 2 calls to the runner (preflight, delete), got %d: %+v", len(f.calls), f.calls)
+	}
+	wantPreflight := []string{"kubectl", "auth", "can-i", "delete", "deployment", "--namespace", "solace-connectors"}
+	if !reflect.DeepEqual(f.calls[0].argv, wantPreflight) {
+		t.Errorf("preflight argv = %v, want %v", f.calls[0].argv, wantPreflight)
 	}
 	want := []string{"kubectl", "delete", "-f", "-"}
-	if !reflect.DeepEqual(f.calls[0].argv, want) {
-		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	if !reflect.DeepEqual(f.calls[1].argv, want) {
+		t.Errorf("argv = %v, want %v", f.calls[1].argv, want)
 	}
 }
 
@@ -612,6 +632,25 @@ podman:
 `, filepath.ToSlash(quadletDir))
 }
 
+// podmanEnvSudo mirrors podmanEnv but with a chained `sudo podman` command:
+// rejected outright (sudo is not on the podman allowlist) unless the caller
+// approves it via --allow-command sudo, which is the escape-hatch scenario
+// the flag exists for.
+func podmanEnvSudo(quadletDir string) string {
+	return fmt.Sprintf(`
+podman:
+  command: sudo podman
+  image: img:1
+  name: solmq-conn
+  ports:
+    - 8090
+  mode: quadlet
+  quadlet:
+    scope: user
+    dir: %s
+`, filepath.ToSlash(quadletDir))
+}
+
 func TestGenerateKubernetesStdout(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", kubeEnv)
@@ -685,22 +724,30 @@ func TestDeployDockerSeamWritesComposeAndRuns(t *testing.T) {
 	if _, err := os.Stat(compose); !os.IsNotExist(err) {
 		t.Fatalf("compose file should be removed after a successful deploy, stat err=%v", err)
 	}
-	if len(f.calls) != 1 {
-		t.Fatalf("want 1 runner call, got %d", len(f.calls))
+	// Call 0 is the read-only preflight probe (runner.Preflight), which runs
+	// before the compose file is even written.
+	if len(f.calls) != 2 {
+		t.Fatalf("want 2 runner calls (preflight, up), got %d: %+v", len(f.calls), f.calls)
+	}
+	if want := []string{"docker", "info"}; !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("preflight argv = %v, want %v", f.calls[0].argv, want)
 	}
 	want := []string{"docker", "compose", "-f", compose, "up", "-d"}
-	if !reflect.DeepEqual(f.calls[0].argv, want) {
-		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	if !reflect.DeepEqual(f.calls[1].argv, want) {
+		t.Errorf("argv = %v, want %v", f.calls[1].argv, want)
 	}
 }
 
 // TestDeployDockerSeamComposeFileSurvivesFailedRun covers the other half of the
 // compose file's lifecycle: a half-started stack (docker compose up failed
 // partway through) still needs the compose file on disk to `down` with, so a
-// failed run must leave it in place instead of cleaning it up.
+// failed run must leave it in place instead of cleaning it up. failFrom: 1
+// lets the preflight probe (call 0) succeed so the compose file is actually
+// written, and fails only the real `up` call (call 1).
 func TestDeployDockerSeamComposeFileSurvivesFailedRun(t *testing.T) {
 	f := useFakeRunner(t)
 	f.err = fmt.Errorf("boom")
+	f.failFrom = 1
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", dockerEnv)
 	write(t, dir, "10.yaml", validWF)
@@ -729,8 +776,10 @@ func TestDeployDockerSeamChildEnvCarriesCredentials(t *testing.T) {
 	if code := dispatch([]string{"deploy", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
-	if len(f.calls) != 1 {
-		t.Fatalf("want 1 runner call, got %d", len(f.calls))
+	// Call 0 is the preflight probe (no Env); call 1 is the real `up`, which
+	// carries the resolved credentials.
+	if len(f.calls) != 2 {
+		t.Fatalf("want 2 runner calls, got %d: %+v", len(f.calls), f.calls)
 	}
 	want := []string{
 		"MQ_CONN_1_USER=app",
@@ -738,8 +787,8 @@ func TestDeployDockerSeamChildEnvCarriesCredentials(t *testing.T) {
 		"SOL_CONN_1_CLIENT_USERNAME=envuser",
 		"SOL_CONN_1_CLIENT_PASSWORD=envpass",
 	}
-	if !reflect.DeepEqual(f.calls[0].env, want) {
-		t.Errorf("child env = %v, want %v", f.calls[0].env, want)
+	if !reflect.DeepEqual(f.calls[1].env, want) {
+		t.Errorf("child env = %v, want %v", f.calls[1].env, want)
 	}
 }
 
@@ -752,9 +801,17 @@ func TestDeleteDockerSeam(t *testing.T) {
 	if code := dispatch([]string{"delete", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
-	want := []string{"docker", "compose", "-f", filepath.Join(dir, "docker-compose.yml"), "down"}
-	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) {
-		t.Errorf("calls = %+v, want single %v", f.calls, want)
+	wantCalls := [][]string{
+		{"docker", "info"},
+		{"docker", "compose", "-f", filepath.Join(dir, "docker-compose.yml"), "down"},
+	}
+	if len(f.calls) != len(wantCalls) {
+		t.Fatalf("calls = %+v, want %v", f.calls, wantCalls)
+	}
+	for i, w := range wantCalls {
+		if !reflect.DeepEqual(f.calls[i].argv, w) {
+			t.Errorf("call %d argv = %v, want %v", i, f.calls[i].argv, w)
+		}
 	}
 }
 
@@ -777,8 +834,10 @@ func TestDeployPodmanSeamWritesUnitsAndStarts(t *testing.T) {
 	// validWF's four credentials (mq user/password, solace
 	// client-username/client-password) must each be stored (secret rm --ignore,
 	// then secret create) BEFORE daemon-reload/start: the unit being started
-	// references these secrets by name, so they must already exist.
+	// references these secrets by name, so they must already exist. Call 0 is
+	// the read-only preflight probe, which runs before any of that.
 	wantCalls := [][]string{
+		{"podman", "info"},
 		{"podman", "secret", "rm", "--ignore", "solmq-conn-MQ_CONN_1_USER"},
 		{"podman", "secret", "create", "solmq-conn-MQ_CONN_1_USER", "-"},
 		{"podman", "secret", "rm", "--ignore", "solmq-conn-MQ_CONN_1_PASSWORD"},
@@ -817,8 +876,10 @@ func TestDeletePodmanSeamStopsRemovesReloads(t *testing.T) {
 	// Secrets are removed from podman's store only AFTER the unit is stopped and
 	// the generator reloaded, mirroring deploy's create-before-start ordering in
 	// reverse: a failure removing them still surfaces (see main.go's
-	// podmanDelete), but the units referencing them are gone first.
+	// podmanDelete), but the units referencing them are gone first. Call 0 is
+	// the read-only preflight probe, which runs before any of that.
 	wantCalls := [][]string{
+		{"podman", "info"},
 		{"systemctl", "--user", "stop", "solmq-conn.service"},
 		{"systemctl", "--user", "daemon-reload"},
 		{"podman", "secret", "rm", "--ignore",
@@ -837,6 +898,173 @@ func TestDeletePodmanSeamStopsRemovesReloads(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(quadletDir, name)); !os.IsNotExist(err) {
 			t.Errorf("%s should be removed by delete", name)
 		}
+	}
+}
+
+// ---- j) --allow-command flag --------------------------------------------------
+
+// TestAllowCommandFlagBadValueExitsUsageError covers the flag's own input
+// validation (SafeToken-clean, no path separator) independent of
+// CheckDeployCommand: a bad value must fail fs.Parse (exit 2, the usage-error
+// contract) before anything reaches loadEnv/validate/the runner.
+func TestAllowCommandFlagBadValueExitsUsageError(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", kubeEnv)
+	write(t, dir, "10.yaml", validWF)
+	envPath := filepath.Join(dir, "env.yaml")
+
+	cases := []struct {
+		name string
+		val  string
+	}{
+		{"path", "/usr/bin/sudo"},
+		{"unsafe character", "sudo;rm"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeRunner{}
+			code := dispatch([]string{"deploy", "kubernetes", "-e", envPath, "--allow-command", c.val}, f)
+			if code != 2 {
+				t.Errorf("--allow-command %q: exit=%d, want 2", c.val, code)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("--allow-command %q: runner must not be invoked, got %d calls", c.val, len(f.calls))
+			}
+		})
+	}
+}
+
+// TestAllowCommandFlagRejectedOnGenerateAndValidate pins --allow-command as
+// deploy/delete-only: generate and validate never register the flag, so
+// passing it is an unknown-flag usage error, same as any other undefined flag.
+func TestAllowCommandFlagRejectedOnGenerateAndValidate(t *testing.T) {
+	dir := workflowDir(t, validWF)
+	envPath := filepath.Join(dir, "env.yaml")
+	cases := [][]string{
+		{"generate", "config", "-e", envPath, "--allow-command", "sudo"},
+		{"validate", "-e", envPath, "--allow-command", "sudo"},
+	}
+	for _, args := range cases {
+		if code := run(args); code != 2 {
+			t.Errorf("%v: exit=%d, want 2 (flag not defined on this verb)", args, code)
+		}
+	}
+}
+
+// TestAllowCommandFlagRepeatableThreadsToRunner is the threading assertion:
+// a chained `sudo podman` command: fails before the runner without the flag,
+// and reaches every runner call (preflight, secrets) once --allow-command sudo
+// approves it. Passing the flag twice with the same value also covers that it
+// is genuinely repeatable (flag.Value.Set called more than once).
+func TestAllowCommandFlagRepeatableThreadsToRunner(t *testing.T) {
+	quadletDir := t.TempDir()
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", podmanEnvSudo(quadletDir))
+	write(t, dir, "10.yaml", validWF)
+	envPath := filepath.Join(dir, "env.yaml")
+
+	fReject := useFakeRunner(t)
+	if code := dispatch([]string{"deploy", "podman", "-e", envPath}, fReject); code != 1 {
+		t.Fatalf("without --allow-command: exit=%d, want 1", code)
+	}
+	if len(fReject.calls) != 0 {
+		t.Fatalf("without --allow-command: runner must not be invoked, got %d calls", len(fReject.calls))
+	}
+
+	fAccept := useFakeRunner(t)
+	args := []string{"deploy", "podman", "-e", envPath, "--allow-command", "sudo", "--allow-command", "sudo"}
+	if code := dispatch(args, fAccept); code != 0 {
+		t.Fatalf("with --allow-command sudo: exit=%d, want 0", code)
+	}
+	if len(fAccept.calls) == 0 {
+		t.Fatalf("with --allow-command sudo: expected the runner to be reached")
+	}
+	// The preflight probe runs first, resolving argv[0] "sudo" via the flag and
+	// "podman" as its own allowlisted chained token.
+	if want := []string{"sudo", "podman", "info"}; !reflect.DeepEqual(fAccept.calls[0].argv, want) {
+		t.Errorf("preflight argv = %v, want %v", fAccept.calls[0].argv, want)
+	}
+	foundSecretCall := false
+	for _, c := range fAccept.calls {
+		if len(c.argv) >= 3 && c.argv[0] == "sudo" && c.argv[1] == "podman" && c.argv[2] == "secret" {
+			foundSecretCall = true
+			break
+		}
+	}
+	if !foundSecretCall {
+		t.Errorf("expected a podman secret call prefixed with [sudo podman secret ...], got %+v", fAccept.calls)
+	}
+}
+
+// ---- k) preflight ordering -----------------------------------------------------
+//
+// These pin runner.Preflight's placement: after generate/validate, before any
+// file write or mutating exec. A failing probe must stop the action with
+// nothing written to disk and nothing beyond the probe itself reaching the
+// runner.
+
+func TestDeployKubernetesPreflightFailureStopsBeforeApply(t *testing.T) {
+	f := useFakeRunner(t)
+	f.err = fmt.Errorf("not logged in")
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", kubeEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	if code := dispatch([]string{"deploy", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("want exactly 1 runner call (the preflight probe), got %d: %+v", len(f.calls), f.calls)
+	}
+	want := []string{"kubectl", "auth", "can-i", "create", "deployment", "--namespace", "solace-connectors"}
+	if !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("preflight argv = %v, want %v", f.calls[0].argv, want)
+	}
+}
+
+func TestDeployDockerPreflightFailureStopsBeforeWrite(t *testing.T) {
+	f := useFakeRunner(t)
+	f.err = fmt.Errorf("daemon unreachable")
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", dockerEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	if code := dispatch([]string{"deploy", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	compose := filepath.Join(dir, "docker-compose.yml")
+	if _, err := os.Stat(compose); !os.IsNotExist(err) {
+		t.Errorf("compose file must not be written when preflight fails, stat err=%v", err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("want exactly 1 runner call (the preflight probe), got %d: %+v", len(f.calls), f.calls)
+	}
+	if want := []string{"docker", "info"}; !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("preflight argv = %v, want %v", f.calls[0].argv, want)
+	}
+}
+
+func TestDeployPodmanPreflightFailureStopsBeforeWrite(t *testing.T) {
+	f := useFakeRunner(t)
+	f.err = fmt.Errorf("podman unreachable")
+	quadletDir := t.TempDir()
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", podmanEnv(quadletDir))
+	write(t, dir, "10.yaml", validWF)
+
+	if code := dispatch([]string{"deploy", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	for _, name := range []string{"solmq-conn-application.yml", "solmq-conn.container"} {
+		if _, err := os.Stat(filepath.Join(quadletDir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s must not be written when preflight fails", name)
+		}
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("want exactly 1 runner call (the preflight probe), got %d: %+v", len(f.calls), f.calls)
+	}
+	if want := []string{"podman", "info"}; !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("preflight argv = %v, want %v", f.calls[0].argv, want)
 	}
 }
 

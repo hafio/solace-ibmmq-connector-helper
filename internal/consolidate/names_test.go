@@ -1,6 +1,7 @@
 package consolidate
 
 import (
+	"regexp"
 	"testing"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -88,6 +89,64 @@ func TestBinderFieldsCarryStablePlaceholders(t *testing.T) {
 		}
 		if got != w {
 			t.Errorf("Secrets[%s] = %+v, want %+v", got.Stable, got, w)
+		}
+	}
+}
+
+// stableSecretName is every generated-secret-name shape the connector emits:
+// stableName(binder, suffix), securityUserPasswordName(user), and the fixed
+// truststore/keystore/leader-election constants. All fold through stableToken,
+// so config-controlled text (a connection name, a security-user name) can only
+// ever land in the run of characters before the fixed suffix -- never replace
+// it -- but this pins the actual suffix vocabulary in use today (MQBinder.User
+// is "..._USER", not "..._USERNAME") rather than assuming it.
+var stableSecretName = regexp.MustCompile(`^[A-Z0-9_]+_(PASSWORD|USERNAME|USER)$`)
+
+// TestGeneratedSecretNamesStayOutOfChildEnvDanger is the S3 guarantee behind
+// runner.Docker's env param: every SecretRef.Stable this package can produce is
+// injected as a name into the docker-compose child process's environment, so if
+// config text (a connection name, a security-user name) could ever fold into a
+// dangerous identifier like PATH or LD_PRELOAD, the config file would control
+// what the child process loads. stableToken uppercases and folds adversarial
+// input, but the real guarantee is the fixed, code-chosen suffix appended after
+// it (_PASSWORD/_USERNAME/_USER, or one of the four exported constants) --
+// config text only ever supplies the run of characters *before* that suffix, so
+// it can fold to "LD_PRELOAD_PASSWORD" but never to bare "LD_PRELOAD" or "PATH".
+func TestGeneratedSecretNamesStayOutOfChildEnvDanger(t *testing.T) {
+	d := &spec.Defaults{
+		Connections: map[string]spec.Side{
+			// Adversarial conn-ref names chosen to fold toward dangerous env-var
+			// identifiers if the fixed suffix were ever dropped.
+			"path": {System: spec.SystemSolace, Host: "tcps://h", MsgVPN: "v",
+				ClientUserEnv: "SRC_USER_ENV", ClientPass: "src-literal-pass"},
+			"ld-preload": {System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM", Channel: "C",
+				User: "mq-literal-user", PasswordEnv: "MQ_PASS_ENV", TLS: true, KeyAlias: "alias1"},
+		},
+		Security: spec.Security{Present: true, Enabled: true, Users: []spec.User{
+			{Name: "LD", Password: "sekret"},
+			{Name: "../../etc/passwd", PasswordEnv: "WEIRD_ENV"},
+		}},
+		TLS: spec.TLSConfig{
+			Truststore: &spec.Store{File: "ts.jks", Password: "ts-literal-pass", Type: "JKS"},
+			Keystore:   &spec.Store{File: "ks.jks", PasswordEnv: "KS_PASS_ENV", Type: "JKS"},
+		},
+		LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveActive, Queue: "leader-q",
+			Session: &spec.Side{System: spec.SystemSolace, Host: "tcps://lh", MsgVPN: "lv",
+				ClientUserEnv: "LEADER_USER_ENV", ClientPass: "leader-literal-pass"}},
+	}
+	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
+		Source: spec.Side{System: spec.SystemSolace, ConnRef: "path", DestKind: spec.DestQueue, Dest: "IN"},
+		Target: spec.Side{System: spec.SystemMQ, ConnRef: "ld-preload", DestKind: spec.DestQueue, Dest: "OUT"},
+	}}
+
+	m, _ := Build(wfs, d, Opts{MountStores: true})
+
+	if len(m.Secrets) == 0 {
+		t.Fatal("Secrets is empty; the fixture did not exercise any secret-name producer")
+	}
+	for _, s := range m.Secrets {
+		if !stableSecretName.MatchString(s.Stable) {
+			t.Errorf("secret name %q does not match %s: an adversarial config value may be able to produce a dangerous child-process env var name", s.Stable, stableSecretName.String())
 		}
 	}
 }

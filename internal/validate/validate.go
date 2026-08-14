@@ -25,6 +25,26 @@ import (
 // belong on which connector.
 const MaxWorkflows = 20
 
+// Platform keys shared by validate, the runner, and the CLI: the section name
+// in env.yaml, the argv[0] allowlist key, and the --allow-command threading
+// all use these same three strings.
+const (
+	PlatformKubernetes = "kubernetes"
+	PlatformDocker     = "docker"
+	PlatformPodman     = "podman"
+)
+
+// AllowedCommands is the argv[0] allowlist for each deploy platform's
+// `command:` field. CheckDeployCommand also honors any names passed as
+// extraAllowed (deploy/delete's repeatable --allow-command flag), which is
+// how an operator approves a chained binary (e.g. `sudo podman`) that the
+// yaml author cannot grant on their own.
+var AllowedCommands = map[string][]string{
+	PlatformKubernetes: {"kubectl", "oc"},
+	PlatformDocker:     {"docker"},
+	PlatformPodman:     {"podman"},
+}
+
 // fileEnv is the single config file label on every issue (everything now lives
 // in env.yaml; the message body carries the section path).
 const fileEnv = "env.yaml"
@@ -61,6 +81,13 @@ type Context struct {
 	// credential reference can be checked for presence at validate time (the CLI
 	// supplies os.LookupEnv; nil skips the check).
 	Env func(string) (string, bool)
+
+	// AllowCommands extends the platform binary allowlist for CheckDeployCommand,
+	// threaded from deploy/delete's repeatable --allow-command flag. Plain
+	// `validate` leaves this nil: an exotic command (a chained binary like `sudo
+	// podman`) validates clean only at deploy/delete time with the flag, and the
+	// error text says so.
+	AllowCommands []string
 }
 
 var (
@@ -462,6 +489,10 @@ func checkDuplicateSources(warn func(string, string, ...any), wfs []spec.Workflo
 }
 
 func checkKube(add, warn func(string, string, ...any), ctx Context) {
+	if err := CheckDeployCommand(PlatformKubernetes, ctx.Kube.Command, ctx.AllowCommands); err != nil {
+		add(fileEnv, "kubernetes.command %s", err)
+	}
+
 	dep := ctx.Kube.Deployment
 	if dep.Name == "" {
 		add(fileEnv, "deployment.name is required")
@@ -696,22 +727,82 @@ func checkPorts(add func(string, string, ...any), section string, ports []spec.P
 	}
 }
 
-// checkCommand splits a deploy command into whitespace-separated tokens and
-// gates each against SafeToken. It is a validation-grade check; the runner does
-// the authoritative quote-aware parse. A command with spaces in its path is
-// intentionally unsupported (the safe charset rejects space/quote/backslash).
-func checkCommand(add func(string, string, ...any), field, cmd string) {
-	_, bad := Tokenize(cmd)
-	if bad == nil {
-		return
+// CheckDeployCommand is the single shared gate for a deploy/delete `command:`
+// field, used by both the validator (nil extraAllowed) and the runner (the
+// operator's --allow-command values). It layers three checks on top of
+// Tokenize's charset gate, in order, and returns nil or one error naming the
+// first offending token:
+//
+//  1. Empty command -> "must not be empty".
+//  2. argv[0] (a ".exe"/".EXE" suffix is stripped before comparing, so a
+//     Windows-authored config stays portable): a path separator is rejected
+//     outright (a bare PATH-resolved name only); otherwise the token must be
+//     in AllowedCommands[platform] or extraAllowed.
+//  3. Every later token must be flag-shaped: it starts with "-"; or it is
+//     itself allowlisted/extraAllowed after the same .exe-strip (this is what
+//     lets a chained binary like `sudo podman` validate once "sudo" is
+//     extraAllowed); or the previous token starts with "-" and contains no
+//     "=" (so this token is that flag's value). A literal "--" is rejected
+//     outright: as an end-of-flags marker it would let a positional argument
+//     smuggle past this rule right after it.
+//
+// Honest limitation: a flag's value is not further inspectable (arity is
+// unknowable from the token stream alone), so the hard guarantee here covers
+// argv[0] and every bare token -- not what a flag's value itself contains.
+func CheckDeployCommand(platform, cmd string, extraAllowed []string) error {
+	tokens, bad := Tokenize(cmd)
+	if bad != nil {
+		if len(bad) == 0 {
+			return fmt.Errorf("must not be empty")
+		}
+		return fmt.Errorf("token %q contains an unsafe character (%s)", bad[0], UnsafeTokenReason)
 	}
-	if len(bad) == 0 {
-		add(fileEnv, "%s must not be empty", field)
-		return
+
+	stripExe := func(tok string) string {
+		if s, ok := strings.CutSuffix(tok, ".exe"); ok {
+			return s
+		}
+		if s, ok := strings.CutSuffix(tok, ".EXE"); ok {
+			return s
+		}
+		return tok
 	}
-	for _, tok := range bad {
-		add(fileEnv, "%s token %q contains an unsafe character (%s)", field, tok, UnsafeTokenReason)
+	allowed := AllowedCommands[platform]
+	isAllowed := func(name string) bool {
+		for _, a := range allowed {
+			if a == name {
+				return true
+			}
+		}
+		for _, a := range extraAllowed {
+			if a == name {
+				return true
+			}
+		}
+		return false
 	}
+
+	bin := tokens[0]
+	if binName := stripExe(bin); strings.Contains(binName, "/") {
+		return fmt.Errorf("%q: a path is not accepted here; use a bare binary name, resolved from PATH", bin)
+	} else if !isAllowed(binName) {
+		return fmt.Errorf("%q: binary must be one of %s; deploy/delete can approve another with --allow-command <name>", bin, strings.Join(allowed, ", "))
+	}
+
+	for i := 1; i < len(tokens); i++ {
+		tok := tokens[i]
+		switch {
+		case tok == "--":
+			return fmt.Errorf(`token "--": end-of-flags marker is not accepted`)
+		case strings.HasPrefix(tok, "-"):
+		case isAllowed(stripExe(tok)):
+		case strings.HasPrefix(tokens[i-1], "-") && !strings.Contains(tokens[i-1], "="):
+			// This token is the previous flag's value.
+		default:
+			return fmt.Errorf("token %q: arguments must be flag-shaped (-x, --flag, --flag=value, or a flag's value); solmq-conn appends its own subcommand", tok)
+		}
+	}
+	return nil
 }
 
 // UnsafeTokenReason describes the safe-token charset, shared so the validator and
@@ -745,6 +836,7 @@ func Tokenize(cmd string) (tokens, bad []string) {
 // wider signature at three places.
 type containerTarget struct {
 	Section  string
+	Platform string
 	Name     string
 	Command  string
 	Image    string
@@ -762,7 +854,8 @@ const secretsMountPath = "/run/secrets"
 
 // checkContainerTarget runs the checks common to the docker and podman sections:
 // a DNS-1123 name (it flows into filesystem paths and a systemctl unit token), a
-// safe non-empty command, a required image, valid ports, credentials wiring, and
+// deploy command gated by CheckDeployCommand (bare, allowlisted binary plus
+// flag-shaped arguments), a required image, valid ports, credentials wiring, and
 // host-provided stores/libs paths.
 //
 // image/restart/timezone and the host paths are gated here because both renderers
@@ -780,7 +873,9 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 	if !isDNS1123(t.Name) {
 		add(fileEnv, "%s.name %q is not a valid DNS-1123 label", section, t.Name)
 	}
-	checkCommand(add, section+".command", t.Command)
+	if err := CheckDeployCommand(t.Platform, t.Command, ctx.AllowCommands); err != nil {
+		add(fileEnv, "%s.command %s", section, err)
+	}
 	if t.Image == "" {
 		add(fileEnv, "%s.image is required", section)
 	} else if !SafeToken(t.Image) {
@@ -832,6 +927,7 @@ func checkDocker(add func(string, string, ...any), ctx Context) {
 	d := ctx.Docker
 	checkContainerTarget(add, ctx, containerTarget{
 		Section:  "docker",
+		Platform: PlatformDocker,
 		Name:     d.Name,
 		Command:  d.Command,
 		Image:    d.Image,
@@ -850,6 +946,7 @@ func checkPodman(add func(string, string, ...any), ctx Context) {
 	p := ctx.Podman
 	checkContainerTarget(add, ctx, containerTarget{
 		Section:  "podman",
+		Platform: PlatformPodman,
 		Name:     p.Name,
 		Command:  p.Command,
 		Image:    p.Image,

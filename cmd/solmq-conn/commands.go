@@ -11,6 +11,16 @@ import "strings"
 
 const bt = "`" // backtick, for building markdown code spans without raw-string clashes
 
+// allowCommandFlagName is the repeatable deploy/delete flag's plain name (no
+// backticks): the cliFlag key used in cliVerb.Flags, and the literal usageText()
+// must contain.
+const allowCommandFlagName = "--allow-command"
+
+// allowCommandSpan and cmdFieldSpan are the markdown code spans for
+// --allow-command and command:, reused across the deploy/delete Detail text.
+const allowCommandSpan = bt + allowCommandFlagName + bt
+const cmdFieldSpan = bt + "command:" + bt
+
 // cliFlag documents one global flag.
 type cliFlag struct {
 	Short, Long, AppliesTo, Meaning string
@@ -36,6 +46,7 @@ var cliFlags = []cliFlag{
 	{Short: "-e", Long: "--env", AppliesTo: "all except " + bt + "examples" + bt, Meaning: "config file, relative or absolute path (default: " + bt + "env.yaml" + bt + ")"},
 	{Short: "-o", Long: "--out", AppliesTo: bt + "generate" + bt, Meaning: "write output to a file (default: stdout)"},
 	{Short: "-f", Long: "--force", AppliesTo: bt + "examples" + bt, Meaning: "overwrite existing files"},
+	{Short: allowCommandFlagName, Long: allowCommandFlagName, AppliesTo: bt + "deploy" + bt + "/" + bt + "delete" + bt, Meaning: "approve an extra command binary beyond the " + cmdFieldSpan + " allowlist; repeatable"},
 }
 
 var cliVerbs = []cliVerb{
@@ -50,8 +61,8 @@ var cliVerbs = []cliVerb{
 		},
 	},
 	{
-		Name: "deploy", Args: "[-e env.yaml]", Flags: []string{"-e"}, InUsage: true,
-		Detail: "Generates for the platform, then applies it by shelling out to the section's " + bt + "command:" + bt + " (" + bt + "kubectl" + bt + "/" + bt + "oc" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " + " + bt + "systemctl" + bt + ") through an argv slice -- never a shell. The env file must contain the matching section.",
+		Name: "deploy", Args: "[-e env.yaml] [" + allowCommandFlagName + " name]", Flags: []string{"-e", allowCommandFlagName}, InUsage: true,
+		Detail: "Generates for the platform, then applies it by shelling out to the section's " + cmdFieldSpan + " (" + bt + "kubectl" + bt + "/" + bt + "oc" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " + " + bt + "systemctl" + bt + ") through an argv slice -- never a shell. The env file must contain the matching section. " + cmdFieldSpan + "'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); " + allowCommandSpan + " approves an extra binary for this invocation (e.g. a " + bt + "sudo" + bt + " prefix). Before anything is written or applied, a read-only preflight probe (login/permission check) must succeed, or the run stops with a login hint.",
 		Targets: []cliTarget{
 			{Name: "kubernetes", Summary: "kubectl/oc apply -f - (manifest on stdin)", Example: "solmq-conn deploy kubernetes -e env.yaml"},
 			{Name: "docker", Summary: "docker compose up -d", Example: "solmq-conn deploy docker -e env.yaml"},
@@ -59,8 +70,8 @@ var cliVerbs = []cliVerb{
 		},
 	},
 	{
-		Name: "delete", Args: "[-e env.yaml]", Flags: []string{"-e"}, InUsage: true,
-		Detail: "Tears down what " + bt + "deploy" + bt + " created for the platform, the same way (via the section's " + bt + "command:" + bt + ").",
+		Name: "delete", Args: "[-e env.yaml] [" + allowCommandFlagName + " name]", Flags: []string{"-e", allowCommandFlagName}, InUsage: true,
+		Detail: "Tears down what " + bt + "deploy" + bt + " created for the platform, the same way (via the section's " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", and the same read-only preflight probe before anything is torn down).",
 		Targets: []cliTarget{
 			{Name: "kubernetes", Summary: "kubectl/oc delete -f -", Example: "solmq-conn delete kubernetes -e env.yaml"},
 			{Name: "docker", Summary: "docker compose down", Example: "solmq-conn delete docker -e env.yaml"},
@@ -84,6 +95,16 @@ var cliVerbs = []cliVerb{
 	},
 }
 
+// flagSpan renders one flag as backtick-quoted markdown code spans: "`-e`,
+// `--env`" for a short+long pair, or just "`--allow-command`" when the flag has
+// no short alias (Short == Long).
+func flagSpan(f cliFlag) string {
+	if f.Short == f.Long {
+		return bt + f.Long + bt
+	}
+	return bt + f.Short + bt + ", " + bt + f.Long + bt
+}
+
 // flagsLine renders the "Flags: ..." line for a verb's detail block ("" if none).
 func flagsLine(v cliVerb) string {
 	if len(v.Flags) == 0 {
@@ -93,7 +114,7 @@ func flagsLine(v cliVerb) string {
 	for _, sh := range v.Flags {
 		for _, f := range cliFlags {
 			if f.Short == sh {
-				parts = append(parts, bt+f.Short+bt+", "+bt+f.Long+bt)
+				parts = append(parts, flagSpan(f))
 			}
 		}
 	}
@@ -166,7 +187,7 @@ func renderCommandsDoc() string {
 	add("| Flag | Applies to | Meaning |")
 	add("|------|-----------|---------|")
 	for _, f := range cliFlags {
-		add("| " + bt + f.Short + bt + ", " + bt + f.Long + bt + " | " + f.AppliesTo + " | " + f.Meaning + " |")
+		add("| " + flagSpan(f) + " | " + f.AppliesTo + " | " + f.Meaning + " |")
 	}
 	add("")
 	add("Flags may appear before, after, or between the positional arguments.")
@@ -222,23 +243,29 @@ Usage:
   solmq-conn generate kubernetes [-e env.yaml] [-o out]   Emit ConfigMap+Deployment+Service (+Secrets)
   solmq-conn generate docker     [-e env.yaml] [-o out]   Emit docker-compose.yml (application.yml inlined)
   solmq-conn generate podman     [-e env.yaml] [-o out]   Emit a podman run script or quadlet unit
-  solmq-conn deploy  kubernetes  [-e env.yaml]            kubectl/oc apply -f - (manifest on stdin)
-  solmq-conn delete  kubernetes  [-e env.yaml]            kubectl/oc delete -f -
-  solmq-conn deploy  docker      [-e env.yaml]            docker compose up -d
-  solmq-conn delete  docker      [-e env.yaml]            docker compose down
-  solmq-conn deploy  podman      [-e env.yaml]            write the quadlet unit; systemctl start
-  solmq-conn delete  podman      [-e env.yaml]            systemctl stop; remove the unit
-  solmq-conn validate            [-e env.yaml]            Lint the whole env.yaml + workflows
-  solmq-conn examples [dir] [-f]                          Write a starter env.yaml + workflows
+  solmq-conn deploy  kubernetes  [-e env.yaml] [--allow-command name]  kubectl/oc apply -f - (manifest on stdin)
+  solmq-conn delete  kubernetes  [-e env.yaml] [--allow-command name]  kubectl/oc delete -f -
+  solmq-conn deploy  docker      [-e env.yaml] [--allow-command name]  docker compose up -d
+  solmq-conn delete  docker      [-e env.yaml] [--allow-command name]  docker compose down
+  solmq-conn deploy  podman      [-e env.yaml] [--allow-command name]  write the quadlet unit; systemctl start
+  solmq-conn delete  podman      [-e env.yaml] [--allow-command name]  systemctl stop; remove the unit
+  solmq-conn validate            [-e env.yaml]                        Lint the whole env.yaml + workflows
+  solmq-conn examples [dir] [-f]                                      Write a starter env.yaml + workflows
 
 Flags:
-  -e, --env     Config file, relative or absolute (default: env.yaml)
-  -o, --out     Generate output file (default: stdout)
-  -f, --force   examples: overwrite existing files
+  -e, --env         Config file, relative or absolute (default: env.yaml)
+  -o, --out         Generate output file (default: stdout)
+  -f, --force       examples: overwrite existing files
+  --allow-command   deploy/delete: approve an extra command binary beyond the
+                     platform allowlist (repeatable)
 
 Workflows and per-target settings all come from env.yaml. The env file is always
 excluded from the workflow set. Deploy commands run the CLI named by each
 section's 'command:' via an argv slice -- never a shell -- and every command
-token is checked against a safe charset.
+token is checked against a safe charset and a per-platform binary allowlist
+(kubectl/oc, docker, podman); --allow-command approves an extra binary for one
+invocation. Before anything is written or applied, a read-only preflight probe
+checks login/permissions and stops with a hint on failure. The resolved binary
+path is echoed before it runs.
 `
 }

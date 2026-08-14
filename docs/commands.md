@@ -28,12 +28,12 @@ takes a second argument it names the **target** (`generate`) or **platform**
 | `solmq-conn generate kubernetes [-e env.yaml] [-o out]` | Emit ConfigMap+Deployment+Service (+Secrets) |
 | `solmq-conn generate docker [-e env.yaml] [-o out]` | Emit docker-compose.yml (application.yml inlined) |
 | `solmq-conn generate podman [-e env.yaml] [-o out]` | Emit a podman run script or quadlet unit |
-| `solmq-conn deploy kubernetes [-e env.yaml]` | kubectl/oc apply -f - (manifest on stdin) |
-| `solmq-conn deploy docker [-e env.yaml]` | docker compose up -d |
-| `solmq-conn deploy podman [-e env.yaml]` | write the quadlet unit; systemctl start |
-| `solmq-conn delete kubernetes [-e env.yaml]` | kubectl/oc delete -f - |
-| `solmq-conn delete docker [-e env.yaml]` | docker compose down |
-| `solmq-conn delete podman [-e env.yaml]` | systemctl stop; remove the unit |
+| `solmq-conn deploy kubernetes [-e env.yaml] [--allow-command name]` | kubectl/oc apply -f - (manifest on stdin) |
+| `solmq-conn deploy docker [-e env.yaml] [--allow-command name]` | docker compose up -d |
+| `solmq-conn deploy podman [-e env.yaml] [--allow-command name]` | write the quadlet unit; systemctl start |
+| `solmq-conn delete kubernetes [-e env.yaml] [--allow-command name]` | kubectl/oc delete -f - |
+| `solmq-conn delete docker [-e env.yaml] [--allow-command name]` | docker compose down |
+| `solmq-conn delete podman [-e env.yaml] [--allow-command name]` | systemctl stop; remove the unit |
 | `solmq-conn validate [-e env.yaml]` | Lint the whole env.yaml + workflows |
 | `solmq-conn examples [dir] [-f]` | Write a starter env.yaml + workflows |
 | `solmq-conn help` | Print the usage summary (also -h, --help) |
@@ -45,6 +45,7 @@ takes a second argument it names the **target** (`generate`) or **platform**
 | `-e`, `--env` | all except `examples` | config file, relative or absolute path (default: `env.yaml`) |
 | `-o`, `--out` | `generate` | write output to a file (default: stdout) |
 | `-f`, `--force` | `examples` | overwrite existing files |
+| `--allow-command` | `deploy`/`delete` | approve an extra command binary beyond the `command:` allowlist; repeatable |
 
 Flags may appear before, after, or between the positional arguments.
 
@@ -98,11 +99,11 @@ solmq-conn generate podman -e env.yaml -o run.sh
 
 ### deploy
 
-Generates for the platform, then applies it by shelling out to the section's `command:` (`kubectl`/`oc`, `docker`, or `podman` + `systemctl`) through an argv slice -- never a shell. The env file must contain the matching section.
+Generates for the platform, then applies it by shelling out to the section's `command:` (`kubectl`/`oc`, `docker`, or `podman` + `systemctl`) through an argv slice -- never a shell. The env file must contain the matching section. `command:`'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); `--allow-command` approves an extra binary for this invocation (e.g. a `sudo` prefix). Before anything is written or applied, a read-only preflight probe (login/permission check) must succeed, or the run stops with a login hint.
 
-Flags: `-e`, `--env`.
+Flags: `-e`, `--env`; `--allow-command`.
 
-#### `solmq-conn deploy kubernetes [-e env.yaml]`
+#### `solmq-conn deploy kubernetes [-e env.yaml] [--allow-command name]`
 
 kubectl/oc apply -f - (manifest on stdin).
 
@@ -110,7 +111,7 @@ kubectl/oc apply -f - (manifest on stdin).
 solmq-conn deploy kubernetes -e env.yaml
 ```
 
-#### `solmq-conn deploy docker [-e env.yaml]`
+#### `solmq-conn deploy docker [-e env.yaml] [--allow-command name]`
 
 docker compose up -d.
 
@@ -118,7 +119,7 @@ docker compose up -d.
 solmq-conn deploy docker -e env.yaml
 ```
 
-#### `solmq-conn deploy podman [-e env.yaml]`
+#### `solmq-conn deploy podman [-e env.yaml] [--allow-command name]`
 
 write the quadlet unit; systemctl start.
 
@@ -128,11 +129,11 @@ solmq-conn deploy podman -e env.yaml
 
 ### delete
 
-Tears down what `deploy` created for the platform, the same way (via the section's `command:`).
+Tears down what `deploy` created for the platform, the same way (via the section's `command:`, the same binary allowlist, `--allow-command`, and the same read-only preflight probe before anything is torn down).
 
-Flags: `-e`, `--env`.
+Flags: `-e`, `--env`; `--allow-command`.
 
-#### `solmq-conn delete kubernetes [-e env.yaml]`
+#### `solmq-conn delete kubernetes [-e env.yaml] [--allow-command name]`
 
 kubectl/oc delete -f -.
 
@@ -140,7 +141,7 @@ kubectl/oc delete -f -.
 solmq-conn delete kubernetes -e env.yaml
 ```
 
-#### `solmq-conn delete docker [-e env.yaml]`
+#### `solmq-conn delete docker [-e env.yaml] [--allow-command name]`
 
 docker compose down.
 
@@ -148,7 +149,7 @@ docker compose down.
 solmq-conn delete docker -e env.yaml
 ```
 
-#### `solmq-conn delete podman [-e env.yaml]`
+#### `solmq-conn delete podman [-e env.yaml] [--allow-command name]`
 
 systemctl stop; remove the unit.
 

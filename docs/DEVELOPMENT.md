@@ -110,8 +110,14 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
 - **Deploy exec layer.** `internal/runner` shells out to the CLI named by each target's
   `command:` through an `os/exec` argv slice -- never `sh -c`. Every config-derived token is
   validated against a safe charset before it reaches argv (shell metacharacters and control
-  chars are rejected with an actionable error), and credential env-files are written `0600`
-  and never logged. Kubernetes manifests are piped on **stdin** (`apply -f -`), not argv.
+  chars are rejected with an actionable error), and on top of that
+  `validate.CheckDeployCommand` pins argv[0] to a bare, per-platform allowlisted binary
+  (kubectl/oc, docker, podman; `--allow-command` approves an extra one per invocation) and
+  requires later tokens to be flag-shaped. Before anything mutating runs, `runner.Preflight`
+  probes login/daemon reachability read-only; the real Runner resolves argv[0] via
+  `exec.LookPath` and echoes the resolved path to stderr before exec'ing. Credential
+  env-files are written `0600` and never logged. Kubernetes manifests are piped on
+  **stdin** (`apply -f -`), not argv.
 - **Durable names** use UUIDv5 (namespace `6ba7f4e2-9c1d-5a3b-8e47-2f9a0c7d13e5`, key =
   `conn-name ‖ queue-manager ‖ topic ‖ file-basename` joined by `0x1F`). Renaming a workflow
   file changes its durable name and orphans the old subscription — rename deliberately.

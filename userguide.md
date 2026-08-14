@@ -71,6 +71,9 @@ It builds the whole spec folder for you:
 Credentials are entered as the name of an environment variable (the `-env` form,
 section 8) rather than as values, so the generated `env.yaml` stays safe to commit.
 The preview is a convenience -- `solmq-conn generate config` remains authoritative.
+The one case where the two are known to differ is `${VAR}`: the page cannot read
+the environment the CLI will run in, so it previews the reference verbatim and
+says so (section 4.1).
 
 ---
 
@@ -102,6 +105,7 @@ reference at [docs/commands.md](docs/commands.md).
 | `-e`, `--env` | all except `examples` | config file, relative or absolute path (default: `env.yaml`) |
 | `-o`, `--out` | `generate` | write output to a file (default: stdout) |
 | `-f`, `--force` | `examples` | overwrite existing files |
+| `--allow-command` | `deploy`/`delete` | approve an extra command binary beyond the `command:` allowlist; repeatable |
 
 Flags may appear before, after, or between the positional arguments. Exit codes:
 **0** success, **1** a processing error (bad input, unreadable file, missing env
@@ -118,6 +122,9 @@ target, unknown flag).
   shelling out to the section's `command:` (`kubectl`/`oc`, `docker`, or
   `podman` + `systemctl`); **`delete <platform>`** tears the same thing down. The
   env file must contain the matching section (a `deploy docker` needs `docker:`).
+  `command:`'s binary must be on the platform allowlist (or approved with
+  `--allow-command`), and both verbs run a read-only login/daemon preflight before
+  writing or applying anything -- see section 7.
 - **`validate`** runs **every** check across the whole `env.yaml` (including any
   present `kubernetes:`/`docker:`/`podman:` sections) and its workflows, and prints
   all findings (non-zero exit if any errors). Use it as a linter.
@@ -197,6 +204,17 @@ msg-vpn: ${VPN:prod}          # ${VAR:default} -- default used when VAR is unset
   variable in the matching `-env` field (see section 8.1) -- use that form instead of
   `${...}` inside a credential. A `${...}` inside a literal credential already
   triggers its own warning telling you to switch to `-env`.
+- **Verbatim passthrough never expands** either -- `api-properties`,
+  `additional-properties`, `consumer`, `producer`, `solace-defaults`,
+  `logging.level` and the leader-election `fail-over` block are copied through
+  untouched (section 5.4), so a `${...}` inside one reaches the connector as typed
+  and is resolved by Spring at runtime, not by `solmq-conn` at generate time.
+- **The generator page cannot expand.** A browser has no access to the
+  environment `solmq-conn` will run in, so
+  [solmq-conn-generator.html](solmq-conn-generator.html) previews a `${VAR}`
+  verbatim and raises an advisory saying the generated file may differ. The
+  `env.yaml` it writes is still correct -- expansion happens when you generate,
+  not when you author.
 - **Determinism caveat**: the tool's core promise is byte-for-byte reproducible
   output. Variable expansion is the one exception -- the rendered output now
   depends on the environment `solmq-conn` runs in, so the same `env.yaml` can
@@ -452,6 +470,45 @@ tokenized to an **argv slice and executed directly (never via a shell)**, and
 **every token is validated against a safe charset** -- shell metacharacters and
 control characters are rejected with an error naming the offending token. Kubernetes
 manifests are passed on **stdin**, never as arguments.
+
+On top of the charset gate, `command:`'s first token (argv[0]) is checked against
+a **per-platform binary allowlist** -- `kubectl`/`oc` for `kubernetes:`, `docker`
+for `docker:`, `podman` for `podman:` (a trailing `.exe`/`.EXE` is stripped before
+comparing, so Windows configs stay portable). It must be a **bare name resolved
+from PATH** -- a token containing `/` (or, since backslash is already
+charset-rejected, any path) is an error. Every later token must be **flag-shaped**
+(`-x`, `--flag`, `--flag=value`, or the value belonging to the preceding flag) --
+a literal `--` or a bare positional argument is rejected, since `solmq-conn`
+appends its own subcommand (`apply -f -`, `compose up -d`, etc.) and a stray
+positional would land in the wrong place. `validate` runs this same check on
+`kubernetes.command` too, not just `docker`/`podman`.
+
+Need a binary outside the allowlist (a `sudo` prefix, an internal wrapper)?
+`deploy`/`delete` take a repeatable **`--allow-command <name>`** flag that approves
+it for that invocation only -- authority lives with whoever runs the command, never
+with whoever wrote `env.yaml`. `command: sudo podman` fails both `validate` and
+`deploy podman` until you add `deploy podman --allow-command sudo`.
+
+Before `deploy`/`delete` write or apply anything, they run a **read-only preflight
+probe** against the target: kubernetes checks `auth can-i create|delete deployment`
+(the verb `deploy`/`delete` will actually need); docker/podman check `info`
+(daemon/socket reachability). A failing probe stops the run before any file is
+written or any mutating command runs, with the underlying CLI error plus a login
+hint (e.g. "log in or select a context first ... then re-run" for kubernetes,
+a daemon-unreachable hint for docker/podman). There is no way to skip it -- a
+failing preflight means the real command would fail anyway.
+
+The real runner also resolves argv[0] with `exec.LookPath` before exec'ing (a
+same-directory match via `exec.ErrDot` is rejected, matching Go 1.19+'s hardening)
+and echoes the resolved path to stderr first, e.g. `exec: /usr/local/bin/kubectl
+apply -f -`, so you can see exactly what ran.
+
+**Trust model:** `env.yaml` is executable configuration, not passive data -- its
+`command:` (plus manifests, compose files, and quadlet units it drives) runs with
+your privileges. Review a config someone else handed you the way you would a
+Makefile before running `deploy`/`delete` against it. `generate` is the dry-run: it
+renders the same artifacts without shelling out to anything, so you can inspect
+them first.
 
 Credentials and stores use the **same schema across all three targets** -- see
 section 8.
@@ -723,8 +780,9 @@ error, as is a `kubernetes.secrets.credentials.create` still carrying the remove
 binders (connections sharing a broker/queue-manager tuple collapse into one binder),
 numbered workflows, the mandatory `undefined` binder (always emitted, always last),
 derived destination-types, auto `durable-subscription-name` for MQ topic consumers,
-verbatim `api-properties` / `additional-properties`, `${VAR}` placeholders, and the
-Solace + MQ TLS/mTLS blocks. It is always a single document (a folder holding more
+verbatim `api-properties` / `additional-properties` (the one place a `${VAR}`
+survives into the output, for Spring to resolve at runtime -- everywhere else it is
+expanded at generate time, section 4.1), and the Solace + MQ TLS/mTLS blocks. It is always a single document (a folder holding more
 than 20 workflows is rejected -- see section 4). Point `-o` **outside** the workflow
 folder so the output is not re-scanned as a workflow on the next run.
 

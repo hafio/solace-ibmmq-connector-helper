@@ -163,6 +163,14 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckPodmanModeAndScope | bad-scope | podman quadlet scope 'root' errors scope must be auto, user, or system |
 | TestCheckCommandMultiToken | safe-multi-token | docker command with extra safe tokens has no unsafe-character error |
 | TestCheckCommandMultiToken | unsafe-token | docker command with $(evil) token errors unsafe character |
+| TestCheckDeployCommandAcceptReject | kubectl / oc / kubectl with flags / docker with flag / podman / kubectl.exe / sudo podman with extraAllowed | accept matrix: bare allowlisted argv[0], flag-shaped args, .exe-stripped comparison, and a chained binary approved via extraAllowed all pass |
+| TestCheckDeployCommandAcceptReject | curl / absolute path / relative path / bare positional arg / sudo podman without extraAllowed / bare "--" / empty command | reject matrix: unlisted binary, path argv[0], a bare positional argument, an unapproved chained binary, a bare end-of-flags marker, and an empty command all error |
+| TestCheckDeployCommandEndOfFlagsMarkerMidCommand | - | "kubectl --" errors token "--": end-of-flags marker is not accepted, distinct from the argv[0] allowlist rejection |
+| TestCheckDeployCommandErrorTexts | - | pins the canonical wording verbatim for the path, allowlist, end-of-flags, flag-shape, and empty-command errors |
+| TestCheckKubeCommandNowValidated | - | kubernetes.command "kubectl; rm -rf /" now errors (previously skipped entirely for k8s); a safe kubectl command produces no such error |
+| TestCheckKubeCommandDefaultKubectlUnvalidated | - | the zero-value default (spec.DefaultKubeCommand) validates clean |
+| TestContextAllowCommandsHonored | - | Context.AllowCommands threads into checkKube and checkContainerTarget: "sudo docker"/"sudo podman"/"sudo kubectl" reject with AllowCommands nil, accept with AllowCommands=[sudo] |
+| TestCheckContainerCommandUnlistedBinaryRejected | - | docker.command "curl" and podman.command "/tmp/evil" are rejected by the platform allowlist, not merely the charset check |
 | TestSafeToken | kubectl | SafeToken returns true |
 | TestSafeToken | docker | SafeToken returns true |
 | TestSafeToken | --context=prod | SafeToken returns true |
@@ -276,6 +284,7 @@ Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [cons
 | TestDurableNameGolden | - | DurableName of fixed inputs equals pinned solmq-3631c883-c0c4-5bc8-985e-ea2842831ad6 |
 | TestDurableNameDeterministic | same inputs called twice | DurableName returns identical value both times |
 | TestDurableNameDeterministic | different file name g.yaml vs f.yaml | DurableName differs when file name changes |
+| TestGeneratedSecretNamesStayOutOfChildEnvDanger | - | every SecretRef.Stable Build() can produce (binder creds, security-user passwords, TLS stores, leader-election) matches a fixed-suffix pattern, so adversarial conn-ref/security-user names (e.g. "path", "ld-preload", "LD") can never fold to a bare dangerous docker-compose child-env name like PATH or LD_PRELOAD |
 
 ## internal/tls
 
@@ -478,6 +487,10 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestParseCommand | kubectl $(evil) | $ and ( rejected as unsafe, error |
 | TestParseCommand | kubectl \`id\` | backtick rejected as unsafe, error |
 | TestParseCommand | kubectl --kubeconfig "a b" | quote+space rejected as unsafe, error |
+| TestParseCommand | curl | not on the kubernetes allowlist, error |
+| TestParseCommand | /tmp/evil | path, not a bare name, error |
+| TestParseCommandExtraAllowed | sudo podman without extraAllowed | rejected, error |
+| TestParseCommandExtraAllowed | sudo podman with extraAllowed=[sudo] | accepted, argv [sudo podman] with the platform binary unmodified |
 | TestKubernetesDeployApplyOnStdin | - | deploy issues one call kubectl --context prod apply -f - with manifest on stdin |
 | TestKubernetesDeleteUsesDeleteVerb | - | delete issues argv [oc delete -f -] |
 | TestKubernetesRejectsUnsafeCommand | - | unsafe command rejected, error returned, zero calls made |
@@ -498,6 +511,16 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestWriteFileDoesNotTightenExistingFileMode | - | content replaced but existing 0644 mode left unchanged (non-windows) |
 | TestWriteFileParentIsFileReturnsError | - | parent path is a file: MkdirAll error surfaces naming the blocker path |
 | TestWriteFileTargetIsDirectoryReturnsError | - | target path is a directory: write error surfaces naming the target path |
+| TestOSRunEchoesResolvedPathToStderr | - | OS.Run prints "exec: <resolved-path> <remaining args>" to stderr before exec'ing, using the resolved binary path |
+| TestOSRunRejectsUnresolvableArgv0 | - | a binary LookPath cannot find on PATH is a Run error, not a deferred exec.Start failure |
+| TestPreflightKubernetesArgvDeployNoNamespace | - | kubernetes deploy preflight issues <argv> auth can-i create deployment with no --namespace when namespace is empty |
+| TestPreflightKubernetesArgvDeleteWithNamespace | - | kubernetes delete preflight issues <argv> auth can-i delete deployment --namespace <ns> |
+| TestPreflightDockerArgvIsInfo | - | docker preflight issues <argv> info |
+| TestPreflightPodmanArgvIsInfo | - | podman preflight issues <argv> info |
+| TestPreflightFailureWrapsPlatformHint | kubernetes / docker / podman | a failing probe's error contains "preflight failed for <platform>", preserves the underlying cause, and carries the platform's login/daemon hint |
+| TestPreflightRejectsDisallowedBinaryBeforeRunning | - | a command outside the platform allowlist (curl) is rejected before the probe ever runs, zero runner calls |
+| TestPreflightExtraAllowedThreadsThrough | - | "sudo podman" is rejected without extraAllowed and accepted with it, running argv [sudo podman info] |
+| TestPreflightUnknownAction | - | an action other than deploy/delete is rejected, zero runner calls |
 
 ## internal/scan
 
@@ -578,9 +601,16 @@ Tests: [main_test.go](../cmd/solmq-conn/main_test.go)
 | TestGenerateConfigEmitWriteError | - | emit to path with missing parent dir returns exit code 1 |
 | TestLoadEnvWorkflowsDirRelativeToEnvFile | - | workflows.dir resolved relative to env file not cwd; exit 0 and stdout has spring: |
 | TestLoadEnvExcludesEnvFileFromWorkflowSet | - | env.yaml excluded from its own workflow scan; exit code 0 |
-| TestDeployKubernetesSeamHappyPath | - | exit 0, 1 runner call with argv [kubectl apply -f -], stdin contains kind: Deployment |
-| TestDeleteKubernetesSeamHappyPath | - | exit 0, 1 runner call with argv [kubectl delete -f -] |
+| TestDeployKubernetesSeamHappyPath | - | exit 0, 2 runner calls (preflight then apply) with argv [kubectl apply -f -], stdin contains kind: Deployment |
+| TestDeleteKubernetesSeamHappyPath | - | exit 0, 2 runner calls (preflight then delete) with argv [kubectl delete -f -] |
 | TestDeployKubernetesSeamRejectsUnsafeCommand | - | unsafe kubernetes.command yields exit 1 and zero runner calls |
+| TestAllowCommandFlagBadValueExitsUsageError | path value | --allow-command /usr/bin/sudo exits 2, zero runner calls |
+| TestAllowCommandFlagBadValueExitsUsageError | unsafe character | --allow-command sudo;rm exits 2, zero runner calls |
+| TestAllowCommandFlagRejectedOnGenerateAndValidate | generate config / validate | --allow-command is undefined on generate/validate; exit 2 as an unknown flag |
+| TestAllowCommandFlagRepeatableThreadsToRunner | - | "sudo podman" rejects with zero runner calls without the flag; repeating --allow-command sudo twice threads through to preflight (argv [sudo podman info]) and to the podman secret calls |
+| TestDeployKubernetesPreflightFailureStopsBeforeApply | - | a failing kubernetes preflight (auth can-i argv incl. --namespace) stops with exit 1 and exactly 1 runner call |
+| TestDeployDockerPreflightFailureStopsBeforeWrite | - | a failing docker preflight (argv [docker info]) stops before the compose file is written, exit 1, exactly 1 runner call |
+| TestDeployPodmanPreflightFailureStopsBeforeWrite | - | a failing podman preflight (argv [podman info]) stops before the unit/app-yaml files are written, exit 1, exactly 1 runner call |
 | TestValidateOKAndErrors | valid spec | validate exits 0 |
 | TestValidateOKAndErrors | invalid spec | validate exits 1 |
 | TestExamplesWriteSkipForceThenGenerate | first write | examples command exits 0 creating env.yaml |
@@ -591,9 +621,11 @@ Tests: [main_test.go](../cmd/solmq-conn/main_test.go)
 | TestGenerateKubernetesStdout | - | exit 0 and stdout contains kind: Deployment |
 | TestGenerateDockerToFile | - | exit 0 and compose file contains services: and image: img:1 |
 | TestGeneratePodmanQuadletStdout | - | exit 0 and stdout contains unit banner '# === solmq-conn.container ===' |
-| TestDeployDockerSeamWritesComposeAndRuns | - | exit 0, compose file written, 1 runner call argv [docker compose -f <compose> up -d] |
-| TestDeleteDockerSeam | - | exit 0, 1 runner call argv [docker compose -f <compose> down] |
-| TestDeployPodmanSeamWritesUnitsAndStarts | - | exit 0, app yaml and container unit written to quadlet dir, systemctl daemon-reload then start calls |
-| TestDeletePodmanSeamStopsRemovesReloads | - | exit 0, systemctl stop then daemon-reload calls, unit and app yaml files removed |
+| TestDeployDockerSeamWritesComposeAndRuns | - | exit 0, compose file written, 2 runner calls (preflight then up) argv [docker compose -f <compose> up -d] |
+| TestDeployDockerSeamComposeFileSurvivesFailedRun | - | preflight succeeds but the real `up` call fails; compose file still exists on disk afterward, exit 1 |
+| TestDeployDockerSeamChildEnvCarriesCredentials | - | preflight call carries no env; the real `up` call (index 1) carries the resolved literal and -env credentials as STABLE=value pairs |
+| TestDeleteDockerSeam | - | exit 0, 2 runner calls (preflight then down) argv [docker compose -f <compose> down] |
+| TestDeployPodmanSeamWritesUnitsAndStarts | - | exit 0, a leading podman info preflight call, then app yaml and container unit written to quadlet dir, systemctl daemon-reload then start calls |
+| TestDeletePodmanSeamStopsRemovesReloads | - | exit 0, a leading podman info preflight call, then systemctl stop then daemon-reload calls, unit and app yaml files removed |
 | TestAbsPath | absolute input | absPath returns input unchanged when already absolute |
 | TestAbsPath | relative input | absPath joins relative path onto base dir |

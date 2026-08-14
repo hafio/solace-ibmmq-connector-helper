@@ -111,8 +111,10 @@ solmq-conn examples [dir] [-f]                               Write a starter env
 `generate` fails fast (stops at the first error, writes nothing); `validate`
 reports every finding; generate output is buffered and only written on full
 success -- never a half-written `-o`. `deploy`/`delete` run the CLI named by each
-section's `command:` through an argv slice -- never a shell -- and every command
-token is checked against a safe charset. Details and exit codes:
+section's `command:` through an argv slice -- never a shell -- with every token
+checked against a safe charset, argv[0] checked against a per-platform binary
+allowlist (escape hatch: `--allow-command`), and a read-only login/daemon
+preflight before anything is written or applied. Details and exit codes:
 [userguide.md](userguide.md) section 3; the full generated command reference:
 [docs/commands.md](docs/commands.md).
 

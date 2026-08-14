@@ -94,7 +94,11 @@ func Validate(r Request, res Resolver) (errs, warns []Issue) {
 // GenerateKubernetes parses+validates and returns the manifest set on success.
 // Credentials/stores are resolved and embedded (stringData/base64), so this is
 // the same rendered output the deploy path applies.
-func GenerateKubernetes(r Request, res Resolver) (out string, errs, warns []Issue) {
+//
+// extraAllowed threads deploy/delete's --allow-command values into the
+// kubernetes.command allowlist check; plain `generate kubernetes` calls this
+// with none, so an exotic command validates clean only at deploy time.
+func GenerateKubernetes(r Request, res Resolver, extraAllowed ...string) (out string, errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
 	k := e.Kubernetes
 	if k == nil {
@@ -106,6 +110,7 @@ func GenerateKubernetes(r Request, res Resolver) (out string, errs, warns []Issu
 		Kube:            k,
 		CheckKubernetes: true,
 		Env:             res.Env,
+		AllowCommands:   extraAllowed,
 	})
 	errs = append(pissues, verrs...)
 	warns = append(ewarns, w...)
@@ -147,7 +152,10 @@ type DockerPlan struct {
 // GenerateDocker parses+validates and renders the docker-compose.yml (with
 // application.yml inlined under compose configs:). Store/libs host paths are
 // resolved to absolute so the compose is portable regardless of cwd.
-func GenerateDocker(r Request, res Resolver) (plan DockerPlan, errs, warns []Issue) {
+//
+// extraAllowed threads deploy/delete's --allow-command values into the
+// docker.command allowlist check; plain `generate docker` calls this with none.
+func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan DockerPlan, errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
 	d := e.Docker
 	if d == nil {
@@ -155,6 +163,7 @@ func GenerateDocker(r Request, res Resolver) (plan DockerPlan, errs, warns []Iss
 	}
 	verrs, w := validate.Run(validate.Context{
 		Workflows: wfs, Defaults: &e.Defaults, Docker: d, CheckDocker: true, Env: res.Env,
+		AllowCommands: extraAllowed,
 	})
 	errs = append(pissues, verrs...)
 	warns = append(ewarns, w...)
@@ -216,7 +225,10 @@ type PodmanPlan struct {
 // (mode run) or one .container quadlet unit per instance (mode quadlet, or when
 // opts.ForceQuadlet is set). application.yml documents are returned separately
 // for the caller to write to disk.
-func GeneratePodman(r Request, res Resolver, opts PodmanOpts) (plan PodmanPlan, errs, warns []Issue) {
+//
+// extraAllowed threads deploy/delete's --allow-command values into the
+// podman.command allowlist check; plain `generate podman` calls this with none.
+func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...string) (plan PodmanPlan, errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
 	p := e.Podman
 	if p == nil {
@@ -224,6 +236,7 @@ func GeneratePodman(r Request, res Resolver, opts PodmanOpts) (plan PodmanPlan, 
 	}
 	verrs, w := validate.Run(validate.Context{
 		Workflows: wfs, Defaults: &e.Defaults, Podman: p, CheckPodman: true, Env: res.Env,
+		AllowCommands: extraAllowed,
 	})
 	errs = append(pissues, verrs...)
 	warns = append(ewarns, w...)

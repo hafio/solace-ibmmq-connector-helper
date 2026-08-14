@@ -1278,6 +1278,8 @@ function validateModel(m){
   const haveKeystore = !!(m.tls.keystore && m.tls.keystore.file);
 
   checkWorkflowCount(add, m.wfs.length);
+  checkExpansion(warn, ENV_FILE, 'workflows.dir', m.workflows.dir);
+  checkExpansion(warn, ENV_FILE, 'workflows.file_pattern', m.workflows.filePattern);
 
   // Connection definitions.
   const seenNames = {};
@@ -1288,6 +1290,7 @@ function validateModel(m){
     const label = 'connections.' + c.name;
     checkTuple(add, ENV_FILE, label, c.side, haveKeystore);
     checkSideCredentials(add, warn, ENV_FILE, label, c.side);
+    checkSideExpansion(warn, ENV_FILE, label, c.side);
   });
 
   // Per-workflow structural + semantic checks (raw sides, before resolution).
@@ -1328,7 +1331,7 @@ function validateModel(m){
     const k = dedupKey(s), prev = passByKey[k];
     if(prev){
       if(prev.key !== credKey(c)){
-        add(wf.file, `conflicting password for the same binder: this side uses ${credDesc(c)}, ${prev.file} uses a different one — one connection cannot authenticate two ways, so give it a single password or make the tuples distinct`);
+        add(wf.file, `conflicting password for the same binder: this side uses ${credDesc(c)}, ${prev.file} uses a different one -- one connection cannot authenticate two ways, so give it a single password or make the tuples distinct`);
       }
       return;
     }
@@ -1347,10 +1350,16 @@ function validateModel(m){
 
   checkLeaderElection(add, warn, m, haveKeystore);
 
+  if(m.management.present){
+    checkExpansion(warn, ENV_FILE, 'management.exposure', m.management.exposure);
+    checkExpansion(warn, ENV_FILE, 'management.health-show-details', m.management.healthShowDetails);
+  }
+
   if(m.kube) checkKube(add, warn, m);
-  if(m.docker) checkContainerTarget(add, m, m.docker);
+  if(m.docker) checkContainerTarget(add, warn, m, m.docker);
   if(m.podman){
-    checkContainerTarget(add, m, m.podman);
+    checkContainerTarget(add, warn, m, m.podman);
+    checkExpansion(warn, ENV_FILE, 'podman.quadlet.dir', m.podman.quadlet.dir);
     if(m.podman.mode !== 'run' && m.podman.mode !== 'quadlet'){
       add(ENV_FILE, `podman.mode must be "run" or "quadlet" (got "${m.podman.mode}")`);
     }
@@ -1365,14 +1374,16 @@ function validateModel(m){
     }
   });
 
-  (m.security.users || []).forEach(u => {
+  (m.security.users || []).forEach((u, i) => {
     if(!u.name) add(ENV_FILE, 'security.users entry needs a name');
+    checkExpansion(warn, ENV_FILE, `security.users[${i}].name`, u.name);
   });
   return { errs: errs, warns: warns };
 }
 
 function checkSide(add, warn, file, which, s, isSource, haveKeystore, conns){
   checkSideCredentials(add, warn, file, which, s);
+  checkSideExpansion(warn, file, which, s);
   if(!s.dest){
     add(file, `${which} (${s.system}) must specify exactly one of 'queue:' or 'topic:'`);
   }
@@ -1462,11 +1473,58 @@ function checkDefaultsCredentials(add, warn, m){
   });
   if(m.leader.session){
     checkSideCredentials(add, warn, ENV_FILE, 'leader-election session', m.leader.session);
+    checkSideExpansion(warn, ENV_FILE, 'leader-election session', m.leader.session);
   }
 }
 
 function checkStore(add, warn, label, st){
   checkCred(add, warn, ENV_FILE, `${label}.password`, st.password);
+  checkExpansion(warn, ENV_FILE, `${label}.file`, st.file);
+  checkExpansion(warn, ENV_FILE, `${label}.type`, st.type);
+}
+
+// checkExpansion flags a generate-time ${VAR} / ${VAR:default} placeholder in
+// a NON-CREDENTIAL string field (mirrors Go's internal/spec/expand.go, run
+// from internal/gen.parse before validation). solmq-conn resolves those
+// placeholders from its OWN environment when it runs, so the preview this
+// page renders -- which has no shell environment to read -- may not match
+// the application.yml the CLI actually produces. Advisory only: it never
+// blocks generation, and callers must never route a credential or -env field
+// through it (checkCred already owns those) or a verbatim passthrough block
+// (props/tune/logging.level/solace-defaults/leader-election fail-over),
+// which Go never expands either.
+function checkExpansion(warn, file, label, value){
+  if(!value || value.indexOf('${') < 0) return;
+  const vars = [];
+  const re = /\$\{([^}:]+)(?::[^}]*)?\}/g;
+  let mt;
+  while((mt = re.exec(value))){
+    if(vars.indexOf(mt[1]) < 0) vars.push(mt[1]);
+  }
+  if(!vars.length) return;
+  const names = vars.map(v => '\${' + v + '}').join(', ');
+  warn(file, `${label} "${value}" references ${names}; solmq-conn expands \${VAR} and \${VAR:default} placeholders from its OWN environment at generate time, so this preview may differ from the generated application.yml. If a referenced variable is unset and has no default, the text passes through unchanged and the CLI emits its own warning naming it`);
+}
+
+// checkSideExpansion runs checkExpansion over the non-credential string
+// fields of one side (mirrors the field set checkSideCredentials covers for
+// credentials): connRef/system/destKind are structural, not user-editable
+// text, and props/tune are verbatim passthrough that Go never expands, so
+// none of those are checked here.
+function checkSideExpansion(warn, file, label, s){
+  if(s.connRef) return;
+  if(s.system === 'solace'){
+    checkExpansion(warn, file, `${label} host`, s.host);
+    checkExpansion(warn, file, `${label} msg-vpn`, s.msgVpn);
+    checkExpansion(warn, file, `${label} key-alias`, s.keyAlias);
+  } else {
+    checkExpansion(warn, file, `${label} conn-name`, s.connName);
+    checkExpansion(warn, file, `${label} queue-manager`, s.queueManager);
+    checkExpansion(warn, file, `${label} channel`, s.channel);
+    checkExpansion(warn, file, `${label} cipher`, s.cipher);
+    checkExpansion(warn, file, `${label} key-alias`, s.keyAlias);
+  }
+  checkExpansion(warn, file, `${label} ${s.destKind || 'destination'}`, s.dest);
 }
 
 function edaAdvisory(warn, file, s, isSource){
@@ -1483,6 +1541,7 @@ function checkLeaderElection(add, warn, m, haveKeystore){
   const le = m.leader;
   if(!le.present || !le.mode || le.mode === 'standalone') return;
   if(!le.queue) add(ENV_FILE, `leader-election mode "${le.mode}" requires a 'queue'`);
+  checkExpansion(warn, ENV_FILE, 'leader-election queue', le.queue);
   if(le.connRef){
     const c = m.connections.find(x => x.name === le.connRef);
     if(!c) add(ENV_FILE, `leader-election conn-ref "${le.connRef}" is not defined under connections`);
@@ -1501,6 +1560,7 @@ function checkLeaderElection(add, warn, m, haveKeystore){
 // syslog, and libs.
 function checkKube(add, warn, m){
   const k = m.kube, d = k.deployment;
+  checkCommand(add, 'kubernetes.command', k.command, 'kubernetes');
   if(!d.name) add(ENV_FILE, 'deployment.name is required');
   else if(!isDNS1123(d.name)) add(ENV_FILE, `deployment.name "${d.name}" is not a valid DNS-1123 label`);
   else {
@@ -1509,9 +1569,14 @@ function checkKube(add, warn, m){
       add(ENV_FILE, `deployment.name "${d.name}" is too long: it derives the ConfigMap name "${longest}", which exceeds the 63-char DNS-1123 limit`);
     }
   }
+  checkExpansion(warn, ENV_FILE, 'deployment.name', d.name);
   if(!d.namespace) add(ENV_FILE, 'deployment.namespace is required');
   else if(!isDNS1123(d.namespace)) add(ENV_FILE, `deployment.namespace "${d.namespace}" is not a valid DNS-1123 label`);
+  checkExpansion(warn, ENV_FILE, 'deployment.namespace', d.namespace);
   if(!d.image) add(ENV_FILE, 'deployment.image is required');
+  checkExpansion(warn, ENV_FILE, 'deployment.image', d.image);
+  checkExpansion(warn, ENV_FILE, 'deployment.timezone', d.timezone);
+  checkExpansion(warn, ENV_FILE, 'kubernetes.command', k.command);
 
   const mode = m.leader.mode;
   if((!mode || mode === 'standalone') && d.replicas > 1){
@@ -1546,15 +1611,16 @@ function checkKube(add, warn, m){
   if(k.syslog){
     if(!k.syslog.host) add(ENV_FILE, 'logging.syslog.host is required');
     else if(!RE_HOST.test(k.syslog.host)) add(ENV_FILE, `logging.syslog.host "${k.syslog.host}" may only contain letters, digits, '.', ':', '_' and '-'`);
+    checkExpansion(warn, ENV_FILE, 'logging.syslog.host', k.syslog.host);
     if(k.syslog.port < 1 || k.syslog.port > 65535) add(ENV_FILE, `logging.syslog.port must be 1-65535 (got ${k.syslog.port})`);
     if(k.syslog.protocol === 'tcp'){
       warn(ENV_FILE, 'logging.syslog protocol tcp requires the logstash-logback-encoder jar on the connector classpath (provide it via libs)');
     }
   }
-  checkLibs(add, k.libs);
+  checkLibs(add, warn, k.libs);
 }
 
-function checkLibs(add, lb){
+function checkLibs(add, warn, lb){
   if(!lb) return;
   if(lb.kind === 'pvc-existing'){
     if(!lb.existing) add(ENV_FILE, "libs.pvc must set exactly one of 'create' or 'existing'");
@@ -1567,14 +1633,18 @@ function checkLibs(add, lb){
     } else {
       if(!RE_HOST.test(lb.nfsServer)) add(ENV_FILE, `libs.pvc.create nfs.server "${lb.nfsServer}" may only contain letters, digits, '.', ':', '_' and '-'`);
       if(!safeHostPath(lb.nfsPath)) add(ENV_FILE, `libs.pvc.create nfs.path "${lb.nfsPath}" contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
+      checkExpansion(warn, ENV_FILE, 'libs.pvc.create.nfs.path', lb.nfsPath);
     }
+    checkExpansion(warn, ENV_FILE, 'kubernetes.libs.pvc.create.storage', lb.storage);
   }
   if(lb.kind === 'download'){
     if(!lb.urls.length) add(ENV_FILE, "libs.download requires a non-empty 'urls' list");
     lb.urls.forEach(u => {
       if(!safeLibsURL(u)) add(ENV_FILE, `libs.download url "${u}" must be http(s) and contain no spaces, quotes, or control characters`);
+      checkExpansion(warn, ENV_FILE, 'libs.download url', u);
     });
     if(lb.pvc && !isDNS1123(lb.pvc)) add(ENV_FILE, `libs.download.pvc "${lb.pvc}" is not a valid DNS-1123 label`);
+    checkExpansion(warn, ENV_FILE, 'kubernetes.libs.download.image', lb.image);
   }
 }
 function safeShellChars(s){
@@ -1594,12 +1664,57 @@ function safeToken(s){
   for(let i = 0; i < s.length; i++){ if(SHELL_META.indexOf(s[i]) >= 0) return false; }
   return true;
 }
-function checkCommand(add, field, cmd){
+// ALLOWED_COMMANDS is the argv[0] allowlist for each deploy platform's
+// command: field (mirrors Go's validate.AllowedCommands). The page never
+// executes, so there is no --allow-command extension here; the error text
+// still names it as the CLI-side remedy.
+const ALLOWED_COMMANDS = { kubernetes: ['kubectl', 'oc'], docker: ['docker'], podman: ['podman'] };
+function stripExeSuffix(tok){
+  if(tok.endsWith('.exe')) return tok.slice(0, -4);
+  if(tok.endsWith('.EXE')) return tok.slice(0, -4);
+  return tok;
+}
+// checkCommand gates a deploy/delete command: field. It layers three checks
+// on top of the safe-token charset gate (mirrors Go's CheckDeployCommand):
+// bare-name argv[0] (no path separators, PATH-resolved only), a per-platform
+// binary allowlist (a ".exe"/".EXE" suffix is stripped before comparing), and
+// flag-shaped arguments after argv[0]. Like the Go function, it reports the
+// first offending token among these three and stops -- only the charset gate
+// above them reports every bad token, since that layer is unchanged.
+function checkCommand(add, field, cmd, platform){
   const tokens = String(cmd || '').split(/\s+/).filter(Boolean);
   if(!tokens.length){ add(ENV_FILE, `${field} must not be empty`); return; }
+  let badCharset = false;
   tokens.forEach(t => {
-    if(!safeToken(t)) add(ENV_FILE, `${field} token "${t}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
+    if(!safeToken(t)){ add(ENV_FILE, `${field} token "${t}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`); badCharset = true; }
   });
+  if(badCharset) return;
+
+  const allowed = ALLOWED_COMMANDS[platform] || [];
+  const isAllowed = name => allowed.indexOf(name) >= 0;
+
+  const bin = tokens[0], binName = stripExeSuffix(bin);
+  if(binName.indexOf('/') >= 0){
+    add(ENV_FILE, `${field} "${bin}": a path is not accepted here; use a bare binary name, resolved from PATH`);
+    return;
+  }
+  if(!isAllowed(binName)){
+    add(ENV_FILE, `${field} "${bin}": binary must be one of ${allowed.join(', ')}; deploy/delete can approve another with --allow-command <name>`);
+    return;
+  }
+
+  for(let i = 1; i < tokens.length; i++){
+    const tok = tokens[i];
+    if(tok === '--'){
+      add(ENV_FILE, `${field} token "--": end-of-flags marker is not accepted`);
+      return;
+    }
+    if(tok.startsWith('-')) continue;
+    if(isAllowed(stripExeSuffix(tok))) continue;
+    if(tokens[i - 1].startsWith('-') && tokens[i - 1].indexOf('=') < 0) continue; // previous flag's value
+    add(ENV_FILE, `${field} token "${tok}": arguments must be flag-shaped (-x, --flag, --flag=value, or a flag's value); solmq-conn appends its own subcommand`);
+    return;
+  }
 }
 
 // checkSecretName gates a Secret name emitted verbatim into the manifest
@@ -1628,16 +1743,20 @@ function safeHostPath(s){
 // sections. Change 1 removes the secrets: block entirely (credentials are now
 // derived from the connection fields and mounted at /run/secrets), so any
 // leftover cred configuration is rejected outright rather than validated.
-function checkContainerTarget(add, m, c){
+function checkContainerTarget(add, warn, m, c){
   if(c.cred){
     add(ENV_FILE, `${c.section}.secrets is no longer configured: credentials come from the connection fields themselves (client-password / client-password-env, password / password-env, ...) and are mounted at /run/secrets. Remove the ${c.section}.secrets section`);
   }
   if(!isDNS1123(c.name)) add(ENV_FILE, `${c.section}.name "${c.name}" is not a valid DNS-1123 label`);
-  checkCommand(add, c.section + '.command', c.command);
+  checkExpansion(warn, ENV_FILE, `${c.section}.name`, c.name);
+  checkCommand(add, c.section + '.command', c.command, c.section);
   if(!c.image) add(ENV_FILE, `${c.section}.image is required`);
   else if(!safeToken(c.image)) add(ENV_FILE, `${c.section}.image "${c.image}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
+  checkExpansion(warn, ENV_FILE, `${c.section}.image`, c.image);
   if(c.restart && !safeToken(c.restart)) add(ENV_FILE, `${c.section}.restart "${c.restart}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
+  checkExpansion(warn, ENV_FILE, `${c.section}.restart`, c.restart);
   if(c.timezone && !safeToken(c.timezone)) add(ENV_FILE, `${c.section}.timezone "${c.timezone}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
+  checkExpansion(warn, ENV_FILE, `${c.section}.timezone`, c.timezone);
   c.ports.forEach(p => {
     const parts = p.split(':');
     if(parts.length > 2){ add(ENV_FILE, `${c.section}.ports entry "${p}" must be "host:container" (exactly one colon)`); return; }
@@ -1659,6 +1778,7 @@ function checkContainerTarget(add, m, c){
   if(c.libsDir && !safeHostPath(c.libsDir)){
     add(ENV_FILE, `${c.section}.libs.dir "${c.libsDir}" contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
   }
+  checkExpansion(warn, ENV_FILE, `${c.section}.libs.dir`, c.libsDir);
 }
 function usesTLS(resolved){
   return resolved.some(wf => [wf.source, wf.target].some(s =>

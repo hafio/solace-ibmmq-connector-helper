@@ -202,7 +202,7 @@ func baseKubeDeploy() spec.Deployment {
 
 func TestCheckSyslog(t *testing.T) {
 	run := func(sys *spec.Syslog) (errs, warns []Issue) {
-		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Logging: &spec.Logging{Syslog: sys}}
+		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand, Logging: &spec.Logging{Syslog: sys}}
 		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
 	}
 	if e, _ := run(&spec.Syslog{Port: 514, Protocol: spec.SyslogUDP}); !hasErr(e, "logging.syslog.host is required") {
@@ -230,7 +230,7 @@ func TestCheckSyslog(t *testing.T) {
 
 func TestCheckLibs(t *testing.T) {
 	run := func(lb *spec.Libs) (errs, warns []Issue) {
-		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Libs: lb}
+		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand, Libs: lb}
 		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
 	}
 	if e, _ := run(&spec.Libs{}); !hasErr(e, "exactly one of 'pvc' or 'download'") {
