@@ -1,6 +1,6 @@
 // Package examples embeds a ready-to-edit starter set of spec files (sample
-// workflows + a combined env.yaml) that the `solmq-conn examples` command writes
-// to disk. They are valid inputs on their own: `solmq-conn generate config -e
+// workflows + a combined env.yaml) that the `solmq-conn-util examples` command writes
+// to disk. They are valid inputs on their own: `solmq-conn-util generate config -e
 // <dir>/env.yaml` on a freshly written set generates an application.yml with no
 // errors.
 package examples

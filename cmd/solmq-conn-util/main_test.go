@@ -268,6 +268,8 @@ func TestExitCodeContract(t *testing.T) {
 		{"delete kubernetes no section", []string{"delete", "kubernetes", "-e", noSectionEnv}, 1},
 		{"delete docker no section", []string{"delete", "docker", "-e", noSectionEnv}, 1},
 		{"delete podman no section", []string{"delete", "podman", "-e", noSectionEnv}, 1},
+		{"completion no shell", []string{"completion"}, 2},
+		{"completion bogus shell", []string{"completion", "bogus"}, 2},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -282,6 +284,39 @@ func TestExitCodeContract(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCompletionDispatchPrintsScript covers the success path the exit-code table
+// cannot: every modeled shell exits 0, writes its script to stdout (never a
+// file), and never reaches the runner -- rendering is compiled-in, so it needs
+// no env.yaml and no exec.
+func TestCompletionDispatchPrintsScript(t *testing.T) {
+	for _, shell := range targetNames("completion") {
+		t.Run(shell, func(t *testing.T) {
+			f := &fakeRunner{}
+			code := -1
+			out := captureStdout(t, func() { code = dispatch([]string{"completion", shell}, f) })
+			if code != 0 {
+				t.Errorf("dispatch(completion %s) = %d, want 0", shell, code)
+			}
+			if !strings.Contains(out, "solmq-conn-util") {
+				t.Errorf("completion %s: stdout does not look like a completion script: %q", shell, truncate(out))
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("completion %s: runner must not be invoked, got %d calls", shell, len(f.calls))
+			}
+		})
+	}
+}
+
+// truncate keeps a failure message readable when a whole script would otherwise
+// be dumped into it.
+func truncate(s string) string {
+	const max = 120
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 // ---- a2) command-model / dispatch drift guard ------------------------------------
@@ -301,6 +336,7 @@ func TestDispatchHandlersMatchModel(t *testing.T) {
 	assertSameNameSet(t, "generate target", nameSet(targetNames("generate")), keySet(genTargets))
 	assertSameNameSet(t, "deploy platform", nameSet(targetNames("deploy")), keySet(actTargets))
 	assertSameNameSet(t, "delete platform", nameSet(targetNames("delete")), keySet(actTargets))
+	assertSameNameSet(t, "completion shell", nameSet(targetNames("completion")), keySet(completionShellRenderers))
 }
 
 func nameSet(names []string) map[string]bool {

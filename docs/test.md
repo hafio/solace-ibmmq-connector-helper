@@ -1,4 +1,4 @@
-# solmq-conn test catalogue
+# solmq-conn-util test catalogue
 
 Every test in the suite, grouped by package and expanded to individual cases, so you can
 see what behavior is covered and jump to the test that covers it. This is a living
@@ -22,7 +22,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 255 test functions, 462 cases across 14 packages._
+_Snapshot: 270 test functions, 599 cases across 14 packages._
 
 ## internal/spec
 
@@ -459,7 +459,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestGenValidateAndValuesFileKeys | Validate with TLS but no secrets.stores | no errors, exactly one warning about missing store files at runtime |
 | TestGenValidateAndValuesFileKeys | valuesFileKeys with kubernetes create/file source | returns keys map with SOL=true, no issues |
 | TestGenValidateAndValuesFileKeys | valuesFileKeys nil kubernetes | returns nil,nil |
-| TestGeneratorPageGoldenInSync | - | the golden embedded in solmq-conn-generator.html matches testdata/golden/application.yml (regenerate with -update-html-golden) |
+| TestGeneratorPageGoldenInSync | - | the golden embedded in solmq-conn-util-generator.html matches testdata/golden/application.yml (regenerate with -update-html-golden) |
 | TestGoldenConfig | - | generated config output matches testdata/golden/application.yml byte-for-byte, one instance |
 | TestGoldenKubernetesCreate | - | generated kubernetes manifests (namespace, configmap, secret, stores, pv, pvc, deployment with envFrom/stores/syslog/libs, service) match golden fixture byte-for-byte |
 | TestGoldenKubernetesNoSecrets | - | generated manifests without secrets/syslog/libs (namespace, configmap, deployment, service) match golden fixture byte-for-byte |
@@ -573,15 +573,15 @@ Tests: [examples_test.go](../internal/examples/examples_test.go)
 | TestWriteMkdirError | - | Write returns error when target dir path is under a regular file |
 | TestShippedExamplesGenerateConfig | - | embedded example set written to disk generates config via gen.Config with no errors and at least one non-empty rendered application.yml |
 
-## cmd/solmq-conn
+## cmd/solmq-conn-util
 
-The CLI shell -- flag parsing, the exit-code contract, the generate/validate/examples commands, and the deploy/delete seams for all three engines.
+The CLI shell -- flag parsing, the exit-code contract, the generate/validate/examples/completion commands, and the deploy/delete seams for all three engines. The completion tests also gate the four generated shell scripts against the command model.
 
-Tests: [main_test.go](../cmd/solmq-conn/main_test.go)
+Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.go](../cmd/solmq-conn-util/commands_doc_test.go), [completion_test.go](../cmd/solmq-conn-util/completion_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
-| TestDispatchHandlersMatchModel | verbs / generate targets / deploy platforms | the dispatch handler sets and cliVerbs agree in BOTH directions, so a command added to one cannot drift from the other |
+| TestDispatchHandlersMatchModel | verbs / generate targets / deploy platforms / completion shells | the dispatch handler sets and cliVerbs agree in BOTH directions, so a command added to one cannot drift from the other |
 | TestExitCodeContract | nil args | run(nil) returns exit code 2 |
 | TestExitCodeContract | unknown command | run([bogus]) returns exit code 2 |
 | TestExitCodeContract | help short -h | run([-h]) returns exit code 0 |
@@ -620,7 +620,7 @@ Tests: [main_test.go](../cmd/solmq-conn/main_test.go)
 | TestExamplesDefaultDir | - | examples with no dir arg exits 0 and creates ./examples/workflow-0.yaml |
 | TestGenerateKubernetesStdout | - | exit 0 and stdout contains kind: Deployment |
 | TestGenerateDockerToFile | - | exit 0 and compose file contains services: and image: img:1 |
-| TestGeneratePodmanQuadletStdout | - | exit 0 and stdout contains unit banner '# === solmq-conn.container ===' |
+| TestGeneratePodmanQuadletStdout | - | exit 0 and stdout contains unit banner '# === solmq-conn-util.container ===' |
 | TestDeployDockerSeamWritesComposeAndRuns | - | exit 0, compose file written, 2 runner calls (preflight then up) argv [docker compose -f <compose> up -d] |
 | TestDeployDockerSeamComposeFileSurvivesFailedRun | - | preflight succeeds but the real `up` call fails; compose file still exists on disk afterward, exit 1 |
 | TestDeployDockerSeamChildEnvCarriesCredentials | - | preflight call carries no env; the real `up` call (index 1) carries the resolved literal and -env credentials as STABLE=value pairs |
@@ -629,3 +629,17 @@ Tests: [main_test.go](../cmd/solmq-conn/main_test.go)
 | TestDeletePodmanSeamStopsRemovesReloads | - | exit 0, a leading podman info preflight call, then systemctl stop then daemon-reload calls, unit and app yaml files removed |
 | TestAbsPath | absolute input | absPath returns input unchanged when already absolute |
 | TestAbsPath | relative input | absPath joins relative path onto base dir |
+| TestCommandsDocInSync | - | docs/commands.md equals what the command model renders; -update rewrites it instead of asserting |
+| TestCommandsModelMatchesUsage | - | every InUsage command and every flag in the model appears in usage(), and usage() lists no command the model omits |
+| TestCompletionDispatchPrintsScript | bash / zsh / fish / powershell | `completion <shell>` exits 0, writes the script to stdout, and never reaches the runner |
+| TestCompletionGoldenInSync | bash / zsh / fish / powershell | each rendered script equals its snapshot under cmd/solmq-conn-util/testdata/completions; -update rewrites them |
+| TestCompletionCoversModel | bash / zsh / fish / powershell | every modeled verb, target and flag spelling reaches every shell, with descriptions in the three shells that show them |
+| TestCompletionRecognizesFlagAliases | bash / zsh / powershell | every spelling flag.Parse accepts (-e, --e, -env, --env) is in the value-skipping table, so a value is never mistaken for a positional |
+| TestCompletionShellStructure | bash / zsh / fish / powershell | each script keeps the registration line that makes it load, and the zsh script opens with #compdef |
+| TestCompletionValueKindsReachScripts | bash / zsh / fish / powershell | a path flag completes files and `examples` completes directories in every shell |
+| TestCompletionOutputIsPlainASCIILF | bash / zsh / fish / powershell | generated scripts are plain ASCII, LF only, newline-terminated |
+| TestCompletionModelMetadataComplete | - | every verb has a description and a known PosArg, every flag a known Arg and a non-empty Meaning, every modeled shell a renderer and a snapshot; verb/target names stay [a-z0-9-] for unquoted case patterns |
+| TestPlainText | code spans stripped / newline folded / tab and CR folded / whitespace runs collapse / trimmed / control chars dropped / empty / only backticks / punctuation preserved | model text is reduced to a single-line tooltip that cannot break the enclosing shell statement |
+| TestShellQuoting | plain / empty / apostrophe / backslash / dollar and backtick / double quote / semicolon and pipe | bashQuote, fishQuote and psQuote each neutralize their shell's escape rules |
+| TestZshEntry | plain / colon in the value escaped / colon in the description left alone / apostrophe quoted / empty description | _describe entries split on the intended colon only |
+| TestFlagAliasesAndOffered | short and long pair / long only | flagOffered suggests the documented spellings, flagAliases lists all four dash forms, fishFlagSpec renders -s/-l correctly |

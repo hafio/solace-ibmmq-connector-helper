@@ -1,8 +1,8 @@
 #requires -Version 5.1
-# Dev tasks for solmq-conn. Behaviourally identical to dev.sh -- same task names,
+# Dev tasks for solmq-conn-util. Behaviourally identical to dev.sh -- same task names,
 # same gating, same footer format.
 #
-# solmq-conn is a pure-Go CLI with no Dockerfile and no compose stack, so the
+# solmq-conn-util is a pure-Go CLI with no Dockerfile and no compose stack, so the
 # Docker tasks (image, up, down) do not apply and are omitted.
 [CmdletBinding()]
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Tasks)
@@ -67,7 +67,7 @@ function Get-HostArch {
 }
 $TOs   = if ($env:TARGET_OS)   { $env:TARGET_OS }   else { 'windows' }
 $TArch = if ($env:TARGET_ARCH) { $env:TARGET_ARCH } else { Get-HostArch }
-$BinName = "solmq-conn-{0}-{1}" -f $TOs, $TArch
+$BinName = "solmq-conn-util-{0}-{1}" -f $TOs, $TArch
 if ($TOs -eq 'windows') { $BinName = "$BinName.exe" }
 
 # --- tasks ------------------------------------------------------------------
@@ -75,7 +75,7 @@ function Task-build {
   New-Item -ItemType Directory -Force -Path $Dist | Out-Null
   $env:CGO_ENABLED = '0'; $env:GOOS = $TOs; $env:GOARCH = $TArch
   $code = Invoke-Logged 'build' 'go' @(
-    'build','-trimpath','-ldflags','-s -w','-o',(Join-Path $Dist $BinName),'./cmd/solmq-conn')
+    'build','-trimpath','-ldflags','-s -w','-o',(Join-Path $Dist $BinName),'./cmd/solmq-conn-util')
   Remove-Item Env:CGO_ENABLED, Env:GOOS, Env:GOARCH -ErrorAction SilentlyContinue
   return $code
 }
@@ -97,7 +97,7 @@ function Task-cov {
   return 0
 }
 
-# One task, every applicable check. FATAL on fixable CVEs. solmq-conn ships no
+# One task, every applicable check. FATAL on fixable CVEs. solmq-conn-util ships no
 # image, so this is the Go dependency scan alone. govulncheck reports only vulns
 # reachable from called code -- all actionable -- so a non-zero exit stops the
 # run. NOT `go run ...@version`: that form ignores this go.mod, so the scanner

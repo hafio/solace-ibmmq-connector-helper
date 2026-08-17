@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Dev tasks for solmq-conn. The only place that knows how to build/vet/test/scan
+# Dev tasks for solmq-conn-util. The only place that knows how to build/vet/test/scan
 # this repo. CI calls task names only. Keep dev.ps1 behaviourally identical.
 #
-# solmq-conn is a pure-Go CLI with no Dockerfile and no compose stack, so the
+# solmq-conn-util is a pure-Go CLI with no Dockerfile and no compose stack, so the
 # Docker tasks (image, up, down) do not apply and are omitted.
 set -uo pipefail
 
@@ -55,14 +55,14 @@ host_os()   { uname -s | tr '[:upper:]' '[:lower:]'; }
 host_arch() { case "$(uname -m)" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; *) uname -m;; esac; }
 T_OS="${TARGET_OS:-$(host_os)}"
 T_ARCH="${TARGET_ARCH:-$(host_arch)}"
-BIN_NAME="solmq-conn-$T_OS-$T_ARCH"
+BIN_NAME="solmq-conn-util-$T_OS-$T_ARCH"
 [ "$T_OS" = "windows" ] && BIN_NAME="$BIN_NAME.exe"
 
 # --- tasks ------------------------------------------------------------------
 task_build() {
   mkdir -p "$DIST"
   run build env CGO_ENABLED=0 GOOS="$T_OS" GOARCH="$T_ARCH" \
-    go build -trimpath -ldflags "-s -w" -o "$DIST/$BIN_NAME" ./cmd/solmq-conn
+    go build -trimpath -ldflags "-s -w" -o "$DIST/$BIN_NAME" ./cmd/solmq-conn-util
 }
 
 task_vet() { run vet go vet ./...; }
@@ -81,7 +81,7 @@ task_cov() {
   go tool cover -func=coverage.out | tail -n1 | tee -a "$LOG_DIR/cov.log"
 }
 
-# One task, every applicable check. FATAL on fixable CVEs. solmq-conn ships no
+# One task, every applicable check. FATAL on fixable CVEs. solmq-conn-util ships no
 # image, so this is the Go dependency scan alone. govulncheck reports only vulns
 # reachable from called code -- all actionable -- so a non-zero exit stops the
 # run. NOT `go run ...@version`: that form ignores this go.mod, so the scanner

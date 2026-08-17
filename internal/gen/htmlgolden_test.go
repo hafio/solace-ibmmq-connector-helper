@@ -13,10 +13,10 @@ import (
 // what the Go code produces. docs/DEVELOPMENT.md documents keeping the two in
 // sync as a manual rule; this test makes it a failing build instead, because a
 // stale copy makes Self-test report a pass that means nothing.
-const generatorPagePath = "../../solmq-conn-generator.html"
+const generatorPagePath = "../../solmq-conn-util-generator.html"
 
 var updateHTMLGolden = flag.Bool("update-html-golden", false,
-	"rewrite the embedded golden in solmq-conn-generator.html from testdata/golden/application.yml")
+	"rewrite the embedded golden in solmq-conn-util-generator.html from testdata/golden/application.yml")
 
 // goldenBlockRE captures the embedded copy. The block is `text/plain` so the
 // browser never executes it and the YAML survives verbatim.

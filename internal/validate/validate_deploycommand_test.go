@@ -75,7 +75,7 @@ func TestCheckDeployCommandErrorTexts(t *testing.T) {
 		t.Errorf("end-of-flags error text = %v", err)
 	}
 	if err := CheckDeployCommand(PlatformKubernetes, "kubectl delete", nil); err == nil ||
-		err.Error() != `token "delete": arguments must be flag-shaped (-x, --flag, --flag=value, or a flag's value); solmq-conn appends its own subcommand` {
+		err.Error() != `token "delete": arguments must be flag-shaped (-x, --flag, --flag=value, or a flag's value); solmq-conn-util appends its own subcommand` {
 		t.Errorf("flag-shape error text = %v", err)
 	}
 	if err := CheckDeployCommand(PlatformKubernetes, "", nil); err == nil || err.Error() != "must not be empty" {

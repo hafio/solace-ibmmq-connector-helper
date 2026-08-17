@@ -73,7 +73,7 @@ func TestWriteMkdirError(t *testing.T) {
 }
 
 // TestShippedExamplesGenerateConfig writes the embedded example set to disk and
-// drives it through gen.Config, the same entry point cmd/solmq-conn's
+// drives it through gen.Config, the same entry point cmd/solmq-conn-util's
 // `generate config` calls (see main.go's genConfig). This enforces the package
 // doc comment's promise (examples.go) -- a freshly written example set generates
 // with no errors -- and catches schema drift in the embedded env.yaml
@@ -125,7 +125,7 @@ func TestShippedExamplesGenerateConfig(t *testing.T) {
 	}
 }
 
-// testResolver builds a gen.Resolver the same way cmd/solmq-conn/main.go's
+// testResolver builds a gen.Resolver the same way cmd/solmq-conn-util/main.go's
 // resolver()/fileReader()/absResolver() do: real env lookups, and file/path
 // resolution relative to dir.
 func testResolver(dir string) gen.Resolver {

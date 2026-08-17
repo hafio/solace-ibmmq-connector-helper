@@ -9,7 +9,7 @@ import (
 )
 
 // -update regenerates the committed docs from the model instead of asserting.
-// Run: go test ./cmd/solmq-conn -run TestCommandsDocInSync -update
+// Run: go test ./cmd/solmq-conn-util -run TestCommandsDocInSync -update
 var updateDoc = flag.Bool("update", false, "regenerate generated docs (docs/commands.md)")
 
 // normLF collapses CRLF to LF so the byte comparison is independent of the
@@ -32,11 +32,11 @@ func TestCommandsDocInSync(t *testing.T) {
 	}
 	want, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v\nregenerate: go test ./cmd/solmq-conn -run TestCommandsDocInSync -update", path, err)
+		t.Fatalf("read %s: %v\nregenerate: go test ./cmd/solmq-conn-util -run TestCommandsDocInSync -update", path, err)
 	}
 	if normLF(string(want)) != normLF(got) {
-		t.Errorf("docs/commands.md is out of sync with the command model (cmd/solmq-conn/commands.go).\n" +
-			"regenerate: go test ./cmd/solmq-conn -run TestCommandsDocInSync -update")
+		t.Errorf("docs/commands.md is out of sync with the command model (cmd/solmq-conn-util/commands.go).\n" +
+			"regenerate: go test ./cmd/solmq-conn-util -run TestCommandsDocInSync -update")
 	}
 }
 
@@ -54,14 +54,14 @@ func TestCommandsModelMatchesUsage(t *testing.T) {
 		}
 		if len(v.Targets) == 0 {
 			leaves++
-			if !strings.Contains(collapsed, "solmq-conn "+v.Name) {
+			if !strings.Contains(collapsed, "solmq-conn-util "+v.Name) {
 				t.Errorf("usage() is missing command %q", v.Name)
 			}
 			continue
 		}
 		for _, tg := range v.Targets {
 			leaves++
-			inv := "solmq-conn " + v.Name + " " + tg.Name
+			inv := "solmq-conn-util " + v.Name + " " + tg.Name
 			if !strings.Contains(collapsed, inv) {
 				t.Errorf("usage() is missing command %q", inv)
 			}
@@ -70,7 +70,7 @@ func TestCommandsModelMatchesUsage(t *testing.T) {
 
 	got := 0
 	for _, ln := range strings.Split(u, "\n") {
-		if strings.HasPrefix(ln, "  solmq-conn ") {
+		if strings.HasPrefix(ln, "  solmq-conn-util ") {
 			got++
 		}
 	}

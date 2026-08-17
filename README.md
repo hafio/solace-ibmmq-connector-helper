@@ -1,6 +1,6 @@
-# solmq-conn -- Solace IBM MQ Connector config generator and deployer
+# solmq-conn-util -- Solace IBM MQ Connector config generator and deployer
 
-`solmq-conn` turns a folder of small, per-workflow YAML files plus one `env.yaml`
+`solmq-conn-util` turns a folder of small, per-workflow YAML files plus one `env.yaml`
 into a consolidated `application.yml` for the **Solace PubSub+ Connector for IBM
 MQ** (`solace/solace-pubsub-connector-ibmmq:2.13.0`), generates the Kubernetes,
 Docker Compose, or Podman artifacts that run it, and can apply or tear those down
@@ -25,13 +25,13 @@ so splitting them across connectors stays your decision.
 
 ## Quick start
 
-Grab the release binary for your platform (`solmq-conn-linux-amd64`,
-`solmq-conn-darwin-arm64`, `solmq-conn-windows-amd64.exe`, ...) or build from
+Grab the release binary for your platform (`solmq-conn-util-linux-amd64`,
+`solmq-conn-util-darwin-arm64`, `solmq-conn-util-windows-amd64.exe`, ...) or build from
 source (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)), then:
 
 ```sh
-solmq-conn examples specs                     # write a ready-to-edit sample set into ./specs
-solmq-conn generate config -e specs/env.yaml  # print the application.yml those samples produce
+solmq-conn-util examples specs                     # write a ready-to-edit sample set into ./specs
+solmq-conn-util generate config -e specs/env.yaml  # print the application.yml those samples produce
 ```
 
 The sample set is four cross-platform (MQ/Solace) workflows that together cover
@@ -40,7 +40,7 @@ mTLS, TLS-only, and plaintext transports, plus an MQ topic source exercising the
 auto-named durable subscription. Full breakdown: [userguide.md](userguide.md) section 10.
 
 Prefer a form to a text editor? Open
-[solmq-conn-generator.html](solmq-conn-generator.html) in a browser (no server, no
+[solmq-conn-util-generator.html](solmq-conn-util-generator.html) in a browser (no server, no
 install): it builds the whole spec folder, lints it with the same rules `validate`
 enforces, previews the `application.yml` it consolidates into, and downloads the
 set as a zip.
@@ -81,27 +81,28 @@ target:
 ```
 
 ```sh
-solmq-conn generate config -e specs/env.yaml                     # application.yml on stdout
-solmq-conn generate config -e specs/env.yaml -o application.yml  # ...or written to a file
+solmq-conn-util generate config -e specs/env.yaml                     # application.yml on stdout
+solmq-conn-util generate config -e specs/env.yaml -o application.yml  # ...or written to a file
 ```
 
 Add a `kubernetes:` section ([userguide.md](userguide.md) section 7) and
-`solmq-conn generate kubernetes -e specs/env.yaml` emits the full manifest set
+`solmq-conn-util generate kubernetes -e specs/env.yaml` emits the full manifest set
 (Namespace, ConfigMap, Deployment, Service, Secrets).
-`solmq-conn deploy kubernetes -e specs/env.yaml` then applies it by piping the
+`solmq-conn-util deploy kubernetes -e specs/env.yaml` then applies it by piping the
 manifest to `kubectl`/`oc`.
 
 ## Commands
 
 ```text
-solmq-conn generate config     [-e env.yaml] [-o out]        Emit application.yml
-solmq-conn generate kubernetes [-e env.yaml] [-o out]        Emit ConfigMap+Deployment+Service (+Secrets)
-solmq-conn generate docker     [-e env.yaml] [-o out]        Emit docker-compose.yml (application.yml inlined)
-solmq-conn generate podman     [-e env.yaml] [-o out]        Emit a podman run script or quadlet unit
-solmq-conn deploy  kubernetes|docker|podman  [-e env.yaml]   Apply: kubectl/oc, docker compose up, or systemctl start
-solmq-conn delete  kubernetes|docker|podman  [-e env.yaml]   Tear the same target down
-solmq-conn validate            [-e env.yaml]                 Lint the whole env.yaml + workflows
-solmq-conn examples [dir] [-f]                               Write a starter env.yaml + workflows
+solmq-conn-util generate config     [-e env.yaml] [-o out]        Emit application.yml
+solmq-conn-util generate kubernetes [-e env.yaml] [-o out]        Emit ConfigMap+Deployment+Service (+Secrets)
+solmq-conn-util generate docker     [-e env.yaml] [-o out]        Emit docker-compose.yml (application.yml inlined)
+solmq-conn-util generate podman     [-e env.yaml] [-o out]        Emit a podman run script or quadlet unit
+solmq-conn-util deploy  kubernetes|docker|podman  [-e env.yaml]   Apply: kubectl/oc, docker compose up, or systemctl start
+solmq-conn-util delete  kubernetes|docker|podman  [-e env.yaml]   Tear the same target down
+solmq-conn-util validate            [-e env.yaml]                 Lint the whole env.yaml + workflows
+solmq-conn-util examples [dir] [-f]                               Write a starter env.yaml + workflows
+solmq-conn-util completion bash|zsh|fish|powershell               Print a shell completion script
 
 -e, --env     Config file, relative or absolute path (default: env.yaml)
 -o, --out     generate output file (default: stdout)
@@ -118,6 +119,11 @@ preflight before anything is written or applied. Details and exit codes:
 [userguide.md](userguide.md) section 3; the full generated command reference:
 [docs/commands.md](docs/commands.md).
 
+Tab completion for all of the above: `solmq-conn-util completion bash|zsh|fish|powershell`
+prints a script for your shell, rendered from the binary's own command model so it
+never drifts from the commands that binary accepts
+([userguide.md](userguide.md) section 1.1).
+
 ## Documentation
 
 - [userguide.md](userguide.md) -- the complete user reference: commands (section
@@ -129,6 +135,6 @@ preflight before anything is written or applied. Details and exit codes:
   generated from the command model and gated against drift.
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) -- building, dev-script tasks, tests
   and golden fixtures, CI release, design notes.
-- [solmq-conn-generator.html](solmq-conn-generator.html) -- a standalone browser
+- [solmq-conn-util-generator.html](solmq-conn-util-generator.html) -- a standalone browser
   page (no install, no server) that generates the `env.yaml` + workflow files,
   reports the same findings as `validate`, and previews the `application.yml`.

@@ -1,14 +1,15 @@
-// Command solmq-conn generates and deploys the Solace PubSub+ Connector for IBM
+// Command solmq-conn-util generates and deploys the Solace PubSub+ Connector for IBM
 // MQ from a single env.yaml: it consolidates a folder of per-workflow YAML files
 // into an application.yml and, per target, into Kubernetes manifests, a docker
 // compose file, or podman run/quadlet units -- and can apply or tear those down
 // by shelling out to kubectl/oc, docker, or podman/systemctl.
 //
-//	solmq-conn generate config|kubernetes|docker|podman [-e env.yaml] [-o out]
-//	solmq-conn deploy   kubernetes|docker|podman        [-e env.yaml]
-//	solmq-conn delete   kubernetes|docker|podman        [-e env.yaml]
-//	solmq-conn validate                                 [-e env.yaml]
-//	solmq-conn examples [dir] [-f]
+//	solmq-conn-util generate config|kubernetes|docker|podman [-e env.yaml] [-o out]
+//	solmq-conn-util deploy   kubernetes|docker|podman        [-e env.yaml]
+//	solmq-conn-util delete   kubernetes|docker|podman        [-e env.yaml]
+//	solmq-conn-util validate                                 [-e env.yaml]
+//	solmq-conn-util examples [dir] [-f]
+//	solmq-conn-util completion bash|zsh|fish|powershell
 package main
 
 import (
@@ -53,12 +54,13 @@ func run(args []string) int {
 // other fails that test rather than drifting silently (see task 2's
 // examples-default-dir drift for what this class of bug looks like).
 var verbHandlers = map[string]func(args []string, r runner.Runner) int{
-	"generate": func(args []string, r runner.Runner) int { return runGenerate(args) },
-	"deploy":   func(args []string, r runner.Runner) int { return runAction(runner.ActionDeploy, args, r) },
-	"delete":   func(args []string, r runner.Runner) int { return runAction(runner.ActionDelete, args, r) },
-	"validate": func(args []string, r runner.Runner) int { return runValidate(args) },
-	"examples": func(args []string, r runner.Runner) int { return runExamples(args) },
-	"help":     func(args []string, r runner.Runner) int { usage(); return 0 },
+	"generate":   func(args []string, r runner.Runner) int { return runGenerate(args) },
+	"deploy":     func(args []string, r runner.Runner) int { return runAction(runner.ActionDeploy, args, r) },
+	"delete":     func(args []string, r runner.Runner) int { return runAction(runner.ActionDelete, args, r) },
+	"validate":   func(args []string, r runner.Runner) int { return runValidate(args) },
+	"examples":   func(args []string, r runner.Runner) int { return runExamples(args) },
+	"completion": func(args []string, r runner.Runner) int { return runCompletion(args) },
+	"help":       func(args []string, r runner.Runner) int { usage(); return 0 },
 }
 
 // dispatch resolves args[0] against verbHandlers. -h/--help are aliases of the
@@ -443,8 +445,43 @@ func runExamples(args []string) int {
 		fmt.Fprintln(os.Stderr, "exists (use -f to overwrite):", p)
 	}
 	fmt.Fprintf(os.Stderr, "\n%d written, %d skipped in %q\n", len(written), len(skipped), dir)
-	fmt.Fprintf(os.Stderr, "next: solmq-conn generate config -e %s\n", filepath.Join(dir, defaultEnvFile))
+	fmt.Fprintf(os.Stderr, "next: solmq-conn-util generate config -e %s\n", filepath.Join(dir, defaultEnvFile))
 	return 0
+}
+
+// ---- completion --------------------------------------------------------------
+
+// completionShellRenderers maps each modeled "completion" shell (cliVerbs in
+// commands.go) to its renderer, so runCompletion's accepted set can never drift
+// from the model -- see TestDispatchHandlersMatchModel.
+var completionShellRenderers = map[string]func() string{
+	"bash":       renderBashCompletion,
+	"zsh":        renderZshCompletion,
+	"fish":       renderFishCompletion,
+	"powershell": renderPowerShellCompletion,
+}
+
+// runCompletion prints the named shell's completion script on stdout, for the
+// caller to redirect or source. Nothing is read or written beyond that: the
+// script is rendered from the compiled-in command model, so it needs no env.yaml
+// and matches the binary that printed it.
+func runCompletion(args []string) int {
+	fs := flag.NewFlagSet("completion", flag.ContinueOnError)
+	pos, err := collectFlagsAndDirs(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(pos) == 0 {
+		fmt.Fprintf(os.Stderr, "completion: missing shell (%s)\n", pipeList(targetNames("completion")))
+		usage()
+		return 2
+	}
+	h, ok := completionShellRenderers[pos[0]]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "completion: unknown shell %q (want %s)\n", pos[0], wantList(targetNames("completion")))
+		return 2
+	}
+	return emit("", h())
 }
 
 // ---- shared flags + loading --------------------------------------------------

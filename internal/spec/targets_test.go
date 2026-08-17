@@ -123,7 +123,7 @@ docker:
 }
 
 // applyPodmanDefaults must allocate a Quadlet even when the podman: section
-// omits quadlet: entirely -- cmd/solmq-conn/main.go dereferences it
+// omits quadlet: entirely -- cmd/solmq-conn-util/main.go dereferences it
 // unconditionally on the podman deploy path, so a nil Quadlet here would
 // later panic.
 func TestApplyPodmanDefaultsFillsMissing(t *testing.T) {

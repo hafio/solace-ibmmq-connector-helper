@@ -1,4 +1,4 @@
-// Package spec defines the on-disk input schema for solmq-conn -- the per-workflow
+// Package spec defines the on-disk input schema for solmq-conn-util -- the per-workflow
 // files and the unified env.yaml (connector defaults plus the workflows,
 // kubernetes, docker, and podman sections) -- and parses them into typed values.
 //

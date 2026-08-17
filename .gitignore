@@ -1,7 +1,6 @@
 # Build outputs
-/solmq-conn
-/solmq-conn.exe
-/solmq-gen.exe
+/solmq-conn-util
+/solmq-conn-util.exe
 /dist/
 
 # Coverage artifacts (produced by scripts/dev.* cov)

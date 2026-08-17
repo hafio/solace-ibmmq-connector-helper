@@ -799,7 +799,7 @@ func CheckDeployCommand(platform, cmd string, extraAllowed []string) error {
 		case strings.HasPrefix(tokens[i-1], "-") && !strings.Contains(tokens[i-1], "="):
 			// This token is the previous flag's value.
 		default:
-			return fmt.Errorf("token %q: arguments must be flag-shaped (-x, --flag, --flag=value, or a flag's value); solmq-conn appends its own subcommand", tok)
+			return fmt.Errorf("token %q: arguments must be flag-shaped (-x, --flag, --flag=value, or a flag's value); solmq-conn-util appends its own subcommand", tok)
 		}
 	}
 	return nil

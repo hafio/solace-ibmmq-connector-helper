@@ -1,6 +1,6 @@
-# solmq-conn -- Development Guide
+# solmq-conn-util -- Development Guide
 
-Building, testing, releasing, and design notes for `solmq-conn`. For using the
+Building, testing, releasing, and design notes for `solmq-conn-util`. For using the
 tool, see the [user guide](../userguide.md); for a quick start, the
 [README](../README.md).
 
@@ -11,7 +11,7 @@ Requires Go 1.24+ (developed against 1.26). Dependency: `gopkg.in/yaml.v3` only.
 ```sh
 # from the repo root
 go mod tidy          # offline if the module cache already has yaml.v3
-go build -o solmq-conn ./cmd/solmq-conn   # CGO_ENABLED=0 for a static binary
+go build -o solmq-conn-util ./cmd/solmq-conn-util   # CGO_ENABLED=0 for a static binary
 ```
 
 Or use the mirrored task runner (`dev.sh` / `dev.ps1`, behaviorally identical):
@@ -33,7 +33,7 @@ packages from a module on a newer `go` directive. The Go toolchain itself is pin
 (`toolchain` directive in `go.mod`), so the laptop and both CI runners download and run the identical
 Go rather than whatever the runner image preinstalls -- bump the pin deliberately when upgrading
 locally. `build` honors `TARGET_OS`/`TARGET_ARCH` and writes
-`dist/solmq-conn-<os>-<arch>[.exe]` (host os/arch when unset), so one task serves the laptop and
+`dist/solmq-conn-util-<os>-<arch>[.exe]` (host os/arch when unset), so one task serves the laptop and
 the CI matrix. `graphify` is local-only (warn-skips under CI). `image`/`up`/`down` are omitted --
 the tool ships no Dockerfile or local stack (it generates artifacts for other engines; it is not
 itself containerized).
@@ -48,17 +48,43 @@ expanded to individual cases. Keep it in sync: a test or case added, removed, or
 updates the matching row in the same change.
 
 [`commands.md`](commands.md) is the **generated** command reference, rendered from the
-command model in [`cmd/solmq-conn/commands.go`](../cmd/solmq-conn/commands.go). Do not edit
+command model in [`cmd/solmq-conn-util/commands.go`](../cmd/solmq-conn-util/commands.go). Do not edit
 it by hand; `TestCommandsDocInSync` fails the build if it drifts from the model. Regenerate
 after changing a command:
 
 ```sh
-go test ./cmd/solmq-conn -run TestCommandsDocInSync -update   # or: go generate ./cmd/solmq-conn
+go generate ./cmd/solmq-conn-util   # = go test . -run "TestCommandsDocInSync|TestCompletionGoldenInSync" -update
 ```
 
-## The spec generator (`solmq-conn-generator.html`)
+### Shell completion
 
-[`solmq-conn-generator.html`](../solmq-conn-generator.html) is a standalone, dependency-free
+`solmq-conn-util completion bash|zsh|fish|powershell` prints a completion script, rendered by
+[`cmd/solmq-conn-util/completion.go`](../cmd/solmq-conn-util/completion.go) from the same
+`cliVerbs`/`cliFlags` model as the help and `commands.md` -- so a verb, target or flag added
+to the model reaches all four shells with no second edit, and the script a binary prints
+always matches the commands that binary accepts. Nothing is shipped as a file; the binary
+is the distribution.
+
+Two things gate that, both under `dev.sh test` (so CI, so a tag):
+
+- **`TestCompletionGoldenInSync`** compares each rendered script against a snapshot in
+  [`cmd/solmq-conn-util/testdata/completions/`](../cmd/solmq-conn-util/testdata/completions). Those
+  are test fixtures, not artifacts: they exist so a model change shows up as a reviewable
+  diff in the generated shell code. The `go generate` line above rewrites them along with
+  `commands.md`, so **changing a command means regenerating and reading that diff**.
+- **`TestCompletionCoversModel`** and its siblings assert the semantics a snapshot cannot:
+  every modeled name reaches every shell, the value kinds (`-e`/`-o` complete a path,
+  `examples` completes a directory) survive into each script, each script keeps the one
+  registration line that makes it load, and the output stays plain ASCII with LF endings.
+
+Adding a verb, target or flag therefore also means giving it the metadata the renderers
+need -- a `Blurb` (verbs with targets) or `Summary` (leaf verbs), a `PosArg` kind, and an
+`Arg` kind on a flag. `TestCompletionModelMetadataComplete` fails the build when one is
+missing or unrecognized rather than letting it render as an empty tooltip.
+
+## The spec generator (`solmq-conn-util-generator.html`)
+
+[`solmq-conn-util-generator.html`](../solmq-conn-util-generator.html) is a standalone, dependency-free
 page that builds a spec folder (`env.yaml` + workflow files) from a form. It has **no build
 step** and is not part of any dev-script task -- open it from disk and edit it in place.
 
@@ -103,7 +129,7 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
 - **Byte-for-byte output.** `application.yml` and the manifests use a deterministic ordered
   emitter (not generic YAML marshaling, which would re-sort keys), so regenerated files diff
   cleanly and match the golden fixture exactly.
-- **Layered core.** The CLI (`cmd/solmq-conn`) is a thin shell over `internal/gen`, which
+- **Layered core.** The CLI (`cmd/solmq-conn-util`) is a thin shell over `internal/gen`, which
   ties parse -> validate -> consolidate -> render together. Packages: `scan`, `spec`,
   `consolidate`, `tls`, `render`, `deploy`, `dockergen`, `podmangen`, `runner`, `validate`,
   `examples`, `gen`.

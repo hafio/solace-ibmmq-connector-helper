@@ -1,0 +1,131 @@
+#compdef solmq-conn-util
+# solmq-conn-util zsh completion -- GENERATED, do not edit by hand.
+#
+# Rendered from the command model in cmd/solmq-conn-util/commands.go by
+# `solmq-conn-util completion zsh`, so it matches the binary that printed it.
+# Re-run that command after upgrading solmq-conn-util.
+#
+# Install:
+#   mkdir -p ~/.zsh/completions
+#   solmq-conn-util completion zsh > ~/.zsh/completions/_solmq-conn-util
+#   
+#   The #compdef line above is what zsh autoloads on, so the directory must
+#   be on $fpath BEFORE compinit runs -- in ~/.zshrc:
+#   fpath=(~/.zsh/completions $fpath)
+#   autoload -Uz compinit && compinit
+#   
+#   Nothing completing? compinit is serving a stale cache:
+#   rm -f ~/.zcompdump* && exec zsh
+#
+# _solmq_conn_util_flag_arg <word> prints the value kind the flag consumes:
+# 'file', 'name', or nothing. Boolean flags fall through to the catch-all.
+_solmq_conn_util_flag_arg() {
+  case "$1" in
+    -e|--e|-env|--env) print -n 'file' ;;
+    -o|--o|-out|--out) print -n 'file' ;;
+    -allow-command|--allow-command) print -n 'name' ;;
+    *) print -n '' ;;
+  esac
+}
+
+# _solmq_conn_util_targets <verb> offers the verb's targets; 1 when it has none.
+_solmq_conn_util_targets() {
+  local -a t
+  case "$1" in
+    generate) t=('config:Emit application.yml' 'kubernetes:Emit ConfigMap+Deployment+Service (+Secrets)' 'docker:Emit docker-compose.yml (application.yml inlined)' 'podman:Emit a podman run script or quadlet unit') ;;
+    deploy) t=('kubernetes:kubectl/oc apply -f - (manifest on stdin)' 'docker:docker compose up -d' 'podman:write the quadlet unit; systemctl start') ;;
+    delete) t=('kubernetes:kubectl/oc delete -f -' 'docker:docker compose down' 'podman:systemctl stop; remove the unit') ;;
+    completion) t=('bash:Print the bash completion script' 'zsh:Print the zsh completion script' 'fish:Print the fish completion script' 'powershell:Print the PowerShell completion script') ;;
+    *) return 1 ;;
+  esac
+  _describe -t targets 'target' t
+  return 0
+}
+
+# _solmq_conn_util_flags <verb> offers the verb's flags; 1 when it has none.
+_solmq_conn_util_flags() {
+  local -a f
+  case "$1" in
+    generate) f=('-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '-o:write output to a file (default: stdout)' '--out:write output to a file (default: stdout)') ;;
+    deploy) f=('-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '--allow-command:approve an extra command binary beyond the command: allowlist; repeatable') ;;
+    delete) f=('-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '--allow-command:approve an extra command binary beyond the command: allowlist; repeatable') ;;
+    validate) f=('-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)') ;;
+    examples) f=('-f:overwrite existing files' '--force:overwrite existing files') ;;
+    *) return 1 ;;
+  esac
+  _describe -t options 'option' f
+  return 0
+}
+
+# _solmq_conn_util_posarg <verb> prints the completion kind for the verb's own
+# positional argument, or nothing when it takes none.
+_solmq_conn_util_posarg() {
+  case "$1" in
+    examples) print -n 'dir' ;;
+    *) print -n '' ;;
+  esac
+}
+
+_solmq_conn_util() {
+  local -a verbs
+  local verb='' cur prev kind
+  local -i i positional=0
+
+  cur="${words[CURRENT]}"
+  prev=''
+  (( CURRENT > 1 )) && prev="${words[CURRENT-1]}"
+
+  # A value for the flag just typed wins over everything else.
+  kind="$(_solmq_conn_util_flag_arg "$prev")"
+  case "$kind" in
+    file) _files; return ;;
+    name) return ;;
+  esac
+
+  # words is 1-indexed and words[1] is the command, so the already-typed
+  # arguments are 2..CURRENT-1. Flags and their values are skipped, because
+  # they may appear before, after, or between the positional arguments.
+  for (( i = 2; i < CURRENT; i++ )); do
+    case "${words[i]}" in
+      -*=*) ;;
+      -*) [[ -n "$(_solmq_conn_util_flag_arg "${words[i]}")" ]] && (( i++ )) ;;
+      *) if [[ -z "$verb" ]]; then verb="${words[i]}"; else (( positional++ )); fi ;;
+    esac
+  done
+
+  if [[ -z "$verb" ]]; then
+    verbs=(
+      'generate:Render artifacts for one target to stdout or a file'
+      'deploy:Generate for a platform, then apply it'
+      'delete:Tear down what deploy created for a platform'
+      'validate:Lint the whole env.yaml + workflows'
+      'examples:Write a starter env.yaml + workflows'
+      'completion:Print a shell completion script'
+      'help:Print the usage summary (also -h, --help)'
+      '-h:Print the usage summary'
+      '--help:Print the usage summary'
+    )
+    _describe -t commands 'command' verbs
+    return
+  fi
+
+  if [[ "$cur" == -* ]]; then
+    _solmq_conn_util_flags "$verb"
+    return
+  fi
+
+  if (( positional == 0 )); then
+    _solmq_conn_util_targets "$verb" && return
+    case "$(_solmq_conn_util_posarg "$verb")" in
+      dir) _files -/; return ;;
+      file) _files; return ;;
+    esac
+  fi
+}
+
+# Works both ways: autoloaded from $fpath, or sourced directly from a shell rc.
+if [ "$funcstack[1]" = '_solmq_conn_util' ]; then
+  _solmq_conn_util
+else
+  compdef _solmq_conn_util solmq-conn-util
+fi

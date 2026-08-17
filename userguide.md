@@ -1,6 +1,6 @@
-# solmq-conn -- User Guide
+# solmq-conn-util -- User Guide
 
-`solmq-conn` turns a folder of small, per-workflow YAML files plus one `env.yaml`
+`solmq-conn-util` turns a folder of small, per-workflow YAML files plus one `env.yaml`
 into one consolidated `application.yml` for the **Solace PubSub+ Connector for IBM
 MQ**, generates the Kubernetes, Docker Compose, or Podman artifacts that run it, and
 can apply or tear those down for you. You describe each message flow as its own small
@@ -15,36 +15,86 @@ recommended everywhere.
 
 ---
 
-## 1. Running solmq-conn
+## 1. Running solmq-conn-util
 
-You run `solmq-conn` as a command-line tool. Use the prebuilt binary for your
-platform -- on Windows it is `solmq-conn.exe`, elsewhere `solmq-conn` (release
-binaries are named like `solmq-conn-linux-amd64`, `solmq-conn-darwin-arm64`,
-`solmq-conn-windows-amd64.exe`). The examples below write it as `solmq-conn`; on
-Windows use `.\solmq-conn.exe`, or put the binary on your `PATH` and drop the
+You run `solmq-conn-util` as a command-line tool. Use the prebuilt binary for your
+platform -- on Windows it is `solmq-conn-util.exe`, elsewhere `solmq-conn-util` (release
+binaries are named like `solmq-conn-util-linux-amd64`, `solmq-conn-util-darwin-arm64`,
+`solmq-conn-util-windows-amd64.exe`). The examples below write it as `solmq-conn-util`; on
+Windows use `.\solmq-conn-util.exe`, or put the binary on your `PATH` and drop the
 leading `./`. To build from source, see
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ```sh
-solmq-conn                                     # no arguments: print usage
-solmq-conn --help                              # print usage
-solmq-conn <verb> <target> [-e env.yaml] ...   # run a command (see section 3)
+solmq-conn-util                                     # no arguments: print usage
+solmq-conn-util --help                              # print usage
+solmq-conn-util <verb> <target> [-e env.yaml] ...   # run a command (see section 3)
 ```
 
-`solmq-conn` reads one `env.yaml` (chosen with `-e`, default `env.yaml`) plus the
+`solmq-conn-util` reads one `env.yaml` (chosen with `-e`, default `env.yaml`) plus the
 workflow files it discovers alongside it. `generate`, `validate`, and `examples`
 are pure build-time steps: they read and write plain files and need no network,
 broker, or cluster. `deploy`/`delete` additionally shell out to the target CLI
 (`kubectl`/`oc`, `docker`, or `podman` + `systemctl`) to apply or tear down what was
 generated -- run those where that CLI and its context are available.
 
+### 1.1 Shell completion
+
+`solmq-conn-util completion <shell>` prints a completion script on stdout for `bash`,
+`zsh`, `fish`, or `powershell`. It completes the verbs, each verb's targets, the
+flags valid under that verb, a file path after `-e`/`-o`, and a directory after
+`examples` -- including when a flag comes before the target, as in
+`solmq-conn-util generate -e env.yaml <TAB>`.
+
+The script is rendered from the command model compiled into the binary, so it
+always matches the commands that binary accepts. **Re-run the command after
+upgrading `solmq-conn-util`** to pick up new commands.
+
+Printing the script installs nothing -- it goes to stdout. What makes a shell
+*use* it differs per shell, so follow the recipe for yours:
+
+```sh
+# bash -- add the source line to ~/.bashrc; depends on nothing but bash
+source <(solmq-conn-util completion bash)
+
+# fish -- writing the file IS the install; fish autoloads that path
+mkdir -p ~/.config/fish/completions
+solmq-conn-util completion fish > ~/.config/fish/completions/solmq-conn-util.fish
+
+# zsh -- the file must be named _solmq-conn-util and sit on $fpath BEFORE compinit
+mkdir -p ~/.zsh/completions
+solmq-conn-util completion zsh > ~/.zsh/completions/_solmq-conn-util
+#   ...then in ~/.zshrc, ahead of any existing compinit call:
+#   fpath=(~/.zsh/completions $fpath)
+#   autoload -Uz compinit && compinit
+```
+
+```powershell
+# PowerShell -- Register-ArgumentCompleter is per-session, so persist it
+solmq-conn-util completion powershell >> $PROFILE
+```
+
+Each shell has one thing that catches people out:
+
+| Shell | Gotcha |
+|-------|--------|
+| bash | `/etc/bash_completion.d/` works only where the **bash-completion package** is installed and sourced from the profile -- it is what reads that directory. Without it the file is never loaded; the `~/.bashrc` `source` line has no such dependency. |
+| zsh | `compinit` caches. If nothing completes, `rm -f ~/.zcompdump* && exec zsh`. |
+| fish | None -- it autoloads. `solmq-conn-util completion fish \| source` covers the current session if you would rather not install. |
+| PowerShell | `\| Out-String \| Invoke-Expression` is the current session only; it does not survive a restart. |
+
+The scripts complete the command named `solmq-conn-util` (and `solmq-conn-util.exe` on
+Windows). Release binaries carry their platform in the filename, so rename the one
+you downloaded -- `solmq-conn-util-linux-amd64` to `solmq-conn-util` -- or completion will not
+fire for it.
+
 ---
 
 ## 2. Quick start
 
 ```sh
-solmq-conn examples examples                     # write a ready-to-edit sample set into ./examples
-solmq-conn generate config -e examples/env.yaml  # print the application.yml those samples produce
+solmq-conn-util examples examples                     # write a ready-to-edit sample set into ./examples
+solmq-conn-util generate config -e examples/env.yaml  # print the application.yml those samples produce
 ```
 
 Then edit the files under `examples/` (start with `examples/env.yaml`), drop your
@@ -54,14 +104,14 @@ Then edit the files under `examples/` (start with `examples/env.yaml`), drop you
 ### The spec generator (no editor required)
 
 If you would rather fill in a form than hand-write YAML, open
-[solmq-conn-generator.html](solmq-conn-generator.html) in any browser -- it is a
+[solmq-conn-util-generator.html](solmq-conn-util-generator.html) in any browser -- it is a
 single self-contained page, so there is nothing to install and no server to run.
 It builds the whole spec folder for you:
 
 - a form for every `env.yaml` section (section 6) and for each deploy target
   (section 7), plus repeatable cards for `connections` and for the workflow files
   (section 5), so a `conn-ref` is picked from a list rather than typed;
-- live findings using the same rules and wording as `solmq-conn validate`
+- live findings using the same rules and wording as `solmq-conn-util validate`
   (section 3), including the EDA advisories;
 - a preview of the `application.yml` the spec consolidates into (section 9);
 - **Download all (.zip)** writes `specs/env.yaml` plus one file per workflow,
@@ -70,7 +120,7 @@ It builds the whole spec folder for you:
 
 Credentials are entered as the name of an environment variable (the `-env` form,
 section 8) rather than as values, so the generated `env.yaml` stays safe to commit.
-The preview is a convenience -- `solmq-conn generate config` remains authoritative.
+The preview is a convenience -- `solmq-conn-util generate config` remains authoritative.
 The one case where the two are known to differ is `${VAR}`: the page cannot read
 the environment the CLI will run in, so it previews the reference verbatim and
 says so (section 4.1).
@@ -83,18 +133,19 @@ The first argument is a **verb**; the second names the **target** (for `generate
 or **platform** (for `deploy`/`delete`).
 
 ```text
-solmq-conn generate config     [-e env.yaml] [-o out]        Emit application.yml
-solmq-conn generate kubernetes [-e env.yaml] [-o out]        Emit ConfigMap+Deployment+Service (+Secrets)
-solmq-conn generate docker     [-e env.yaml] [-o out]        Emit docker-compose.yml (application.yml inlined)
-solmq-conn generate podman     [-e env.yaml] [-o out]        Emit a podman run script or quadlet unit
-solmq-conn deploy  kubernetes  [-e env.yaml]                 kubectl/oc apply -f - (manifest on stdin)
-solmq-conn delete  kubernetes  [-e env.yaml]                 kubectl/oc delete -f -
-solmq-conn deploy  docker      [-e env.yaml]                 docker compose up -d
-solmq-conn delete  docker      [-e env.yaml]                 docker compose down
-solmq-conn deploy  podman      [-e env.yaml]                 write the quadlet unit; systemctl start
-solmq-conn delete  podman      [-e env.yaml]                 systemctl stop; remove the unit
-solmq-conn validate            [-e env.yaml]                 Lint the whole env.yaml + workflows
-solmq-conn examples [dir] [-f]                               Write a starter env.yaml + workflows
+solmq-conn-util generate config     [-e env.yaml] [-o out]        Emit application.yml
+solmq-conn-util generate kubernetes [-e env.yaml] [-o out]        Emit ConfigMap+Deployment+Service (+Secrets)
+solmq-conn-util generate docker     [-e env.yaml] [-o out]        Emit docker-compose.yml (application.yml inlined)
+solmq-conn-util generate podman     [-e env.yaml] [-o out]        Emit a podman run script or quadlet unit
+solmq-conn-util deploy  kubernetes  [-e env.yaml]                 kubectl/oc apply -f - (manifest on stdin)
+solmq-conn-util delete  kubernetes  [-e env.yaml]                 kubectl/oc delete -f -
+solmq-conn-util deploy  docker      [-e env.yaml]                 docker compose up -d
+solmq-conn-util delete  docker      [-e env.yaml]                 docker compose down
+solmq-conn-util deploy  podman      [-e env.yaml]                 write the quadlet unit; systemctl start
+solmq-conn-util delete  podman      [-e env.yaml]                 systemctl stop; remove the unit
+solmq-conn-util validate            [-e env.yaml]                 Lint the whole env.yaml + workflows
+solmq-conn-util examples [dir] [-f]                               Write a starter env.yaml + workflows
+solmq-conn-util completion bash|zsh|fish|powershell               Print a shell completion script (section 1.1)
 ```
 
 The full command tree -- with an example for every command -- is the generated
@@ -128,6 +179,9 @@ target, unknown flag).
 - **`validate`** runs **every** check across the whole `env.yaml` (including any
   present `kubernetes:`/`docker:`/`podman:` sections) and its workflows, and prints
   all findings (non-zero exit if any errors). Use it as a linter.
+- **`completion <shell>`** prints a completion script for `bash`, `zsh`, `fish` or
+  `powershell` on stdout -- see section 1.1. It reads no `env.yaml` and touches
+  nothing on disk.
 - `generate` output is buffered and only written on full success -- you never get a
   half-written `-o` file.
 
@@ -135,7 +189,7 @@ target, unknown flag).
 
 ## 4. The config file and workflow discovery
 
-You point `solmq-conn` at one **`env.yaml`** with `-e` (default `env.yaml`). It
+You point `solmq-conn-util` at one **`env.yaml`** with `-e` (default `env.yaml`). It
 carries the connector defaults (section 6), a `workflows:` discovery block, and one
 optional section per deploy target -- `kubernetes:`, `docker:`, `podman:` (section
 7).
@@ -193,7 +247,7 @@ host: tcps://${BROKER_HOST}:55443
 msg-vpn: ${VPN:prod}          # ${VAR:default} -- default used when VAR is unset
 ```
 
-- `${VAR}` and `${VAR:default}` expand from the environment `solmq-conn` runs in.
+- `${VAR}` and `${VAR:default}` expand from the environment `solmq-conn-util` runs in.
   Only the braced form expands -- a bare `$VAR` is left as literal text.
 - If `VAR` is unset and a default is given, the default is used.
 - If `VAR` is unset and there is **no default**, the text is left **verbatim** and
@@ -208,16 +262,16 @@ msg-vpn: ${VPN:prod}          # ${VAR:default} -- default used when VAR is unset
   `additional-properties`, `consumer`, `producer`, `solace-defaults`,
   `logging.level` and the leader-election `fail-over` block are copied through
   untouched (section 5.4), so a `${...}` inside one reaches the connector as typed
-  and is resolved by Spring at runtime, not by `solmq-conn` at generate time.
+  and is resolved by Spring at runtime, not by `solmq-conn-util` at generate time.
 - **The generator page cannot expand.** A browser has no access to the
-  environment `solmq-conn` will run in, so
-  [solmq-conn-generator.html](solmq-conn-generator.html) previews a `${VAR}`
+  environment `solmq-conn-util` will run in, so
+  [solmq-conn-util-generator.html](solmq-conn-util-generator.html) previews a `${VAR}`
   verbatim and raises an advisory saying the generated file may differ. The
   `env.yaml` it writes is still correct -- expansion happens when you generate,
   not when you author.
 - **Determinism caveat**: the tool's core promise is byte-for-byte reproducible
   output. Variable expansion is the one exception -- the rendered output now
-  depends on the environment `solmq-conn` runs in, so the same `env.yaml` can
+  depends on the environment `solmq-conn-util` runs in, so the same `env.yaml` can
   render differently across machines or CI runs unless the referenced variables
   are pinned identically everywhere it runs.
 
@@ -478,7 +532,7 @@ comparing, so Windows configs stay portable). It must be a **bare name resolved
 from PATH** -- a token containing `/` (or, since backslash is already
 charset-rejected, any path) is an error. Every later token must be **flag-shaped**
 (`-x`, `--flag`, `--flag=value`, or the value belonging to the preceding flag) --
-a literal `--` or a bare positional argument is rejected, since `solmq-conn`
+a literal `--` or a bare positional argument is rejected, since `solmq-conn-util`
 appends its own subcommand (`apply -f -`, `compose up -d`, etc.) and a stray
 positional would land in the wrong place. `validate` runs this same check on
 `kubernetes.command` too, not just `docker`/`podman`.
@@ -822,7 +876,7 @@ section 8).
 ## 10. `examples`
 
 ```sh
-solmq-conn examples [dir] [-f]
+solmq-conn-util examples [dir] [-f]
 ```
 
 Writes a ready-to-edit starter set into `<dir>` (default: the current directory):
@@ -853,7 +907,7 @@ the auto-named durable subscription (section 5.4). Only the *referenced* connect
 live in `env.yaml`; the inline ones live on the sides that use them. Existing files are
 left untouched (and reported) unless you pass `-f` / `--force`. The freshly written set
 always generates cleanly:
-`solmq-conn examples && solmq-conn generate config -e examples/env.yaml`.
+`solmq-conn-util examples && solmq-conn-util generate config -e examples/env.yaml`.
 
 ---
 
