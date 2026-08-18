@@ -12,9 +12,11 @@ import (
 
 // Instance is the connector: its compose service name and rendered config.
 type Instance struct {
-	Name    string // service/container name
-	AppYAML string // the rendered application.yml (has a trailing newline)
-	MQTLS   bool   // when true, add JAVA_TOOL_OPTIONS for IBM cipher mappings
+	Name         string // service/container name
+	AppYAML      string // the rendered application.yml (has a trailing newline)
+	MQTLS        bool   // when true, add JAVA_TOOL_OPTIONS for IBM cipher mappings
+	StatusScript string // the rendered status script, inlined as a second compose config
+	LeaderMode   string // effective leader-election mode; empty means standalone (normalized in the renderer)
 }
 
 // Mount is one read-only bind mount (host path -> container path).
@@ -37,9 +39,10 @@ type Input struct {
 // yw is the indentation-aware line writer used by every renderer here.
 type yw = yamlwriter.Writer
 
-// Render returns the full docker-compose.yml. The application.yml is inlined via
-// a compose top-level configs entry with content:, mounted into the service at
-// /app/external/spring/config/application.yml.
+// Render returns the full docker-compose.yml. The application.yml and the
+// status script are each inlined via their own compose top-level configs entry
+// with content:, mounted into the service at /app/external/spring/config/application.yml
+// and /app/external/libs/status respectively.
 func Render(in Input) string {
 	w := &yw{}
 
@@ -48,6 +51,7 @@ func Render(in Input) string {
 
 	w.Line(0, "configs:")
 	renderConfig(w, in.Instance)
+	renderStatusScriptConfig(w, in.Instance)
 
 	renderSecrets(w, in.Secrets)
 
@@ -70,7 +74,7 @@ func renderSecrets(w *yw, names []string) {
 	}
 }
 
-// renderService emits the service block: image, container name, and
+// renderService emits the service block: image, container name, labels, and
 // the conditional restart / ports / environment / secrets / configs / volumes
 // sub-blocks. A sub-block whose contents would be empty is omitted entirely so
 // no dangling key with a null value is produced.
@@ -79,6 +83,18 @@ func renderService(w *yw, in Input, inst Instance) {
 	w.Line(2, inst.Name+":")
 	w.Line(4, "image: "+d.Image)
 	w.Line(4, "container_name: "+inst.Name)
+	// labels: le-mode is always set; role: active only for standalone and
+	// active_active -- an active_standby role is only knowable live from the
+	// actuator, so it is never asserted statically here.
+	mode := inst.LeaderMode
+	if mode == "" {
+		mode = spec.LeaderStandalone
+	}
+	w.Line(4, "labels:")
+	w.Line(6, spec.LabelModeKey+": "+mode)
+	if mode == spec.LeaderStandalone || mode == spec.LeaderActiveActive {
+		w.Line(6, spec.LabelRoleKey+": "+spec.LabelRoleActive)
+	}
 	if d.Restart != "" {
 		w.Line(4, "restart: "+d.Restart)
 	}
@@ -107,10 +123,21 @@ func renderService(w *yw, in Input, inst Instance) {
 			w.Line(6, "- "+n)
 		}
 	}
-	// configs: always one entry -- the inlined application.yml.
+	// configs: always two entries -- the inlined application.yml and status script.
+	//
+	// The status script's target sits inside the libs directory a libs volume
+	// mounts below, and unlike the kubernetes and podman renderers -- where
+	// emitting the file mount last keeps it nested -- compose has no ordering to
+	// control here: configs and volumes are separate fields, both handed to the
+	// engine, which mounts by destination depth so a parent lands before its
+	// child. That makes the nesting the engine's job rather than this file's, so
+	// verify it against a real engine when both are configured (see the docker
+	// smoke test in userguide.md) rather than trusting key order.
 	w.Line(4, "configs:")
 	w.Line(6, "- source: "+inst.Name+"-app")
 	w.Line(8, "target: /app/external/spring/config/application.yml")
+	w.Line(6, "- source: "+inst.Name+"-status")
+	w.Line(8, "target: /app/external/libs/status")
 	// volumes: stores first, then libs; omit the key when there are neither.
 	if len(in.Stores) > 0 || in.Libs != nil {
 		w.Line(4, "volumes:")
@@ -130,6 +157,22 @@ func renderConfig(w *yw, inst Instance) {
 	w.Line(2, inst.Name+"-app:")
 	w.Line(4, "content: |")
 	for _, ln := range yamlwriter.SplitLines(inst.AppYAML) {
+		if ln == "" {
+			w.Raw("\n")
+		} else {
+			w.Line(6, ln)
+		}
+	}
+}
+
+// renderStatusScriptConfig emits the top-level configs entry inlining the
+// status script as a block scalar under content:, mirroring renderConfig.
+// Blank lines are preserved as truly empty lines (no indent, no trailing
+// spaces).
+func renderStatusScriptConfig(w *yw, inst Instance) {
+	w.Line(2, inst.Name+"-status:")
+	w.Line(4, "content: |")
+	for _, ln := range yamlwriter.SplitLines(inst.StatusScript) {
 		if ln == "" {
 			w.Raw("\n")
 		} else {

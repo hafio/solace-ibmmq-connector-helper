@@ -10,7 +10,15 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/scan"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 )
+
+// goldenStatusPassword is the obviously-synthetic literal the golden fixture's
+// solmq-status account carries. Setting spec.StatusUserPasswordEnvVar makes
+// gen.resolveStatusPassword use it verbatim instead of generating a random
+// one, so testdata/golden/application.yml can pin an exact byte-for-byte value.
+const goldenStatusPassword = "0123456789abcdef0123456789abcdef"
 
 const specsDir = "../../testdata/golden/specs"
 
@@ -49,8 +57,10 @@ func envWithKube(t *testing.T, kubeBlock string) []byte {
 }
 
 // setGoldenCredEnv sets the seven host environment variables the golden
-// spec's -env credential positions name. validate checks every -env
-// reference resolves to a set variable regardless of target (S4a: catch a
+// spec's -env credential positions name, plus spec.StatusUserPasswordEnvVar
+// so the reserved status account's password is the fixed goldenStatusPassword
+// rather than a freshly generated one. validate checks every -env reference
+// resolves to a set variable regardless of target (S4a: catch a
 // missing/misspelled name while linting rather than only at deploy time), so
 // even TestGoldenConfig -- which never reads the values -- needs them set.
 func setGoldenCredEnv(t *testing.T) {
@@ -59,7 +69,8 @@ func setGoldenCredEnv(t *testing.T) {
 		"SOL_PASSWORD": "sol-pw", "MQ_CORE_PASSWORD": "mqcore-pw",
 		"MQ_ARCHIVE_PASSWORD": "mqarchive-pw", "EDGE_SOL_PASSWORD": "edge-pw",
 		"TRUSTSTORE_PASSWORD": "ts-pw", "KEYSTORE_PASSWORD": "ks-pw",
-		"HEALTHCHECK_PASSWORD": "hc-pw",
+		"HEALTHCHECK_PASSWORD":        "hc-pw",
+		spec.StatusUserPasswordEnvVar: goldenStatusPassword,
 	} {
 		t.Setenv(k, v)
 	}
@@ -190,6 +201,18 @@ func configMapDoc(appYAML string, logback bool) string {
 			}
 		}
 	}
+	// The status script is always present, regardless of secrets/syslog/libs:
+	// the operator execs it inside the container in every configuration. 8090
+	// mirrors the golden fixture's management.port, unaffected by which
+	// kubernetes: block (create vs. no-secrets) the caller swapped in.
+	b.WriteString("  status: |\n")
+	for _, ln := range strings.Split(strings.TrimSuffix(statusscript.Render(8090, spec.StatusUserName), "\n"), "\n") {
+		if ln == "" {
+			b.WriteString("\n")
+		} else {
+			b.WriteString("    " + ln + "\n")
+		}
+	}
 	return b.String()
 }
 
@@ -301,6 +324,7 @@ spec:
     metadata:
       labels:
         app: solmq-connector
+        solace-connector/le-mode: active_standby
     spec:
       automountServiceAccountToken: false
       containers:
@@ -346,6 +370,9 @@ spec:
 	if libs {
 		b.WriteString("            - name: libs\n              mountPath: /app/external/libs\n              readOnly: true\n")
 	}
+	// The status-script mount is unconditional and always last (deploy.go:
+	// renderDeployment), so a libs directory mount above never shadows it.
+	b.WriteString("            - name: config\n              mountPath: /app/external/libs/status\n              subPath: status\n              readOnly: true\n")
 	b.WriteString(`          livenessProbe:
             tcpSocket:
               port: 8090

@@ -5,17 +5,22 @@ Source of truth: cmd/solmq-conn-util/commands.go (the cliSpec model).
 Regenerate: go test ./cmd/solmq-conn-util -run TestCommandsDocInSync -update
 TestCommandsDocInSync fails the build if this file drifts from the model. -->
 
-The full `solmq-conn-util` command tree. The first argument is a **verb**; where a verb
-takes a second argument it names the **target** (`generate`) or **platform**
-(`deploy`/`delete`). Generated from the command model in
+The full `solmq-conn-util` command tree. The first argument is a **verb**.
+`generate` takes an optional second argument, `config`, to render
+`application.yml` instead of a platform's artifacts. `generate`, `deploy`,
+`delete`, and `status` all accept `--platform` to pick a **platform**
+(`kubernetes`, `docker`, or `podman`) instead of resolving it from
+`env.yaml`. Generated from the command model in
 [`cmd/solmq-conn-util/commands.go`](../cmd/solmq-conn-util/commands.go); see
 [DEVELOPMENT.md](DEVELOPMENT.md#testing) to regenerate.
 
 ## Command tree
 
-- `generate` -> `config` | `kubernetes` | `docker` | `podman`
-- `deploy` -> `kubernetes` | `docker` | `podman`
-- `delete` -> `kubernetes` | `docker` | `podman`
+- `generate` `[config]` `[--platform kubernetes|docker|podman]`
+- `deploy` `[--platform kubernetes|docker|podman]`
+- `delete` `[--platform kubernetes|docker|podman]`
+- `status` `[--install]` `[--platform kubernetes|docker|podman]`
+- `version`
 - `validate`
 - `examples` `[dir]`
 - `completion` -> `bash` | `zsh` | `fish` | `powershell`
@@ -25,16 +30,12 @@ takes a second argument it names the **target** (`generate`) or **platform**
 
 | Command | Summary |
 |---------|---------|
-| `solmq-conn-util generate config [-e env.yaml] [-o out]` | Emit application.yml |
-| `solmq-conn-util generate kubernetes [-e env.yaml] [-o out]` | Emit ConfigMap+Deployment+Service (+Secrets) |
-| `solmq-conn-util generate docker [-e env.yaml] [-o out]` | Emit docker-compose.yml (application.yml inlined) |
-| `solmq-conn-util generate podman [-e env.yaml] [-o out]` | Emit a podman run script or quadlet unit |
-| `solmq-conn-util deploy kubernetes [-e env.yaml] [--allow-command name]` | kubectl/oc apply -f - (manifest on stdin) |
-| `solmq-conn-util deploy docker [-e env.yaml] [--allow-command name]` | docker compose up -d |
-| `solmq-conn-util deploy podman [-e env.yaml] [--allow-command name]` | write the quadlet unit; systemctl start |
-| `solmq-conn-util delete kubernetes [-e env.yaml] [--allow-command name]` | kubectl/oc delete -f - |
-| `solmq-conn-util delete docker [-e env.yaml] [--allow-command name]` | docker compose down |
-| `solmq-conn-util delete podman [-e env.yaml] [--allow-command name]` | systemctl stop; remove the unit |
+| `solmq-conn-util generate config [--platform kubernetes\|docker\|podman] [-e env.yaml] [-o out]` | Emit application.yml |
+| `solmq-conn-util generate [--platform kubernetes\|docker\|podman] [-e env.yaml] [-o out]` | Render the artifacts for the resolved platform to stdout or a file |
+| `solmq-conn-util deploy [--platform kubernetes\|docker\|podman] [-e env.yaml] [--allow-command name]` | Generate for a platform, then apply it |
+| `solmq-conn-util delete [--platform kubernetes\|docker\|podman] [-e env.yaml] [--allow-command name]` | Tear down what deploy created for a platform |
+| `solmq-conn-util status [--install] [--platform kubernetes\|docker\|podman] [-e env.yaml] [--pod name] [--container name] [--namespace ns] [--management-port port] [--user name] [--command name] [--allow-command name]` | Ensure and run the status script, printing per-target leader-election and workflow state |
+| `solmq-conn-util version` | Print the utility name, version, Go version and OS/arch |
 | `solmq-conn-util validate [-e env.yaml]` | Lint the whole env.yaml + workflows |
 | `solmq-conn-util examples [dir] [-f]` | Write a starter env.yaml + workflows |
 | `solmq-conn-util completion bash` | Print the bash completion script |
@@ -50,7 +51,15 @@ takes a second argument it names the **target** (`generate`) or **platform**
 | `-e`, `--env` | all except `examples` | config file, relative or absolute path (default: `env.yaml`) |
 | `-o`, `--out` | `generate` | write output to a file (default: stdout) |
 | `-f`, `--force` | `examples` | overwrite existing files |
-| `--allow-command` | `deploy`/`delete` | approve an extra command binary beyond the `command:` allowlist; repeatable |
+| `--allow-command` | `deploy`/`delete`/`status` | approve an extra command binary beyond the `command:` allowlist; repeatable |
+| `--platform` | `generate`/`deploy`/`delete`/`status` | the platform: `kubernetes`, `docker`, or `podman` (default: resolved from env.yaml, or an interactive menu -- see Command details) |
+| `--install` | `status` | install the status script on every target without prompting |
+| `--pod` | `status` | limit checks to this kubernetes pod name; repeatable (default: every running pod); no effect on docker/podman |
+| `--container` | `status` | limit checks to this docker/podman container name; repeatable (default: every running container); no effect on kubernetes |
+| `--namespace` | `status` | kubernetes namespace to query (default: the namespace of the deployment in env.yaml); no effect on docker/podman |
+| `--management-port` | `status` | actuator management port to reach inside each target (default: the management port configured for the target) |
+| `--user` | `status` | actuator account the status script authenticates as (default `solmq-status`) |
+| `--command` | `status` | override the platform CLI binary (`kubectl`/`oc`, `docker`, or `podman`) used to reach each target, instead of the `command:` in that section |
 
 Flags may appear before, after, or between the positional arguments.
 
@@ -66,11 +75,15 @@ Flags may appear before, after, or between the positional arguments.
 
 ### generate
 
-Renders the target's artifacts from `env.yaml` and prints them to stdout (or `-o`). Fails fast: stops at the first error and writes nothing; output is buffered, so a failed run never leaves a half-written `-o` file.
+Renders artifacts and prints them to stdout (or `-o`). Fails fast: stops at the first error and writes nothing; output is buffered, so a failed run never leaves a half-written `-o` file. The `config` positional renders `application.yml` from env.yaml and never involves a platform (`--platform` is ignored); leaving it off renders the resolved platform's artifacts instead. The platform is resolved in order: `--platform`, if given; otherwise the single `kubernetes:`/`docker:`/`podman:` section in env.yaml, when exactly one is present; otherwise an interactive menu, when more than one is present. A `--platform` value with no matching section in env.yaml is a loud error, and so are zero sections. The menu -- and, under `status`, the install confirmation prompt -- never block when stdin is not a TTY; both fail with the same guidance instead of hanging.
 
-Flags: `-e`, `--env`; `-o`, `--out`.
+Flags: `--platform`; `-e`, `--env`; `-o`, `--out`.
 
-#### `solmq-conn-util generate config [-e env.yaml] [-o out]`
+```sh
+solmq-conn-util generate --platform kubernetes -e env.yaml -o k8s.yaml
+```
+
+#### `solmq-conn-util generate config [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]`
 
 Emit application.yml.
 
@@ -78,88 +91,42 @@ Emit application.yml.
 solmq-conn-util generate config -e env.yaml -o application.yml
 ```
 
-#### `solmq-conn-util generate kubernetes [-e env.yaml] [-o out]`
-
-Emit ConfigMap+Deployment+Service (+Secrets).
-
-```sh
-solmq-conn-util generate kubernetes -e env.yaml -o k8s.yaml
-```
-
-#### `solmq-conn-util generate docker [-e env.yaml] [-o out]`
-
-Emit docker-compose.yml (application.yml inlined).
-
-```sh
-solmq-conn-util generate docker -e env.yaml -o docker-compose.yml
-```
-
-#### `solmq-conn-util generate podman [-e env.yaml] [-o out]`
-
-Emit a podman run script or quadlet unit.
-
-```sh
-solmq-conn-util generate podman -e env.yaml -o run.sh
-```
-
 ### deploy
 
-Generates for the platform, then applies it by shelling out to the section's `command:` (`kubectl`/`oc`, `docker`, or `podman` + `systemctl`) through an argv slice -- never a shell. The env file must contain the matching section. `command:`'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); `--allow-command` approves an extra binary for this invocation (e.g. a `sudo` prefix). Before anything is written or applied, a read-only preflight probe (login/permission check) must succeed, or the run stops with a login hint.
+Generates for the platform, then applies it by shelling out to the section's `command:` (`kubectl`/`oc`, `docker`, or `podman` + `systemctl`) through an argv slice -- never a shell. The env file must contain the matching section. `command:`'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); `--allow-command` approves an extra binary for this invocation (e.g. a `sudo` prefix). Before anything is written or applied, a read-only preflight probe (login/permission check) must succeed, or the run stops with a login hint. The platform is resolved in order: `--platform`, if given; otherwise the single `kubernetes:`/`docker:`/`podman:` section in env.yaml, when exactly one is present; otherwise an interactive menu, when more than one is present. A `--platform` value with no matching section in env.yaml is a loud error, and so are zero sections. The menu -- and, under `status`, the install confirmation prompt -- never block when stdin is not a TTY; both fail with the same guidance instead of hanging.
 
-Flags: `-e`, `--env`; `--allow-command`.
-
-#### `solmq-conn-util deploy kubernetes [-e env.yaml] [--allow-command name]`
-
-kubectl/oc apply -f - (manifest on stdin).
+Flags: `--platform`; `-e`, `--env`; `--allow-command`.
 
 ```sh
-solmq-conn-util deploy kubernetes -e env.yaml
-```
-
-#### `solmq-conn-util deploy docker [-e env.yaml] [--allow-command name]`
-
-docker compose up -d.
-
-```sh
-solmq-conn-util deploy docker -e env.yaml
-```
-
-#### `solmq-conn-util deploy podman [-e env.yaml] [--allow-command name]`
-
-write the quadlet unit; systemctl start.
-
-```sh
-solmq-conn-util deploy podman -e env.yaml
+solmq-conn-util deploy --platform kubernetes -e env.yaml
 ```
 
 ### delete
 
-Tears down what `deploy` created for the platform, the same way (via the section's `command:`, the same binary allowlist, `--allow-command`, and the same read-only preflight probe before anything is torn down).
+Tears down what `deploy` created for the platform, the same way (via the section's `command:`, the same binary allowlist, `--allow-command`, and the same read-only preflight probe before anything is torn down). The platform is resolved in order: `--platform`, if given; otherwise the single `kubernetes:`/`docker:`/`podman:` section in env.yaml, when exactly one is present; otherwise an interactive menu, when more than one is present. A `--platform` value with no matching section in env.yaml is a loud error, and so are zero sections. The menu -- and, under `status`, the install confirmation prompt -- never block when stdin is not a TTY; both fail with the same guidance instead of hanging.
 
-Flags: `-e`, `--env`; `--allow-command`.
-
-#### `solmq-conn-util delete kubernetes [-e env.yaml] [--allow-command name]`
-
-kubectl/oc delete -f -.
+Flags: `--platform`; `-e`, `--env`; `--allow-command`.
 
 ```sh
-solmq-conn-util delete kubernetes -e env.yaml
+solmq-conn-util delete --platform kubernetes -e env.yaml
 ```
 
-#### `solmq-conn-util delete docker [-e env.yaml] [--allow-command name]`
+### status
 
-docker compose down.
+For the resolved platform, execs into each running instance (a `kubernetes` pod, or a `docker`/`podman` container) and ensures the status script is present: `--install` installs it without asking; without it, a declined per-target install prompt just skips that target. Then runs the script and prints, per target, the leader-election result and workflow state from the instance's own actuator endpoint. `--pod` and `--container` (both repeatable) narrow which running targets are checked; `--namespace` overrides the kubernetes namespace and `--management-port` the actuator port; `--user` names the read-only actuator account the script authenticates as, for an instance whose config does not carry the reserved `solmq-status` account. `--command` overrides the platform CLI binary used to reach each target, and `--allow-command` approves an extra one, the same as deploy/delete. The platform is resolved in order: `--platform`, if given; otherwise the single `kubernetes:`/`docker:`/`podman:` section in env.yaml, when exactly one is present; otherwise an interactive menu, when more than one is present. A `--platform` value with no matching section in env.yaml is a loud error, and so are zero sections. The menu -- and, under `status`, the install confirmation prompt -- never block when stdin is not a TTY; both fail with the same guidance instead of hanging.
+
+Flags: `--install`; `--platform`; `-e`, `--env`; `--pod`; `--container`; `--namespace`; `--management-port`; `--user`; `--command`; `--allow-command`.
 
 ```sh
-solmq-conn-util delete docker -e env.yaml
+solmq-conn-util status --platform kubernetes -e env.yaml
 ```
 
-#### `solmq-conn-util delete podman [-e env.yaml] [--allow-command name]`
+### version
 
-systemctl stop; remove the unit.
+Prints solmq-conn-util's own version (stamped in at build time), the Go version it was built with, and its OS/arch (`GOOS`/`GOARCH`) -- for bug reports and to confirm which build is installed. Takes no flags.
 
 ```sh
-solmq-conn-util delete podman -e env.yaml
+solmq-conn-util version
 ```
 
 ### validate

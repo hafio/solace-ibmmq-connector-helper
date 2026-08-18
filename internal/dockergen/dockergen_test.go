@@ -17,6 +17,15 @@ logging:
   level: INFO
 `
 
+// statusScript1 exercises a blank line too, so the status config's content
+// block is checked against the same blank-line-preservation behavior as
+// application.yml's.
+const statusScript1 = `#!/bin/sh
+STATUS_URL="http://localhost:8080/actuator/health"
+
+curl -fsS "$STATUS_URL"
+`
+
 // TestRenderFull_WithEverything is the primary full-string golden: a single
 // instance with creds (rendered as a per-service secrets list plus a
 // top-level environment-provider secrets block -- never an env_file), a store
@@ -30,8 +39,14 @@ func TestRenderFull_WithEverything(t *testing.T) {
 			Ports:    []spec.Port{{Host: 8090, Container: 8090}, {Host: 8080, Container: 8091}},
 			Timezone: "Asia/Singapore",
 		},
-		Instance: Instance{Name: "solmq-connector", AppYAML: appYAML1, MQTLS: true},
-		Secrets:  []string{"SOLACE_CLIENT_USERNAME", "SOLACE_CLIENT_PASSWORD", "TRUSTSTORE_PASSWORD"},
+		Instance: Instance{
+			Name:         "solmq-connector",
+			AppYAML:      appYAML1,
+			MQTLS:        true,
+			StatusScript: statusScript1,
+			LeaderMode:   spec.LeaderActiveActive,
+		},
+		Secrets: []string{"SOLACE_CLIENT_USERNAME", "SOLACE_CLIENT_PASSWORD", "TRUSTSTORE_PASSWORD"},
 		Stores: []Mount{
 			{Source: "/abs/certs/truststore.jks", Target: "/app/external/classpath/truststores/truststore.jks"},
 		},
@@ -42,6 +57,9 @@ func TestRenderFull_WithEverything(t *testing.T) {
   solmq-connector:
     image: solace/solace-pubsub-connector-ibmmq:2.13.0
     container_name: solmq-connector
+    labels:
+      solace-connector/le-mode: active_active
+      solace-connector/role: active
     restart: unless-stopped
     ports:
       - "8090:8090"
@@ -56,6 +74,8 @@ func TestRenderFull_WithEverything(t *testing.T) {
     configs:
       - source: solmq-connector-app
         target: /app/external/spring/config/application.yml
+      - source: solmq-connector-status
+        target: /app/external/libs/status
     volumes:
       - /abs/certs/truststore.jks:/app/external/classpath/truststores/truststore.jks:ro
       - /abs/libs:/app/external/libs:ro
@@ -68,6 +88,12 @@ configs:
 
       logging:
         level: INFO
+  solmq-connector-status:
+    content: |
+      #!/bin/sh
+      STATUS_URL="http://localhost:8080/actuator/health"
+
+      curl -fsS "$STATUS_URL"
 secrets:
   SOLACE_CLIENT_USERNAME:
     environment: SOLACE_CLIENT_USERNAME
@@ -101,20 +127,28 @@ func TestRenderFull_Minimal(t *testing.T) {
 			Image: "img:1",
 			Name:  "solmq",
 		},
-		Instance: Instance{Name: "solmq", AppYAML: "key: value\n", MQTLS: false},
+		Instance: Instance{Name: "solmq", AppYAML: "key: value\n", MQTLS: false, StatusScript: "echo ok\n"},
 	}
 
 	want := `services:
   solmq:
     image: img:1
     container_name: solmq
+    labels:
+      solace-connector/le-mode: standalone
+      solace-connector/role: active
     configs:
       - source: solmq-app
         target: /app/external/spring/config/application.yml
+      - source: solmq-status
+        target: /app/external/libs/status
 configs:
   solmq-app:
     content: |
       key: value
+  solmq-status:
+    content: |
+      echo ok
 `
 
 	if got := Render(in); got != want {
@@ -129,7 +163,7 @@ configs:
 func TestSecretsBranches(t *testing.T) {
 	withSecret := Render(Input{
 		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "k: v\n"},
+		Instance: Instance{Name: "s", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 		Secrets:  []string{"MQ_USER"},
 	})
 	if !strings.Contains(withSecret, "    secrets:\n      - MQ_USER\n") {
@@ -141,7 +175,7 @@ func TestSecretsBranches(t *testing.T) {
 
 	noSecrets := Render(Input{
 		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "k: v\n"},
+		Instance: Instance{Name: "s", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
 	if strings.Contains(noSecrets, "secrets:") {
 		t.Errorf("secrets block should be absent when Secrets is empty:\n%s", noSecrets)
@@ -156,7 +190,7 @@ func TestEnvironmentBranches(t *testing.T) {
 	// TZ only (no MQTLS).
 	tzOnly := Render(Input{
 		Docker:   &spec.Docker{Image: "img", Name: "s", Timezone: "UTC"},
-		Instance: Instance{Name: "s", AppYAML: "k: v\n", MQTLS: false},
+		Instance: Instance{Name: "s", AppYAML: "k: v\n", MQTLS: false, StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
 	if !strings.Contains(tzOnly, "    environment:\n      TZ: UTC\n") {
 		t.Errorf("TZ-only environment block missing:\n%s", tzOnly)
@@ -168,7 +202,7 @@ func TestEnvironmentBranches(t *testing.T) {
 	// MQTLS only (no timezone).
 	mqOnly := Render(Input{
 		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "k: v\n", MQTLS: true},
+		Instance: Instance{Name: "s", AppYAML: "k: v\n", MQTLS: true, StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
 	if !strings.Contains(mqOnly, `    environment:
       JAVA_TOOL_OPTIONS: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"
@@ -185,7 +219,7 @@ func TestEnvironmentBranches(t *testing.T) {
 func TestContentIndentationAndBlankLines(t *testing.T) {
 	out := Render(Input{
 		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "root:\n  child: v\n\ntail: end\n"},
+		Instance: Instance{Name: "s", AppYAML: "root:\n  child: v\n\ntail: end\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
 	// A nested line keeps its own indentation on top of the 6-space block indent.
 	if !strings.Contains(out, "      root:\n        child: v\n") {
@@ -207,7 +241,7 @@ func TestContentIndentationAndBlankLines(t *testing.T) {
 func TestStoresOnlyAndLibsOnly(t *testing.T) {
 	storesOnly := Render(Input{
 		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "k: v\n"},
+		Instance: Instance{Name: "s", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 		Stores:   []Mount{{Source: "/h/a.jks", Target: "/c/a.jks"}},
 	})
 	if !strings.Contains(storesOnly, "    volumes:\n      - /h/a.jks:/c/a.jks:ro\n") {
@@ -216,7 +250,7 @@ func TestStoresOnlyAndLibsOnly(t *testing.T) {
 
 	libsOnly := Render(Input{
 		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "k: v\n"},
+		Instance: Instance{Name: "s", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 		Libs:     &Mount{Source: "/h/libs", Target: "/c/libs"},
 	})
 	if !strings.Contains(libsOnly, "    volumes:\n      - /h/libs:/c/libs:ro\n") {
@@ -225,13 +259,80 @@ func TestStoresOnlyAndLibsOnly(t *testing.T) {
 }
 
 // TestSplitLinesNoTrailingNewline covers the branch where the app.yml does not
-// end in a newline, so no trailing empty element is dropped.
+// end in a newline, so no trailing empty element is dropped. The status
+// config now renders after the app config, so this checks the app content is
+// present rather than that it is the final block.
 func TestSplitLinesNoTrailingNewline(t *testing.T) {
 	out := Render(Input{
 		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "only: line"},
+		Instance: Instance{Name: "s", AppYAML: "only: line", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
-	if !strings.HasSuffix(out, "    content: |\n      only: line\n") {
+	if !strings.Contains(out, "    content: |\n      only: line\n") {
 		t.Errorf("no-trailing-newline content not rendered as expected:\n%s", out)
+	}
+}
+
+// TestLabelsPerMode covers the labels block for every leader-election mode:
+// le-mode is always emitted, and role: active is added for standalone and
+// active_active but withheld for active_standby, whose role is only knowable
+// live from the actuator. An empty mode defaults to standalone.
+func TestLabelsPerMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		mode     string
+		wantMode string
+		wantRole bool
+	}{
+		{"empty defaults to standalone", "", spec.LeaderStandalone, true},
+		{"standalone", spec.LeaderStandalone, spec.LeaderStandalone, true},
+		{"active_active", spec.LeaderActiveActive, spec.LeaderActiveActive, true},
+		{"active_standby", spec.LeaderActiveStby, spec.LeaderActiveStby, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := Render(Input{
+				Docker:   &spec.Docker{Image: "img", Name: "s"},
+				Instance: Instance{Name: "s", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: tt.mode},
+			})
+			wantModeLine := "    labels:\n      " + spec.LabelModeKey + ": " + tt.wantMode + "\n"
+			if !strings.Contains(out, wantModeLine) {
+				t.Errorf("le-mode label missing or wrong:\n%s", out)
+			}
+			roleLine := "      " + spec.LabelRoleKey + ": " + spec.LabelRoleActive + "\n"
+			if got := strings.Contains(out, roleLine); got != tt.wantRole {
+				t.Errorf("role label present = %v, want %v:\n%s", got, tt.wantRole, out)
+			}
+		})
+	}
+}
+
+// TestStatusScriptConfigSourceAndTarget covers the second configs entry: the
+// service references <name>-status and mounts it at
+// /app/external/libs/status.
+func TestStatusScriptConfigSourceAndTarget(t *testing.T) {
+	out := Render(Input{
+		Docker:   &spec.Docker{Image: "img", Name: "s"},
+		Instance: Instance{Name: "solmq", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
+	})
+	if !strings.Contains(out, "      - source: solmq-status\n        target: /app/external/libs/status\n") {
+		t.Errorf("status config source/target pair missing:\n%s", out)
+	}
+	if !strings.Contains(out, "  solmq-status:\n    content: |\n") {
+		t.Errorf("top-level solmq-status config entry missing:\n%s", out)
+	}
+}
+
+// TestStatusScriptContentIsVerbatim checks the status script body is inlined
+// under the status config's content: block, indented 6 spaces, with its
+// blank line preserved as truly empty -- the same rules renderConfig applies
+// to application.yml.
+func TestStatusScriptContentIsVerbatim(t *testing.T) {
+	out := Render(Input{
+		Docker:   &spec.Docker{Image: "img", Name: "s"},
+		Instance: Instance{Name: "s", AppYAML: "k: v\n", StatusScript: statusScript1, LeaderMode: spec.LeaderStandalone},
+	})
+	want := "  s-status:\n    content: |\n      #!/bin/sh\n      STATUS_URL=\"http://localhost:8080/actuator/health\"\n\n      curl -fsS \"$STATUS_URL\"\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("status script content not inlined verbatim:\n%s", out)
 	}
 }

@@ -211,6 +211,132 @@ func TestBuildSolaceTopicSourceEmitsConsumerTopic(t *testing.T) {
 	}
 }
 
+// TestApplyStatusAccessSecurityAbsent pins the security-absent branch: absent
+// means EffectivelyEnabled (spec.Security.EffectivelyEnabled's own doc), so
+// Build synthesizes the management/security blocks from nothing and the
+// reserved account is the only user, carrying the literal status password
+// rather than a secretRef placeholder.
+func TestApplyStatusAccessSecurityAbsent(t *testing.T) {
+	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
+		Source: solaceSide("prod", "IN", spec.DestQueue, ""), Target: solaceSide("prod", "OUT", spec.DestQueue, "")}}
+	m, _ := Build(wfs, nil, Opts{MountStores: true, StatusPassword: "status-literal"})
+
+	if !m.Security.Present || !m.Security.Enabled {
+		t.Fatalf("Security = %+v, want Present and Enabled both true", m.Security)
+	}
+	if len(m.Security.Users) != 1 || m.Security.Users[0].Name != spec.StatusUserName || m.Security.Users[0].Password != "status-literal" {
+		t.Fatalf("Security.Users = %+v, want one reserved user carrying the literal password", m.Security.Users)
+	}
+	for _, s := range m.Secrets {
+		if s.Literal == "status-literal" || s.Stable == securityUserPasswordName(spec.StatusUserName) {
+			t.Errorf("status password must never enter Model.Secrets, got %+v", s)
+		}
+	}
+}
+
+// TestApplyStatusAccessSecurityEnabledAppendsAfterExisting covers security
+// present+enabled with existing users: the reserved account is appended last,
+// and existing users are still rewired through secretRef exactly as before.
+func TestApplyStatusAccessSecurityEnabledAppendsAfterExisting(t *testing.T) {
+	d := &spec.Defaults{Security: spec.Security{Present: true, Enabled: true, Users: []spec.User{
+		{Name: "alice", Password: "alice-pass"},
+		{Name: "bob", PasswordEnv: "BOB_PASS_ENV"},
+	}}}
+	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
+		Source: solaceSide("prod", "IN", spec.DestQueue, ""), Target: solaceSide("prod", "OUT", spec.DestQueue, "")}}
+	m, _ := Build(wfs, d, Opts{MountStores: true, StatusPassword: "status-literal"})
+
+	if len(m.Security.Users) != 3 {
+		t.Fatalf("Security.Users = %+v, want 3 (2 existing + 1 reserved)", m.Security.Users)
+	}
+	last := m.Security.Users[2]
+	if last.Name != spec.StatusUserName || last.Password != "status-literal" {
+		t.Errorf("last user = %+v, want the reserved account carrying the literal password", last)
+	}
+	if got := m.Security.Users[0]; got.Password != "${"+securityUserPasswordName("alice")+"}" {
+		t.Errorf("existing user alice = %+v, want a secretRef placeholder", got)
+	}
+	if got := m.Security.Users[1]; got.Password != "${"+securityUserPasswordName("bob")+"}" {
+		t.Errorf("existing user bob = %+v, want a secretRef placeholder", got)
+	}
+	for _, s := range m.Secrets {
+		if s.Literal == "status-literal" {
+			t.Errorf("status password must never enter Model.Secrets, got %+v", s)
+		}
+	}
+}
+
+// TestApplyStatusAccessSecurityDisabled covers explicit security.enabled:
+// false: no reserved user is added and Enabled stays false.
+func TestApplyStatusAccessSecurityDisabled(t *testing.T) {
+	d := &spec.Defaults{Security: spec.Security{Present: true, Enabled: false, Users: []spec.User{
+		{Name: "alice", Password: "alice-pass"},
+	}}}
+	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
+		Source: solaceSide("prod", "IN", spec.DestQueue, ""), Target: solaceSide("prod", "OUT", spec.DestQueue, "")}}
+	m, _ := Build(wfs, d, Opts{MountStores: true, StatusPassword: "status-literal"})
+
+	if m.Security.Enabled {
+		t.Error("Security.Enabled should stay false when explicitly disabled")
+	}
+	if len(m.Security.Users) != 1 || m.Security.Users[0].Name != "alice" {
+		t.Fatalf("Security.Users = %+v, want only the existing user (no reserved account)", m.Security.Users)
+	}
+}
+
+// TestApplyStatusAccessExposure covers every exposure branch: empty defaults to
+// health+leaderelection+workflows, an already-complete list is left unchanged,
+// a partial list gets only the missing entry appended, and "*" (Spring's
+// wildcard for "everything") is left untouched.
+func TestApplyStatusAccessExposure(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"empty", "", "health,leaderelection,workflows"},
+		{"already both", "health,leaderelection,workflows", "health,leaderelection,workflows"},
+		{"missing one", "health,leaderelection", "health,leaderelection,workflows"},
+		{"wildcard", "*", "*"},
+	}
+	for _, c := range cases {
+		d := &spec.Defaults{Management: spec.Management{Present: true, Exposure: c.in}}
+		wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
+			Source: solaceSide("prod", "IN", spec.DestQueue, ""), Target: solaceSide("prod", "OUT", spec.DestQueue, "")}}
+		m, _ := Build(wfs, d, Opts{MountStores: true})
+		if !m.Management.Present {
+			t.Errorf("%s: Management.Present should always be forced true", c.name)
+		}
+		if m.Management.Exposure != c.want {
+			t.Errorf("%s: Exposure = %q, want %q", c.name, m.Management.Exposure, c.want)
+		}
+	}
+}
+
+// TestHasExposureEntry pins the substring-vs-exact-match distinction: a
+// same-prefix entry like "leaderelection2" or a suffixed "leaderelectionx"
+// must never be read as "leaderelection", and spaces after a comma are
+// trimmed before comparing.
+func TestHasExposureEntry(t *testing.T) {
+	cases := []struct {
+		csv, entry string
+		want       bool
+	}{
+		{"health,leaderelection,workflows", "leaderelection", true},
+		{"health, leaderelection, workflows", "leaderelection", true},
+		{"leaderelection2", "leaderelection", false},
+		{"xleaderelection", "leaderelection", false},
+		{"leaderelectionx", "leaderelection", false},
+		{"*", "leaderelection", true},
+		{"*", "workflows", true},
+		{"health", "leaderelection", false},
+		{"", "leaderelection", false},
+	}
+	for _, c := range cases {
+		if got := hasExposureEntry(c.csv, c.entry); got != c.want {
+			t.Errorf("hasExposureEntry(%q, %q) = %v, want %v", c.csv, c.entry, got, c.want)
+		}
+	}
+}
+
 func TestBuildStorePathsRawVsMount(t *testing.T) {
 	mq := spec.Side{System: spec.SystemMQ, ConnName: "h(1)", QueueManager: "QM", Channel: "C", UserEnv: "MQ_USER", PasswordEnv: "MQ_PASSWORD", TLS: true, KeyAlias: "mc", DestKind: spec.DestQueue, Dest: "IN"}
 	sol := spec.Side{System: spec.SystemSolace, Host: "tcps://b", MsgVPN: "v", ClientUserEnv: "SOL_USER", ClientPassEnv: "SOL_PASSWORD", DestKind: spec.DestQueue, Dest: "OUT"}

@@ -16,15 +16,22 @@ import (
 // (read-only); podman cannot inline file content.
 const appYAMLTarget = "/app/external/spring/config/application.yml"
 
+// statusTarget is the in-container path the rendered status script is
+// bind-mounted to (read-only); like application.yml, podman cannot inline
+// file content, so the script has to be a bind mount too.
+const statusTarget = "/app/external/libs/status"
+
 // javaToolOptions is the JAVA_TOOL_OPTIONS value set when the connector uses MQ TLS,
 // selecting the IBM cipher mappings the connector expects.
 const javaToolOptions = "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"
 
 // Instance is the connector: its container name and on-disk config path.
 type Instance struct {
-	Name        string // container name
-	AppYAMLPath string // host path to the application.yml on disk (bind-mounted)
-	MQTLS       bool   // when true, add JAVA_TOOL_OPTIONS env for IBM cipher mappings
+	Name             string // container name
+	AppYAMLPath      string // host path to the application.yml on disk (bind-mounted)
+	MQTLS            bool   // when true, add JAVA_TOOL_OPTIONS env for IBM cipher mappings
+	StatusScriptPath string // host path to the rendered status script on disk (bind-mounted); empty omits the mount
+	LeaderMode       string // leader-election mode; empty means standalone (see leaderLabels)
 }
 
 // Mount is one read-only bind mount (host path -> container path).
@@ -112,6 +119,22 @@ func renderSecretPreamble(w *sw, secrets []SecretRef) {
 	w.Line(0, "")
 }
 
+// leaderLabels returns the ordered (key, value) label pairs common to both
+// renderers. The mode label is always present. The role label marks this
+// instance active only when that is knowable at render time: standalone
+// always is, and every active_active member is; active_standby's active side
+// flips at runtime, so it never gets a static role label.
+func leaderLabels(mode string) [][2]string {
+	if mode == "" {
+		mode = spec.LeaderStandalone
+	}
+	labels := [][2]string{{spec.LabelModeKey, mode}}
+	if mode == spec.LeaderStandalone || mode == spec.LeaderActiveActive {
+		labels = append(labels, [2]string{spec.LabelRoleKey, spec.LabelRoleActive})
+	}
+	return labels
+}
+
 // runArgs builds the ordered argv-style lines for the `podman run -d` block,
 // from the leading `podman run -d` to the trailing image line.
 func runArgs(in Input, p *spec.Podman, inst Instance) []string {
@@ -119,6 +142,9 @@ func runArgs(in Input, p *spec.Podman, inst Instance) []string {
 	args = append(args, "--name "+inst.Name)
 	if p.Restart != "" {
 		args = append(args, "--restart "+p.Restart)
+	}
+	for _, l := range leaderLabels(inst.LeaderMode) {
+		args = append(args, "--label "+l[0]+"="+l[1])
 	}
 	for _, port := range p.Ports {
 		args = append(args, "-p "+port.String())
@@ -138,6 +164,12 @@ func runArgs(in Input, p *spec.Podman, inst Instance) []string {
 	}
 	if in.Libs != nil {
 		args = append(args, "-v "+in.Libs.Source+":"+in.Libs.Target+":ro")
+	}
+	if inst.StatusScriptPath != "" {
+		// Mounted after the libs volume so this single-file mount nests
+		// inside it instead of being shadowed by a libs directory mount at
+		// the same path.
+		args = append(args, "-v "+inst.StatusScriptPath+":"+statusTarget+":ro")
 	}
 	args = append(args, p.Image)
 	return args
@@ -162,6 +194,9 @@ func RenderQuadlet(in Input) Unit {
 	w.Line(0, "[Container]")
 	w.Line(0, "Image="+p.Image)
 	w.Line(0, "ContainerName="+inst.Name)
+	for _, l := range leaderLabels(inst.LeaderMode) {
+		w.Line(0, "Label="+l[0]+"="+l[1])
+	}
 	for _, port := range p.Ports {
 		w.Line(0, "PublishPort="+port.String())
 	}
@@ -180,6 +215,11 @@ func RenderQuadlet(in Input) Unit {
 	}
 	if in.Libs != nil {
 		w.Line(0, "Volume="+in.Libs.Source+":"+in.Libs.Target+":ro")
+	}
+	if inst.StatusScriptPath != "" {
+		// Same ordering rationale as runArgs: nests inside the libs volume
+		// rather than being shadowed by it.
+		w.Line(0, "Volume="+inst.StatusScriptPath+":"+statusTarget+":ro")
 	}
 	w.Line(0, "")
 

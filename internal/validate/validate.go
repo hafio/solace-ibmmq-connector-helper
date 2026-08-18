@@ -131,6 +131,9 @@ func Run(ctx Context) (errs, warns []Issue) {
 	// Leader-election (standalone | active_active | active_standby).
 	checkLeaderElection(add, d, haveKeystore)
 
+	// Reserved status-account name, and its password override charset.
+	checkStatusUser(add, ctx.Env, d)
+
 	// Per-target deploy-grade checks.
 	checkTargets(add, warn, ctx, resolved)
 
@@ -408,6 +411,35 @@ func checkLeaderElection(add func(string, string, ...any), d *spec.Defaults, hav
 		}
 	default:
 		add(fileEnv, "leader-election mode %q requires a solace session (conn-ref or inline solace:)", le.Mode)
+	}
+}
+
+// checkStatusUser guards the reserved read-only actuator account the tool
+// injects into every rendered application.yml (named spec.StatusUserName)
+// once management security is effectively enabled. No author-configured user
+// may claim that name -- it would collide with the account the tool adds
+// itself. If the account's generated password is overridden via
+// spec.StatusUserPasswordEnvVar, the override must survive being rendered as
+// a literal into application.yml and parsed back out of that file by the
+// generated status script.
+func checkStatusUser(add func(string, string, ...any), env func(string) (string, bool), d *spec.Defaults) {
+	if !d.Security.EffectivelyEnabled() {
+		return
+	}
+	for i, u := range d.Security.Users {
+		if u.Name == spec.StatusUserName {
+			add(fileEnv, "security.users[%d].name %q is reserved for the tool's own read-only status account used by the generated status script; choose a different name", i, u.Name)
+		}
+	}
+	if env == nil {
+		return
+	}
+	v, ok := env(spec.StatusUserPasswordEnvVar)
+	if !ok || v == "" {
+		return
+	}
+	if !safeStatusPassword(v) {
+		add(fileEnv, "%s is set but its value contains a character the generated status script cannot round-trip: the password is rendered as a literal into application.yml and parsed back out by a shell script, so whitespace, quotes, backslash, and ${...} would corrupt the YAML or break the parse. Use only printable ASCII, excluding those characters", spec.StatusUserPasswordEnvVar)
 	}
 }
 
@@ -985,4 +1017,51 @@ const shellMeta = ";|&<>()*?[]{}~#!"
 // executing any config-derived command token.
 func SafeToken(s string) bool {
 	return safeShellChars(s) && !strings.ContainsAny(s, shellMeta)
+}
+
+// SafeActuatorUser reports whether s is safe to use as the management account
+// name the generated status script authenticates as. On top of SafeToken's
+// argv rules the charset is an allowlist of letters, digits, '.', '-' and '_',
+// because the name is also spliced into a sed address inside the script: '/'
+// would end the address early and leave the script silently unauthenticated,
+// and a regex metacharacter could match an unintended account. The script
+// escapes the name as well (statusscript.breEscape) -- this is the boundary
+// half of that pair.
+func SafeActuatorUser(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// SafeActuatorUserReason explains the SafeActuatorUser charset in errors.
+const SafeActuatorUserReason = "only letters, digits, '.', '-' and '_' are allowed"
+
+// safeStatusPassword gates a status-account password override
+// (spec.StatusUserPasswordEnvVar): the value is rendered as a literal into
+// application.yml and later parsed back out of that file by the generated
+// status script's sed invocation, so it must be non-empty and consist only
+// of printable ASCII, excluding whitespace, single/double quotes, backslash,
+// and the '$', '{', '}' characters that make up a ${...} placeholder -- any
+// of those would corrupt the YAML literal or break the sed match. Unlike
+// SafeToken this value is never passed to a shell as a token, so the shell
+// metacharacters SafeToken also rejects (!, #, ;, ...) are fine here.
+func safeStatusPassword(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x21 || r > 0x7e || r == '\'' || r == '"' || r == '\\' || r == '$' || r == '{' || r == '}' {
+			return false
+		}
+	}
+	return true
 }

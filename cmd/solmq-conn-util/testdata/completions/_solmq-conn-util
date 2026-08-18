@@ -24,6 +24,13 @@ _solmq_conn_util_flag_arg() {
     -e|--e|-env|--env) print -n 'file' ;;
     -o|--o|-out|--out) print -n 'file' ;;
     -allow-command|--allow-command) print -n 'name' ;;
+    -platform|--platform) print -n 'name' ;;
+    -pod|--pod) print -n 'name' ;;
+    -container|--container) print -n 'name' ;;
+    -namespace|--namespace) print -n 'name' ;;
+    -management-port|--management-port) print -n 'name' ;;
+    -user|--user) print -n 'name' ;;
+    -command|--command) print -n 'name' ;;
     *) print -n '' ;;
   esac
 }
@@ -32,9 +39,7 @@ _solmq_conn_util_flag_arg() {
 _solmq_conn_util_targets() {
   local -a t
   case "$1" in
-    generate) t=('config:Emit application.yml' 'kubernetes:Emit ConfigMap+Deployment+Service (+Secrets)' 'docker:Emit docker-compose.yml (application.yml inlined)' 'podman:Emit a podman run script or quadlet unit') ;;
-    deploy) t=('kubernetes:kubectl/oc apply -f - (manifest on stdin)' 'docker:docker compose up -d' 'podman:write the quadlet unit; systemctl start') ;;
-    delete) t=('kubernetes:kubectl/oc delete -f -' 'docker:docker compose down' 'podman:systemctl stop; remove the unit') ;;
+    generate) t=('config:Emit application.yml') ;;
     completion) t=('bash:Print the bash completion script' 'zsh:Print the zsh completion script' 'fish:Print the fish completion script' 'powershell:Print the PowerShell completion script') ;;
     *) return 1 ;;
   esac
@@ -46,9 +51,10 @@ _solmq_conn_util_targets() {
 _solmq_conn_util_flags() {
   local -a f
   case "$1" in
-    generate) f=('-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '-o:write output to a file (default: stdout)' '--out:write output to a file (default: stdout)') ;;
-    deploy) f=('-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '--allow-command:approve an extra command binary beyond the command: allowlist; repeatable') ;;
-    delete) f=('-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '--allow-command:approve an extra command binary beyond the command: allowlist; repeatable') ;;
+    generate) f=('--platform:the platform: kubernetes, docker, or podman (default: resolved from env.yaml, or an interactive menu -- see Command details)' '-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '-o:write output to a file (default: stdout)' '--out:write output to a file (default: stdout)') ;;
+    deploy) f=('--platform:the platform: kubernetes, docker, or podman (default: resolved from env.yaml, or an interactive menu -- see Command details)' '-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '--allow-command:approve an extra command binary beyond the command: allowlist; repeatable') ;;
+    delete) f=('--platform:the platform: kubernetes, docker, or podman (default: resolved from env.yaml, or an interactive menu -- see Command details)' '-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '--allow-command:approve an extra command binary beyond the command: allowlist; repeatable') ;;
+    status) f=('--install:install the status script on every target without prompting' '--platform:the platform: kubernetes, docker, or podman (default: resolved from env.yaml, or an interactive menu -- see Command details)' '-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '--pod:limit checks to this kubernetes pod name; repeatable (default: every running pod); no effect on docker/podman' '--container:limit checks to this docker/podman container name; repeatable (default: every running container); no effect on kubernetes' '--namespace:kubernetes namespace to query (default: the namespace of the deployment in env.yaml); no effect on docker/podman' '--management-port:actuator management port to reach inside each target (default: the management port configured for the target)' '--user:actuator account the status script authenticates as (default solmq-status)' '--command:override the platform CLI binary (kubectl/oc, docker, or podman) used to reach each target, instead of the command: in that section' '--allow-command:approve an extra command binary beyond the command: allowlist; repeatable') ;;
     validate) f=('-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)') ;;
     examples) f=('-f:overwrite existing files' '--force:overwrite existing files') ;;
     *) return 1 ;;
@@ -95,9 +101,11 @@ _solmq_conn_util() {
 
   if [[ -z "$verb" ]]; then
     verbs=(
-      'generate:Render artifacts for one target to stdout or a file'
+      'generate:Render application.yml, or the artifacts for the resolved platform, to stdout or a file'
       'deploy:Generate for a platform, then apply it'
       'delete:Tear down what deploy created for a platform'
+      'status:Ensure and run the status script, printing per-target leader-election and workflow state'
+      'version:Print the utility name, version, Go version and OS/arch'
       'validate:Lint the whole env.yaml + workflows'
       'examples:Write a starter env.yaml + workflows'
       'completion:Print a shell completion script'

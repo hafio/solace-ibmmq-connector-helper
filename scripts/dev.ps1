@@ -71,11 +71,19 @@ $BinName = "solmq-conn-util-{0}-{1}" -f $TOs, $TArch
 if ($TOs -eq 'windows') { $BinName = "$BinName.exe" }
 
 # --- tasks ------------------------------------------------------------------
+# Version stamp: git describe, falling back to "dev" when git fails or the
+# checkout has no tags (a fresh clone, a shallow CI checkout with no tags
+# fetched). Tag-triggered release builds check out the exact tag, so
+# --dirty can never fire there -- only a local build off an unclean tree
+# ever reports a "-dirty" suffix.
+$Version = (git describe --tags --dirty 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $Version) { $Version = 'dev' }
+
 function Task-build {
   New-Item -ItemType Directory -Force -Path $Dist | Out-Null
   $env:CGO_ENABLED = '0'; $env:GOOS = $TOs; $env:GOARCH = $TArch
   $code = Invoke-Logged 'build' 'go' @(
-    'build','-trimpath','-ldflags','-s -w','-o',(Join-Path $Dist $BinName),'./cmd/solmq-conn-util')
+    'build','-trimpath','-ldflags',"-s -w -X main.version=$Version",'-o',(Join-Path $Dist $BinName),'./cmd/solmq-conn-util')
   Remove-Item Env:CGO_ENABLED, Env:GOOS, Env:GOARCH -ErrorAction SilentlyContinue
   return $code
 }

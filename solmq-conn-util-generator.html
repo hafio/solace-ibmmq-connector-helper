@@ -536,6 +536,8 @@ solace:
       users:
         - name: healthcheck
           password: ${SECURITY_USER_HEALTHCHECK_PASSWORD}
+        - name: solmq-status
+          password: 0123456789abcdef0123456789abcdef
     management:
       leader-election:
         mode: active_standby
@@ -565,7 +567,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,workflows
+        include: health,info,workflows,leaderelection
   endpoint:
     health:
       show-details: always
@@ -1260,6 +1262,10 @@ const ENV_FILE = 'env.yaml';
 
 function isDNS1123(s){ return s.length <= 63 && RE_DNS1123.test(s); }
 function isTCPS(h){ return String(h || '').startsWith('tcps://'); }
+// securityEffectivelyEnabled mirrors spec.Security.EffectivelyEnabled(): the
+// connector defaults solace.connector.security.enabled to true, so an absent
+// security block still means auth is on.
+function securityEffectivelyEnabled(sec){ return !sec.present || sec.enabled; }
 
 const RE_ENVNAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -1374,9 +1380,16 @@ function validateModel(m){
     }
   });
 
+  // checkStatusUser: no author-configured user may claim the reserved status
+  // account's name -- it would collide with the account the tool adds itself
+  // once security is effectively enabled. Mirrors Go's checkStatusUser.
+  const statusUserGuarded = securityEffectivelyEnabled(m.security);
   (m.security.users || []).forEach((u, i) => {
     if(!u.name) add(ENV_FILE, 'security.users entry needs a name');
     checkExpansion(warn, ENV_FILE, `security.users[${i}].name`, u.name);
+    if(statusUserGuarded && u.name === STATUS_USER_NAME){
+      add(ENV_FILE, `security.users[${i}].name "${u.name}" is reserved for the tool's own read-only status account used by the generated status script; choose a different name`);
+    }
   });
   return { errs: errs, warns: warns };
 }
@@ -1876,6 +1889,21 @@ const LEADER_PASSWORD_NAME = 'LEADER_ELECTION_CLIENT_PASSWORD';
 // carries; credentials are mounted one-file-per-name under this directory on all
 // three platforms. Mirrors gen.ConfigImport.
 const CONFIG_IMPORT = 'optional:configtree:/run/secrets/';
+// STATUS_USER_NAME is the tool-reserved, read-only actuator account the
+// generated status script authenticates as. Mirrors spec.StatusUserName.
+const STATUS_USER_NAME = 'solmq-status';
+
+// randomStatusPassword generates the STATUS_USER_NAME account's password: 32
+// lowercase hex characters from a cryptographically strong RNG (never
+// Math.random -- this value is a credential). This page has no host
+// environment to read spec.StatusUserPasswordEnvVar from, so unlike
+// gen.resolveStatusPassword it always generates rather than checking for an
+// override.
+function randomStatusPassword(){
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+}
 
 // stableName is the in-container secret name for a binder-scoped credential.
 function stableName(binder, suffix){ return stableToken(binder) + '_' + suffix; }
@@ -1956,11 +1984,16 @@ function buildBundle(a, m, secretRef){
 // config carries ("" for an unset credential). A name seen twice -- a store
 // password reached from both the SSL bundle and the Solace api-properties --
 // collapses onto one entry, exactly like consolidate.Build's secretRef.
-function consolidateBuild(wfs, m){
+function consolidateBuild(wfs, m, statusPassword){
   const model = {
     bundles: [], binders: [], bindings: [], jms: [], solaceB: [], workflows: [],
-    security: { present: false, enabled: false, users: [] },
-    management: m.management, loggingLevel: m.loggingLevel,
+    // Present/enabled start as copies of the operator's config (mirrors
+    // consolidate.Build's "Security: d.Security"); applyStatusAccess is the
+    // only place that forces them and it always rebuilds users, below.
+    security: { present: m.security.present, enabled: !!m.security.enabled, users: [] },
+    management: { present: m.management.present, port: m.management.port,
+                  exposure: m.management.exposure, healthShowDetails: m.management.healthShowDetails },
+    loggingLevel: m.loggingLevel,
     leader: null, mqTLS: false, secrets: [], configImport: CONFIG_IMPORT
   };
   const warns = [];
@@ -2084,25 +2117,66 @@ function consolidateBuild(wfs, m){
 
   model.leader = buildLeaderElection(m, secretRef);
 
-  // Management users authenticate against the actuator endpoint like any other
-  // credential; the plain literal/-env pair is never carried into the model.
-  if(m.security.present){
-    model.security.present = true;
-    model.security.enabled = m.security.enabled;
-    model.security.users = (m.security.users || []).map(u => ({
-      name: u.name,
-      password: secretRef(securityUserPasswordName(u.name), userCred(u))
-    }));
-  }
+  // The status script needs actuator access in every deployment, so the
+  // exposure list and the reserved read-only status account are forced onto
+  // the model regardless of what the operator configured.
+  applyStatusAccess(model, m, statusPassword, secretRef);
 
   return { model: model, warns: warns };
+}
+
+// hasExposureEntry reports whether entry appears in csv, Spring's own
+// comma-separated management.endpoints.web.exposure.include syntax. Matching
+// is exact per comma-separated part (after trimming spaces) so "leaderelection2"
+// or "leaderelectionx" never counts as "leaderelection". A "*" entry is
+// Spring's wildcard for "everything is already exposed", so it always matches.
+// Mirrors consolidate.go's hasExposureEntry.
+function hasExposureEntry(csv, entry){
+  return csv.split(',').some(part => { part = part.trim(); return part === '*' || part === entry; });
+}
+
+// applyStatusAccess forces the actuator surface the generated status script
+// depends on: the leaderelection/workflows exposure entries and the reserved
+// read-only account (STATUS_USER_NAME), regardless of what the operator
+// configured. Mirrors consolidate.go's applyStatusAccess.
+function applyStatusAccess(model, m, statusPassword, secretRef){
+  // Management users authenticate against the actuator endpoint, so their
+  // passwords are credentials like any other.
+  const users = (m.security.users || []).map(u => ({
+    name: u.name,
+    password: secretRef(securityUserPasswordName(u.name), userCred(u))
+  }));
+
+  // The generated status script queries /actuator/leaderelection and
+  // /actuator/workflows, so both are guaranteed exposed in every
+  // leader-election mode instead of leaving it to the operator to remember.
+  model.management.present = true;
+  let exposure = model.management.exposure || 'health'; // Spring's own default, made explicit now that entries are appended
+  if(!hasExposureEntry(exposure, 'leaderelection')) exposure += ',leaderelection';
+  if(!hasExposureEntry(exposure, 'workflows')) exposure += ',workflows';
+  model.management.exposure = exposure;
+
+  if(securityEffectivelyEnabled(m.security)){
+    model.security.present = true;
+    model.security.enabled = true;
+    // The status password is a literal and never routed through secretRef:
+    // the generated script reads it back out of the mounted application.yml,
+    // so putting it through the secrets model would leave the script with
+    // nothing to read.
+    users.push({ name: STATUS_USER_NAME, password: statusPassword });
+  }
+  model.security.users = users;
 }
 
 // buildConfig mirrors gen.build: sharding is gone (validate now rejects a folder
 // with more than MAX_WF_PER_INSTANCE workflows outright), so one folder yields
 // exactly one consolidated application.yml.
 function buildConfig(m){
-  const r = consolidateBuild(m.wfs, m);
+  // Resolved once per generate call and threaded through, exactly like
+  // gen.resolveStatusPassword: the password must stay stable for the one
+  // application.yml this call renders.
+  const statusPassword = randomStatusPassword();
+  const r = consolidateBuild(m.wfs, m, statusPassword);
   return { out: renderApplication(r.model), warns: r.warns };
 }
 
@@ -2585,12 +2659,21 @@ function downloadAll(){
   toast(`${files.length} file(s) zipped`);
 }
 
+// normStatusPassword blanks the STATUS_USER_NAME account's password value so
+// selfTest can diff against it. That password is 32 random hex characters on
+// every render (see randomStatusPassword) but the embedded golden holds one
+// fixed synthetic value, so a raw diff would always fail on that one line --
+// narrowly matched by name so every other line still compares verbatim.
+function normStatusPassword(text){
+  return text.replace(/(- name: solmq-status\n\s*password: )\S+/, '$1STATUS_PASSWORD');
+}
+
 function selfTest(){
   // The embedded block carries no trailing newline (it would otherwise be part of
   // the markup); render.Application emits exactly one, so restore it before diffing.
-  const golden = $('golden').textContent.replace(/\r\n/g, '\n').replace(/\n*$/, '') + '\n';
+  const golden = normStatusPassword($('golden').textContent.replace(/\r\n/g, '\n').replace(/\n*$/, '') + '\n');
   const m = sampleModel();
-  const got = buildConfig(m).out || '';
+  const got = normStatusPassword(buildConfig(m).out || '');
   if(got === golden){ toast('Self-test PASS: sample matches the golden application.yml'); return; }
   const g = golden.split('\n'), o = got.split('\n');
   let i = 0;

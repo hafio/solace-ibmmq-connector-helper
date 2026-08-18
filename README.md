@@ -22,6 +22,9 @@ so splitting them across connectors stays your decision.
   mounted as a file under `/run/secrets/` -- a Kubernetes Secret volume, a compose
   environment-provider secret, or a podman secret. No credential value or host
   variable name reaches any generated file, and nothing secret is written to disk.
+- **`status` tells you which instance is active**, on any platform, by exec'ing
+  into each running instance and reading its own actuator; `version` prints the
+  build's own version plus its Go/OS/arch, for bug reports.
 
 ## Quick start
 
@@ -37,7 +40,7 @@ solmq-conn-util generate config -e specs/env.yaml  # print the application.yml t
 The sample set is four cross-platform (MQ/Solace) workflows that together cover
 every connection style -- referenced vs. inline, reused vs. single-use -- across
 mTLS, TLS-only, and plaintext transports, plus an MQ topic source exercising the
-auto-named durable subscription. Full breakdown: [userguide.md](userguide.md) section 10.
+auto-named durable subscription. Full breakdown: [userguide.md](userguide.md) section 11.
 
 Prefer a form to a text editor? Open
 [solmq-conn-util-generator.html](solmq-conn-util-generator.html) in a browser (no server, no
@@ -86,20 +89,27 @@ solmq-conn-util generate config -e specs/env.yaml -o application.yml  # ...or wr
 ```
 
 Add a `kubernetes:` section ([userguide.md](userguide.md) section 7) and
-`solmq-conn-util generate kubernetes -e specs/env.yaml` emits the full manifest set
-(Namespace, ConfigMap, Deployment, Service, Secrets).
-`solmq-conn-util deploy kubernetes -e specs/env.yaml` then applies it by piping the
-manifest to `kubectl`/`oc`.
+`solmq-conn-util generate --platform kubernetes -e specs/env.yaml` emits the full
+manifest set (Namespace, ConfigMap, Deployment, Service, Secrets).
+`solmq-conn-util deploy --platform kubernetes -e specs/env.yaml` then applies it by
+piping the manifest to `kubectl`/`oc`.
 
 ## Commands
 
+> **Breaking change:** the platform used to be a second positional argument
+> (`deploy kubernetes`); it is now `--platform kubernetes`, or just `deploy` when
+> `env.yaml` has exactly one platform section. See [userguide.md](userguide.md)
+> for the full resolution order (flag, single section, interactive menu, or a
+> loud error) and why CI must pass `--platform` explicitly.
+
 ```text
-solmq-conn-util generate config     [-e env.yaml] [-o out]        Emit application.yml
-solmq-conn-util generate kubernetes [-e env.yaml] [-o out]        Emit ConfigMap+Deployment+Service (+Secrets)
-solmq-conn-util generate docker     [-e env.yaml] [-o out]        Emit docker-compose.yml (application.yml inlined)
-solmq-conn-util generate podman     [-e env.yaml] [-o out]        Emit a podman run script or quadlet unit
-solmq-conn-util deploy  kubernetes|docker|podman  [-e env.yaml]   Apply: kubectl/oc, docker compose up, or systemctl start
-solmq-conn-util delete  kubernetes|docker|podman  [-e env.yaml]   Tear the same target down
+solmq-conn-util generate [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
+                                                                   Emit application.yml, or the resolved platform's artifacts
+solmq-conn-util deploy  [--platform kubernetes|docker|podman] [-e env.yaml]  Generate for the resolved platform, then apply it
+solmq-conn-util delete  [--platform kubernetes|docker|podman] [-e env.yaml]  Tear the same platform down
+solmq-conn-util status  [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
+                                                                   Ensure and run the status script; report per-target leader-election + workflow state
+solmq-conn-util version                                           Print the utility name, version, Go version and OS/arch
 solmq-conn-util validate            [-e env.yaml]                 Lint the whole env.yaml + workflows
 solmq-conn-util examples [dir] [-f]                               Write a starter env.yaml + workflows
 solmq-conn-util completion bash|zsh|fish|powershell               Print a shell completion script
@@ -111,13 +121,13 @@ solmq-conn-util completion bash|zsh|fish|powershell               Print a shell 
 
 `generate` fails fast (stops at the first error, writes nothing); `validate`
 reports every finding; generate output is buffered and only written on full
-success -- never a half-written `-o`. `deploy`/`delete` run the CLI named by each
-section's `command:` through an argv slice -- never a shell -- with every token
-checked against a safe charset, argv[0] checked against a per-platform binary
-allowlist (escape hatch: `--allow-command`), and a read-only login/daemon
-preflight before anything is written or applied. Details and exit codes:
-[userguide.md](userguide.md) section 3; the full generated command reference:
-[docs/commands.md](docs/commands.md).
+success -- never a half-written `-o`. `deploy`/`delete`/`status` run the CLI
+named by each section's `command:` through an argv slice -- never a shell --
+with every token checked against a safe charset, argv[0] checked against a
+per-platform binary allowlist (escape hatch: `--allow-command`), and a
+read-only login/daemon preflight before anything is written, applied, or
+queried. Details and exit codes: [userguide.md](userguide.md) section 3; the
+full generated command reference: [docs/commands.md](docs/commands.md).
 
 Tab completion for all of the above: `solmq-conn-util completion bash|zsh|fish|powershell`
 prints a script for your shell, rendered from the binary's own command model so it
@@ -130,7 +140,8 @@ never drifts from the commands that binary accepts
   3), the config file and workflow discovery (section 4), workflow files (section
   5), the `env.yaml` connector defaults (section 6), the deploy targets --
   kubernetes/docker/podman (section 7), the secrets model (section 8), what gets
-  generated (section 9), the sample set (section 10), and gotchas (section 11).
+  generated (section 9), determining which instance is active (section 10), the
+  sample set (section 11), and gotchas (section 12).
 - [docs/commands.md](docs/commands.md) -- the full command tree / reference,
   generated from the command model and gated against drift.
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) -- building, dev-script tasks, tests

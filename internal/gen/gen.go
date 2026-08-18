@@ -6,7 +6,9 @@
 package gen
 
 import (
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/podmangen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/render"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
 
@@ -44,6 +47,11 @@ type Resolver struct {
 	// Abs resolves a config-relative path (store/libs dir) to a host path for
 	// bind mounts. Nil leaves the path unchanged.
 	Abs func(string) string
+	// Rand fills b with cryptographically random bytes, used to generate the
+	// reserved status account's password (see resolveStatusPassword). Tests
+	// inject a deterministic or failing implementation; nil means
+	// crypto/rand.Read.
+	Rand func(b []byte) error
 }
 
 func (res Resolver) abs(p string) string {
@@ -70,7 +78,11 @@ func Config(r Request, res Resolver) (out string, errs, warns []Issue) {
 	if len(errs) > 0 {
 		return "", errs, warns
 	}
-	b, cw := build(wfs, &e.Defaults, false)
+	statusPW, err := resolveStatusPassword(res)
+	if err != nil {
+		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+	}
+	b, cw := build(wfs, &e.Defaults, false, statusPW)
 	return b.appYAML, nil, append(warns, toIssues(cw)...)
 }
 
@@ -118,7 +130,11 @@ func GenerateKubernetes(r Request, res Resolver, extraAllowed ...string) (out st
 		return "", errs, warns
 	}
 
-	b, cw := build(wfs, &e.Defaults, true)
+	statusPW, err := resolveStatusPassword(res)
+	if err != nil {
+		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+	}
+	b, cw := build(wfs, &e.Defaults, true, statusPW)
 	warns = append(warns, toIssues(cw)...)
 
 	in := deploy.Input{Kube: k, Defaults: &e.Defaults}
@@ -136,7 +152,12 @@ func GenerateKubernetes(r Request, res Resolver, extraAllowed ...string) (out st
 		}
 		in.Stores = files
 	}
-	in.Instance = deploy.Instance{Name: k.Deployment.Name, AppYAML: b.appYAML, Model: b.model}
+	in.Instance = deploy.Instance{
+		Name:         k.Deployment.Name,
+		AppYAML:      b.appYAML,
+		StatusScript: statusscript.Render(deploy.ManagementPort(in), spec.StatusUserName),
+		Model:        b.model,
+	}
 	return deploy.Render(in), nil, warns
 }
 
@@ -171,16 +192,26 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 		return DockerPlan{}, errs, warns
 	}
 
-	b, cw := build(wfs, &e.Defaults, true)
+	statusPW, err := resolveStatusPassword(res)
+	if err != nil {
+		return DockerPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+	}
+	b, cw := build(wfs, &e.Defaults, true, statusPW)
 	warns = append(warns, toIssues(cw)...)
 
 	sm, lm := targetMounts(e.Defaults.TLS, d.Stores, d.Libs, res)
 	in := dockergen.Input{
-		Docker:   d,
-		Secrets:  stableNames(b.model.Secrets),
-		Stores:   toDockerMounts(sm),
-		Libs:     toDockerMount(lm),
-		Instance: dockergen.Instance{Name: d.Name, AppYAML: b.appYAML, MQTLS: b.model.MQTLS},
+		Docker:  d,
+		Secrets: stableNames(b.model.Secrets),
+		Stores:  toDockerMounts(sm),
+		Libs:    toDockerMount(lm),
+		Instance: dockergen.Instance{
+			Name:         d.Name,
+			AppYAML:      b.appYAML,
+			MQTLS:        b.model.MQTLS,
+			StatusScript: statusscript.Render(e.Defaults.EffectiveManagementPort(), spec.StatusUserName),
+			LeaderMode:   e.Defaults.LeaderElection.EffectiveMode(),
+		},
 	}
 	return DockerPlan{Compose: dockergen.Render(in), Secrets: b.model.Secrets}, nil, warns
 }
@@ -213,12 +244,16 @@ type PodmanOpts struct {
 // PodmanPlan carries whichever artifact the effective mode produced plus the
 // on-disk material a deploy must write before activating the units.
 type PodmanPlan struct {
-	Mode      string                  // effective mode: run | quadlet
-	RunScript string                  // set when Mode == run
-	Unit      podmangen.Unit          // set when Mode == quadlet
-	AppYAML   NamedDoc                // application.yml (write to disk)
-	Secrets   []consolidate.SecretRef // credentials to place in podman's secret store
-	Service   string                  // systemd service name (quadlet), e.g. name.service
+	Mode      string         // effective mode: run | quadlet
+	RunScript string         // set when Mode == run
+	Unit      podmangen.Unit // set when Mode == quadlet
+	AppYAML   NamedDoc       // application.yml (write to disk)
+	// StatusScript is the rendered status script (write to disk): like
+	// AppYAML, a container cannot inline file content, so it too has to be a
+	// bind-mounted file rather than embedded in the run script/quadlet unit.
+	StatusScript NamedDoc
+	Secrets      []consolidate.SecretRef // credentials to place in podman's secret store
+	Service      string                  // systemd service name (quadlet), e.g. name.service
 }
 
 // GeneratePodman parses+validates and renders either a `podman run` script
@@ -244,7 +279,11 @@ func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...st
 		return PodmanPlan{}, errs, warns
 	}
 
-	b, cw := build(wfs, &e.Defaults, true)
+	statusPW, err := resolveStatusPassword(res)
+	if err != nil {
+		return PodmanPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+	}
+	b, cw := build(wfs, &e.Defaults, true, statusPW)
 	warns = append(warns, toIssues(cw)...)
 
 	plan.Mode = p.Mode
@@ -255,14 +294,22 @@ func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...st
 
 	sm, lm := targetMounts(e.Defaults.TLS, p.Stores, p.Libs, res)
 	appName := p.Name + "-application.yml"
+	statusName := p.Name + "-status"
 	plan.AppYAML = NamedDoc{Name: appName, Data: b.appYAML}
+	plan.StatusScript = NamedDoc{Name: statusName, Data: statusscript.Render(e.Defaults.EffectiveManagementPort(), spec.StatusUserName)}
 	plan.Service = p.Name + ".service"
 	in := podmangen.Input{
-		Podman:   p,
-		Secrets:  podmanSecretRefs(p.Name, plan.Secrets),
-		Stores:   toPodmanMounts(sm),
-		Libs:     toPodmanMount(lm),
-		Instance: podmangen.Instance{Name: p.Name, AppYAMLPath: pathIn(opts.BaseDir, appName), MQTLS: b.model.MQTLS},
+		Podman:  p,
+		Secrets: podmanSecretRefs(p.Name, plan.Secrets),
+		Stores:  toPodmanMounts(sm),
+		Libs:    toPodmanMount(lm),
+		Instance: podmangen.Instance{
+			Name:             p.Name,
+			AppYAMLPath:      pathIn(opts.BaseDir, appName),
+			MQTLS:            b.model.MQTLS,
+			StatusScriptPath: pathIn(opts.BaseDir, statusName),
+			LeaderMode:       e.Defaults.LeaderElection.EffectiveMode(),
+		},
 	}
 	if plan.Mode == spec.PodmanModeQuadlet {
 		plan.Unit = podmangen.RenderQuadlet(in)
@@ -297,6 +344,33 @@ func ResolveCredentials(refs []consolidate.SecretRef, res Resolver) ([]KV, error
 	return out, nil
 }
 
+// resolveStatusPassword returns the password for the tool-reserved status
+// actuator account (spec.StatusUserName): the operator's override from
+// spec.StatusUserPasswordEnvVar when set and non-empty (validate.Run has
+// already charset-checked it, so it is used verbatim), otherwise 16 random
+// bytes hex-encoded into a 32-lowercase-hex-char literal. The result is
+// rendered as a literal that the in-container status script (internal/
+// statusscript) reads back out of application.yml, so it must be strong by
+// default -- never a fixed or predictable fallback -- and it must stay
+// stable within one generate call, which is why every build() call site
+// resolves it exactly once and threads the same value through.
+func resolveStatusPassword(res Resolver) (string, error) {
+	if res.Env != nil {
+		if v, ok := res.Env(spec.StatusUserPasswordEnvVar); ok && v != "" {
+			return v, nil
+		}
+	}
+	read := res.Rand
+	if read == nil {
+		read = func(b []byte) error { _, err := rand.Read(b); return err }
+	}
+	b := make([]byte, 16)
+	if err := read(b); err != nil {
+		return "", fmt.Errorf("generating the %s account password: %v; set %s to provide one explicitly", spec.StatusUserName, err, spec.StatusUserPasswordEnvVar)
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // ---- config building ---------------------------------------------------------
 
 // built is the consolidated model and its rendered application.yml. One folder
@@ -314,10 +388,14 @@ type built struct {
 const ConfigImport = "optional:configtree:/run/secrets/"
 
 // build consolidates the workflows and renders the application.yml.
-func build(wfs []spec.Workflow, d *spec.Defaults, mountStores bool) (built, []string) {
+// statusPassword is the already-resolved password for the reserved status
+// account (see resolveStatusPassword); it flows straight into
+// consolidate.Opts so it is threaded through, never recomputed.
+func build(wfs []spec.Workflow, d *spec.Defaults, mountStores bool, statusPassword string) (built, []string) {
 	m, warns := consolidate.Build(wfs, d, consolidate.Opts{
-		MountStores:  mountStores,
-		ConfigImport: ConfigImport,
+		MountStores:    mountStores,
+		ConfigImport:   ConfigImport,
+		StatusPassword: statusPassword,
 	})
 	return built{appYAML: render.Application(m), model: m}, warns
 }

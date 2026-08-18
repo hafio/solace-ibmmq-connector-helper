@@ -50,11 +50,36 @@ type User struct {
 // Secret is the user's password credential.
 func (u User) Secret() Cred { return Cred{u.Password, u.PasswordEnv} }
 
+// StatusUserName is the tool-reserved, read-only actuator account used by the
+// generated status script. StatusUserPasswordEnvVar is the optional host env
+// var that overrides its generated password at render time.
+const (
+	StatusUserName           = "solmq-status"
+	StatusUserPasswordEnvVar = "SECURITY_USER_SOLMQ_STATUS_PASSWORD"
+)
+
+// Label keys/values emitted on Kubernetes pods, compose services and podman
+// containers alike: solace-connector is a valid DNS-1123 subdomain prefix and
+// le-mode/role are valid label names, so one spelling works on every platform.
+const (
+	LabelModeKey    = "solace-connector/le-mode"
+	LabelRoleKey    = "solace-connector/role"
+	LabelRoleActive = "active"
+)
+
 // Security mirrors solace.connector.security.
 type Security struct {
 	Present bool
 	Enabled bool
 	Users   []User
+}
+
+// EffectivelyEnabled reports whether security is on. The connector defaults
+// solace.connector.security.enabled to true, so an absent security block
+// still means auth is on (see defaultsFromRaw, which only ever sets Enabled
+// to false when the block is present and says so explicitly).
+func (s Security) EffectivelyEnabled() bool {
+	return !s.Present || s.Enabled
 }
 
 // Management mirrors the Spring actuator settings.
@@ -74,6 +99,15 @@ type LeaderElection struct {
 	ConnRef  string     // solace connection for the session (OR inline Session)
 	Session  *Side      // inline solace session (alternative to ConnRef)
 	FailOver *yaml.Node // verbatim leader-election.fail-over mapping
+}
+
+// EffectiveMode returns le.Mode, defaulting to LeaderStandalone: an absent or
+// empty leader-election mode means standalone.
+func (le LeaderElection) EffectiveMode() string {
+	if le.Mode == "" {
+		return LeaderStandalone
+	}
+	return le.Mode
 }
 
 // Defaults is the parsed connector-defaults section of env.yaml (all subsections optional).

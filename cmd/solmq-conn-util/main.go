@@ -1,22 +1,27 @@
 // Command solmq-conn-util generates and deploys the Solace PubSub+ Connector for IBM
 // MQ from a single env.yaml: it consolidates a folder of per-workflow YAML files
-// into an application.yml and, per target, into Kubernetes manifests, a docker
-// compose file, or podman run/quadlet units -- and can apply or tear those down
-// by shelling out to kubectl/oc, docker, or podman/systemctl.
+// into an application.yml and, per platform, into Kubernetes manifests, a docker
+// compose file, or podman run/quadlet units -- and can apply, tear down, or check
+// the status of those by shelling out to kubectl/oc, docker, or podman/systemctl.
 //
-//	solmq-conn-util generate config|kubernetes|docker|podman [-e env.yaml] [-o out]
-//	solmq-conn-util deploy   kubernetes|docker|podman        [-e env.yaml]
-//	solmq-conn-util delete   kubernetes|docker|podman        [-e env.yaml]
-//	solmq-conn-util validate                                 [-e env.yaml]
+//	solmq-conn-util generate [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
+//	solmq-conn-util deploy   [--platform kubernetes|docker|podman] [-e env.yaml]
+//	solmq-conn-util delete   [--platform kubernetes|docker|podman] [-e env.yaml]
+//	solmq-conn-util status   [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
+//	solmq-conn-util version
+//	solmq-conn-util validate [-e env.yaml]
 //	solmq-conn-util examples [dir] [-f]
 //	solmq-conn-util completion bash|zsh|fish|powershell
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/examples"
@@ -24,6 +29,7 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/scan"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
 
@@ -36,6 +42,18 @@ const (
 	tgtDocker     = "docker"
 	tgtPodman     = "podman"
 )
+
+// platformNames lists the three deploy-platform section keys, in the order
+// commands.go's --platform meaning documents them. generate (without
+// "config"), deploy, delete, and status all resolve to one of these three via
+// resolvePlatform; every platform-keyed map in this file (platformGenerators,
+// actTargets) is gated against this same list by TestPlatformMapsCoverThreeNames.
+var platformNames = []string{tgtKubernetes, tgtDocker, tgtPodman}
+
+// version is solmq-conn-util's own version, stamped at build time via
+// -ldflags "-X main.version=<tag>"; "dev" is what an un-injected local build
+// reports.
+var version = "dev"
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -57,6 +75,8 @@ var verbHandlers = map[string]func(args []string, r runner.Runner) int{
 	"generate":   func(args []string, r runner.Runner) int { return runGenerate(args) },
 	"deploy":     func(args []string, r runner.Runner) int { return runAction(runner.ActionDeploy, args, r) },
 	"delete":     func(args []string, r runner.Runner) int { return runAction(runner.ActionDelete, args, r) },
+	"status":     func(args []string, r runner.Runner) int { return runStatus(args, r) },
+	"version":    func(args []string, r runner.Runner) int { return actVersion() },
 	"validate":   func(args []string, r runner.Runner) int { return runValidate(args) },
 	"examples":   func(args []string, r runner.Runner) int { return runExamples(args) },
 	"completion": func(args []string, r runner.Runner) int { return runCompletion(args) },
@@ -121,35 +141,61 @@ func wantList(names []string) string {
 
 // ---- generate ----------------------------------------------------------------
 
-// genTargets maps each modeled "generate" target (cliVerbs in commands.go) to
-// its renderer, so runGenerate's accepted set can never drift from the model --
-// see TestDispatchHandlersMatchModel.
+// genTargets maps generate's one modeled positional target ("config", in
+// cliVerbs -- kubernetes/docker/podman are no longer positional, see
+// platformGenerators) to its renderer, so runGenerate's accepted set can
+// never drift from the model -- see TestDispatchHandlersMatchModel.
 var genTargets = map[string]func(envPath, out string) int{
-	tgtConfig:     genConfig,
+	tgtConfig: genConfig,
+}
+
+// platformGenerators maps each of platformNames to the renderer generate
+// falls back to when no positional target is given: the resolved platform's
+// artifacts instead of application.yml. Gated against platformNames by
+// TestPlatformMapsCoverThreeNames.
+var platformGenerators = map[string]func(envPath, out string) int{
 	tgtKubernetes: genKubernetes,
 	tgtDocker:     genDocker,
 	tgtPodman:     genPodman,
 }
 
+// runGenerate handles both of generate's forms: the "config" positional
+// (application.yml, no platform involved) and the platform form, which
+// resolves --platform (or infers/prompts, see resolvePlatform) and renders
+// that platform's artifacts. A positional naming an old-grammar platform
+// (generate kubernetes, ...) is rejected with a hint at --platform instead of
+// being resolved, per platformResolutionDetail in commands.go.
 func runGenerate(args []string) int {
 	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
 	env := envFlag(fs)
 	out := outFlag(fs)
+	platform := platformFlag(fs)
 	pos, err := collectFlagsAndDirs(fs, args)
 	if err != nil {
 		return 2
 	}
-	if len(pos) == 0 {
-		fmt.Fprintf(os.Stderr, "generate: missing target (%s)\n", pipeList(targetNames("generate")))
-		usage()
-		return 2
+	if len(pos) > 0 {
+		switch {
+		case pos[0] == tgtConfig:
+			return genConfig(*env, *out)
+		case contains(platformNames, pos[0]):
+			fmt.Fprintf(os.Stderr, "generate: %q is no longer a positional target; pass --platform %s instead\n", pos[0], pos[0])
+			usage()
+			return 2
+		default:
+			fmt.Fprintf(os.Stderr, "generate: unknown target %q (want %s)\n", pos[0], wantList(append(targetNames("generate"), platformNames...)))
+			return 2
+		}
 	}
-	h, ok := genTargets[pos[0]]
-	if !ok {
-		fmt.Fprintf(os.Stderr, "generate: unknown target %q (want %s)\n", pos[0], wantList(targetNames("generate")))
-		return 2
+	e, lerr := loadEnvFile(*env)
+	if lerr != nil {
+		return errExit(lerr)
 	}
-	return h(*env, *out)
+	platformName, perr := resolvePlatform(*platform, presentPlatforms(e), true)
+	if perr != nil {
+		return errExit(perr)
+	}
+	return platformGenerators[platformName](*env, *out)
 }
 
 func genConfig(envPath, out string) int {
@@ -209,35 +255,51 @@ func genPodman(envPath, out string) int {
 
 // ---- deploy / delete ---------------------------------------------------------
 
-// actTargets maps each modeled deploy/delete platform (cliVerbs in
-// commands.go) to its implementation, so runAction's accepted set can never
-// drift from the model -- see TestDispatchHandlersMatchModel. extraAllowed
-// carries the values of a repeatable --allow-command flag (nil when unused).
+// actTargets maps each of platformNames to its deploy/delete implementation.
+// Gated against platformNames by TestPlatformMapsCoverThreeNames (deploy/
+// delete no longer model a positional Targets list in commands.go -- the
+// platform is resolved by resolvePlatform, not looked up from args[0]).
+// extraAllowed carries the values of a repeatable --allow-command flag (nil
+// when unused).
 var actTargets = map[string]func(action, envPath string, r runner.Runner, extraAllowed []string) int{
 	tgtKubernetes: actKubernetes,
 	tgtDocker:     actDocker,
 	tgtPodman:     actPodman,
 }
 
+// runAction resolves --platform (or infers/prompts, see resolvePlatform) for
+// deploy/delete and dispatches to actTargets. A positional argument is never
+// a platform anymore: one naming an old-grammar platform (deploy kubernetes,
+// ...) is rejected with a hint at --platform, and anything else is an
+// unexpected argument -- both usage errors (exit 2), per
+// platformResolutionDetail in commands.go.
 func runAction(action string, args []string, r runner.Runner) int {
 	fs := flag.NewFlagSet(action, flag.ContinueOnError)
 	env := envFlag(fs)
+	platform := platformFlag(fs)
 	allow := allowCommandFlag(fs)
 	pos, err := collectFlagsAndDirs(fs, args)
 	if err != nil {
 		return 2
 	}
-	if len(pos) == 0 {
-		fmt.Fprintf(os.Stderr, "%s: missing platform (%s)\n", action, pipeList(targetNames(action)))
-		usage()
+	if len(pos) > 0 {
+		if contains(platformNames, pos[0]) {
+			fmt.Fprintf(os.Stderr, "%s: %q is no longer a positional platform; pass --platform %s instead\n", action, pos[0], pos[0])
+			usage()
+			return 2
+		}
+		fmt.Fprintf(os.Stderr, "%s: unexpected argument %q (the platform is now selected with --platform)\n", action, pos[0])
 		return 2
 	}
-	h, ok := actTargets[pos[0]]
-	if !ok {
-		fmt.Fprintf(os.Stderr, "%s: unknown platform %q (want %s)\n", action, pos[0], wantList(targetNames(action)))
-		return 2
+	e, lerr := loadEnvFile(*env)
+	if lerr != nil {
+		return errExit(lerr)
 	}
-	return h(action, *env, r, *allow)
+	platformName, perr := resolvePlatform(*platform, presentPlatforms(e), true)
+	if perr != nil {
+		return errExit(perr)
+	}
+	return actTargets[platformName](action, *env, r, *allow)
 }
 
 // preflight runs the read-only login/reachability probe (runner.Preflight)
@@ -363,9 +425,16 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 			return report(runner.ActionDeploy, tgtPodman, out, err)
 		}
 	}
-	// application.yml and the unit carry only stable secret names, never values,
-	// so they are readable by the container user and by systemd (0644).
-	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.AppYAML.Name), plan.AppYAML.Data, 0o644); err != nil {
+	// application.yml now carries a live read-only credential (the reserved
+	// status account's password, read back out of this same file by the
+	// generated status script at run time -- see statusscript.Render), so it is
+	// written 0600 rather than world/group-readable. The status script and the
+	// unit carry no secret of their own -- the script only reads one back out,
+	// the unit only stable secret names -- so 0644 is right for both.
+	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.AppYAML.Name), plan.AppYAML.Data, 0o600); err != nil {
+		return errExit(err)
+	}
+	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.StatusScript.Name), plan.StatusScript.Data, 0o644); err != nil {
 		return errExit(err)
 	}
 	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.Unit.Filename), plan.Unit.Content, 0o644); err != nil {
@@ -377,8 +446,9 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 
 func podmanDelete(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r runner.Runner, extraAllowed []string) int {
 	out, rerr := runner.PodmanDelete(r, sc, []string{plan.Service}, []string{plan.Unit.Filename})
-	// Best-effort cleanup of the file we generated.
+	// Best-effort cleanup of the files we generated.
 	_ = os.Remove(filepath.Join(sc.Dir, plan.AppYAML.Name))
+	_ = os.Remove(filepath.Join(sc.Dir, plan.StatusScript.Name))
 	// Credentials are removed from podman's store last, after the units that
 	// referenced them are gone. Leaving credential material behind is worth
 	// reporting even when the teardown itself succeeded, so a failure here
@@ -393,6 +463,469 @@ func podmanDelete(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 		rerr = serr
 	}
 	return report(runner.ActionDelete, tgtPodman, out, rerr)
+}
+
+// ---- platform resolution (shared by generate/deploy/delete/status) ----------
+
+// contains reports whether s appears in names.
+func contains(names []string, s string) bool {
+	for _, n := range names {
+		if n == s {
+			return true
+		}
+	}
+	return false
+}
+
+// presentPlatforms returns which of platformNames have a section in e, in
+// platformNames order. A nil e (status with no env.yaml at all -- see
+// loadStatusEnv) reports none present.
+func presentPlatforms(e *spec.Env) []string {
+	if e == nil {
+		return nil
+	}
+	var out []string
+	if e.Kubernetes != nil {
+		out = append(out, tgtKubernetes)
+	}
+	if e.Docker != nil {
+		out = append(out, tgtDocker)
+	}
+	if e.Podman != nil {
+		out = append(out, tgtPodman)
+	}
+	return out
+}
+
+// resolvePlatform implements the order platformResolutionDetail (commands.go)
+// documents for generate/deploy/delete/status: flagVal if set; otherwise the
+// single entry in present, echoed to stderr so the operator sees what ran;
+// otherwise an interactive numbered menu over present; zero entries in
+// present is a loud error naming all three section keys.
+//
+// requireSection gates whether a given flagVal must name an entry actually in
+// present: true for every caller except status with explicit --pod/--container
+// targets, which names its own targets and so needs no section to run
+// against them (see actStatus).
+func resolvePlatform(flagVal string, present []string, requireSection bool) (string, error) {
+	if flagVal != "" {
+		if !contains(platformNames, flagVal) {
+			return "", fmt.Errorf("--platform %q must be %s", flagVal, wantList(platformNames))
+		}
+		if requireSection && !contains(present, flagVal) {
+			if len(present) == 0 {
+				return "", fmt.Errorf("--platform %s: env.yaml has no kubernetes:, docker:, or podman: section", flagVal)
+			}
+			return "", fmt.Errorf("--platform %s: env.yaml has no %s: section (present: %s)", flagVal, flagVal, strings.Join(present, ", "))
+		}
+		return flagVal, nil
+	}
+	switch len(present) {
+	case 0:
+		return "", fmt.Errorf("env.yaml has no kubernetes:, docker:, or podman: section; pass --platform to select one")
+	case 1:
+		fmt.Fprintf(os.Stderr, "platform: %s (the only section present in env.yaml)\n", present[0])
+		return present[0], nil
+	default:
+		return promptPlatformMenu(present)
+	}
+}
+
+// promptLine is the injectable stdin-read seam behind the interactive
+// platform menu and the status install confirmation: readStdinLine in
+// production, a canned fake in tests (mirroring the runner.Runner seam
+// dispatch already threads explicitly -- see useFakeRunner in main_test.go).
+var promptLine = readStdinLine
+
+// readStdinLine refuses to read when stdin is not a character device (a
+// script, a CI job, or anything else that is not an interactive terminal) so
+// a non-interactive invocation fails fast with actionable guidance instead of
+// blocking forever on a read that will never return.
+func readStdinLine(question string) (string, error) {
+	fi, err := os.Stdin.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return "", fmt.Errorf("stdin is not a terminal, so this prompt cannot be answered interactively")
+	}
+	fmt.Fprint(os.Stderr, question)
+	line, rerr := bufio.NewReader(os.Stdin).ReadString('\n')
+	if rerr != nil && line == "" {
+		return "", fmt.Errorf("reading input: %w", rerr)
+	}
+	return strings.TrimSpace(line), nil
+}
+
+// promptPlatformMenu lists present as a numbered menu and reads the operator's
+// choice via promptLine. A non-TTY refusal is wrapped with a --platform hint
+// so the operator has an immediate next step instead of a bare "not a
+// terminal" error.
+func promptPlatformMenu(present []string) (string, error) {
+	var b strings.Builder
+	b.WriteString("multiple platforms are configured in env.yaml; choose one:\n")
+	for i, p := range present {
+		fmt.Fprintf(&b, "  %d) %s\n", i+1, p)
+	}
+	b.WriteString("> ")
+	line, err := promptLine(b.String())
+	if err != nil {
+		return "", fmt.Errorf("choosing a platform interactively: %w; pass --platform instead", err)
+	}
+	n, cerr := strconv.Atoi(line)
+	if cerr != nil || n < 1 || n > len(present) {
+		return "", fmt.Errorf("%q is not a valid choice (want 1-%d); pass --platform instead", line, len(present))
+	}
+	return present[n-1], nil
+}
+
+// platformFlag registers the shared --platform selector (generate/deploy/
+// delete/status; no short alias) and returns its raw value for
+// resolvePlatform to interpret.
+func platformFlag(fs *flag.FlagSet) *string {
+	const u = "the platform: kubernetes, docker, or podman (default: resolved from env.yaml, or an interactive menu)"
+	return fs.String("platform", "", u)
+}
+
+// loadEnvFile reads and parses env.yaml only, with no workflow scan: platform
+// resolution and status need the parsed sections but never the workflow set
+// loadEnv additionally reads for generate/deploy/delete.
+func loadEnvFile(envPath string) (*spec.Env, error) {
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", envPath, err)
+	}
+	return spec.ParseEnv(data)
+}
+
+// ---- status --------------------------------------------------------------
+
+// repeatableName implements flag.Value for a repeatable, free-form name flag
+// (--pod, --container): it only collects raw values here, since the platform
+// (and therefore which flag applies) is not known until after parsing;
+// actStatus validates each one against validate.SafeToken before it reaches
+// an argv.
+type repeatableName struct{ vals *[]string }
+
+func (repeatableName) String() string { return "" } // flag.Value needs a zero-value String; nothing to show before parsing
+
+func (v repeatableName) Set(s string) error {
+	*v.vals = append(*v.vals, s)
+	return nil
+}
+
+// runStatus parses status's flags and hands them to actStatus.
+func runStatus(args []string, r runner.Runner) int {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	env := envFlag(fs)
+	install := fs.Bool("install", false, "install the status script on every target without prompting")
+	platform := platformFlag(fs)
+	var pods, containers []string
+	fs.Var(repeatableName{&pods}, "pod", "limit checks to this kubernetes pod name (repeatable)")
+	fs.Var(repeatableName{&containers}, "container", "limit checks to this docker/podman container name (repeatable)")
+	namespace := fs.String("namespace", "", "kubernetes namespace to query")
+	port := fs.Int("management-port", 0, "actuator management port to reach inside each target")
+	user := fs.String("user", "", "actuator account the status script authenticates as (default "+spec.StatusUserName+")")
+	command := fs.String("command", "", "override the platform CLI binary used to reach each target")
+	allow := allowCommandFlag(fs)
+	pos, err := collectFlagsAndDirs(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(pos) > 0 {
+		fmt.Fprintf(os.Stderr, "status: unexpected argument %q\n", pos[0])
+		return 2
+	}
+	return actStatus(*env, *install, *platform, pods, containers, *namespace, *port, *user, *command, *allow, r)
+}
+
+// loadStatusEnv loads env.yaml the same way loadEnvFile does, except when the
+// operator has named explicit --pod/--container targets and an explicit
+// --platform: status then needs nothing from the file at all (see
+// platformResolutionDetail's status exception), so a missing file is not an
+// error and status proceeds against a zero Env (built-in command/port/user
+// defaults). A file that does exist but fails to parse is still reported --
+// its presence means the operator expects it to be read.
+func loadStatusEnv(envPath string, skipIfMissing bool) (*spec.Env, error) {
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		if skipIfMissing {
+			return &spec.Env{}, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", envPath, err)
+	}
+	return spec.ParseEnv(data)
+}
+
+// statusCommand resolves the CLI binary status execs through: the --command
+// override if given, else the platform's section command: in env.yaml when
+// the section is present, else the platform's own default -- the same
+// defaults applyKubeDefaults/applyDockerDefaults/applyPodmanDefaults fill in
+// at parse time, needed again here because status can run with no section at
+// all (explicit --pod/--container targets).
+func statusCommand(platform, override string, e *spec.Env) string {
+	if override != "" {
+		return override
+	}
+	switch platform {
+	case validate.PlatformKubernetes:
+		if e != nil && e.Kubernetes != nil && e.Kubernetes.Command != "" {
+			return e.Kubernetes.Command
+		}
+		return spec.DefaultKubeCommand
+	case validate.PlatformDocker:
+		if e != nil && e.Docker != nil && e.Docker.Command != "" {
+			return e.Docker.Command
+		}
+		return spec.DefaultDockerCommand
+	case validate.PlatformPodman:
+		if e != nil && e.Podman != nil && e.Podman.Command != "" {
+			return e.Podman.Command
+		}
+		return spec.DefaultPodmanCommand
+	default:
+		return ""
+	}
+}
+
+// statusNamespace resolves the kubernetes namespace status queries: the
+// --namespace override if given, else the kubernetes section's
+// deployment.namespace when present, else "" (the CLI's current-context
+// default). No effect on docker/podman.
+func statusNamespace(platform, override string, e *spec.Env) string {
+	if override != "" {
+		return override
+	}
+	if platform == validate.PlatformKubernetes && e != nil && e.Kubernetes != nil {
+		return e.Kubernetes.Deployment.Namespace
+	}
+	return ""
+}
+
+// resolveStatusTargets returns the targets status checks: the operator's own
+// --pod/--container values when given, otherwise discovered from env.yaml --
+// kubernetes lists running pods (runner.KubernetesPodNames, selector
+// app=<deployment name>), docker/podman use the section's configured
+// instance name.
+func resolveStatusTargets(platform string, pods, containers []string, namespace string, e *spec.Env, r runner.Runner, cmdArgv []string) ([]string, error) {
+	switch platform {
+	case validate.PlatformKubernetes:
+		if len(pods) > 0 {
+			return pods, nil
+		}
+		if e == nil || e.Kubernetes == nil {
+			return nil, fmt.Errorf("no kubernetes: section in env.yaml to discover pods from; pass --pod explicitly")
+		}
+		selector := "app=" + e.Kubernetes.Deployment.Name
+		names, err := runner.KubernetesPodNames(r, cmdArgv, namespace, selector)
+		if err != nil {
+			return nil, err
+		}
+		if len(names) == 0 {
+			return nil, fmt.Errorf("no pods found for selector %q in namespace %q; pass --pod explicitly", selector, namespace)
+		}
+		return names, nil
+	case validate.PlatformDocker:
+		if len(containers) > 0 {
+			return containers, nil
+		}
+		if e == nil || e.Docker == nil {
+			return nil, fmt.Errorf("no docker: section in env.yaml to discover the container name from; pass --container explicitly")
+		}
+		return []string{e.Docker.Name}, nil
+	case validate.PlatformPodman:
+		if len(containers) > 0 {
+			return containers, nil
+		}
+		if e == nil || e.Podman == nil {
+			return nil, fmt.Errorf("no podman: section in env.yaml to discover the container name from; pass --container explicitly")
+		}
+		return []string{e.Podman.Name}, nil
+	default:
+		return nil, fmt.Errorf("unknown platform %q", platform)
+	}
+}
+
+// actStatus resolves the platform and its targets, ensures the generated
+// status script is present on each (installing per install/prompt policy),
+// runs it, and prints the per-target report. See platformResolutionDetail and
+// the status Detail text in commands.go for the resolution order and the
+// install-or-skip behavior.
+func actStatus(envPath string, install bool, platformFlagVal string, pods, containers []string, namespaceFlagVal string, portFlagVal int, userFlagVal, commandFlagVal string, extraAllowed []string, r runner.Runner) int {
+	explicitTargets := len(pods) > 0 || len(containers) > 0
+
+	e, lerr := loadStatusEnv(envPath, explicitTargets && platformFlagVal != "")
+	if lerr != nil {
+		return errExit(lerr)
+	}
+
+	platform, perr := resolvePlatform(platformFlagVal, presentPlatforms(e), !explicitTargets)
+	if perr != nil {
+		return errExit(perr)
+	}
+
+	namespace := statusNamespace(platform, namespaceFlagVal, e)
+	if namespace != "" && !validate.SafeToken(namespace) {
+		return errExit(fmt.Errorf("--namespace %q contains an unsafe character (%s)", namespace, validate.UnsafeTokenReason))
+	}
+	for _, p := range pods {
+		if !validate.SafeToken(p) {
+			return errExit(fmt.Errorf("--pod %q contains an unsafe character (%s)", p, validate.UnsafeTokenReason))
+		}
+	}
+	for _, c := range containers {
+		if !validate.SafeToken(c) {
+			return errExit(fmt.Errorf("--container %q contains an unsafe character (%s)", c, validate.UnsafeTokenReason))
+		}
+	}
+
+	user := userFlagVal
+	if user == "" {
+		user = spec.StatusUserName
+	}
+	// Stricter than the other flags: the account name is also spliced into a
+	// sed address inside the generated script, where a '/' or a regex
+	// metacharacter would break the password lookup rather than fail loudly.
+	if !validate.SafeActuatorUser(user) {
+		return errExit(fmt.Errorf("--user %q is not a usable account name (%s)", user, validate.SafeActuatorUserReason))
+	}
+
+	port := portFlagVal
+	if port == 0 {
+		port = e.Defaults.EffectiveManagementPort()
+	}
+	if port < 1 || port > 65535 {
+		return errExit(fmt.Errorf("--management-port %d must be 1-65535", port))
+	}
+
+	command := statusCommand(platform, commandFlagVal, e)
+	cmdArgv, cerr := runner.ParseCommand(platform, command, extraAllowed)
+	if cerr != nil {
+		return errExit(cerr)
+	}
+
+	// Reuse the read-only preflight probe before touching anything, same as
+	// deploy/delete. The action argument only steers kubernetes' can-i verb
+	// (docker/podman ignore it); status never creates or deletes a deployment,
+	// so deploy's "create" is used as the closer of the two existing checks.
+	if code, ok := preflight(r, runner.ActionDeploy, platform, command, namespace, extraAllowed); !ok {
+		return code
+	}
+
+	targets, terr := resolveStatusTargets(platform, pods, containers, namespace, e, r, cmdArgv)
+	if terr != nil {
+		return errExit(terr)
+	}
+
+	script := statusscript.Render(port, user)
+	return runStatusOnTargets(r, cmdArgv, platform, namespace, targets, script, install)
+}
+
+// runStatusOnTargets ensures the status script is present on each target and
+// runs it, printing "<target>: " followed by the script's own output (one
+// line per continuation, so a multi-line report -- leader-election mode,
+// leader-election state, one line per workflow -- stays grouped under its
+// target). It never aborts the loop on a target's own non-zero exit: that is
+// the script's documented convention (1 standby, 2 error), data to report,
+// not a crash. It returns 0 only when every target reached the run step; a
+// probe/install failure or a declined install both count toward exit 1.
+func runStatusOnTargets(r runner.Runner, cmdArgv []string, platform, namespace string, targets []string, script string, install bool) int {
+	var present, missing []string
+	failed := false
+
+	for _, t := range targets {
+		ok, err := runner.ScriptInstalled(r, cmdArgv, platform, t, namespace, statusscript.ContainerPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: error: %v\n", t, err)
+			failed = true
+			continue
+		}
+		if ok {
+			present = append(present, t)
+		} else {
+			missing = append(missing, t)
+		}
+	}
+
+	toRun := present
+	if len(missing) > 0 {
+		doInstall := install
+		if !doInstall {
+			var cerr error
+			doInstall, cerr = confirmInstall(missing)
+			if cerr != nil {
+				fmt.Fprintln(os.Stderr, "error:", cerr)
+				return 1
+			}
+		}
+		if doInstall {
+			for _, t := range missing {
+				if _, err := runner.InstallScript(r, cmdArgv, platform, t, namespace, statusscript.ContainerDir, statusscript.ContainerPath, script); err != nil {
+					fmt.Fprintf(os.Stderr, "%s: error installing status script: %v\n", t, err)
+					failed = true
+					continue
+				}
+				toRun = append(toRun, t)
+			}
+		} else {
+			for _, t := range missing {
+				fmt.Fprintf(os.Stderr, "%s: skipped (status script not installed, and the install prompt was declined)\n", t)
+			}
+			failed = true
+		}
+	}
+
+	for _, t := range toRun {
+		// The script always exits 0 and puts its findings in the output, so an
+		// error here is the exec failing rather than a standby instance -- report
+		// it and keep going, so one unreachable target does not hide the rest.
+		out, err := runner.RunStatusScript(r, cmdArgv, platform, t, namespace, statusscript.ContainerPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: error running the status script: %v\n", t, err)
+			failed = true
+			continue
+		}
+		printTargetReport(t, out)
+	}
+
+	if failed {
+		return 1
+	}
+	return 0
+}
+
+// printTargetReport prints target's status report with a "<target>: " lead-in
+// on the first line and every continuation line indented under it.
+func printTargetReport(target, out string) {
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	fmt.Printf("%s: %s\n", target, lines[0])
+	for _, l := range lines[1:] {
+		fmt.Printf("  %s\n", l)
+	}
+}
+
+// confirmInstall asks once whether to install the status script on the listed
+// missing targets, via the same promptLine seam and non-TTY refusal
+// promptPlatformMenu uses. "y"/"yes" (case-insensitive) installs; anything
+// else, including a blank line, declines.
+func confirmInstall(missing []string) (bool, error) {
+	line, err := promptLine(fmt.Sprintf("status script missing on %s -- install it now? [y/N] ", strings.Join(missing, ", ")))
+	if err != nil {
+		return false, fmt.Errorf("confirming the status script install interactively: %w; pass --install instead", err)
+	}
+	switch strings.ToLower(line) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+// ---- version ---------------------------------------------------------------
+
+// actVersion prints solmq-conn-util's own version (see the package-level
+// version var) plus the Go toolchain and OS/arch it was built with. It takes
+// no flags and always succeeds.
+func actVersion() int {
+	fmt.Println("solmq-conn-util", version, runtime.Version(), runtime.GOOS+"/"+runtime.GOARCH)
+	return 0
 }
 
 // ---- validate / examples -----------------------------------------------------

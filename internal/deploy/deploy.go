@@ -30,9 +30,10 @@ type StoreFile struct {
 
 // Instance is the connector: its ConfigMap + Deployment + Service.
 type Instance struct {
-	Name    string             // deployment name
-	AppYAML string             // the rendered application.yml (trailing newline)
-	Model   *consolidate.Model // the consolidated model (drives MQTLS etc.)
+	Name         string             // deployment name
+	AppYAML      string             // the rendered application.yml (trailing newline)
+	StatusScript string             // the rendered status script the operator execs inside the container
+	Model        *consolidate.Model // the consolidated model (drives MQTLS etc.)
 }
 
 // Input is everything needed to render the manifests.
@@ -144,6 +145,16 @@ func syslogOf(k *spec.Kubernetes) *spec.Syslog {
 	return k.Logging.Syslog
 }
 
+// leaderMode returns the pod's leader-election mode label value, defaulting
+// to standalone when Defaults is absent (mirrors the ManagementPort/syslogOf
+// nil-guard style: a *Defaults that was never parsed still renders).
+func leaderMode(d *spec.Defaults) string {
+	if d == nil {
+		return spec.LeaderStandalone
+	}
+	return d.LeaderElection.EffectiveMode()
+}
+
 // Render produces the full multi-doc manifest set, in the order Namespace,
 // ConfigMap, Secrets, libs PV/PVC, Deployment, Service.
 func Render(in Input) string {
@@ -168,7 +179,7 @@ func Render(in Input) string {
 		}
 	}
 	hasStores := storeRef != ""
-	mgmtPort := managementPort(in)
+	mgmtPort := ManagementPort(in)
 
 	w := &yw{}
 	docs := 0
@@ -189,7 +200,7 @@ func Render(in Input) string {
 
 	// 1. ConfigMap.
 	sep()
-	renderConfigMap(w, in.Instance.Name+"-config", ns, in.Instance.AppYAML, syslogOf(in.Kube))
+	renderConfigMap(w, in.Instance.Name+"-config", ns, in.Instance.AppYAML, in.Instance.StatusScript, syslogOf(in.Kube))
 
 	// 2. credentials Secret (stringData).
 	if emitCred {
@@ -274,9 +285,11 @@ func Render(in Input) string {
 	return w.String()
 }
 
-// renderConfigMap emits the ConfigMap embedding the application.yml
-// and, when syslog is configured, the shared logback-spring.xml.
-func renderConfigMap(w *yw, cmName, ns, appYAML string, sys *spec.Syslog) {
+// renderConfigMap emits the ConfigMap embedding the application.yml, the
+// status script (always present, so the operator can exec it inside the
+// container regardless of leader-election mode) and, when syslog is
+// configured, the shared logback-spring.xml.
+func renderConfigMap(w *yw, cmName, ns, appYAML, statusScript string, sys *spec.Syslog) {
 	w.Line(0, "apiVersion: v1")
 	w.Line(0, "kind: ConfigMap")
 	w.Line(0, "metadata:")
@@ -301,6 +314,14 @@ func renderConfigMap(w *yw, cmName, ns, appYAML string, sys *spec.Syslog) {
 			}
 		}
 	}
+	w.Line(2, "status: |")
+	for _, ln := range yamlwriter.SplitLines(statusScript) {
+		if ln == "" {
+			w.Raw("\n")
+		} else {
+			w.Line(4, ln)
+		}
+	}
 }
 
 func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef string, hasStores bool, mgmtPort int) {
@@ -316,11 +337,24 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 	w.Line(2, "replicas: "+strconv.Itoa(dep.Replicas))
 	w.Line(2, "selector:")
 	w.Line(4, "matchLabels:")
+	// app only: a selector must be immutable for the life of the Deployment, and
+	// the role label below changes with the actuator-reported leader, not with
+	// anything the selector could pin.
 	w.Line(6, "app: "+name)
 	w.Line(2, "template:")
 	w.Line(4, "metadata:")
 	w.Line(6, "labels:")
 	w.Line(8, "app: "+name)
+	mode := leaderMode(in.Defaults)
+	w.Line(8, spec.LabelModeKey+": "+mode)
+	// active_standby gets no role label: which pod is currently active is only
+	// knowable at runtime from the actuator, which is exactly what the status
+	// script (rendered into the ConfigMap above) execs to answer. standalone
+	// and active_active are both statically "active" -- there is no standby to
+	// distinguish from.
+	if mode == spec.LeaderStandalone || mode == spec.LeaderActiveActive {
+		w.Line(8, spec.LabelRoleKey+": "+spec.LabelRoleActive)
+	}
 	w.Line(4, "spec:")
 	// The connector never calls the Kubernetes API, and an automounted service
 	// account token would land under the same /run/secrets tree the configtree
@@ -393,6 +427,14 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 		w.Line(14, "mountPath: /app/external/libs")
 		w.Line(14, "readOnly: true")
 	}
+	// The status-script mount must be declared last: it mounts a single file
+	// inside /app/external/libs, and a directory mount (the libs one above, when
+	// present) shadows anything nested under its path unless that nested mount
+	// comes after it in the list.
+	w.Line(12, "- name: config")
+	w.Line(14, "mountPath: /app/external/libs/status")
+	w.Line(14, "subPath: status")
+	w.Line(14, "readOnly: true")
 	// probes (tcpSocket — see prompt.md "Probes"; keep isolated for a later switch)
 	w.Line(10, "livenessProbe:")
 	w.Line(12, "tcpSocket:")
@@ -472,9 +514,9 @@ func renderService(w *yw, name, ns string, port, targetPort int) {
 	w.Line(6, "targetPort: "+strconv.Itoa(targetPort))
 }
 
-// managementPort prefers the configured management port, then the service port,
+// ManagementPort prefers the configured management port, then the service port,
 // then the connector default 8090.
-func managementPort(in Input) int {
+func ManagementPort(in Input) int {
 	if in.Defaults != nil && in.Defaults.Management.Port != 0 {
 		return in.Defaults.Management.Port
 	}

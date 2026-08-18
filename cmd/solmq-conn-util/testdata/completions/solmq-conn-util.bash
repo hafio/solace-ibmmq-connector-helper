@@ -22,6 +22,13 @@ _solmq_conn_util_flag_arg() {
     -e|--e|-env|--env) printf 'file' ;;
     -o|--o|-out|--out) printf 'file' ;;
     -allow-command|--allow-command) printf 'name' ;;
+    -platform|--platform) printf 'name' ;;
+    -pod|--pod) printf 'name' ;;
+    -container|--container) printf 'name' ;;
+    -namespace|--namespace) printf 'name' ;;
+    -management-port|--management-port) printf 'name' ;;
+    -user|--user) printf 'name' ;;
+    -command|--command) printf 'name' ;;
     *) printf '' ;;
   esac
 }
@@ -29,9 +36,7 @@ _solmq_conn_util_flag_arg() {
 # _solmq_conn_util_targets <verb> prints the verb's target names, or nothing.
 _solmq_conn_util_targets() {
   case "$1" in
-    generate) printf 'config kubernetes docker podman' ;;
-    deploy) printf 'kubernetes docker podman' ;;
-    delete) printf 'kubernetes docker podman' ;;
+    generate) printf 'config' ;;
     completion) printf 'bash zsh fish powershell' ;;
     *) printf '' ;;
   esac
@@ -40,9 +45,10 @@ _solmq_conn_util_targets() {
 # _solmq_conn_util_flags <verb> prints the flag spellings valid under the verb.
 _solmq_conn_util_flags() {
   case "$1" in
-    generate) printf '-e --env -o --out' ;;
-    deploy) printf '-e --env --allow-command' ;;
-    delete) printf '-e --env --allow-command' ;;
+    generate) printf '--platform -e --env -o --out' ;;
+    deploy) printf '--platform -e --env --allow-command' ;;
+    delete) printf '--platform -e --env --allow-command' ;;
+    status) printf '--install --platform -e --env --pod --container --namespace --management-port --user --command --allow-command' ;;
     validate) printf '-e --env' ;;
     examples) printf '-f --force' ;;
     *) printf '' ;;
@@ -103,7 +109,7 @@ _solmq_conn_util() {
   done
 
   if [ -z "$verb" ]; then
-    COMPREPLY=( $(compgen -W 'generate deploy delete validate examples completion help -h --help' -- "$cur") )
+    COMPREPLY=( $(compgen -W 'generate deploy delete status version validate examples completion help -h --help' -- "$cur") )
     return
   fi
 

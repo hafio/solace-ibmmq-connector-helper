@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
 // ---- fixtures -----------------------------------------------------------------
@@ -80,8 +82,9 @@ const bareEnv = `workflows:
   file_pattern: "*"
 `
 
-// kubeEnv is a minimal-but-valid kubernetes: section for the deploy/delete seam
-// tests -- a safe command, and the three fields checkKube requires.
+// kubeEnv is a minimal-but-valid kubernetes: section for the deploy/delete/
+// platform-resolution seam tests -- a safe command, and the three fields
+// checkKube requires.
 const kubeEnv = `
 kubernetes:
   command: kubectl
@@ -197,6 +200,18 @@ func captureStderr(t *testing.T, f func()) string {
 	return <-done
 }
 
+// withPromptAnswer overrides the injectable promptLine seam (the interactive
+// platform menu and the status install confirmation) to return answer for
+// every call during the test, restoring the previous value on cleanup. It
+// never touches the real os.Stdin, so it carries no risk of blocking on a
+// read regardless of how the test binary itself was invoked.
+func withPromptAnswer(t *testing.T, answer string) {
+	t.Helper()
+	old := promptLine
+	promptLine = func(string) (string, error) { return answer, nil }
+	t.Cleanup(func() { promptLine = old })
+}
+
 // ---- deploy/delete seam helpers -------------------------------------------------
 
 // fakeRunner records every invocation reaching the deploy/delete seam so tests
@@ -237,14 +252,35 @@ func useFakeRunner(t *testing.T) *fakeRunner {
 	return &fakeRunner{}
 }
 
+// queuedResp is one (out, err) pair a queueRunner call returns.
+type queuedResp struct {
+	out string
+	err error
+}
+
+// queueRunner is a fakeRunner variant status's tests need: each call in a
+// sequence returns its own (out, err) pair (e.g. probe-absent, then
+// install-succeeds, then run-standby) rather than fakeRunner's uniform
+// "fail from index N onward". Calls beyond len(resp) succeed with no output.
+type queueRunner struct {
+	calls []fakeCall
+	resp  []queuedResp
+}
+
+func (q *queueRunner) Run(c runner.Cmd) (string, error) {
+	idx := len(q.calls)
+	q.calls = append(q.calls, fakeCall{argv: c.Argv, stdin: c.Stdin, env: c.Env})
+	if idx < len(q.resp) {
+		return q.resp[idx].out, q.resp[idx].err
+	}
+	return "", nil
+}
+
 // ---- a) exit-code contract -----------------------------------------------------
 
 func TestExitCodeContract(t *testing.T) {
 	validDir := workflowDir(t, validWF)
 	invalidDir := workflowDir(t, invalidWF)
-	// validDir's env.yaml (bareEnv) has no kubernetes:/docker:/podman: section, so
-	// it doubles as the fixture for the "missing section" deploy/delete cases below.
-	noSectionEnv := filepath.Join(validDir, "env.yaml")
 	cases := []struct {
 		name string
 		args []string
@@ -258,16 +294,8 @@ func TestExitCodeContract(t *testing.T) {
 		{"unknown flag", []string{"generate", "config", "-nope"}, 2},
 		{"missing env file", []string{"generate", "config", "-e", filepath.Join(validDir, "does-not-exist.yaml")}, 1},
 		{"invalid spec", []string{"generate", "config", "-e", filepath.Join(invalidDir, "env.yaml")}, 1},
-		{"generate no target", []string{"generate"}, 2},
 		{"generate bogus target", []string{"generate", "bogus"}, 2},
-		{"deploy no platform", []string{"deploy"}, 2},
 		{"deploy bogus platform", []string{"deploy", "bogus"}, 2},
-		{"deploy kubernetes no section", []string{"deploy", "kubernetes", "-e", noSectionEnv}, 1},
-		{"deploy docker no section", []string{"deploy", "docker", "-e", noSectionEnv}, 1},
-		{"deploy podman no section", []string{"deploy", "podman", "-e", noSectionEnv}, 1},
-		{"delete kubernetes no section", []string{"delete", "kubernetes", "-e", noSectionEnv}, 1},
-		{"delete docker no section", []string{"delete", "docker", "-e", noSectionEnv}, 1},
-		{"delete podman no section", []string{"delete", "podman", "-e", noSectionEnv}, 1},
 		{"completion no shell", []string{"completion"}, 2},
 		{"completion bogus shell", []string{"completion", "bogus"}, 2},
 	}
@@ -326,7 +354,10 @@ func truncate(s string) string {
 // disagreed with both): the handler maps dispatch/runGenerate/runAction actually
 // use must name exactly the verbs/targets cliVerbs (commands.go) documents, in
 // both directions -- a modeled entry with no handler, or a handler with no
-// modeled entry, must fail.
+// modeled entry, must fail. deploy/delete no longer model a positional Targets
+// list (the platform is resolved via --platform, not looked up from args[0]),
+// so their platform-map coverage is gated separately by
+// TestPlatformMapsCoverThreeNames instead of against cliVerbs here.
 func TestDispatchHandlersMatchModel(t *testing.T) {
 	verbNames := make(map[string]bool, len(cliVerbs))
 	for _, v := range cliVerbs {
@@ -334,9 +365,17 @@ func TestDispatchHandlersMatchModel(t *testing.T) {
 	}
 	assertSameNameSet(t, "verb", verbNames, keySet(verbHandlers))
 	assertSameNameSet(t, "generate target", nameSet(targetNames("generate")), keySet(genTargets))
-	assertSameNameSet(t, "deploy platform", nameSet(targetNames("deploy")), keySet(actTargets))
-	assertSameNameSet(t, "delete platform", nameSet(targetNames("delete")), keySet(actTargets))
 	assertSameNameSet(t, "completion shell", nameSet(targetNames("completion")), keySet(completionShellRenderers))
+}
+
+// TestPlatformMapsCoverThreeNames guards every platform-keyed map in this file
+// (generate's platform fallback, deploy/delete's platform dispatch) against the
+// same platformNames list resolvePlatform validates --platform against, so a
+// platform added to one and not the other fails here instead of drifting
+// silently.
+func TestPlatformMapsCoverThreeNames(t *testing.T) {
+	assertSameNameSet(t, "generate platform renderer", nameSet(platformNames), keySet(platformGenerators))
+	assertSameNameSet(t, "deploy/delete platform handler", nameSet(platformNames), keySet(actTargets))
 }
 
 func nameSet(names []string) map[string]bool {
@@ -373,6 +412,12 @@ func assertSameNameSet(t *testing.T, label string, modeled, handlers map[string]
 // ---- b) generate config: stdout vs file ----------------------------------------
 
 func TestGenerateConfigStdoutAndFileMatch(t *testing.T) {
+	// Two separate runs: without pinning the status account's password each
+	// would mint its own, so the comparison would fail on the one line that is
+	// designed to differ. Pinning it via the documented override leaves the
+	// rest of the document -- what this test is actually about -- comparable.
+	t.Setenv(spec.StatusUserPasswordEnvVar, "pinned-for-reproducible-output")
+
 	dir := workflowDir(t, validWF)
 	envPath := filepath.Join(dir, "env.yaml")
 
@@ -513,7 +558,7 @@ func TestDeployKubernetesSeamHappyPath(t *testing.T) {
 	write(t, dir, "env.yaml", kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	// Call 0 is the read-only preflight probe (runner.Preflight), which always
@@ -540,7 +585,7 @@ func TestDeleteKubernetesSeamHappyPath(t *testing.T) {
 	write(t, dir, "env.yaml", kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"delete", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"delete", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	if len(f.calls) != 2 {
@@ -565,7 +610,7 @@ func TestDeployKubernetesSeamRejectsUnsafeCommand(t *testing.T) {
 	write(t, dir, "env.yaml", kubeEnvUnsafeCommand)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
+	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
 		t.Fatalf("unsafe kubernetes.command should exit 1, got %d", code)
 	}
 	if len(f.calls) != 0 {
@@ -693,7 +738,7 @@ func TestGenerateKubernetesStdout(t *testing.T) {
 	write(t, dir, "10.yaml", validWF)
 	var code int
 	stdout := captureStdout(t, func() {
-		code = run([]string{"generate", "kubernetes", "-e", filepath.Join(dir, "env.yaml")})
+		code = run([]string{"generate", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")})
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d", code)
@@ -708,7 +753,7 @@ func TestGenerateDockerToFile(t *testing.T) {
 	write(t, dir, "env.yaml", dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 	out := filepath.Join(t.TempDir(), "compose.yml")
-	if code := run([]string{"generate", "docker", "-e", filepath.Join(dir, "env.yaml"), "-o", out}); code != 0 {
+	if code := run([]string{"generate", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml"), "-o", out}); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	b, err := os.ReadFile(out)
@@ -731,7 +776,7 @@ func TestGeneratePodmanQuadletStdout(t *testing.T) {
 	write(t, dir, "10.yaml", validWF)
 	var code int
 	stdout := captureStdout(t, func() {
-		code = run([]string{"generate", "podman", "-e", filepath.Join(dir, "env.yaml")})
+		code = run([]string{"generate", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")})
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d", code)
@@ -751,7 +796,7 @@ func TestDeployDockerSeamWritesComposeAndRuns(t *testing.T) {
 	write(t, dir, "env.yaml", dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	compose := filepath.Join(dir, "docker-compose.yml")
@@ -788,7 +833,7 @@ func TestDeployDockerSeamComposeFileSurvivesFailedRun(t *testing.T) {
 	write(t, dir, "env.yaml", dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
+	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
 		t.Fatalf("exit=%d, want 1 for a failed deploy", code)
 	}
 	compose := filepath.Join(dir, "docker-compose.yml")
@@ -809,7 +854,7 @@ func TestDeployDockerSeamChildEnvCarriesCredentials(t *testing.T) {
 	write(t, dir, "env.yaml", dockerEnv)
 	write(t, dir, "10.yaml", envCredWF)
 
-	if code := dispatch([]string{"deploy", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	// Call 0 is the preflight probe (no Env); call 1 is the real `up`, which
@@ -834,7 +879,7 @@ func TestDeleteDockerSeam(t *testing.T) {
 	write(t, dir, "env.yaml", dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"delete", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"delete", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	wantCalls := [][]string{
@@ -858,13 +903,27 @@ func TestDeployPodmanSeamWritesUnitsAndStarts(t *testing.T) {
 	write(t, dir, "env.yaml", podmanEnv(quadletDir))
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
-	// The app yaml and the quadlet unit land in the (overridden) quadlet dir.
-	for _, name := range []string{"solmq-conn-application.yml", "solmq-conn.container"} {
-		if _, err := os.Stat(filepath.Join(quadletDir, name)); err != nil {
+	// The app yaml, the status script, and the quadlet unit all land in the
+	// (overridden) quadlet dir. application.yml now carries a live credential
+	// (the reserved status account's password), so it is 0600; the status
+	// script and unit carry no secret of their own, so both stay 0644.
+	wantModes := map[string]os.FileMode{
+		"solmq-conn-application.yml": 0o600,
+		"solmq-conn-status":          0o644,
+		"solmq-conn.container":       0o644,
+	}
+	for name, wantMode := range wantModes {
+		info, err := os.Stat(filepath.Join(quadletDir, name))
+		if err != nil {
 			t.Errorf("%s not written to quadlet dir: %v", name, err)
+			continue
+		}
+		// Unix perms are not faithfully reproduced on the windows-2025 CI runner.
+		if runtime.GOOS != "windows" && info.Mode().Perm() != wantMode {
+			t.Errorf("%s mode = %v, want %v", name, info.Mode().Perm(), wantMode)
 		}
 	}
 	// validWF's four credentials (mq user/password, solace
@@ -901,12 +960,13 @@ func TestDeletePodmanSeamStopsRemovesReloads(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", podmanEnv(quadletDir))
 	write(t, dir, "10.yaml", validWF)
-	// Pre-seed the files a deploy would have written; delete must remove both
-	// the unit and the generated app yaml.
+	// Pre-seed the files a deploy would have written; delete must remove all
+	// three: the unit, the generated app yaml, and the status script.
 	write(t, quadletDir, "solmq-conn.container", "[Container]\n")
 	write(t, quadletDir, "solmq-conn-application.yml", "x\n")
+	write(t, quadletDir, "solmq-conn-status", "#!/bin/sh\n")
 
-	if code := dispatch([]string{"delete", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"delete", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	// Secrets are removed from podman's store only AFTER the unit is stopped and
@@ -930,7 +990,7 @@ func TestDeletePodmanSeamStopsRemovesReloads(t *testing.T) {
 			t.Errorf("call %d argv = %v, want %v", i, f.calls[i].argv, w)
 		}
 	}
-	for _, name := range []string{"solmq-conn.container", "solmq-conn-application.yml"} {
+	for _, name := range []string{"solmq-conn.container", "solmq-conn-application.yml", "solmq-conn-status"} {
 		if _, err := os.Stat(filepath.Join(quadletDir, name)); !os.IsNotExist(err) {
 			t.Errorf("%s should be removed by delete", name)
 		}
@@ -959,7 +1019,7 @@ func TestAllowCommandFlagBadValueExitsUsageError(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeRunner{}
-			code := dispatch([]string{"deploy", "kubernetes", "-e", envPath, "--allow-command", c.val}, f)
+			code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", envPath, "--allow-command", c.val}, f)
 			if code != 2 {
 				t.Errorf("--allow-command %q: exit=%d, want 2", c.val, code)
 			}
@@ -971,8 +1031,9 @@ func TestAllowCommandFlagBadValueExitsUsageError(t *testing.T) {
 }
 
 // TestAllowCommandFlagRejectedOnGenerateAndValidate pins --allow-command as
-// deploy/delete-only: generate and validate never register the flag, so
-// passing it is an unknown-flag usage error, same as any other undefined flag.
+// deploy/delete/status-only: generate config and validate never register the
+// flag, so passing it is an unknown-flag usage error, same as any other
+// undefined flag.
 func TestAllowCommandFlagRejectedOnGenerateAndValidate(t *testing.T) {
 	dir := workflowDir(t, validWF)
 	envPath := filepath.Join(dir, "env.yaml")
@@ -1000,7 +1061,7 @@ func TestAllowCommandFlagRepeatableThreadsToRunner(t *testing.T) {
 	envPath := filepath.Join(dir, "env.yaml")
 
 	fReject := useFakeRunner(t)
-	if code := dispatch([]string{"deploy", "podman", "-e", envPath}, fReject); code != 1 {
+	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", envPath}, fReject); code != 1 {
 		t.Fatalf("without --allow-command: exit=%d, want 1", code)
 	}
 	if len(fReject.calls) != 0 {
@@ -1008,7 +1069,7 @@ func TestAllowCommandFlagRepeatableThreadsToRunner(t *testing.T) {
 	}
 
 	fAccept := useFakeRunner(t)
-	args := []string{"deploy", "podman", "-e", envPath, "--allow-command", "sudo", "--allow-command", "sudo"}
+	args := []string{"deploy", "--platform", "podman", "-e", envPath, "--allow-command", "sudo", "--allow-command", "sudo"}
 	if code := dispatch(args, fAccept); code != 0 {
 		t.Fatalf("with --allow-command sudo: exit=%d, want 0", code)
 	}
@@ -1046,7 +1107,7 @@ func TestDeployKubernetesPreflightFailureStopsBeforeApply(t *testing.T) {
 	write(t, dir, "env.yaml", kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
+	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
 	}
 	if len(f.calls) != 1 {
@@ -1065,7 +1126,7 @@ func TestDeployDockerPreflightFailureStopsBeforeWrite(t *testing.T) {
 	write(t, dir, "env.yaml", dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
+	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
 	}
 	compose := filepath.Join(dir, "docker-compose.yml")
@@ -1088,10 +1149,10 @@ func TestDeployPodmanPreflightFailureStopsBeforeWrite(t *testing.T) {
 	write(t, dir, "env.yaml", podmanEnv(quadletDir))
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
+	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
 	}
-	for _, name := range []string{"solmq-conn-application.yml", "solmq-conn.container"} {
+	for _, name := range []string{"solmq-conn-application.yml", "solmq-conn-status", "solmq-conn.container"} {
 		if _, err := os.Stat(filepath.Join(quadletDir, name)); !os.IsNotExist(err) {
 			t.Errorf("%s must not be written when preflight fails", name)
 		}
@@ -1101,6 +1162,439 @@ func TestDeployPodmanPreflightFailureStopsBeforeWrite(t *testing.T) {
 	}
 	if want := []string{"podman", "info"}; !reflect.DeepEqual(f.calls[0].argv, want) {
 		t.Errorf("preflight argv = %v, want %v", f.calls[0].argv, want)
+	}
+}
+
+// ---- l) --platform resolution ----------------------------------------------------
+//
+// These pin resolvePlatform's shared order (platformResolutionDetail in
+// commands.go): --platform, then single-section inference, then an
+// interactive menu, then a loud error -- shared by generate/deploy/delete
+// (status has its own matrix further down, since it also has the
+// explicit-target exception).
+
+// TestPlatformFlagHitOverridesInference asserts --platform wins even when a
+// different section could have been inferred (kubernetes is also present).
+func TestPlatformFlagHitOverridesInference(t *testing.T) {
+	f := useFakeRunner(t)
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", kubeEnv+dockerEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if want := []string{"docker", "info"}; len(f.calls) == 0 || !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("explicit --platform docker should be used even though kubernetes is also present, got %+v", f.calls)
+	}
+}
+
+// TestPlatformFlagMissingSectionIsLoudError asserts a --platform value with no
+// matching section in env.yaml fails loudly and names the sections that ARE
+// present, before anything reaches the runner.
+func TestPlatformFlagMissingSectionIsLoudError(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", dockerEnv)
+	f := &fakeRunner{}
+	stderr := captureStderr(t, func() {
+		code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f)
+		if code != 1 {
+			t.Fatalf("exit=%d, want 1", code)
+		}
+	})
+	if !strings.Contains(stderr, "kubernetes") || !strings.Contains(stderr, "docker") {
+		t.Errorf("stderr should name both the requested and the present sections, got:\n%s", stderr)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("runner must not be invoked, got %d calls", len(f.calls))
+	}
+}
+
+// TestPlatformSingleSectionInferred asserts that with no --platform and
+// exactly one section present, that section is used and echoed to stderr.
+func TestPlatformSingleSectionInferred(t *testing.T) {
+	f := useFakeRunner(t)
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", kubeEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	stderr := captureStderr(t, func() {
+		code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, f)
+		if code != 0 {
+			t.Fatalf("exit=%d, want 0", code)
+		}
+	})
+	if !strings.Contains(stderr, "platform: kubernetes") {
+		t.Errorf("stderr should echo the inferred platform, got:\n%s", stderr)
+	}
+	if len(f.calls) != 2 {
+		t.Errorf("want 2 runner calls (preflight, apply), got %d: %+v", len(f.calls), f.calls)
+	}
+}
+
+// TestPlatformMenuOnMultipleSections asserts that with no --platform and more
+// than one section present, the interactive menu (via the injected promptLine
+// seam) picks the platform.
+func TestPlatformMenuOnMultipleSections(t *testing.T) {
+	withPromptAnswer(t, "2") // present order is [kubernetes, docker]; 2 = docker
+	f := useFakeRunner(t)
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", kubeEnv+dockerEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	if code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if want := []string{"docker", "info"}; len(f.calls) == 0 || !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("menu choice 2 should select docker, got %+v", f.calls)
+	}
+}
+
+// TestPlatformMenuNonTTYRefusesWithPlatformHint asserts the menu refuses to
+// block when stdin is not a terminal, instead of hanging on a read that would
+// never return, and that the resulting error points at --platform. Stdin is
+// swapped for a pipe (never a character device) rather than relying on
+// whatever terminal state the test binary happened to inherit, so this cannot
+// flake or block regardless of how the tests are invoked.
+func TestPlatformMenuNonTTYRefusesWithPlatformHint(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", kubeEnv+dockerEnv)
+
+	oldStdin := os.Stdin
+	pr, pw, perr := os.Pipe()
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	os.Stdin = pr
+	t.Cleanup(func() {
+		os.Stdin = oldStdin
+		_ = pw.Close()
+		_ = pr.Close()
+	})
+
+	f := &fakeRunner{}
+	stderr := captureStderr(t, func() {
+		code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, f)
+		if code != 1 {
+			t.Fatalf("exit=%d, want 1", code)
+		}
+	})
+	if !strings.Contains(stderr, "--platform") {
+		t.Errorf("non-tty menu error should mention --platform, got:\n%s", stderr)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("runner must not be invoked, got %d calls", len(f.calls))
+	}
+}
+
+// TestPlatformZeroSectionsIsLoudError asserts that with no --platform and no
+// section present at all, the error names all three section keys.
+func TestPlatformZeroSectionsIsLoudError(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", bareEnv)
+	f := &fakeRunner{}
+	stderr := captureStderr(t, func() {
+		code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, f)
+		if code != 1 {
+			t.Fatalf("exit=%d, want 1", code)
+		}
+	})
+	for _, want := range []string{"kubernetes:", "docker:", "podman:"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr should name %q, got:\n%s", want, stderr)
+		}
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("runner must not be invoked, got %d calls", len(f.calls))
+	}
+}
+
+// TestOldPositionalFormsRejectedWithPlatformHint asserts the pre-rework
+// positional grammar (deploy kubernetes, generate docker, ...) is now a usage
+// error (exit 2) that points at --platform, rather than being resolved.
+func TestOldPositionalFormsRejectedWithPlatformHint(t *testing.T) {
+	cases := [][]string{
+		{"deploy", "kubernetes"},
+		{"delete", "docker"},
+		{"generate", "podman"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			f := &fakeRunner{}
+			stderr := captureStderr(t, func() {
+				code := dispatch(args, f)
+				if code != 2 {
+					t.Errorf("%v: exit=%d, want 2", args, code)
+				}
+			})
+			if !strings.Contains(stderr, "--platform") {
+				t.Errorf("%v: stderr should hint at --platform, got:\n%s", args, stderr)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("%v: runner must not be invoked, got %d calls", args, len(f.calls))
+			}
+		})
+	}
+}
+
+// ---- m) status ------------------------------------------------------------------
+
+// TestStatusScriptPresentRunsAndReportsOutput covers the simplest matrix
+// entry: the script is already installed, so status just runs it and prints
+// "<target>: " followed by its output, one line per continuation.
+func TestStatusScriptPresentRunsAndReportsOutput(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},                                // preflight: kubectl auth can-i create deployment
+		{runner.ScriptPresentMarker + "\n", nil}, // ScriptInstalled: present
+		{"leader-election mode: standalone\nleader-election state: active\n", nil}, // RunStatusScript
+	}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	want := "pod-a: leader-election mode: standalone\n  leader-election state: active\n"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+	if len(q.calls) != 3 {
+		t.Fatalf("want 3 runner calls, got %d: %+v", len(q.calls), q.calls)
+	}
+}
+
+// TestStatusAbsentPlusInstallFlagInstallsThenRuns covers --install: a missing
+// script is installed without any prompt, then run.
+func TestStatusAbsentPlusInstallFlagInstallsThenRuns(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},                               // preflight
+		{runner.ScriptAbsentMarker + "\n", nil}, // ScriptInstalled: absent
+		{"", nil},                               // InstallScript
+		{"leader-election mode: standalone\nleader-election state: active\n", nil}, // RunStatusScript
+	}}
+	if code := dispatch([]string{"status", "--install", "--platform", "kubernetes", "--pod", "pod-a"}, q); code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if len(q.calls) != 4 {
+		t.Fatalf("want 4 runner calls, got %d: %+v", len(q.calls), q.calls)
+	}
+}
+
+// TestStatusAbsentPromptYesInstallsThenRuns covers the same absent-script case
+// without --install: one prompt (via the injected promptLine seam) answered
+// "y" installs, then runs.
+func TestStatusAbsentPromptYesInstallsThenRuns(t *testing.T) {
+	withPromptAnswer(t, "y")
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},                               // preflight
+		{runner.ScriptAbsentMarker + "\n", nil}, // probe: absent
+		{"", nil},                               // install
+		{"leader-election mode: standalone\nleader-election state: active\n", nil}, // run
+	}}
+	if code := dispatch([]string{"status", "--platform", "kubernetes", "--pod", "pod-a"}, q); code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if len(q.calls) != 4 {
+		t.Fatalf("want 4 runner calls, got %d: %+v", len(q.calls), q.calls)
+	}
+}
+
+// TestStatusAbsentPromptNoSkipsAndExitsOne covers declining the install
+// prompt: the target is skipped (never installed, never run) and the overall
+// exit code is 1.
+func TestStatusAbsentPromptNoSkipsAndExitsOne(t *testing.T) {
+	withPromptAnswer(t, "n")
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},                               // preflight
+		{runner.ScriptAbsentMarker + "\n", nil}, // probe: absent
+	}}
+	stderr := captureStderr(t, func() {
+		code := dispatch([]string{"status", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+		if code != 1 {
+			t.Fatalf("exit=%d, want 1", code)
+		}
+	})
+	if !strings.Contains(stderr, "pod-a: skipped") {
+		t.Errorf("stderr should report the skipped target, got:\n%s", stderr)
+	}
+	if len(q.calls) != 2 {
+		t.Fatalf("want 2 runner calls (preflight, probe) -- no install, no run -- got %d: %+v", len(q.calls), q.calls)
+	}
+}
+
+// TestStatusInstallPromptNonTTYRefusesWithInstallHint is the confirmInstall
+// counterpart to TestPlatformMenuNonTTYRefusesWithPlatformHint: the install
+// confirmation shares the same stdin seam, so it must also refuse rather than
+// block on a read that would never return, and point at --install (not
+// --platform, which is already satisfied here).
+func TestStatusInstallPromptNonTTYRefusesWithInstallHint(t *testing.T) {
+	oldStdin := os.Stdin
+	pr, pw, perr := os.Pipe()
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	os.Stdin = pr
+	t.Cleanup(func() {
+		os.Stdin = oldStdin
+		_ = pw.Close()
+		_ = pr.Close()
+	})
+
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},                               // preflight
+		{runner.ScriptAbsentMarker + "\n", nil}, // probe: script absent
+	}}
+	stderr := captureStderr(t, func() {
+		code := dispatch([]string{"status", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+		if code != 1 {
+			t.Fatalf("exit=%d, want 1", code)
+		}
+	})
+	if !strings.Contains(stderr, "--install") {
+		t.Errorf("non-tty install prompt error should mention --install, got:\n%s", stderr)
+	}
+	if len(q.calls) != 2 {
+		t.Fatalf("want 2 runner calls (preflight, probe) -- nothing installed or run -- got %d: %+v", len(q.calls), q.calls)
+	}
+}
+
+// TestStatusRejectsUnsafeUserBeforeAnyExec pins the boundary check on --user:
+// the account name reaches a sed address inside the generated script, so a
+// value carrying a regex or path metacharacter must be refused up front rather
+// than silently producing an unauthenticated request.
+func TestStatusRejectsUnsafeUserBeforeAnyExec(t *testing.T) {
+	for _, user := range []string{"bad/user", "who$e", "a b", "quote'd"} {
+		f := &fakeRunner{}
+		code := dispatch([]string{"status", "--platform", "docker", "--container", "c1", "--user", user}, f)
+		if code != 1 {
+			t.Errorf("--user %q: exit=%d, want 1", user, code)
+		}
+		if len(f.calls) != 0 {
+			t.Errorf("--user %q: runner must not be invoked, got %d calls", user, len(f.calls))
+		}
+	}
+}
+
+// TestStatusStandbyReportedWithoutAbortingOtherTargets asserts that standby is
+// reported as the ordinary answer it is: the script always exits 0 and carries
+// the state in its output, so a standby target prints like any other, the loop
+// still reaches the next target, and the overall exit code stays 0.
+func TestStatusStandbyReportedWithoutAbortingOtherTargets(t *testing.T) {
+	// Every target is probed before any is run, so one install prompt can list
+	// all the missing ones -- hence both probes ahead of both runs here.
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},                                // preflight
+		{runner.ScriptPresentMarker + "\n", nil}, // pod-a probe: present
+		{runner.ScriptPresentMarker + "\n", nil}, // pod-b probe: present
+		{"leader-election mode: standalone\nleader-election state: standby\n", nil}, // pod-a run: standby
+		{"leader-election mode: standalone\nleader-election state: active\n", nil},  // pod-b run: active
+	}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0 (standby is an answer, not a failure)", code)
+	}
+	for _, want := range []string{
+		"pod-a: leader-election mode: standalone", "leader-election state: standby",
+		"pod-b: leader-election mode: standalone", "leader-election state: active",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing %q, got:\n%s", want, stdout)
+		}
+	}
+	if len(q.calls) != 5 {
+		t.Fatalf("want 5 runner calls, got %d: %+v", len(q.calls), q.calls)
+	}
+}
+
+// TestStatusRunFailureReportedAndExitsOne is the counterpart to the standby
+// case: since the script itself always exits 0, a non-zero exit can only mean
+// the exec failed, so that target is reported as an error and the overall exit
+// code is 1 -- while a reachable target in the same run still prints normally.
+func TestStatusRunFailureReportedAndExitsOne(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},                                // preflight
+		{runner.ScriptPresentMarker + "\n", nil}, // pod-a probe: present
+		{runner.ScriptPresentMarker + "\n", nil}, // pod-b probe: present
+		{"Error from server: pods \"pod-a\" not found\n", fmt.Errorf("exit status 1")}, // pod-a run: exec failed
+		{"leader-election mode: standalone\nleader-election state: active\n", nil},     // pod-b run: fine
+	}}
+	var code int
+	var stdout string
+	stderr := captureStderr(t, func() {
+		stdout = captureStdout(t, func() {
+			code = dispatch([]string{"status", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
+		})
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1 (a target that could not be run)", code)
+	}
+	if !strings.Contains(stderr, "pod-a") {
+		t.Errorf("stderr should name the failed target, got:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "pod-b: leader-election mode: standalone") {
+		t.Errorf("a reachable target must still report, got:\n%s", stdout)
+	}
+}
+
+// TestStatusTargetValidationRejectsBadPodAndNamespace asserts a bad
+// operator-supplied --pod or --namespace value is rejected before any exec,
+// reusing validate.SafeToken rather than a hand-rolled check.
+func TestStatusTargetValidationRejectsBadPodAndNamespace(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"bad pod name", []string{"status", "--platform", "kubernetes", "--pod", "bad pod name"}},
+		{"bad namespace", []string{"status", "--platform", "kubernetes", "--pod", "goodpod", "--namespace", "bad;ns"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeRunner{}
+			if code := dispatch(c.args, f); code != 1 {
+				t.Errorf("%s: exit=%d, want 1", c.name, code)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("%s: runner must not be invoked, got %d calls", c.name, len(f.calls))
+			}
+		})
+	}
+}
+
+// TestStatusManagementPortBounds asserts an out-of-range --management-port is
+// rejected before any exec (0 is not tested: it is the "not given, use the
+// default" sentinel, not a value an operator would pass to mean "port 0").
+func TestStatusManagementPortBounds(t *testing.T) {
+	for _, p := range []string{"-1", "65536"} {
+		t.Run(p, func(t *testing.T) {
+			f := &fakeRunner{}
+			args := []string{"status", "--platform", "kubernetes", "--pod", "pod-a", "--management-port", p}
+			if code := dispatch(args, f); code != 1 {
+				t.Errorf("--management-port %s: exit=%d, want 1", p, code)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("--management-port %s: runner must not be invoked, got %d calls", p, len(f.calls))
+			}
+		})
+	}
+}
+
+// ---- n) version -------------------------------------------------------------------
+
+// TestVersionOutputShape pins the exact printed shape in an un-injected test
+// build, where the package-level version var still holds its "dev" default.
+func TestVersionOutputShape(t *testing.T) {
+	var code int
+	stdout := captureStdout(t, func() { code = run([]string{"version"}) })
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	want := fmt.Sprintf("solmq-conn-util dev %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
 }
 

@@ -93,7 +93,7 @@ func buildRich(t *testing.T) *consolidate.Model {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", richSrcYAML)}, d, consolidate.Opts{MountStores: true})
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", richSrcYAML)}, d, consolidate.Opts{MountStores: true, StatusPassword: "status-literal-pw"})
 	return m
 }
 
@@ -218,13 +218,15 @@ solace:
       users:
         - name: hc
           password: ${SECURITY_USER_HC_PASSWORD}
+        - name: solmq-status
+          password: status-literal-pw
 management:
   server:
     port: 8090
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,leaderelection,workflows
   endpoint:
     health:
       show-details: always
@@ -284,11 +286,23 @@ target:
     client-password: x
     queue: OUT
 `
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{MountStores: true})
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{MountStores: true, StatusPassword: "status-literal-pw"})
 	out := Application(m)
-	for _, no := range []string{"ssl:", "management:", "logging:", "security:"} {
+	// TLS and logging stay absent with nothing configured. management and
+	// security are no longer part of this check: consolidate's
+	// applyStatusAccess forces both on unconditionally so the generated status
+	// script always has actuator access, regardless of what the operator set.
+	for _, no := range []string{"ssl:", "logging:"} {
 		if strings.Contains(out, no) {
 			t.Errorf("unexpected %q with empty defaults:\n%s", no, out)
+		}
+	}
+	for _, want := range []string{
+		"management:", "include: health,leaderelection,workflows",
+		"security:", "enabled: true", "- name: solmq-status", "password: status-literal-pw",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q\n---\n%s", want, out)
 		}
 	}
 	if !strings.Contains(out, "type: undefined") {
@@ -372,7 +386,7 @@ target:
     msg-vpn: v
     topic: OUT
 `
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{MountStores: true})
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{MountStores: true, StatusPassword: "status-literal-pw"})
 	out := Application(m)
 	// Binders still render their identity...
 	for _, want := range []string{"conn-name: h(1414)", "queue-manager: QM1", "host: tcp://b:55555", "msg-vpn: v"} {
@@ -380,10 +394,15 @@ target:
 			t.Errorf("missing %q\n---\n%s", want, out)
 		}
 	}
-	// ...but the empty credential lines are omitted entirely (no `key:` null value).
+	// ...but the empty credential lines are omitted entirely (no `key:` null
+	// value) from the binder section. Everything from "solace:\n  connector:"
+	// onward is the forced status-account security block (consolidate's
+	// applyStatusAccess), which legitimately carries a password line, so only
+	// the binder section checked here is scoped to before it.
+	binderSection, _, _ := strings.Cut(out, "solace:\n  connector:")
 	for _, no := range []string{"user:", "password:", "client-username:", "client-password:"} {
-		if strings.Contains(out, no) {
-			t.Errorf("empty credential line %q should be omitted\n---\n%s", no, out)
+		if strings.Contains(binderSection, no) {
+			t.Errorf("empty credential line %q should be omitted\n---\n%s", no, binderSection)
 		}
 	}
 }

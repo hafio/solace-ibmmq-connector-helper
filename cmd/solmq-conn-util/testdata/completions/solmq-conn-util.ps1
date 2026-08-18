@@ -30,11 +30,27 @@ Register-ArgumentCompleter -Native -CommandName @('solmq-conn-util', 'solmq-conn
     $flagArg['--out'] = 'file'
     $flagArg['-allow-command'] = 'name'
     $flagArg['--allow-command'] = 'name'
+    $flagArg['-platform'] = 'name'
+    $flagArg['--platform'] = 'name'
+    $flagArg['-pod'] = 'name'
+    $flagArg['--pod'] = 'name'
+    $flagArg['-container'] = 'name'
+    $flagArg['--container'] = 'name'
+    $flagArg['-namespace'] = 'name'
+    $flagArg['--namespace'] = 'name'
+    $flagArg['-management-port'] = 'name'
+    $flagArg['--management-port'] = 'name'
+    $flagArg['-user'] = 'name'
+    $flagArg['--user'] = 'name'
+    $flagArg['-command'] = 'name'
+    $flagArg['--command'] = 'name'
 
     $verbs = @(
-        @{ Name = 'generate'; Desc = 'Render artifacts for one target to stdout or a file' }
+        @{ Name = 'generate'; Desc = 'Render application.yml, or the artifacts for the resolved platform, to stdout or a file' }
         @{ Name = 'deploy'; Desc = 'Generate for a platform, then apply it' }
         @{ Name = 'delete'; Desc = 'Tear down what deploy created for a platform' }
+        @{ Name = 'status'; Desc = 'Ensure and run the status script, printing per-target leader-election and workflow state' }
+        @{ Name = 'version'; Desc = 'Print the utility name, version, Go version and OS/arch' }
         @{ Name = 'validate'; Desc = 'Lint the whole env.yaml + workflows' }
         @{ Name = 'examples'; Desc = 'Write a starter env.yaml + workflows' }
         @{ Name = 'completion'; Desc = 'Print a shell completion script' }
@@ -44,15 +60,14 @@ Register-ArgumentCompleter -Native -CommandName @('solmq-conn-util', 'solmq-conn
     )
 
     $targets = @{}
-    $targets['generate'] = @(@{ Name = 'config'; Desc = 'Emit application.yml' }, @{ Name = 'kubernetes'; Desc = 'Emit ConfigMap+Deployment+Service (+Secrets)' }, @{ Name = 'docker'; Desc = 'Emit docker-compose.yml (application.yml inlined)' }, @{ Name = 'podman'; Desc = 'Emit a podman run script or quadlet unit' })
-    $targets['deploy'] = @(@{ Name = 'kubernetes'; Desc = 'kubectl/oc apply -f - (manifest on stdin)' }, @{ Name = 'docker'; Desc = 'docker compose up -d' }, @{ Name = 'podman'; Desc = 'write the quadlet unit; systemctl start' })
-    $targets['delete'] = @(@{ Name = 'kubernetes'; Desc = 'kubectl/oc delete -f -' }, @{ Name = 'docker'; Desc = 'docker compose down' }, @{ Name = 'podman'; Desc = 'systemctl stop; remove the unit' })
+    $targets['generate'] = @(@{ Name = 'config'; Desc = 'Emit application.yml' })
     $targets['completion'] = @(@{ Name = 'bash'; Desc = 'Print the bash completion script' }, @{ Name = 'zsh'; Desc = 'Print the zsh completion script' }, @{ Name = 'fish'; Desc = 'Print the fish completion script' }, @{ Name = 'powershell'; Desc = 'Print the PowerShell completion script' })
 
     $flags = @{}
-    $flags['generate'] = @(@{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '-o'; Desc = 'write output to a file (default: stdout)' }, @{ Name = '--out'; Desc = 'write output to a file (default: stdout)' })
-    $flags['deploy'] = @(@{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--allow-command'; Desc = 'approve an extra command binary beyond the command: allowlist; repeatable' })
-    $flags['delete'] = @(@{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--allow-command'; Desc = 'approve an extra command binary beyond the command: allowlist; repeatable' })
+    $flags['generate'] = @(@{ Name = '--platform'; Desc = 'the platform: kubernetes, docker, or podman (default: resolved from env.yaml, or an interactive menu -- see Command details)' }, @{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '-o'; Desc = 'write output to a file (default: stdout)' }, @{ Name = '--out'; Desc = 'write output to a file (default: stdout)' })
+    $flags['deploy'] = @(@{ Name = '--platform'; Desc = 'the platform: kubernetes, docker, or podman (default: resolved from env.yaml, or an interactive menu -- see Command details)' }, @{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--allow-command'; Desc = 'approve an extra command binary beyond the command: allowlist; repeatable' })
+    $flags['delete'] = @(@{ Name = '--platform'; Desc = 'the platform: kubernetes, docker, or podman (default: resolved from env.yaml, or an interactive menu -- see Command details)' }, @{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--allow-command'; Desc = 'approve an extra command binary beyond the command: allowlist; repeatable' })
+    $flags['status'] = @(@{ Name = '--install'; Desc = 'install the status script on every target without prompting' }, @{ Name = '--platform'; Desc = 'the platform: kubernetes, docker, or podman (default: resolved from env.yaml, or an interactive menu -- see Command details)' }, @{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--pod'; Desc = 'limit checks to this kubernetes pod name; repeatable (default: every running pod); no effect on docker/podman' }, @{ Name = '--container'; Desc = 'limit checks to this docker/podman container name; repeatable (default: every running container); no effect on kubernetes' }, @{ Name = '--namespace'; Desc = 'kubernetes namespace to query (default: the namespace of the deployment in env.yaml); no effect on docker/podman' }, @{ Name = '--management-port'; Desc = 'actuator management port to reach inside each target (default: the management port configured for the target)' }, @{ Name = '--user'; Desc = 'actuator account the status script authenticates as (default solmq-status)' }, @{ Name = '--command'; Desc = 'override the platform CLI binary (kubectl/oc, docker, or podman) used to reach each target, instead of the command: in that section' }, @{ Name = '--allow-command'; Desc = 'approve an extra command binary beyond the command: allowlist; repeatable' })
     $flags['validate'] = @(@{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' })
     $flags['examples'] = @(@{ Name = '-f'; Desc = 'overwrite existing files' }, @{ Name = '--force'; Desc = 'overwrite existing files' })
 

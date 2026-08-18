@@ -59,10 +59,18 @@ BIN_NAME="solmq-conn-util-$T_OS-$T_ARCH"
 [ "$T_OS" = "windows" ] && BIN_NAME="$BIN_NAME.exe"
 
 # --- tasks ------------------------------------------------------------------
+# Version stamp: git describe, falling back to "dev" when git fails or the
+# checkout has no tags (a fresh clone, a shallow CI checkout with no tags
+# fetched). Tag-triggered release builds check out the exact tag, so
+# --dirty can never fire there -- only a local build off an unclean tree
+# ever reports a "-dirty" suffix.
+VERSION="$(git describe --tags --dirty 2>/dev/null)" || VERSION="dev"
+[ -z "$VERSION" ] && VERSION="dev"
+
 task_build() {
   mkdir -p "$DIST"
   run build env CGO_ENABLED=0 GOOS="$T_OS" GOARCH="$T_ARCH" \
-    go build -trimpath -ldflags "-s -w" -o "$DIST/$BIN_NAME" ./cmd/solmq-conn-util
+    go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$DIST/$BIN_NAME" ./cmd/solmq-conn-util
 }
 
 task_vet() { run vet go vet ./...; }

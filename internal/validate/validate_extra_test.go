@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -393,6 +394,33 @@ func TestSafeToken(t *testing.T) {
 	}
 }
 
+// TestSafeActuatorUser pins the tighter allowlist the status account name needs
+// on top of SafeToken: the name is spliced into a sed address inside the
+// generated status script, so '/' (which would end the address early and leave
+// the script unauthenticated) and every other non-allowlisted character are
+// rejected here even though SafeToken permits some of them as argv tokens.
+func TestSafeActuatorUser(t *testing.T) {
+	for name, want := range map[string]bool{
+		"solmq-status": true, "healthcheck": true, "svc.status": true, "a_b-c.9": true,
+		// Rejected here but accepted by SafeToken: these are what make the
+		// separate, stricter gate necessary rather than reusing SafeToken.
+		"bad/user": false, "user:1": false, "a=b": false, "a,b": false, "a+b": false, "a@b": false,
+		// Already rejected by SafeToken; pinned so the two gates cannot diverge.
+		"a b": false, "a$b": false, `a\b`: false, "a'b": false, `a"b`: false, "a*b": false, "a[b": false,
+		// Empty is rejected: callers default to spec.StatusUserName instead.
+		"": false,
+	} {
+		if got := SafeActuatorUser(name); got != want {
+			t.Errorf("SafeActuatorUser(%q)=%v want %v", name, got, want)
+		}
+		// Anything this gate accepts must also be safe as an argv token, since
+		// the same value reaches the exec call.
+		if want && !SafeToken(name) {
+			t.Errorf("SafeActuatorUser(%q) accepted a value SafeToken rejects", name)
+		}
+	}
+}
+
 func TestConnectionDefinitionValidation(t *testing.T) {
 	d := defsWithStores()
 	d.Connections = map[string]spec.Side{
@@ -723,6 +751,86 @@ func TestPasswordConflictOnSameBinder(t *testing.T) {
 	}
 	if e, _ := Run(Context{Workflows: distinct, Defaults: defsWithStores()}); hasErr(e, "conflicting password") {
 		t.Errorf("different binders may hold different passwords, got %v", e)
+	}
+}
+
+// TestStatusUserReservedName pins checkStatusUser's name-collision rule: a
+// configured security.users entry named spec.StatusUserName collides with the
+// tool's own reserved read-only status account and is rejected, naming the
+// index like the surrounding checks do. A differently-named user is fine.
+func TestStatusUserReservedName(t *testing.T) {
+	d := defsWithStores()
+	d.Security.Users = []spec.User{{Name: "ops", Password: "p"}, {Name: spec.StatusUserName, Password: "p"}}
+	errs, _ := Run(Context{Workflows: wfOK(), Defaults: d})
+	n := 0
+	for _, e := range errs {
+		if strings.Contains(e.String(), spec.StatusUserName) && strings.Contains(e.String(), "reserved") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("want exactly one reserved-name error, got %d in %v", n, errs)
+	}
+	if !hasErr(errs, "security.users[1].name") {
+		t.Errorf("want the error to name the index, got %v", errs)
+	}
+
+	// A differently-named user does not collide.
+	d2 := defsWithStores()
+	d2.Security.Users = []spec.User{{Name: "ops", Password: "p"}}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: d2}); hasErr(e, "reserved") {
+		t.Errorf("a differently-named user should not trip the reserved-name check, got %v", e)
+	}
+}
+
+// TestStatusUserPasswordEnvCharset pins checkStatusUser's charset gate on
+// spec.StatusUserPasswordEnvVar: absent or empty is fine (the tool generates a
+// password), a value using only printable ASCII outside the excluded set is
+// fine, and each excluded character -- whitespace, both quote styles,
+// backslash, a ${...} placeholder character, a control character, and a
+// non-ASCII byte -- is rejected. The error text never echoes the value.
+func TestStatusUserPasswordEnvCharset(t *testing.T) {
+	const secret = "s3cr3t-do-not-log-me"
+	run := func(env func(string) (string, bool)) []Issue {
+		errs, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Env: env})
+		return errs
+	}
+
+	if e := run(nil); hasErr(e, spec.StatusUserPasswordEnvVar) {
+		t.Errorf("nil Env should not trip the password check, got %v", e)
+	}
+	if e := run(func(string) (string, bool) { return "", false }); hasErr(e, spec.StatusUserPasswordEnvVar) {
+		t.Errorf("unset env var should be fine, got %v", e)
+	}
+	if e := run(func(string) (string, bool) { return "", true }); hasErr(e, spec.StatusUserPasswordEnvVar) {
+		t.Errorf("empty env var should be fine, got %v", e)
+	}
+	if e := run(func(string) (string, bool) { return secret, true }); hasErr(e, spec.StatusUserPasswordEnvVar) {
+		t.Errorf("a good value should be fine, got %v", e)
+	}
+
+	bad := []struct {
+		name string
+		val  string
+	}{
+		{"space", secret + " x"},
+		{"double quote", secret + `"`},
+		{"single quote", secret + "'"},
+		{"backslash", secret + `\`},
+		{"dollar-brace", secret + "${x}"},
+		{"control char", secret + "\x01"},
+		{"non-ASCII byte", secret + "\xff"},
+	}
+	for _, c := range bad {
+		e := run(func(string) (string, bool) { return c.val, true })
+		if !hasErr(e, spec.StatusUserPasswordEnvVar) {
+			t.Errorf("%s: want a password-charset error, got %v", c.name, e)
+		}
+		for _, issue := range e {
+			if strings.Contains(issue.String(), secret) {
+				t.Errorf("%s: error text must never echo the secret value, got %q", c.name, issue.String())
+			}
+		}
 	}
 }
 

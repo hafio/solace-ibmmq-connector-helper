@@ -13,6 +13,26 @@ All YAML shown here uses block style. Flow style (`{ }` / `[ ]`) also parses, bu
 `${VAR}` placeholders are invalid inside YAML flow `{ }`, so block style is
 recommended everywhere.
 
+> **Breaking change: platforms are no longer positional.** `generate`, `deploy`,
+> `delete`, and `status` used to take the platform as a second positional argument
+> (`deploy kubernetes`). That is now the `--platform` flag: `deploy --platform
+> kubernetes`, or just `deploy` when `env.yaml` has exactly one of
+> `kubernetes:`/`docker:`/`podman:`. The platform resolves in this order:
+>
+> 1. `--platform`, if given -- it must name a section actually present in
+>    `env.yaml`, or the run fails loudly.
+> 2. Otherwise, the single `kubernetes:`/`docker:`/`podman:` section present in
+>    `env.yaml`, when exactly one is present.
+> 3. Otherwise, an interactive numbered menu over the sections present, when more
+>    than one is present.
+> 4. Zero sections present is always a loud error, with or without `--platform`.
+>
+> The menu -- and, under `status`, its install-confirmation prompt (section 10) --
+> refuse to block when stdin is not a TTY: both fail immediately with a hint to
+> pass the flag explicitly instead of hanging. **CI and scripts must therefore
+> pass `--platform` (and, for `status`, `--install`) rather than rely on either
+> prompt.**
+
 ---
 
 ## 1. Running solmq-conn-util
@@ -133,16 +153,15 @@ The first argument is a **verb**; the second names the **target** (for `generate
 or **platform** (for `deploy`/`delete`).
 
 ```text
-solmq-conn-util generate config     [-e env.yaml] [-o out]        Emit application.yml
-solmq-conn-util generate kubernetes [-e env.yaml] [-o out]        Emit ConfigMap+Deployment+Service (+Secrets)
-solmq-conn-util generate docker     [-e env.yaml] [-o out]        Emit docker-compose.yml (application.yml inlined)
-solmq-conn-util generate podman     [-e env.yaml] [-o out]        Emit a podman run script or quadlet unit
-solmq-conn-util deploy  kubernetes  [-e env.yaml]                 kubectl/oc apply -f - (manifest on stdin)
-solmq-conn-util delete  kubernetes  [-e env.yaml]                 kubectl/oc delete -f -
-solmq-conn-util deploy  docker      [-e env.yaml]                 docker compose up -d
-solmq-conn-util delete  docker      [-e env.yaml]                 docker compose down
-solmq-conn-util deploy  podman      [-e env.yaml]                 write the quadlet unit; systemctl start
-solmq-conn-util delete  podman      [-e env.yaml]                 systemctl stop; remove the unit
+solmq-conn-util generate [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
+                                                                   Emit application.yml, or the resolved platform's artifacts
+solmq-conn-util deploy  [--platform kubernetes|docker|podman] [-e env.yaml] [--allow-command name]
+                                                                   Generate for the resolved platform, then apply it
+solmq-conn-util delete  [--platform kubernetes|docker|podman] [-e env.yaml] [--allow-command name]
+                                                                   Tear down what deploy created for the resolved platform
+solmq-conn-util status  [--install] [--platform kubernetes|docker|podman] [-e env.yaml] [flags...]
+                                                                   Ensure and run the status script; print per-target leader-election + workflow state
+solmq-conn-util version                                           Print the utility name, version, Go version and OS/arch
 solmq-conn-util validate            [-e env.yaml]                 Lint the whole env.yaml + workflows
 solmq-conn-util examples [dir] [-f]                               Write a starter env.yaml + workflows
 solmq-conn-util completion bash|zsh|fish|powershell               Print a shell completion script (section 1.1)
@@ -156,26 +175,43 @@ reference at [docs/commands.md](docs/commands.md).
 | `-e`, `--env` | all except `examples` | config file, relative or absolute path (default: `env.yaml`) |
 | `-o`, `--out` | `generate` | write output to a file (default: stdout) |
 | `-f`, `--force` | `examples` | overwrite existing files |
-| `--allow-command` | `deploy`/`delete` | approve an extra command binary beyond the `command:` allowlist; repeatable |
+| `--platform` | `generate`/`deploy`/`delete`/`status` | the platform: `kubernetes`, `docker`, or `podman` (default: resolved from `env.yaml`, or an interactive menu -- see the breaking-change note above) |
+| `--allow-command` | `deploy`/`delete`/`status` | approve an extra command binary beyond the `command:` allowlist; repeatable |
+| `--install` | `status` | install the status script on every target without prompting |
+| `--pod` | `status` | limit checks to this kubernetes pod name; repeatable (default: every running pod) |
+| `--container` | `status` | limit checks to this docker/podman container name; repeatable (default: every running container) |
+| `--namespace` | `status` | kubernetes namespace to query (default: the deployment's namespace in `env.yaml`) |
+| `--management-port` | `status` | actuator management port to reach inside each target (default: the management port configured for the target) |
+| `--user` | `status` | actuator account the status script authenticates as (default `solmq-status`) |
+| `--command` | `status` | override the platform CLI binary used to reach each target, instead of the `command:` in that section |
 
 Flags may appear before, after, or between the positional arguments. Exit codes:
 **0** success, **1** a processing error (bad input, unreadable file, missing env
 var, a deploy command that failed), **2** a usage error (missing/unknown verb or
-target, unknown flag).
+target, unknown flag). `status`'s own exit code is about whether every target
+could be reached and run, not whether each instance is active -- see section 10
+for how to read the per-target report.
 
 - **`generate config`** reads the workflow files + the connector defaults from
   `env.yaml` and prints `application.yml`. It **fails fast**: it stops at the first
   error and writes nothing.
-- **`generate kubernetes` / `docker` / `podman`** render that target's deploy
-  artifacts from the matching `env.yaml` section, resolving secret values / `.jks`
-  bytes as needed (see section 8). They also **fail fast**.
-- **`deploy <platform>`** generates for that platform and then applies it by
+- **`generate` with no `config`** (or `generate --platform <platform>`) renders the
+  resolved platform's deploy artifacts from the matching `env.yaml` section,
+  resolving secret values / `.jks` bytes as needed (see section 8). It also
+  **fails fast**.
+- **`deploy`** generates for the resolved platform and then applies it by
   shelling out to the section's `command:` (`kubectl`/`oc`, `docker`, or
-  `podman` + `systemctl`); **`delete <platform>`** tears the same thing down. The
-  env file must contain the matching section (a `deploy docker` needs `docker:`).
+  `podman` + `systemctl`); **`delete`** tears the same thing down. The env file
+  must contain the resolved section (a docker deploy needs `docker:`).
   `command:`'s binary must be on the platform allowlist (or approved with
   `--allow-command`), and both verbs run a read-only login/daemon preflight before
   writing or applying anything -- see section 7.
+- **`status`** ensures the status script is present on each running instance of
+  the resolved platform, runs it, and prints per-target leader-election and
+  workflow state -- see section 10.
+- **`version`** prints the build's own version (stamped in at build time), the Go
+  version it was built with, and its `GOOS`/`GOARCH` -- for bug reports and to
+  confirm which build is installed. Takes no flags.
 - **`validate`** runs **every** check across the whole `env.yaml` (including any
   present `kubernetes:`/`docker:`/`podman:` sections) and its workflows, and prints
   all findings (non-zero exit if any errors). Use it as a linter.
@@ -488,10 +524,10 @@ solace-defaults:
 | `tls.keystore` | `file`, `password`, `type` | the single shared keystore; required only for mTLS (`key-alias`) |
 | `logging.level` | `<logger>: <level>` | verbatim, order preserved → `logging.level` |
 | `management` | `port` | → `management.server.port` |
-| `management` | `exposure` | → `management.endpoints.web.exposure.include` |
+| `management` | `exposure` | → `management.endpoints.web.exposure.include`; `leaderelection` and `workflows` are always appended on top of whatever you list (or Spring's own `health` default when you list nothing) -- see 6.1 |
 | `management` | `health-show-details` | → `management.endpoint.health.show-details` |
 | `security` | `enabled` | defaults to `true` when the `security` block is present |
-| `security` | `users` | list of `{ name, password }` → `solace.connector.security` |
+| `security` | `users` | list of `{ name, password }` → `solace.connector.security`; a reserved account is always added on top -- see 6.1 |
 | `leader-election` | `mode` | `standalone` (default; omitted from output), `active_active`, or `active_standby` |
 | `leader-election` | `queue` | management queue; **required** for `active_*` |
 | `leader-election` | `conn-ref` / `solace` | the Solace management **session** (`conn-ref` to a solace connection, or inline `solace:`); required for `active_*` |
@@ -507,6 +543,43 @@ block with the `queue` and a Solace `session` (TLS wired from the shared stores)
 every TLS connection (Solace via api-properties, MQ via an ssl-bundle). Different
 connections can present different client certificates by using a different
 `key-alias` **within** that one shared keystore.
+
+### 6.1 The reserved status account (`solmq-status`)
+
+Every generated `application.yml` carries a read-only actuator account named
+`solmq-status` whenever security is **effectively enabled** -- that is, the
+`security` block is absent (its default) or present with `enabled: true`; only an
+explicit `security.enabled: false` turns it off along with the rest of the
+management endpoints' access control. It is what the generated `status` script
+(section 10) authenticates as, so it exists whether or not you configured a
+`security:` block yourself, and in every leader-election mode.
+
+- **The name is reserved.** Naming a `security.users[]` entry `solmq-status`
+  yourself is a `validate`/`generate` error -- choose a different name for your
+  own accounts.
+- **The password** comes from the optional host env var
+  `SECURITY_USER_SOLMQ_STATUS_PASSWORD` at `generate`/`deploy` time, when it is
+  set and non-empty; otherwise the tool generates one (32 lowercase hex
+  characters from a CSPRNG). **A generated password rotates on every
+  regenerate** -- it is not persisted or reused across runs -- so pin
+  `SECURITY_USER_SOLMQ_STATUS_PASSWORD` if you need the value to survive a
+  redeploy unchanged.
+- **It is a literal, not a secrets-model credential.** Unlike every other
+  password this tool handles (section 8), `solmq-status`'s password is rendered
+  as a plain value inside the generated `application.yml` -- the status script
+  reads it back out of that same mounted file at run time, so there is nothing
+  for the secrets model to mount separately. That means the password is
+  **readable by anyone who can read the artifact it lands in**: the Kubernetes
+  ConfigMap, the Docker Compose file (which inlines `application.yml`), or the
+  Podman on-disk `application.yml` -- which is why that last one is written with
+  file mode `0600` (section 7.3) rather than the platform's normal default.
+- **The account is GET-only** against the actuator endpoints it needs
+  (`health`, `leaderelection`, `workflows`); it cannot mutate anything on the
+  connector.
+- **Never reuse a password you use elsewhere** for
+  `SECURITY_USER_SOLMQ_STATUS_PASSWORD` -- the value lands as a literal in build
+  artifacts that may be checked into a ConfigMap, shared as a compose file, or
+  simply sit on a host's disk, so treat it as no more sensitive than that.
 
 ---
 
@@ -847,10 +920,22 @@ those files already live. The container targets rewrite them to a mount path -- 
 `/app/external/classpath/truststores/<file>` because the stores are mounted there (a
 Secret volume for kubernetes, a bind mount onto that same fixed dir for docker/podman).
 
+**The status script and its labels ship on every target, every platform.** All
+three deploy targets always carry the rendered status script (section 10) at
+`/app/external/libs/status` inside the container -- there is no option to omit it
+-- and always set the static label `solace-connector/le-mode` to the instance's
+leader-election mode (`standalone` / `active_active` / `active_standby`). A second
+label, `solace-connector/role: active`, is added only for `standalone` and
+`active_active`, where the deploy artifact itself already determines which
+instance is active; `active_standby` leaves the role for runtime (the connector's
+own leader election) to decide, so no static value would stay accurate.
+
 **`generate kubernetes` -> a multi-document manifest set:** a `Namespace` doc for
 `deployment.namespace` (emitted first; applying it when the namespace already
 exists is a no-op), then a `ConfigMap` mounting `application.yml` at
-`/app/external/spring/config/application.yml` (via `subPath`), a `Deployment`, an
+`/app/external/spring/config/application.yml` (via `subPath`) and the status script
+under its own `status` key, mounted at `/app/external/libs/status`, a `Deployment`
+(pod template carrying the `solace-connector/le-mode`/`role` labels above), an
 optional `Service`, the credentials/stores `Secret`s, and any libs
 `PersistentVolume`/`PersistentVolumeClaim`. Probes use a **tcpSocket**
 check on the management port (basic-auth protects `/actuator/*`).
@@ -863,17 +948,152 @@ volume mounted at `/app/external/libs`: either a PVC (`libs.pvc`, optionally
 provisioned from an NFS PV+PVC) or an initContainer that `wget`s jars into an
 `emptyDir`/PVC (`libs.download`) -- see section 7.
 
-**`generate docker` -> a `docker-compose.yml`** with `application.yml` inlined under
-compose `configs:`, the credentials env-file written alongside, and bind mounts for
-stores/libs. **`generate podman` -> a `podman run` script** (`mode: run`) **or
-a `.container` quadlet unit** (`mode: quadlet`); because neither can inline file
-content, the rendered `application.yml` is written next to the script/unit and
-bind-mounted in (credentials go to the platform's secret store, not to disk -- see
-section 8).
+**`generate docker` -> a `docker-compose.yml`** with `application.yml` inlined
+under compose `configs:`, the status script inlined as a second `configs:` entry
+mounted at `/app/external/libs/status`, the credentials env-file written
+alongside, bind mounts for stores/libs, and the `solace-connector/le-mode`/`role`
+labels above on the service. **`generate podman` -> a `podman run` script**
+(`mode: run`) **or a `.container` quadlet unit** (`mode: quadlet`); because
+neither can inline file content, the rendered `application.yml` **and** the
+status script are each written to disk next to the script/unit and bind-mounted
+in read-only (credentials go to the platform's secret store, not to disk -- see
+section 8), with the same labels applied via `--label`/`Label=`.
 
 ---
 
-## 10. `examples`
+## 10. Status: which instance is active
+
+`solmq-conn-util status` answers "which of my instances is the active one right
+now?" by exec'ing into each running instance and asking its own Spring actuator
+endpoints -- no separate monitoring stack, and no assumption made from outside
+the container.
+
+```sh
+solmq-conn-util status --platform kubernetes -e env.yaml
+```
+
+The platform resolves the same way as `generate`/`deploy`/`delete` (section 3):
+`--platform` if given, else the single section present in `env.yaml`, else an
+interactive menu. `status` then discovers every running instance of that
+platform -- every pod matching the deployment's `app=<name>` selector on
+kubernetes, or the configured container name on docker/podman -- unless you
+narrow it with repeatable `--pod` / `--container`.
+
+### First run: installing the script
+
+Every artifact `generate`/`deploy` produces already carries the status script
+(section 9), but an instance that predates this feature, or one this tool never
+deployed, may not have it installed. The first time `status` finds it missing on
+a target, it asks once:
+
+```
+status script missing on solmq-connector-7d9f8c6b5-x2n4q -- install it now? [y/N]
+```
+
+Answer `y` to install it on every missing target for this run, or pass
+`--install` up front to skip the prompt entirely. Declining (or a blank answer)
+skips that target for this run without installing anything, and `status` exits
+with code 1. **The prompt refuses to block when stdin is not a TTY** -- a CI job
+or script must pass `--install` (or ensure the script is already installed), or
+the run fails immediately with that guidance instead of hanging.
+
+### Sample output
+
+```
+solmq-connector-7d9f8c6b5-x2n4q: leader-election mode: active_standby
+  leader-election state: active
+  workflow 0: STARTED
+  workflow 1: STARTED
+solmq-connector-7d9f8c6b5-k8m1r: leader-election mode: active_standby
+  leader-election state: standby
+  workflow 0: STOPPED
+  workflow 1: STOPPED
+```
+
+One block per target: the leader-election **mode** (`standalone` /
+`active_active` / `active_standby`, from `leader-election.mode`, section 6), the
+leader-election **state** (`active` or `standby`) read from the instance's own
+`/actuator/leaderelection`, then one `workflow <id>: <state>` line per workflow
+from `/actuator/workflows`. A target that does not expose `workflows` in
+`management.endpoints.web.exposure.include` still reports leader-election, with a
+warning on stderr that per-workflow state is missing; one that does not expose
+`leaderelection` reports nothing and explains why on stderr, since that is the
+endpoint the whole report is built from. Either way the script still exits 0 --
+see below.
+
+### The manual alternative
+
+`status` is a thin wrapper around a script the connector container can run on its
+own. To check an instance yourself, without the CLI:
+
+```sh
+kubectl exec <pod> -- sh /app/external/libs/status
+docker exec <container> sh /app/external/libs/status
+podman exec <container> sh /app/external/libs/status
+```
+
+To sweep every pod behind a Deployment:
+
+```sh
+for p in $(kubectl get pods -l app=solmq-connector -o name); do
+  echo "$p:"; kubectl exec "$p" -- sh /app/external/libs/status
+done
+```
+
+The script **always exits 0**. The report goes to stdout, and anything that went
+wrong -- unreachable actuator, an endpoint that is not exposed, no config to read
+the account from, an unrecognized state -- goes to stderr. Nothing is encoded in
+the exit status, so a non-zero exit from `kubectl exec` / `docker exec` /
+`podman exec` means exactly one thing: the exec did not reach or run the
+instance. A standby instance and a misconfigured endpoint never look like that.
+
+To branch on the result, read the output rather than `$?`:
+
+```sh
+kubectl exec <pod> -- sh /app/external/libs/status | grep -q 'state: active'
+```
+
+The `status` command's own exit code follows the same idea: 0 when every target
+could be reached and run, 1 when one could not -- never a statement about which
+instance is active. Read the per-target report lines for that.
+
+### Instances this tool did not deploy
+
+`status` also works against a **foreign** instance -- one deployed by hand, or by
+an older version of this tool -- as long as the status script and the reserved
+`solmq-status` account (section 6.1) are present on it. Combine `--platform` with
+explicit `--pod` / `--container` targets and `status` needs nothing else from
+`env.yaml` at all; `--management-port` and `--user` cover a non-default setup (a
+management port other than the connector default, or an actuator account under a
+different name):
+
+```sh
+solmq-conn-util status --platform kubernetes --pod other-team-connector-0 \
+  --namespace other-ns --management-port 9090 --user ops-readonly
+```
+
+`--command` overrides the platform CLI binary used to reach a target (instead of
+the matching section's `command:`, which may not even exist for a foreign
+instance), and `--allow-command` approves an extra one beyond the platform
+allowlist, the same as `deploy`/`delete`.
+
+The script does not assume this tool mounted the config. Inside the container it
+looks for the connector's configuration the way Spring itself resolves it, taking
+the first file that answers: `SPRING_CONFIG_LOCATION`, then
+`SPRING_CONFIG_ADDITIONAL_LOCATION`, then `/app/external/spring/config/` (what
+the connector image's own entrypoint passes), then `./` and `./config/`. The file
+name follows `SPRING_CONFIG_NAME` (default `application`) and both `.yml` and
+`.yaml` are tried; `classpath:` locations are skipped, since a shell cannot read
+inside the jar. That is where it reads the account password from, and a
+`${PLACEHOLDER}` value there is followed to `/run/secrets/<PLACEHOLDER>` -- so an
+instance whose password still flows through the secrets model works too. If no
+config can be found at all, the script says so and still queries the endpoint
+unauthenticated, which is the right answer for an instance with
+`security.enabled: false`.
+
+---
+
+## 11. `examples`
 
 ```sh
 solmq-conn-util examples [dir] [-f]

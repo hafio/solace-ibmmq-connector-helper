@@ -9,6 +9,7 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/podmangen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 )
 
 // TestParseExpandsNonCredentialAndWarnsOnUnsetDefaultless pins the wiring:
@@ -247,11 +248,28 @@ func TestGenerateKubernetesWorkflowCap(t *testing.T) {
 	}
 }
 
+// fixedStatusRand fills b with a repeating 0xab pattern, giving
+// resolveStatusPassword a deterministic, obviously-synthetic result
+// ("ab" x16 hex-encoded) instead of a fresh crypto/rand draw every run.
+func fixedStatusRand(b []byte) error {
+	for i := range b {
+		b[i] = 0xab
+	}
+	return nil
+}
+
 // Every generated application.yml must import the mounted secret files and
 // must never carry a credential value or a host variable name -- only the
-// ${STABLE} placeholder. This guards that invariant end-to-end through Config.
+// ${STABLE} placeholder, with exactly one carve-out: security defaults to
+// effectively enabled (no security: block here), so
+// consolidate.applyStatusAccess unconditionally appends the reserved
+// spec.StatusUserName account carrying its password as a literal -- the
+// generated status script reads that literal back out of application.yml at
+// run time, so it has nothing else to read. This guards both invariants
+// end-to-end through Config: every ordinary password is a placeholder, and
+// the one literal that exists is exactly the expected status-account value.
 func TestConfigNoSecretsLeak(t *testing.T) {
-	out, errs, _ := Config(Request{Workflows: synthWorkflowFiles(1)}, Resolver{})
+	out, errs, _ := Config(Request{Workflows: synthWorkflowFiles(1)}, Resolver{Rand: fixedStatusRand})
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -263,6 +281,24 @@ func TestConfigNoSecretsLeak(t *testing.T) {
 	}
 	if !strings.Contains(out, "${SOL_CONN_1_CLIENT_USERNAME}") || !strings.Contains(out, "${MQ_CONN_1_USER}") {
 		t.Errorf("rendered config missing expected ${STABLE} placeholders:\n%s", out)
+	}
+
+	wantStatusPW := strings.Repeat("ab", 16)
+	if !strings.Contains(out, "password: "+wantStatusPW) {
+		t.Errorf("expected the reserved status account's literal test password %q:\n%s", wantStatusPW, out)
+	}
+	for _, ln := range strings.Split(out, "\n") {
+		i := strings.Index(ln, "password:")
+		if i < 0 {
+			continue
+		}
+		val := strings.TrimSpace(ln[i+len("password:"):])
+		if val == wantStatusPW {
+			continue // the one permitted literal: the reserved status account
+		}
+		if !strings.HasPrefix(val, "${") || !strings.HasSuffix(val, "}") {
+			t.Errorf("password line %q carries neither a ${STABLE} placeholder nor the reserved status account's literal:\n%s", ln, out)
+		}
 	}
 }
 
@@ -379,6 +415,165 @@ func TestGeneratePodmanRunAndQuadlet(t *testing.T) {
 	}
 	if len(q.Secrets) != 4 {
 		t.Errorf("quadlet secrets = %+v, want 4 entries", q.Secrets)
+	}
+}
+
+// ---- status password resolution + per-platform status script wiring -------
+
+// TestResolveStatusPasswordFixedRand pins the generated branch: a fixed Rand
+// hook yields the exact expected hex literal (16 bytes -> 32 lowercase hex
+// chars), never a randomized value that would make the test flaky.
+func TestResolveStatusPasswordFixedRand(t *testing.T) {
+	res := Resolver{Rand: func(b []byte) error {
+		for i := range b {
+			b[i] = byte(i)
+		}
+		return nil
+	}}
+	got, err := resolveStatusPassword(res)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "000102030405060708090a0b0c0d0e0f"
+	if got != want {
+		t.Errorf("resolveStatusPassword = %q, want %q", got, want)
+	}
+}
+
+// TestResolveStatusPasswordEnvOverride pins the override branch: a set,
+// non-empty spec.StatusUserPasswordEnvVar is used verbatim and Rand is never
+// consulted (validate.Run has already charset-checked the value).
+func TestResolveStatusPasswordEnvOverride(t *testing.T) {
+	randCalled := false
+	res := Resolver{
+		Env: func(k string) (string, bool) {
+			if k == spec.StatusUserPasswordEnvVar {
+				return "operator-chosen-pw", true
+			}
+			return "", false
+		},
+		Rand: func(b []byte) error { randCalled = true; return nil },
+	}
+	got, err := resolveStatusPassword(res)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "operator-chosen-pw" {
+		t.Errorf("resolveStatusPassword = %q, want the env override verbatim", got)
+	}
+	if randCalled {
+		t.Error("env override is set: Rand must not be consulted")
+	}
+}
+
+// TestResolveStatusPasswordEmptyEnvFallsBackToRand covers the "set but empty"
+// case: an empty override is treated the same as unset, so generation falls
+// back to Rand rather than returning "".
+func TestResolveStatusPasswordEmptyEnvFallsBackToRand(t *testing.T) {
+	res := Resolver{
+		Env:  func(string) (string, bool) { return "", true },
+		Rand: fixedStatusRand,
+	}
+	got, err := resolveStatusPassword(res)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != strings.Repeat("ab", 16) {
+		t.Errorf("resolveStatusPassword = %q, want the generated fallback", got)
+	}
+}
+
+// TestResolveStatusPasswordRandError pins the hard-failure branch: Rand
+// failing must surface as an actionable error naming the underlying cause,
+// never a predictable fallback password.
+func TestResolveStatusPasswordRandError(t *testing.T) {
+	_, err := resolveStatusPassword(Resolver{Rand: func([]byte) error { return errors.New("entropy unavailable") }})
+	if err == nil || !strings.Contains(err.Error(), "entropy unavailable") {
+		t.Fatalf("err = %v, want an actionable error naming the underlying cause", err)
+	}
+}
+
+// TestConfigStatusPasswordRandErrorNoOutput covers the same failure through
+// the real Config path: a Rand error is a hard error and produces no output.
+func TestConfigStatusPasswordRandErrorNoOutput(t *testing.T) {
+	res := Resolver{Rand: func([]byte) error { return errors.New("entropy unavailable") }}
+	out, errs, _ := Config(Request{Workflows: synthWorkflowFiles(1)}, res)
+	if out != "" {
+		t.Errorf("expected no output on a Rand failure, got:\n%s", out)
+	}
+	if !issuesContain(errs, "entropy unavailable") {
+		t.Fatalf("errs = %v, want one naming the Rand failure", errs)
+	}
+}
+
+// TestGenerateKubernetesCarriesStatusScript pins the k8s wiring: the
+// ConfigMap gets a "status: |" key carrying the rendered script, addressed to
+// the reserved account and the port GenerateKubernetes itself resolved (the
+// same fallback chain deploy.ManagementPort implements).
+func TestGenerateKubernetesCarriesStatusScript(t *testing.T) {
+	envData := "kubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n    image: img\n"
+	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
+	out, errs, _ := GenerateKubernetes(req, Resolver{Rand: fixedStatusRand})
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if !strings.Contains(out, "  status: |\n") {
+		t.Errorf("ConfigMap missing the status: | key:\n%s", out)
+	}
+	if !strings.Contains(out, "USER_NAME="+spec.StatusUserName) {
+		t.Errorf("rendered status script missing USER_NAME=%s:\n%s", spec.StatusUserName, out)
+	}
+	if !strings.Contains(out, "PORT=8090") { // no management.port/service.port set: falls back to 8090
+		t.Errorf("rendered status script missing the fallback management port:\n%s", out)
+	}
+}
+
+// TestGenerateDockerCarriesStatusScript pins the compose wiring: a second
+// top-level config (<name>-status) inlines the rendered script and the
+// service mounts it at statusscript.ContainerPath.
+func TestGenerateDockerCarriesStatusScript(t *testing.T) {
+	envData := "docker:\n  command: docker\n  image: img\n  name: solmq-connector\n"
+	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
+	plan, errs, _ := GenerateDocker(req, Resolver{Rand: fixedStatusRand})
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if !strings.Contains(plan.Compose, "solmq-connector-status:\n    content: |\n") {
+		t.Errorf("compose missing the second (status) config entry:\n%s", plan.Compose)
+	}
+	if !strings.Contains(plan.Compose, "USER_NAME="+spec.StatusUserName) {
+		t.Errorf("compose missing the rendered status script body:\n%s", plan.Compose)
+	}
+	if !strings.Contains(plan.Compose, "target: "+statusscript.ContainerPath) {
+		t.Errorf("compose missing the status mount target %q:\n%s", statusscript.ContainerPath, plan.Compose)
+	}
+}
+
+// TestGeneratePodmanCarriesStatusScript pins the podman wiring:
+// PodmanPlan.StatusScript names <name>-status and carries the rendered
+// script, and the on-disk mount path is BaseDir-resolved exactly like
+// AppYAML.
+func TestGeneratePodmanCarriesStatusScript(t *testing.T) {
+	envData := "podman:\n  command: podman\n  mode: run\n  image: img\n  name: solmq-connector\n"
+	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
+	res := Resolver{Env: func(string) (string, bool) { return "v", true }, Rand: fixedStatusRand}
+
+	plan, errs, _ := GeneratePodman(req, res, PodmanOpts{BaseDir: "/base"})
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if plan.StatusScript.Name != "solmq-connector-status" {
+		t.Errorf("StatusScript.Name = %q, want %q", plan.StatusScript.Name, "solmq-connector-status")
+	}
+	if !strings.Contains(plan.StatusScript.Data, "USER_NAME="+spec.StatusUserName) {
+		t.Errorf("StatusScript.Data missing the rendered script:\n%s", plan.StatusScript.Data)
+	}
+	// Same BaseDir resolution as AppYAML (pathIn), not a bare name.
+	if want := "/base/solmq-connector-application.yml"; !strings.Contains(plan.RunScript, want) {
+		t.Errorf("run script missing BaseDir-resolved AppYAML mount %q:\n%s", want, plan.RunScript)
+	}
+	if want := "/base/solmq-connector-status:" + statusscript.ContainerPath; !strings.Contains(plan.RunScript, want) {
+		t.Errorf("run script missing BaseDir-resolved status mount %q:\n%s", want, plan.RunScript)
 	}
 }
 

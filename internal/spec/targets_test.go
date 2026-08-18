@@ -224,6 +224,25 @@ docker:
 	}
 }
 
+func TestEffectiveManagementPort(t *testing.T) {
+	tests := []struct {
+		name string
+		d    *Defaults
+		want int
+	}{
+		{"nil receiver", nil, DefaultMgmtPort},
+		{"unset port", &Defaults{}, DefaultMgmtPort},
+		{"set port", &Defaults{Management: Management{Port: 9091}}, 9091},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.d.EffectiveManagementPort(); got != tt.want {
+				t.Errorf("EffectiveManagementPort() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestApplyMountDefaultsOverrideWins(t *testing.T) {
 	data := []byte(`
 docker:

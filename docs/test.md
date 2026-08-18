@@ -22,13 +22,13 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 270 test functions, 599 cases across 14 packages._
+_Snapshot: 354 test functions, 595 cases across 15 packages. (Derived from the rows in this file, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/spec
 
 Parse env.yaml into the typed model -- workflows, defaults, named connections, the kubernetes/docker/podman target sections, and ports -- and apply section defaults.
 
-Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/spec/env_test.go), [targets_test.go](../internal/spec/targets_test.go), [expand_test.go](../internal/spec/expand_test.go)
+Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/spec/env_test.go), [targets_test.go](../internal/spec/targets_test.go), [expand_test.go](../internal/spec/expand_test.go), [defaults_test.go](../internal/spec/defaults_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
@@ -82,12 +82,18 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestExpandYAMLNodePassthroughLeftAlone | - | a `*yaml.Node` field (APIProps) is never walked or rewritten |
 | TestExpandDefaultsConnectionsMapEntry | - | a `${HOST}` value inside Defaults.Connections (map[string]Side) expands via read-modify-write |
 | TestExpandNilLookupDisablesEverything | - | nil Lookup makes Expand a no-op, leaving `${HOST}` untouched |
+| TestSecurityEffectivelyEnabled | absent | Security{} (no block) reports EffectivelyEnabled true |
+| TestSecurityEffectivelyEnabled | present and enabled | Present true, Enabled true reports EffectivelyEnabled true |
+| TestSecurityEffectivelyEnabled | present and disabled | Present true, Enabled false reports EffectivelyEnabled false |
+| TestLeaderElectionEffectiveMode | empty | an empty Mode defaults EffectiveMode to standalone |
+| TestLeaderElectionEffectiveMode | standalone / active_active / active_standby | an explicit Mode passes through EffectiveMode unchanged |
+| TestEffectiveManagementPort | nil receiver / unset port / set port | EffectiveManagementPort falls back to DefaultMgmtPort (8090) for a nil Defaults and an unset port, and returns a configured port unchanged |
 
 ## internal/validate
 
 Validate the parsed model -- per-side rules, connection refs, leader election, the docker/podman/kubernetes target sections, ports, container names, TLS/stores wiring, and the safe-token charset.
 
-Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extra_test.go](../internal/validate/validate_extra_test.go)
+Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extra_test.go](../internal/validate/validate_extra_test.go), [validate_deploycommand_test.go](../internal/validate/validate_deploycommand_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
@@ -118,9 +124,9 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestSolaceKeyAliasRequiresTCPSAndKeystore | - | solace key-alias with plain tcp host errors requires a tcps:// host |
 | TestMQKeyAliasRequiresKeystore | - | mq key-alias without keystore errors no keystore defined |
 | TestCheckKubeRequiredAndReplicas | - | kube deployment missing name/namespace and replicas 3 errors each field plus replicas: 1 message |
-| TestCheckKubeCredentialSources | source-env-empty-vars | credentials source env with no variables errors non-empty 'variables' |
-| TestCheckKubeCredentialSources | source-file-no-values | credentials source file without values-file errors requires 'values-file' |
-| TestCheckKubeCredentialSources | source-weird | unknown credentials source errors source must be |
+| TestCheckKubeCredentialCreateRemovedKeys | source/variables/values-file set | credentials.create still carrying the removed keys errors naming all three and telling the operator to remove them |
+| TestCheckKubeCredentialCreateRemovedKeys | source alone | credentials.create carrying only the removed `source` key errors naming it alone |
+| TestCheckKubeCredentialCreateRemovedKeys | bare name | a bare create.name (the new shape) trips no removed-keys error |
 | TestCheckKubeStoresRequireTruststore | - | kube stores create without tls.truststore errors requires tls.truststore |
 | TestStoresNotWiredWarning | - | TLS workflow with kube deploy and no stores wiring warns secrets.stores is omitted |
 | TestStoresWiredExistingNoWarning | - | stores wired via existing secret produces no stores-omitted warning |
@@ -157,7 +163,9 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckDocker | stores-no-truststore | docker stores set without truststore errors docker.stores requires tls.truststore |
 | TestCheckDocker | libs-no-dir | docker libs set without dir errors docker.libs.dir is required |
 | TestCheckDocker | checkdocker-false-gate | docker section not checked when CheckDocker is false |
-| TestCheckDockerCredentials | - | docker credentials source env with no variables errors non-empty 'variables' |
+| TestCheckDockerPodmanSecretsRemoved | docker.secrets set | a docker section still carrying a `.secrets` block errors docker.secrets is no longer configured |
+| TestCheckDockerPodmanSecretsRemoved | podman.secrets set | a podman section still carrying a `.secrets` block errors podman.secrets is no longer configured |
+| TestCheckDockerPodmanSecretsRemoved | nil secrets | the new default (no `.secrets` block) trips no such error |
 | TestCheckPodmanModeAndScope | valid-podman | valid podman section passes with no errors |
 | TestCheckPodmanModeAndScope | bad-mode | podman mode 'swarm' errors podman.mode must be |
 | TestCheckPodmanModeAndScope | bad-scope | podman quadlet scope 'root' errors scope must be auto, user, or system |
@@ -201,6 +209,9 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestSafeToken | a}b | SafeToken returns false |
 | TestSafeToken | a~b | SafeToken returns false |
 | TestSafeToken | empty string | SafeToken("") returns true, pinned documented exported-API behavior |
+| TestSafeActuatorUser | 4 accepted names | letters, digits, '.', '-' and '_' pass, and every accepted name also satisfies SafeToken |
+| TestSafeActuatorUser | 6 SafeToken-permitted names | '/', ':', '=', ',', '+' and '@' are rejected here even though SafeToken allows them, since the name reaches a sed address |
+| TestSafeActuatorUser | 7 shell-unsafe names, empty | quotes, whitespace, backslash, '$', '*', '[' and the empty string are rejected |
 | TestConnectionDefinitionValidation | - | connection with dest set errors must not define queue/topic; incomplete mq connection errors missing 'queue-manager' |
 | TestCheckContainerNameRejected | ../evil | rejected for both docker.name and podman.name |
 | TestCheckContainerNameRejected | Bad_Name | rejected for both docker.name and podman.name |
@@ -238,6 +249,9 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestPasswordConflictOnSameBinder | identical passwords | same tuple sharing one password passes |
 | TestPasswordConflictOnSameBinder | distinct tuples | different queue-manager means different binders, so passwords may differ |
 | TestPasswordConflictSolaceSide | - | the solace branch keys on client-password and errors on a conflict |
+| TestStatusUserReservedName | - | a security.users entry named spec.StatusUserName errors reserved, naming security.users[1].name; a differently-named user does not collide |
+| TestStatusUserPasswordEnvCharset | nil Env / unset / empty / valid value | none trip the SECURITY_USER_SOLMQ_STATUS_PASSWORD charset error |
+| TestStatusUserPasswordEnvCharset | space / double quote / single quote / backslash / dollar-brace / control char / non-ASCII byte | each errors the charset check, and the error text never echoes the secret value |
 
 ## internal/consolidate
 
@@ -281,6 +295,16 @@ Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [cons
 | TestBuildLeaderElection | conn-ref happy path tcps host | Session host/vpn set and APIProps has SSL_TRUST_STORE, SSL_KEY_STORE, SSL_PRIVATE_KEY_ALIAS mounted paths and alias sc |
 | TestBuildLeaderElection | inline session non-tcps host | Session set from inline fields with zero TLS APIProps |
 | TestBuildLeaderElection | mount rewrite raw vs mnt for leader election truststore | raw keeps ./certs/truststore.jks verbatim, mnt rewrites to /app/external/classpath/truststores/truststore.jks |
+| TestApplyStatusAccessSecurityAbsent | - | absent security (EffectivelyEnabled) synthesizes Security.Present/Enabled true with the reserved account as the only user, carrying the literal status password, never entering Model.Secrets |
+| TestApplyStatusAccessSecurityEnabledAppendsAfterExisting | - | security present+enabled with existing users appends the reserved account last; existing users still resolve to secretRef placeholders |
+| TestApplyStatusAccessSecurityDisabled | - | explicit security.enabled: false adds no reserved user and leaves Security.Enabled false |
+| TestApplyStatusAccessExposure | empty | empty Exposure becomes health,leaderelection,workflows |
+| TestApplyStatusAccessExposure | already both | an already-complete list is left unchanged |
+| TestApplyStatusAccessExposure | missing one | a partial list gets only the missing entry appended |
+| TestApplyStatusAccessExposure | wildcard | Spring's "*" wildcard is left untouched |
+| TestHasExposureEntry | comma-delimited match, with/without spaces | an exact entry among comma-separated entries matches |
+| TestHasExposureEntry | prefix/suffix collision (leaderelection2, xleaderelection, leaderelectionx) | a same-prefix or same-suffix entry never falsely matches |
+| TestHasExposureEntry | wildcard / bare entry / empty | "*" matches any entry, "health" alone does not match "leaderelection", and an empty csv matches nothing |
 | TestDurableNameGolden | - | DurableName of fixed inputs equals pinned solmq-3631c883-c0c4-5bc8-985e-ea2842831ad6 |
 | TestDurableNameDeterministic | same inputs called twice | DurableName returns identical value both times |
 | TestDurableNameDeterministic | different file name g.yaml vs f.yaml | DurableName differs when file name changes |
@@ -304,6 +328,26 @@ Tests: [tls_test.go](../internal/tls/tls_test.go)
 | TestStorePathConfigVsDeploy | mount=false | StorePath returns raw defaults path ./certs/t.jks unchanged |
 | TestStorePathConfigVsDeploy | mount=true | StorePath returns MountDir/t.jks base name from backslash input |
 | TestSolacePropsRawPathWhenNotMounted | - | mount=false keeps SSL_TRUST_STORE as raw ./certs/truststore.jks path |
+
+## internal/statusscript
+
+Render the POSIX status script the generated deploy artifacts embed and `solmq-conn-util status` execs inside each running instance -- a pure renderer with no os/exec, filesystem, or network access.
+
+Tests: [statusscript_test.go](../internal/statusscript/statusscript_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestRenderSubstitution | defaults | Render substitutes PORT=8090 and USER_NAME=solmq-status; BASE and the leaderelection/workflows endpoints are built from $PORT at run time, not by Render |
+| TestRenderSubstitution | non-default port and user | Render substitutes PORT=19090 and USER_NAME=custom-mgmt-user |
+| TestRenderIsPureASCIINoCRLF | - | output has no carriage return, no byte over 127, and ends with a trailing newline |
+| TestRenderHeaderHasExecOneLiners | - | the header pins the kubectl/docker/podman exec one-liners, each built from ContainerPath |
+| TestRenderPasswordResolution | - | the password-lookup chain references ContainerPath, /run/secrets and the from_configs account lookup, and no credential is embedded |
+| TestRenderAlwaysExitsZero | - | every exit in the script is `exit 0`, `set -e` is absent while `set -u` stays, the EXIT trap holds the contract, and active/standby are both quiet outcomes |
+| TestRenderSendsStatusToStdoutAndProblemsToStderr | - | the mode/state/workflow report lines go to stdout unredirected, and every `status:` diagnostic ends in `>&2` |
+| TestRenderVerifiesExposure | - | the has_entry membership check and the leaderelection/workflows exposure gate run before the first actuator request; an unexposed leaderelection stops the run on stderr (still exit 0), an unlocatable config only warns |
+| TestRenderSearchesSpringConfigLocations | - | the config search covers SPRING_CONFIG_LOCATION, SPRING_CONFIG_ADDITIONAL_LOCATION and SPRING_CONFIG_NAME, ConfigDir and its wildcard form, the ./ and ./config/ defaults, both YAML extensions, comma splitting with optional:/file: stripping, the classpath: skip, and runs before the exposure check and password lookup |
+| TestRenderEscapesUserForSedAddress | 7 names | USER_MATCH is regex-escaped for the sed address (dot, slash, brackets, star, backslash, anchors) while USER_NAME stays raw for the Authorization header |
+| TestFilenameAndPathConstants | - | Filename, ContainerDir, ContainerPath and ConfigPath equal their pinned values |
 
 ## internal/yamlwriter
 
@@ -370,9 +414,15 @@ Tests: [deploy_test.go](../internal/deploy/deploy_test.go)
 | TestRenderLibsDownload | existing PVC download | download target uses claimName dl-pvc instead of emptyDir |
 | TestRenderNamespaceAlwaysFirst | - | Namespace doc is first in output and precedes ConfigMap |
 | TestRenderExistingSecrets | - | existing creds/tls secrets produce no Secret doc, referencing my-creds and secretName my-tls |
+| TestRenderConfigMapStatusScript | - | the ConfigMap always carries the status script under its own `status` key, alongside application.yml |
+| TestRenderStatusScriptMountAfterLibs | - | the single-file status mount is declared after the libs directory mount, so it is not shadowed, and carries `subPath: status` |
 | TestManagementPortFallback | defaults.Management.Present true Port 9999 | managementPort returns 9999 from defaults |
 | TestManagementPortFallback | empty Defaults | managementPort returns 8090 from service port |
 | TestManagementPortFallback | Service.Port 0, Defaults nil | managementPort returns 8090 default fallback |
+| TestRenderLeaderModeLabels | nil Defaults / standalone | the le-mode label is standalone and role: active is present |
+| TestRenderLeaderModeLabels | active_active | le-mode is active_active and role: active is present |
+| TestRenderLeaderModeLabels | active_standby | le-mode is active_standby and role: active is withheld (only the actuator knows the live role) |
+| TestRenderSelectorMatchLabelsAppOnly | - | spec.selector.matchLabels stays app-only even when the pod template carries le-mode/role, since a selector must stay immutable for the Deployment's life |
 | TestQuoteRes | 1 | quoteRes("1") returns quoted "1" |
 | TestQuoteRes | 250m | quoteRes("250m") returns unquoted 250m |
 | TestQuoteRes | 512Mi | quoteRes("512Mi") returns unquoted 512Mi |
@@ -393,12 +443,19 @@ Tests: [dockergen_test.go](../internal/dockergen/dockergen_test.go)
 | TestRenderFull_Minimal | - | minimal golden output omits restart, ports, environment, env_file, volumes blocks |
 | TestEnvironmentBranches | TZ only, MQTLS false | environment block contains only TZ: UTC, no JAVA_TOOL_OPTIONS |
 | TestEnvironmentBranches | MQTLS only, no timezone | environment block contains only JAVA_TOOL_OPTIONS line, no TZ |
+| TestSecretsBranches | at least one secret | the per-service secrets list and the top-level environment-provider secrets block are both emitted |
+| TestSecretsBranches | no secrets | neither block, nor any env_file line, is ever emitted |
+| TestLabelsPerMode | empty defaults to standalone | le-mode label defaults to standalone and role: active is present |
+| TestLabelsPerMode | standalone / active_active | le-mode matches the mode and role: active is present |
+| TestLabelsPerMode | active_standby | le-mode is active_standby and role: active is withheld |
 | TestContentIndentationAndBlankLines | nested key indentation | nested line gets extra indent on top of 6-space block indent |
 | TestContentIndentationAndBlankLines | blank line preserved | blank line stays empty with no spaces between content lines |
 | TestContentIndentationAndBlankLines | no trailing spaces | no rendered line has trailing spaces |
 | TestStoresOnlyAndLibsOnly | stores only | volumes block contains only the store mount line |
 | TestStoresOnlyAndLibsOnly | libs only | volumes block contains only the libs mount line |
 | TestSplitLinesNoTrailingNewline | - | app.yml lacking trailing newline still renders content line with no dropped element |
+| TestStatusScriptConfigSourceAndTarget | - | the service references a second `<name>-status` config and mounts it at /app/external/libs/status |
+| TestStatusScriptContentIsVerbatim | - | the status script body is inlined under the status config's content: block, indented 6 spaces, with its blank line preserved as truly empty |
 
 ## internal/podmangen
 
@@ -409,61 +466,60 @@ Tests: [podmangen_test.go](../internal/podmangen/podmangen_test.go)
 | Test | Case | Verifies |
 |------|------|----------|
 | TestRenderRunScriptFull | - | full input renders run script matching exact golden string byte-for-byte |
+| TestRenderRunScriptSecretPreamble | - | the secret-loading preamble carries no credential value, only ${NAME:?...} referencing the stable name |
+| TestRenderRunScriptNoSecretsOmitsPreamble | - | no Secrets in Input emits no `podman secret` lines at all |
 | TestRenderRunScriptMinimal | - | minimal input renders run script matching exact golden string byte-for-byte |
 | TestRenderQuadletFull | - | full input yields 1 unit named solmq-connector.container with content matching golden string |
 | TestRenderQuadletMinimal | - | minimal input yields 1 unit with content matching golden string (no Service section, no restart) |
+| TestLeaderLabelsPerMode | empty defaults to standalone / standalone / active_active | RenderRunScript and RenderQuadlet both carry the le-mode label and role: active |
+| TestLeaderLabelsPerMode | active_standby | both renderers carry le-mode active_standby and withhold role: active |
+| TestStatusScriptMountNestsAfterLibs | - | in both renderers, the status script mount/volume is declared after the libs mount, so it nests rather than being shadowed |
+| TestStatusScriptMountOmittedWhenPathEmpty | - | an empty StatusScriptPath omits the status mount entirely in both renderers, rather than mounting an empty source |
 
 ## internal/gen
 
 Orchestrate parse -> validate -> consolidate -> render, resolve credentials/stores, and assert the byte-for-byte golden fixtures.
 
-Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](../internal/gen/golden_test.go)
+Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](../internal/gen/golden_test.go), [htmlgolden_test.go](../internal/gen/htmlgolden_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
-| TestLooksDotenv | A=1\nB=2\n | recognized as dotenv format |
-| TestLooksDotenv | a: 1\n | yaml mapping is not dotenv |
-| TestLooksDotenv | # c\n\n | comments/blank-only lines are not dotenv |
-| TestLooksDotenv | URL=http://x:1\n | value containing colon after = is still dotenv |
-| TestLooksDotenv | KEY: v=1\n | colon before = means yaml, not dotenv |
-| TestParseValuesDotenv | - | parses dotenv into 2 KVs, trims whitespace, skips comments/blanks |
-| TestParseValuesYAML | A: 1\nB: two\n | parses yaml mapping into 2 KVs |
-| TestParseValuesYAML | - just\n- a\n | yaml sequence (not mapping) returns error |
-| TestResolveCredEnv | env vars present | resolves 2 KVs from env source |
-| TestResolveCredEnv | env var missing | missing env var returns error |
-| TestResolveCredEnv | nil Env resolver | nil env func yields 2 KVs with empty values, no error |
-| TestResolveCredFileAndBadSource | file source with ReadFile | resolves 1 KV (A=1) from file |
-| TestResolveCredFileAndBadSource | no ReadFile provided | missing ReadFile returns error |
-| TestResolveCredFileAndBadSource | ReadFile returns error | read error propagates |
-| TestResolveCredFileAndBadSource | source=weird | unknown credential source returns error |
+| TestParseExpandsNonCredentialAndWarnsOnUnsetDefaultless | - | parse() expands host/msg-vpn from Lookup, leaves client-password-env verbatim, and returns exactly one warning naming TYPO for the unset defaultless conn-name variable |
 | TestResolveStores | truststore+keystore with ReadFile | resolves 2 store files, first named t.jks |
 | TestResolveStores | no ReadFile provided | missing ReadFile returns error |
 | TestResolveStores | ReadFile returns error | read error propagates |
 | TestResolveStores | no stores configured | empty Defaults yields 0 stores, no error |
-| TestNamesAndPaths | credEnvFileName nil creds | returns empty string |
-| TestNamesAndPaths | credEnvFileName Existing set | existing filename wins, returns e.env |
-| TestNamesAndPaths | credEnvFileName Create set | returns <name>.env |
+| TestToIssues | - | toIssues wraps each string into an Issue carrying it as Msg |
 | TestNamesAndPaths | pathIn base variants | empty base returns bare path; trailing/no-trailing slash both join to /base/a |
-| TestNamesAndPaths | instanceName variants | single instance unsuffixed; multi-instance suffixed -1/-2 |
 | TestTargetMounts | tls+stores+libs configured | 2 store mounts at fixed default mount path (ignores custom MountPath), libs mount uses resolved abs source and given target |
 | TestTargetMounts | nil stores and libs | opt-in mounts yield nil,nil when sections absent |
-| TestResolveCredentialsAndEnvFileContent | nil CredentialsSecret | returns nil,nil |
-| TestResolveCredentialsAndEnvFileContent | Existing set | returns nil,nil (no creation needed) |
-| TestResolveCredentialsAndEnvFileContent | Create with env source | resolves 2 KVs and EnvFileContent renders "A=1\nB=2\n" |
-| TestGenerateDockerBasics | - | generates non-empty compose containing image, uses existing env-file name solmq.env |
-| TestGeneratePodmanRunAndQuadlet | mode: run | produces run script, no units, env-file solmq-connector.env, 1 app yaml, 1 service |
+| TestResolveCredentials | nil refs | no kvs, no error |
+| TestResolveCredentials | literal + -env mix | literal ref passes through, -env ref reads from the resolver's environment |
+| TestResolveCredentials | unset -env variable | fails loud naming the stable secret and the variable, never a value |
+| TestResolveCredentials | no environment access | fails loud rather than silently resolving to empty |
+| TestConfigWorkflowCap | 21 workflows | Config produces no output and one error naming the count, the 20 cap, and the split-into-folders remedy |
+| TestConfigWorkflowCap | 20 workflows | exactly at the cap does not error |
+| TestGenerateKubernetesWorkflowCap | 21 workflows | GenerateKubernetes produces no manifest and the same workflow-cap error |
+| TestConfigNoSecretsLeak | - | every rendered password is a ${STABLE} placeholder except the one permitted literal: the reserved spec.StatusUserName account |
+| TestGenerateDockerBasics | - | generates non-empty compose containing the image; all four credential positions render as top-level environment-provider secrets, never inlined as values |
+| TestGeneratePodmanRunAndQuadlet | mode: run | produces a run script (no unit) that loads each secret into podman's store before `podman run`, never carrying the value itself |
 | TestGeneratePodmanRunAndQuadlet | ForceQuadlet true | produces quadlet units, no run script |
+| TestResolveStatusPasswordFixedRand | - | a fixed Rand hook yields the exact 32-lowercase-hex-char literal (16 bytes hex-encoded) |
+| TestResolveStatusPasswordEnvOverride | - | a set, non-empty spec.StatusUserPasswordEnvVar is used verbatim and Rand is never consulted |
+| TestResolveStatusPasswordEmptyEnvFallsBackToRand | - | an empty override is treated as unset, falling back to Rand rather than returning "" |
+| TestResolveStatusPasswordRandError | - | a Rand failure surfaces as an actionable error naming the underlying cause, never a predictable fallback password |
+| TestConfigStatusPasswordRandErrorNoOutput | - | the same Rand failure through Config is a hard error with no output |
+| TestGenerateKubernetesCarriesStatusScript | - | the ConfigMap gets a "status: \|" key carrying the rendered script, addressed to spec.StatusUserName on the resolved management port |
+| TestGenerateDockerCarriesStatusScript | - | compose gets a second top-level config (`<name>-status`) inlining the rendered script, mounted at statusscript.ContainerPath |
+| TestGeneratePodmanCarriesStatusScript | - | PodmanPlan.StatusScript names `<name>-status` and its on-disk mount path is BaseDir-resolved exactly like AppYAML |
 | TestGenerateMissingTargetSection | kubernetes | error contains kubernetes target requires a 'kubernetes:' section in env.yaml |
 | TestGenerateMissingTargetSection | docker | error contains docker target requires a 'docker:' section in env.yaml |
 | TestGenerateMissingTargetSection | podman | error contains podman target requires a 'podman:' section in env.yaml |
-| TestGenValidateAndValuesFileKeys | Validate with TLS but no secrets.stores | no errors, exactly one warning about missing store files at runtime |
-| TestGenValidateAndValuesFileKeys | valuesFileKeys with kubernetes create/file source | returns keys map with SOL=true, no issues |
-| TestGenValidateAndValuesFileKeys | valuesFileKeys nil kubernetes | returns nil,nil |
+| TestGenValidateStoresWarning | - | kubernetes credentials.create (name-only) plus a TLS-without-stores config yields no errors and exactly one stores-omitted advisory warning |
 | TestGeneratorPageGoldenInSync | - | the golden embedded in solmq-conn-util-generator.html matches testdata/golden/application.yml (regenerate with -update-html-golden) |
 | TestGoldenConfig | - | generated config output matches testdata/golden/application.yml byte-for-byte, one instance |
-| TestGoldenKubernetesCreate | - | generated kubernetes manifests (namespace, configmap, secret, stores, pv, pvc, deployment with envFrom/stores/syslog/libs, service) match golden fixture byte-for-byte |
-| TestGoldenKubernetesNoSecrets | - | generated manifests without secrets/syslog/libs (namespace, configmap, deployment, service) match golden fixture byte-for-byte |
-| TestParseExpandsNonCredentialAndWarnsOnUnsetDefaultless | - | parse() expands host/msg-vpn from Lookup, leaves client-password-env verbatim, and returns exactly one warning naming TYPO for the unset defaultless conn-name variable |
+| TestGoldenKubernetesCreate | - | generated kubernetes manifests (namespace, configmap incl. status script, secret, stores, pv, pvc, deployment with secrets-volume/stores/syslog/libs mounts and le-mode/role labels, service) match golden fixture byte-for-byte |
+| TestGoldenKubernetesNoSecrets | - | generated manifests without secrets/syslog/libs (namespace, configmap incl. status script, deployment, service) match golden fixture byte-for-byte |
 
 ## internal/runner
 
@@ -478,6 +534,7 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestOSRunCombinesStdoutAndStderr | - | combined output contains both stdout-line and stderr-line |
 | TestOSRunNonZeroExitReturnsErrorWithOutput | - | non-zero exit returns non-nil error and output still contains before-exit |
 | TestOSRunAcceptsAbsolutePathArgv0 | - | absolute path as argv0 runs successfully, output equals abs-argv0-ok |
+| TestOSRunEnvReachesChildAndAmbientInherited | - | Cmd.Env entries reach the child and override an ambient var of the same name, while an ambient-only var still passes through |
 | TestParseCommand | kubectl | parses to [kubectl], ok |
 | TestParseCommand | kubectl --context prod -n solace | parses to [kubectl --context prod -n solace] tokens, ok |
 | TestParseCommand | oc | trims whitespace to [oc], ok |
@@ -507,6 +564,14 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestPodmanDeployStartFailureIsReported | - | start failure on call 1 surfaces error containing 'start a.service', 2 calls made |
 | TestDockerUnknownAction | - | unknown action rejected, error returned, zero calls made |
 | TestPodmanDeleteStopFailureIsReported | - | stop failure surfaces error containing 'stop solmq-connector.service' |
+| TestPodmanSecretCreateRemovesThenCreatesValueOnStdin | - | PodmanSecretCreate issues rm --ignore then create with the value on stdin, never in argv |
+| TestPodmanSecretCreateSkipsCreateWhenRmFails | - | a failed rm surfaces an error naming it, and create never runs |
+| TestPodmanSecretCreateReportsCreateFailure | - | a failed create surfaces an error naming it, after rm still ran |
+| TestPodmanSecretCreateRejectsUnsafeCommand | - | an unsafe command is rejected before anything runs |
+| TestPodmanSecretRemoveBatchesNames | - | PodmanSecretRemove issues one batched `secret rm --ignore` call naming every secret |
+| TestPodmanSecretRemoveNoNamesIsNoop | - | an empty name list invokes the runner zero times and returns no error |
+| TestPodmanSecretRemoveRejectsUnsafeCommand | - | an unsafe command is rejected before anything runs |
+| TestPodmanSecretRemoveReportsFailure | - | a failed rm surfaces an error naming the operation |
 | TestWriteFileCreatesDirsAndMode | - | creates nested dirs, writes content, sets mode 0600 (non-windows) |
 | TestWriteFileDoesNotTightenExistingFileMode | - | content replaced but existing 0644 mode left unchanged (non-windows) |
 | TestWriteFileParentIsFileReturnsError | - | parent path is a file: MkdirAll error surfaces naming the blocker path |
@@ -521,6 +586,20 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestPreflightRejectsDisallowedBinaryBeforeRunning | - | a command outside the platform allowlist (curl) is rejected before the probe ever runs, zero runner calls |
 | TestPreflightExtraAllowedThreadsThrough | - | "sudo podman" is rejected without extraAllowed and accepted with it, running argv [sudo podman info] |
 | TestPreflightUnknownAction | - | an action other than deploy/delete is rejected, zero runner calls |
+| TestKubernetesPodNamesArgv | no namespace / with namespace | KubernetesPodNames issues `get pods -l <selector> -o name`, adding `-n <namespace>` when given |
+| TestKubernetesPodNamesStripsPrefixAndDropsBlankLines | - | each `pod/` prefix is stripped and blank/whitespace-only lines are dropped |
+| TestKubernetesPodNamesEmptyResultIsNotError | - | no matching pods returns an empty slice, not an error |
+| TestKubernetesPodNamesRunFailureWraps | - | a run failure surfaces as an error naming the "listing pods" operation |
+| TestScriptInstalledArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | ScriptInstalled execs the marker-echoing probe through each platform's exec form, `-n <namespace>` only for kubernetes when given |
+| TestScriptInstalledReadsMarkers | present / absent / marker among engine chatter / present despite a non-zero exit | the answer comes from the marker on stdout, so a marker is believed even when the engine also reported a non-zero exit |
+| TestScriptInstalledUnreachableTargetIsError | engine error with no marker / clean exit with no marker | no marker at all means the probe never ran, so it errors rather than silently reporting absent |
+| TestScriptInstalledUnknownPlatform | - | an unknown platform is rejected, zero runner calls |
+| TestInstallScriptArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | InstallScript execs `mkdir -p <dir> && cat > <path>` through each platform's exec form (`-i` for stdin, `-n <namespace>` only for kubernetes when given) |
+| TestInstallScriptPassesScriptOnStdinNotArgv | - | the script body travels on stdin, never appearing in any argv token |
+| TestInstallScriptUnknownPlatform | - | an unknown platform is rejected, zero runner calls |
+| TestRunStatusScriptArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | RunStatusScript execs `sh <path>` through each platform's exec form |
+| TestRunStatusScriptReturnsOutputAlongsideNonZeroExit | - | a non-zero script exit (the status script's own 1/2 convention) is returned alongside its output, never swallowed |
+| TestRunStatusScriptUnknownPlatform | - | an unknown platform is rejected, zero runner calls |
 
 ## internal/scan
 
@@ -582,6 +661,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | Test | Case | Verifies |
 |------|------|----------|
 | TestDispatchHandlersMatchModel | verbs / generate targets / deploy platforms / completion shells | the dispatch handler sets and cliVerbs agree in BOTH directions, so a command added to one cannot drift from the other |
+| TestPlatformMapsCoverThreeNames | - | platformNames, platformGenerators and actTargets agree in both directions -- a modeled platform with no handler, or a handler with no modeled entry, fails |
 | TestExitCodeContract | nil args | run(nil) returns exit code 2 |
 | TestExitCodeContract | unknown command | run([bogus]) returns exit code 2 |
 | TestExitCodeContract | help short -h | run([-h]) returns exit code 0 |
@@ -594,10 +674,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestGenerateConfigStdoutAndFileMatch | file run | exit 0 and written file content equals prior stdout exactly |
 | TestGenerateFlagsBeforeAndAfterPositional | flags before positional target | exit 0 and output file written |
 | TestGenerateFlagsBeforeAndAfterPositional | flags after positional target | exit 0 and output file written |
-| TestWriteCredEnvFile | empty name | no error and no file written when name is empty |
-| TestWriteCredEnvFile | resolver error | error returned and no creds.env file written for unset variable |
-| TestWriteCredEnvFile | nil kvs existing env-file | no error and existing.env content PRESERVE=1 left untouched |
-| TestWriteCredEnvFile | happy path ordered KVs | writes A=1\nB=2\n and file mode 0600 (non-windows) |
+| TestGenerateConfigWorkflowCapExceeded | - | a folder over validate.MaxWorkflows (20) is a fatal error (exit 1) naming the count and the cap, and writes no `-o` output file |
 | TestGenerateConfigEmitWriteError | - | emit to path with missing parent dir returns exit code 1 |
 | TestLoadEnvWorkflowsDirRelativeToEnvFile | - | workflows.dir resolved relative to env file not cwd; exit 0 and stdout has spring: |
 | TestLoadEnvExcludesEnvFileFromWorkflowSet | - | env.yaml excluded from its own workflow scan; exit code 0 |
@@ -627,6 +704,24 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestDeleteDockerSeam | - | exit 0, 2 runner calls (preflight then down) argv [docker compose -f <compose> down] |
 | TestDeployPodmanSeamWritesUnitsAndStarts | - | exit 0, a leading podman info preflight call, then app yaml and container unit written to quadlet dir, systemctl daemon-reload then start calls |
 | TestDeletePodmanSeamStopsRemovesReloads | - | exit 0, a leading podman info preflight call, then systemctl stop then daemon-reload calls, unit and app yaml files removed |
+| TestPlatformFlagHitOverridesInference | - | an explicit --platform is used even when another section is also present in env.yaml |
+| TestPlatformFlagMissingSectionIsLoudError | - | a --platform value with no matching section fails loud, naming both the requested and the present sections, before the runner is invoked |
+| TestPlatformSingleSectionInferred | - | with no --platform and exactly one section present, that section is used and echoed to stderr |
+| TestPlatformMenuOnMultipleSections | - | with no --platform and more than one section, the interactive menu (via the injected promptLine seam) picks the platform |
+| TestPlatformMenuNonTTYRefusesWithPlatformHint | - | the menu refuses to block when stdin is not a TTY, failing with an error naming --platform instead of hanging |
+| TestPlatformZeroSectionsIsLoudError | - | with no --platform and no section present at all, the error names all three section keys |
+| TestOldPositionalFormsRejectedWithPlatformHint | deploy kubernetes / delete docker / generate podman | the pre-rework positional grammar is a usage error (exit 2) that points at --platform, not resolved as a target |
+| TestStatusScriptPresentRunsAndReportsOutput | - | an already-installed script is just run; stdout prints `"<target>: "` followed by its output, one line per continuation |
+| TestStatusAbsentPlusInstallFlagInstallsThenRuns | - | --install installs a missing script on the target with no prompt, then runs it |
+| TestStatusAbsentPromptYesInstallsThenRuns | - | without --install, a "y" answer to the install prompt (via the injected promptLine seam) installs then runs |
+| TestStatusAbsentPromptNoSkipsAndExitsOne | - | declining the install prompt skips the target (no install, no run) and the overall exit code is 1 |
+| TestStatusStandbyReportedWithoutAbortingOtherTargets | - | standby prints like any other answer (the script always exits 0), the loop still reaches the next target, and the overall exit code stays 0 |
+| TestStatusRunFailureReportedAndExitsOne | - | a non-zero exit from the run can only be a failed exec, so that target is reported on stderr and the exit code is 1, while a reachable target in the same run still reports |
+| TestStatusInstallPromptNonTTYRefusesWithInstallHint | - | the install confirmation refuses to block when stdin is not a TTY, failing with an error naming --install and installing/running nothing |
+| TestStatusTargetValidationRejectsBadPodAndNamespace | bad pod name / bad namespace | an unsafe --pod or --namespace value is rejected via validate.SafeToken before any exec |
+| TestStatusRejectsUnsafeUserBeforeAnyExec | 4 names | a --user carrying '/', '$', a space or a quote is rejected via validate.SafeActuatorUser before any exec, since the name reaches a sed address in the script |
+| TestStatusManagementPortBounds | -1 / 65536 | an out-of-range --management-port is rejected before any exec |
+| TestVersionOutputShape | - | `version` prints `solmq-conn-util <version> <go version> <GOOS>/<GOARCH>`, exit 0; the package-level version var defaults to "dev" in an un-injected test build |
 | TestAbsPath | absolute input | absPath returns input unchanged when already absolute |
 | TestAbsPath | relative input | absPath joins relative path onto base dir |
 | TestCommandsDocInSync | - | docs/commands.md equals what the command model renders; -update rewrites it instead of asserting |

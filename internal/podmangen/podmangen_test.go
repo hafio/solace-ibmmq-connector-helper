@@ -22,7 +22,7 @@ func fullInput() Input {
 			Restart:  "unless-stopped",
 			Timezone: "Asia/Singapore",
 		},
-		Instance: Instance{Name: "solmq-connector", AppYAMLPath: "./solmq-connector-application.yml", MQTLS: true},
+		Instance: Instance{Name: "solmq-connector", AppYAMLPath: "./solmq-connector-application.yml", MQTLS: true, StatusScriptPath: "./solmq-connector-status", LeaderMode: spec.LeaderActiveActive},
 		Secrets: []SecretRef{
 			{StoreName: "solmq-connector-MQ_CONN_1_USER", Target: "MQ_CONN_1_USER"},
 			{StoreName: "solmq-connector-MQ_CONN_1_PASSWORD", Target: "MQ_CONN_1_PASSWORD"},
@@ -44,7 +44,7 @@ func minimalInput() Input {
 			Name:  "solmq-connector",
 			Ports: []spec.Port{{Host: 8090, Container: 8090}},
 		},
-		Instance: Instance{Name: "solmq-connector", AppYAMLPath: "./solmq-connector-application.yml", MQTLS: false},
+		Instance: Instance{Name: "solmq-connector", AppYAMLPath: "./solmq-connector-application.yml", MQTLS: false, StatusScriptPath: "./solmq-connector-status", LeaderMode: ""},
 	}
 }
 
@@ -63,6 +63,8 @@ printf '%s' "${MQ_CONN_1_PASSWORD:?MQ_CONN_1_PASSWORD is not set}" | podman secr
 podman run -d \
   --name solmq-connector \
   --restart unless-stopped \
+  --label solace-connector/le-mode=active_active \
+  --label solace-connector/role=active \
   -p 8090:8090 \
   -p 8080:8091 \
   -e TZ=Asia/Singapore \
@@ -72,6 +74,7 @@ podman run -d \
   -v ./solmq-connector-application.yml:/app/external/spring/config/application.yml:ro \
   -v /abs/certs/truststore.jks:/app/external/classpath/truststores/truststore.jks:ro \
   -v /abs/libs:/app/external/libs:ro \
+  -v ./solmq-connector-status:/app/external/libs/status:ro \
   solace/solace-pubsub-connector-ibmmq:2.13.0
 `
 	if got := RenderRunScript(fullInput()); got != want {
@@ -127,8 +130,11 @@ set -eu
 
 podman run -d \
   --name solmq-connector \
+  --label solace-connector/le-mode=standalone \
+  --label solace-connector/role=active \
   -p 8090:8090 \
   -v ./solmq-connector-application.yml:/app/external/spring/config/application.yml:ro \
+  -v ./solmq-connector-status:/app/external/libs/status:ro \
   solace/solace-pubsub-connector-ibmmq:2.13.0
 `
 	if got := RenderRunScript(minimalInput()); got != want {
@@ -150,6 +156,8 @@ Wants=network-online.target
 [Container]
 Image=solace/solace-pubsub-connector-ibmmq:2.13.0
 ContainerName=solmq-connector
+Label=solace-connector/le-mode=active_active
+Label=solace-connector/role=active
 PublishPort=8090:8090
 PublishPort=8080:8091
 Environment=TZ=Asia/Singapore
@@ -159,6 +167,7 @@ Secret=solmq-connector-MQ_CONN_1_PASSWORD,type=mount,target=MQ_CONN_1_PASSWORD
 Volume=./solmq-connector-application.yml:/app/external/spring/config/application.yml:ro
 Volume=/abs/certs/truststore.jks:/app/external/classpath/truststores/truststore.jks:ro
 Volume=/abs/libs:/app/external/libs:ro
+Volume=./solmq-connector-status:/app/external/libs/status:ro
 
 [Service]
 Restart=unless-stopped
@@ -182,13 +191,98 @@ Wants=network-online.target
 [Container]
 Image=solace/solace-pubsub-connector-ibmmq:2.13.0
 ContainerName=solmq-connector
+Label=solace-connector/le-mode=standalone
+Label=solace-connector/role=active
 PublishPort=8090:8090
 Volume=./solmq-connector-application.yml:/app/external/spring/config/application.yml:ro
+Volume=./solmq-connector-status:/app/external/libs/status:ro
 
 [Install]
 WantedBy=default.target
 `
 	if unit.Content != want {
 		t.Errorf("RenderQuadlet minimal mismatch:\n--- got ---\n%s\n--- want ---\n%s", unit.Content, want)
+	}
+}
+
+// TestLeaderLabelsPerMode asserts the mode label is always present and the
+// role label is present only for standalone and active_active, in both the
+// run script and the quadlet unit.
+func TestLeaderLabelsPerMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		mode     string
+		wantMode string
+		wantRole bool
+	}{
+		{"empty defaults to standalone", "", spec.LeaderStandalone, true},
+		{"standalone", spec.LeaderStandalone, spec.LeaderStandalone, true},
+		{"active_active", spec.LeaderActiveActive, spec.LeaderActiveActive, true},
+		{"active_standby", spec.LeaderActiveStby, spec.LeaderActiveStby, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := minimalInput()
+			in.Instance.LeaderMode = tt.mode
+
+			wantModeLabel := "--label " + spec.LabelModeKey + "=" + tt.wantMode
+			wantRoleLabel := "--label " + spec.LabelRoleKey + "=" + spec.LabelRoleActive
+			run := RenderRunScript(in)
+			if !strings.Contains(run, wantModeLabel) {
+				t.Errorf("RenderRunScript(%q) missing mode label %q, got:\n%s", tt.mode, wantModeLabel, run)
+			}
+			if strings.Contains(run, wantRoleLabel) != tt.wantRole {
+				t.Errorf("RenderRunScript(%q) role label present = %v, want %v, got:\n%s", tt.mode, strings.Contains(run, wantRoleLabel), tt.wantRole, run)
+			}
+
+			wantModeLine := "Label=" + spec.LabelModeKey + "=" + tt.wantMode
+			wantRoleLine := "Label=" + spec.LabelRoleKey + "=" + spec.LabelRoleActive
+			unit := RenderQuadlet(in)
+			if !strings.Contains(unit.Content, wantModeLine) {
+				t.Errorf("RenderQuadlet(%q) missing mode label %q, got:\n%s", tt.mode, wantModeLine, unit.Content)
+			}
+			if strings.Contains(unit.Content, wantRoleLine) != tt.wantRole {
+				t.Errorf("RenderQuadlet(%q) role label present = %v, want %v, got:\n%s", tt.mode, strings.Contains(unit.Content, wantRoleLine), tt.wantRole, unit.Content)
+			}
+		})
+	}
+}
+
+// TestStatusScriptMountNestsAfterLibs asserts the status script mount is
+// emitted after the libs volume in both renderers, so the single-file mount
+// nests inside the libs directory mount instead of being shadowed by it.
+func TestStatusScriptMountNestsAfterLibs(t *testing.T) {
+	in := fullInput()
+
+	run := RenderRunScript(in)
+	libsIdx := strings.Index(run, "-v /abs/libs:/app/external/libs:ro")
+	statusIdx := strings.Index(run, "-v ./solmq-connector-status:/app/external/libs/status:ro")
+	if libsIdx == -1 || statusIdx == -1 || statusIdx < libsIdx {
+		t.Errorf("RenderRunScript status mount must follow the libs mount, got:\n%s", run)
+	}
+
+	unit := RenderQuadlet(in)
+	libsIdx = strings.Index(unit.Content, "Volume=/abs/libs:/app/external/libs:ro")
+	statusIdx = strings.Index(unit.Content, "Volume=./solmq-connector-status:/app/external/libs/status:ro")
+	if libsIdx == -1 || statusIdx == -1 || statusIdx < libsIdx {
+		t.Errorf("RenderQuadlet status mount must follow the libs volume, got:\n%s", unit.Content)
+	}
+}
+
+// TestStatusScriptMountOmittedWhenPathEmpty asserts a caller that has not
+// yet resolved the status script's host path (a preview/partial render)
+// gets no mount for it, rather than a mount with an empty source.
+func TestStatusScriptMountOmittedWhenPathEmpty(t *testing.T) {
+	in := fullInput()
+	in.Instance.StatusScriptPath = ""
+
+	run := RenderRunScript(in)
+	if strings.Contains(run, statusTarget) {
+		t.Errorf("RenderRunScript with empty StatusScriptPath must omit the status mount, got:\n%s", run)
+	}
+
+	unit := RenderQuadlet(in)
+	if strings.Contains(unit.Content, statusTarget) {
+		t.Errorf("RenderQuadlet with empty StatusScriptPath must omit the status mount, got:\n%s", unit.Content)
 	}
 }

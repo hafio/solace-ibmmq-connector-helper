@@ -393,3 +393,154 @@ func PodmanDelete(r Runner, sc QuadletScope, services, units []string) (string, 
 	}
 	return out.String(), nil
 }
+
+// ---- status verb: discovery and in-container exec ---------------------------
+
+// KubernetesPodNames lists the pods matching selector by running
+// `<cmd> get pods [-n namespace] -l selector -o name` and stripping the "pod/"
+// prefix `-o name` prints, one name per line. It is read-only: it never
+// creates, deletes, or execs into anything.
+//
+// An empty match is not an error here -- it returns an empty slice so the
+// caller can produce an actionable "no pods found for selector ..." message
+// with the namespace/selector it used, rather than a generic wrapped error.
+//
+// namespace and selector are operator-supplied and must already be validated
+// by the caller before reaching this function.
+func KubernetesPodNames(r Runner, cmd []string, namespace, selector string) ([]string, error) {
+	argv := append(append([]string(nil), cmd...), "get", "pods")
+	if namespace != "" {
+		argv = append(argv, "-n", namespace)
+	}
+	argv = append(argv, "-l", selector, "-o", "name")
+	out, err := r.Run(Cmd{Argv: argv})
+	if err != nil {
+		return nil, fmt.Errorf("listing pods (selector %q): %w\n%s", selector, err, out)
+	}
+	names := []string{}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		names = append(names, strings.TrimPrefix(line, "pod/"))
+	}
+	return names, nil
+}
+
+// execArgv builds the `<cmd> exec` argv prefix shared by ScriptInstalled,
+// InstallScript, and RunStatusScript, keeping the per-platform shape in one
+// place instead of repeating it in each helper.
+//
+// kubectl/oc need the namespace as a flag and a "--" separator before the
+// in-container command; docker and podman exec take the command directly
+// after the target, with no namespace concept and no separator. interactive
+// adds -i, needed only when the caller pipes something on stdin.
+//
+// target and namespace are operator-supplied and must already be validated by
+// the caller before reaching this function.
+func execArgv(cmd []string, platform, target, namespace string, interactive bool) ([]string, error) {
+	argv := append(append([]string(nil), cmd...), "exec")
+	if interactive {
+		argv = append(argv, "-i")
+	}
+	switch platform {
+	case validate.PlatformKubernetes:
+		argv = append(argv, target)
+		if namespace != "" {
+			argv = append(argv, "-n", namespace)
+		}
+		argv = append(argv, "--")
+	case validate.PlatformDocker, validate.PlatformPodman:
+		argv = append(argv, target)
+	default:
+		return nil, fmt.Errorf("unknown platform %q (want %q, %q, or %q)", platform, validate.PlatformKubernetes, validate.PlatformDocker, validate.PlatformPodman)
+	}
+	return argv, nil
+}
+
+// Markers the presence probe echoes, distinctive enough that engine chatter on
+// the same combined-output stream cannot be mistaken for either answer.
+const (
+	ScriptPresentMarker = "solmq-script-present"
+	ScriptAbsentMarker  = "solmq-script-absent"
+)
+
+// ScriptInstalled probes whether path already exists inside target, returning
+// (present, nil) on a clear answer and an error only when the probe itself
+// could not be carried out.
+//
+// The answer travels as a marker on stdout instead of an exit code, because an
+// exit code cannot carry it unambiguously: a remote non-zero exit is how
+// `test -f` says "no such file", but it is also how kubectl reports that it
+// could not reach the pod at all, and both arrive here as a failed Run with
+// text on combined output. Deciding between them by whether output happens to
+// be empty misreads whichever case it guesses wrong, and guessing "error" on a
+// missing file would refuse to install on precisely the targets that need it.
+//
+// path is a tool-authored constant, never operator input, so it is folded
+// into the sh -c payload as-is. target and namespace are operator-supplied and
+// must already be validated by the caller.
+func ScriptInstalled(r Runner, cmd []string, platform, target, namespace, path string) (bool, error) {
+	argv, err := execArgv(cmd, platform, target, namespace, false)
+	if err != nil {
+		return false, err
+	}
+	// The probe reports its answer as a marker on stdout and always exits 0,
+	// rather than letting "file missing" be a non-zero exit. kubectl exec
+	// surfaces a remote non-zero exit as its own failure plus a "command
+	// terminated with exit code 1" line, so an absent script and an unreachable
+	// pod are indistinguishable by exit status alone -- and treating the wrong
+	// one as an error would refuse to install on exactly the targets that need
+	// it. path is a tool constant, never operator input.
+	argv = append(argv, "sh", "-c", "if [ -f "+path+" ]; then echo "+ScriptPresentMarker+"; else echo "+ScriptAbsentMarker+"; fi")
+	out, runErr := r.Run(Cmd{Argv: argv})
+	switch {
+	case strings.Contains(out, ScriptPresentMarker):
+		return true, nil
+	case strings.Contains(out, ScriptAbsentMarker):
+		return false, nil
+	case runErr != nil:
+		return false, fmt.Errorf("probing %s on %s: %w\n%s", path, target, runErr, out)
+	}
+	return false, fmt.Errorf("probing %s on %s: expected %s or %s in the output, got:\n%s", path, target, ScriptPresentMarker, ScriptAbsentMarker, out)
+}
+
+// InstallScript pipes script onto the target's stdin and writes it to path,
+// creating dir first: `sh -c "mkdir -p <dir> && cat > <path>"` with
+// Cmd.Stdin = script. The script crosses only on stdin -- never cp, never a
+// download, never the script text in argv.
+//
+// dir, path, and script are tool-authored constants, never operator input, so
+// the sh -c payload is built from them as-is. target and namespace are
+// operator-supplied and must already be validated by the caller.
+func InstallScript(r Runner, cmd []string, platform, target, namespace, dir, path, script string) (string, error) {
+	argv, err := execArgv(cmd, platform, target, namespace, true)
+	if err != nil {
+		return "", err
+	}
+	argv = append(argv, "sh", "-c", "mkdir -p "+dir+" && cat > "+path)
+	return r.Run(Cmd{Argv: argv, Stdin: script})
+}
+
+// RunStatusScript runs the already-installed status script (`sh <path>`) and
+// returns its combined output.
+//
+// The script always exits 0 and reports through its output -- the leader-election
+// state on stdout, anything that went wrong on stderr -- so a non-zero exit
+// here did not come from the script and means the exec itself failed (target
+// gone, engine unreachable). Callers should treat it as a failed target rather
+// than as a state. Output is returned alongside any error so whatever the
+// engine printed is available for the message.
+//
+// path is a tool-authored constant, never operator input. target and
+// namespace are operator-supplied and must already be validated by the
+// caller.
+func RunStatusScript(r Runner, cmd []string, platform, target, namespace, path string) (string, error) {
+	argv, err := execArgv(cmd, platform, target, namespace, false)
+	if err != nil {
+		return "", err
+	}
+	argv = append(argv, "sh", path)
+	return r.Run(Cmd{Argv: argv})
+}

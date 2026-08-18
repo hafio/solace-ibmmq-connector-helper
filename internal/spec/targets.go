@@ -21,6 +21,17 @@ const (
 	DefaultMgmtPort      = 8090
 )
 
+// EffectiveManagementPort returns d.Management.Port, falling back to
+// DefaultMgmtPort when unset. Nil-receiver safe so callers can invoke it on a
+// *Defaults that was never parsed (no defaults.yaml/env.yaml section) without
+// a guard at every call site.
+func (d *Defaults) EffectiveManagementPort() int {
+	if d == nil || d.Management.Port == 0 {
+		return DefaultMgmtPort
+	}
+	return d.Management.Port
+}
+
 // Podman generate modes.
 const (
 	PodmanModeRun     = "run"     // emit a `podman run` script (default)

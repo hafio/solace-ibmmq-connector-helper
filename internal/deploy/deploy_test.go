@@ -22,7 +22,7 @@ func baseKube() *spec.Kubernetes {
 
 // one builds a connector instance (the common test-fixture case).
 func one(name, appYAML string, m *consolidate.Model) Instance {
-	return Instance{Name: name, AppYAML: appYAML, Model: m}
+	return Instance{Name: name, AppYAML: appYAML, StatusScript: "#!/bin/sh\necho status\n", Model: m}
 }
 
 // fullFixtureInput builds the everything-on fixture shared by TestRenderFull
@@ -45,11 +45,14 @@ func TestRenderFull(t *testing.T) {
 	out := Render(fullFixtureInput())
 	for _, w := range []string{
 		"kind: ConfigMap", "name: solmq-config", "application.yml: |", "    spring:",
+		"status: |", "    #!/bin/sh", "    echo status",
 		"kind: Secret", "name: creds", "stringData:", `A: "sec\"ret"`,
 		"name: tls", "truststore.jks: QUJD",
 		"kind: Deployment", "automountServiceAccountToken: false", "name: JAVA_TOOL_OPTIONS", "useIBMCipherMappings=false",
+		"solace-connector/le-mode: standalone", "solace-connector/role: active",
 		"- name: secrets", "mountPath: /run/secrets", "defaultMode: 0400",
 		"mountPath: /app/external/classpath/truststores", "livenessProbe:", "tcpSocket:", "readinessProbe:",
+		"mountPath: /app/external/libs/status", "subPath: status",
 		"requests:", "limits:", `cpu: "1"`, "memory: 1Gi",
 		"kind: Service", "targetPort: 8090",
 	} {
@@ -91,6 +94,9 @@ data:
       x: 1
 
       y: 2
+  status: |
+    #!/bin/sh
+    echo status
 ---
 apiVersion: v1
 kind: Secret
@@ -124,6 +130,8 @@ spec:
     metadata:
       labels:
         app: solmq
+        solace-connector/le-mode: standalone
+        solace-connector/role: active
     spec:
       automountServiceAccountToken: false
       containers:
@@ -147,6 +155,10 @@ spec:
               readOnly: true
             - name: stores
               mountPath: /app/external/classpath/truststores
+              readOnly: true
+            - name: config
+              mountPath: /app/external/libs/status
+              subPath: status
               readOnly: true
           livenessProbe:
             tcpSocket:
@@ -190,6 +202,18 @@ spec:
       port: 8090
       targetPort: 8090
 `
+
+// TestRenderConfigMapStatusScript checks the ConfigMap always carries the
+// status script under its own key, alongside application.yml.
+func TestRenderConfigMapStatusScript(t *testing.T) {
+	k := baseKube()
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	for _, want := range []string{"status: |", "    #!/bin/sh", "    echo status"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q\n---\n%s", want, out)
+		}
+	}
+}
 
 // lineDiff returns a compact first-divergence report for two multi-line
 // strings (pattern: internal/gen/golden_test.go's lineDiff).
@@ -324,6 +348,23 @@ func TestRenderLibsDownload(t *testing.T) {
 	}
 }
 
+// TestRenderStatusScriptMountAfterLibs pins the ordering that keeps the
+// single-file status mount from being shadowed by the libs directory mount:
+// the status mount must be declared after it.
+func TestRenderStatusScriptMountAfterLibs(t *testing.T) {
+	k := baseKube()
+	k.Libs = &spec.Libs{PVC: &spec.LibsPVC{Existing: "my-pvc"}}
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	libsIdx := strings.Index(out, "mountPath: /app/external/libs\n")
+	statusIdx := strings.Index(out, "mountPath: /app/external/libs/status")
+	if libsIdx == -1 || statusIdx == -1 || statusIdx < libsIdx {
+		t.Errorf("status mount must come after the libs directory mount:\n%s", out)
+	}
+	if !strings.Contains(out, "subPath: status") {
+		t.Errorf("missing subPath: status\n%s", out)
+	}
+}
+
 func TestRenderNamespaceAlwaysFirst(t *testing.T) {
 	k := baseKube()
 	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
@@ -354,16 +395,58 @@ func TestRenderExistingSecrets(t *testing.T) {
 }
 
 func TestManagementPortFallback(t *testing.T) {
-	if got := managementPort(Input{Kube: baseKube(), Defaults: &spec.Defaults{Management: spec.Management{Present: true, Port: 9999}}}); got != 9999 {
+	if got := ManagementPort(Input{Kube: baseKube(), Defaults: &spec.Defaults{Management: spec.Management{Present: true, Port: 9999}}}); got != 9999 {
 		t.Errorf("mgmt = %d want 9999 (defaults)", got)
 	}
-	if got := managementPort(Input{Kube: baseKube(), Defaults: &spec.Defaults{}}); got != 8090 {
+	if got := ManagementPort(Input{Kube: baseKube(), Defaults: &spec.Defaults{}}); got != 8090 {
 		t.Errorf("mgmt = %d want 8090 (service port)", got)
 	}
 	k := baseKube()
 	k.Service.Port = 0
-	if got := managementPort(Input{Kube: k, Defaults: nil}); got != 8090 {
+	if got := ManagementPort(Input{Kube: k, Defaults: nil}); got != 8090 {
 		t.Errorf("mgmt = %d want 8090 (default)", got)
+	}
+}
+
+// TestRenderLeaderModeLabels covers the pod-template label per mode: standalone
+// and active_active are statically "active", active_standby is not (only the
+// actuator knows the live role there), and a nil Defaults behaves as standalone.
+func TestRenderLeaderModeLabels(t *testing.T) {
+	cases := []struct {
+		name     string
+		defs     *spec.Defaults
+		mode     string
+		wantRole bool
+	}{
+		{"nil Defaults behaves as standalone", nil, spec.LeaderStandalone, true},
+		{"standalone", &spec.Defaults{}, spec.LeaderStandalone, true},
+		{"active_active", &spec.Defaults{LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveActive}}, spec.LeaderActiveActive, true},
+		{"active_standby", &spec.Defaults{LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby}}, spec.LeaderActiveStby, false},
+	}
+	for _, c := range cases {
+		out := Render(Input{Kube: baseKube(), Defaults: c.defs, Instance: one("solmq", "x: 1\n", &consolidate.Model{})})
+		wantMode := "        " + spec.LabelModeKey + ": " + c.mode
+		if !strings.Contains(out, wantMode) {
+			t.Errorf("%s: missing %q\n%s", c.name, wantMode, out)
+		}
+		roleLine := "        " + spec.LabelRoleKey + ": " + spec.LabelRoleActive
+		if has := strings.Contains(out, roleLine); has != c.wantRole {
+			t.Errorf("%s: role label present=%v want %v\n%s", c.name, has, c.wantRole, out)
+		}
+	}
+}
+
+// TestRenderSelectorMatchLabelsAppOnly pins that spec.selector.matchLabels
+// never grows the mode/role labels even when the pod template carries them:
+// a selector must stay immutable for the life of the Deployment, and both
+// labels above can change with configuration or the actuator-reported leader.
+func TestRenderSelectorMatchLabelsAppOnly(t *testing.T) {
+	k := baseKube()
+	defs := &spec.Defaults{LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveActive}}
+	out := Render(Input{Kube: k, Defaults: defs, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	want := "  selector:\n    matchLabels:\n      app: solmq\n  template:"
+	if !strings.Contains(out, want) {
+		t.Errorf("selector must be app-only:\n%s", out)
 	}
 }
 
