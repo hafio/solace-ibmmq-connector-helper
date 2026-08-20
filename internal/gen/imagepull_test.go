@@ -79,7 +79,7 @@ func TestDockerConfigJSONEscapesAwkwardValues(t *testing.T) {
 // TestResolvePullSecret covers the three ways the block resolves, including the
 // reference-only case that must not touch the environment at all.
 func TestResolvePullSecret(t *testing.T) {
-	img := &spec.Image{Repo: "registry.internal", Name: "c", Tag: "1", RepoUser: "svc", RepoPassEnv: "REGISTRY_PASSWORD"}
+	img := &spec.Image{Repo: "registry.internal", Name: "c", Tag: "1", User: "svc", PassEnv: "REGISTRY_PASSWORD"}
 
 	t.Run("reference only: no payload, no environment read", func(t *testing.T) {
 		read := false
@@ -93,6 +93,58 @@ func TestResolvePullSecret(t *testing.T) {
 		}
 		if read {
 			t.Error("referencing a Secret must not read the registry password")
+		}
+	})
+
+	// Both halves are literal/-env pairs, so all four combinations have to reach
+	// the same payload. The -env forms are the ones a committed env.yaml should
+	// use, and the literal forms are what every other credential position here
+	// also allows -- neither is a special case.
+	t.Run("both credentials in their -env form", func(t *testing.T) {
+		envImg := &spec.Image{Repo: "registry.internal", Name: "c", Tag: "1",
+			UserEnv: "REGISTRY_USER", PassEnv: "REGISTRY_PASSWORD"}
+		ps, err := resolvePullSecret(&spec.ImagePullSecret{Name: "regcred", Create: true}, envImg,
+			Resolver{Env: func(k string) (string, bool) {
+				switch k {
+				case "REGISTRY_USER":
+					return "svc", true
+				case "REGISTRY_PASSWORD":
+					return "hunter2", true
+				}
+				return "", false
+			}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := decodeAuths(t, ps.DockerConfigJSON)["registry.internal"]
+		if got["username"] != "svc" || got["password"] != "hunter2" {
+			t.Errorf("auths entry = %v, want the values read from the environment", got)
+		}
+	})
+
+	t.Run("both credentials in their literal form", func(t *testing.T) {
+		litImg := &spec.Image{Repo: "registry.internal", Name: "c", Tag: "1", User: "svc", Pass: "hunter2"}
+		// No environment access at all: a literal pair must not need one.
+		ps, err := resolvePullSecret(&spec.ImagePullSecret{Name: "regcred", Create: true}, litImg, Resolver{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := decodeAuths(t, ps.DockerConfigJSON)["registry.internal"]
+		if got["username"] != "svc" || got["password"] != "hunter2" {
+			t.Errorf("auths entry = %v", got)
+		}
+	})
+
+	t.Run("an unset user-env fails, naming that variable", func(t *testing.T) {
+		envImg := &spec.Image{Repo: "registry.internal", Name: "c", Tag: "1",
+			UserEnv: "REGISTRY_USER", PassEnv: "REGISTRY_PASSWORD"}
+		_, err := resolvePullSecret(&spec.ImagePullSecret{Name: "regcred", Create: true}, envImg,
+			Resolver{Env: func(k string) (string, bool) { return "pw", k == "REGISTRY_PASSWORD" }})
+		if err == nil {
+			t.Fatal("want an error when the user variable is unset")
+		}
+		if !strings.Contains(err.Error(), "REGISTRY_USER") {
+			t.Errorf("error %q should name the user variable, not just the password one", err)
 		}
 	})
 
@@ -126,7 +178,7 @@ func TestResolvePullSecret(t *testing.T) {
 
 	// validate rejects create without both credential fields, so reaching here
 	// means a caller skipped it. The guard exists so that is an error rather
-	// than a nil dereference on img.RepoPassEnv.
+	// than a Secret built from an empty account.
 	t.Run("create with no image block at all", func(t *testing.T) {
 		if _, err := resolvePullSecret(&spec.ImagePullSecret{Name: "regcred", Create: true}, nil,
 			Resolver{Env: func(string) (string, bool) { return "pw", true }}); err == nil {
@@ -135,8 +187,8 @@ func TestResolvePullSecret(t *testing.T) {
 	})
 	t.Run("create with a partial image block", func(t *testing.T) {
 		for _, partial := range []*spec.Image{
-			{Name: "c", Tag: "1", RepoPassEnv: "REGISTRY_PASSWORD"}, // no username
-			{Name: "c", Tag: "1", RepoUser: "svc"},                  // no password variable
+			{Name: "c", Tag: "1", PassEnv: "REGISTRY_PASSWORD"}, // no user
+			{Name: "c", Tag: "1", User: "svc"},                  // no pass in either form
 		} {
 			if _, err := resolvePullSecret(&spec.ImagePullSecret{Name: "regcred", Create: true}, partial,
 				Resolver{Env: func(string) (string, bool) { return "pw", true }}); err == nil {
@@ -153,7 +205,7 @@ func TestResolvePullSecret(t *testing.T) {
 func kubeEnvWithPull(mode string, creds bool) []byte {
 	env := "image:\n  repo: registry.internal\n  name: c\n  tag: v1\n"
 	if creds {
-		env += "  repo-username: svc\n  repo-password-env: REGISTRY_PASSWORD\n"
+		env += "  user: svc\n  pass-env: REGISTRY_PASSWORD\n"
 	}
 	env += "kubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n"
 	if mode != "" {

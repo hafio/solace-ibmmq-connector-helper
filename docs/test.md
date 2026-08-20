@@ -427,11 +427,12 @@ Tests: [render_test.go](../internal/render/render_test.go)
 | TestApplicationSecurityUserRoles | - | a roles-bearing user renders a block-style roles sequence under its password; a role-less user and the reserved solmq-status account emit no roles key at all, keeping pre-roles output byte-identical |
 
 | TestRetiredPerPlatformImageRejected | kubernetes / docker / podman | each retired per-platform image key errors, and the message names the top-level image: block that replaced it |
-| TestImageBlockRequired | absent / no name / no tag / unsafe repo, name, tag, repo-username, repo-password-env | the top-level block is required once a platform is in play, tag included (an untagged image resolves to :latest and pins nothing), and every field is charset-checked |
+| TestImageBlockRequired | absent / no name / no tag / unsafe repo, name, tag | the top-level block is required once a platform is in play, tag included (an untagged image resolves to :latest and pins nothing), and the fields that reach an argv are charset-checked |
+| TestImageBlockRequired | bad pass-env name / either credential set both ways | the registry account (`user`/`pass`) goes through the shared checkCred, so it gets the same literal-xor-env rule and variable-name check as every other credential |
 | TestImageNotRequiredWithoutAPlatform | - | `generate config` renders application.yml alone and pulls nothing, so no image is demanded |
 | TestImagePullSecretChecks | name alone | referencing a Secret requires no registry credentials at all |
 | TestImagePullSecretChecks | name required / DNS-1123 | the Secret name is required and held to the label rule the cluster would apply |
-| TestImagePullSecretChecks | create without credentials | create errors unless image.repo-username and image.repo-password-env are both set |
+| TestImagePullSecretChecks | create without credentials | create errors unless the registry account is set, in either the literal or the -env form |
 | TestImagePullSecretChecks | create, variable unset / set | an unset variable warns rather than errors, so a config can be linted without the deploy secrets |
 | TestRetiredPerPlatformTimezoneRejected | kubernetes / docker / podman | each retired per-platform timezone key errors and names the top-level timezone: key |
 | TestTopLevelTimezoneUnsafe | unsafe / realistic | the top-level timezone keeps the charset gate the per-platform key had, and an empty value is not an error |
@@ -575,6 +576,8 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestDockerConfigJSONEscapesAwkwardValues | - | a password carrying quotes, a backslash or JSON of its own round-trips as data rather than reshaping the document -- which is why it is marshalled, not concatenated |
 | TestResolvePullSecret | reference only | resolves to the name alone and never reads the registry password |
 | TestResolvePullSecret | create | builds the payload from the environment |
+| TestResolvePullSecret | both -env / both literal | all four halves resolve: the -env pair reads each variable, and a literal pair needs no environment access at all |
+| TestResolvePullSecret | unset user-env | an unset user variable fails naming that variable, not only the password one |
 | TestResolvePullSecret | variable unset / no environment access | both fail loudly, naming the variable |
 | TestResolvePullSecret | no image block / partial image block | the guard that exists so a caller who skipped validate gets an error rather than a nil dereference |
 | TestGenerateKubernetesImagePull | no block / reference / create | the wiring from config to rendered manifest: nothing, an imagePullSecrets entry alone, or the entry plus the dockerconfigjson Secret -- the integration point TestResolvePullSecret skips |

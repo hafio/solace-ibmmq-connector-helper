@@ -750,8 +750,8 @@ image:
   repo: registry.internal:5000   # optional; omit for Docker Hub
   name: solace/solace-pubsub-connector-ibmmq
   tag: 2.13.0
-  repo-username: svc-puller      # only for kubernetes.secrets.image-pull.create
-  repo-password-env: REGISTRY_PASSWORD
+  user: svc-puller               # only for kubernetes.secrets.image-pull.create
+  pass-env: REGISTRY_PASSWORD    # ...or pass: <literal>
 ```
 
 | option | notes |
@@ -759,8 +759,8 @@ image:
 | `repo` | the **registry host** (and port) only. A Docker Hub namespace such as `solace/` is part of the repository path and belongs in `name` -- putting it here renders the same reference but looks up credentials under a registry that does not exist. Omit for Docker Hub |
 | `name` | required; the repository path, including any namespace |
 | `tag` | required. An untagged image resolves to `:latest`, which pins nothing; a `sha256:...` digest is joined with `@` and pins exactly |
-| `repo-username` | registry account, needed only when the tool builds a pull secret (section 8) |
-| `repo-password-env` | **names a host variable**, never the password itself -- the same indirection every other credential in this file uses |
+| `user` / `user-env` | registry account, needed only when the tool builds a pull secret (section 8) |
+| `pass` / `pass-env` | its password. A literal/`-env` pair like every other credential here (section 8.1): give one form or the other, never both. Prefer `-env` -- this file is meant to be safe to commit |
 
 The container timezone moved the same way, and for the same reason -- it was
 three keys deciding one thing:
@@ -1072,7 +1072,7 @@ kubernetes:
 |--------|--------|
 | no `image-pull:` block | no pull secret, no `imagePullSecrets` -- nothing changes |
 | `name` only | the pod template gets `imagePullSecrets`, and **no Secret is rendered**. Make it yourself: `kubectl create secret docker-registry regcred ...` |
-| `name` + `create: true` | the tool also renders a `kubernetes.io/dockerconfigjson` Secret, built from `image.repo`, `image.repo-username` and `image.repo-password-env` (section 7.0) |
+| `name` + `create: true` | the tool also renders a `kubernetes.io/dockerconfigjson` Secret, built from `image.repo` and the registry account in the `image` block (section 7.0) |
 
 `create` defaults to **false** deliberately: building a Secret is a mutation, and
 naming one you manage must not overwrite it. It also keeps the registry account

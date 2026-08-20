@@ -248,8 +248,8 @@ details[open]>summary::before{content:"- "}
       <div class="f"><label>Tag</label><input id="i-img-tag" placeholder="2.13.0"><div class="h">Required. A sha256: digest pins exactly.</div></div>
     </div>
     <div class="fr">
-      <div class="f"><label>Registry Username</label><input id="i-img-repouser" placeholder="(only to create a pull secret)"></div>
-      <div class="f"><label>Registry Password Variable</label><input id="i-img-repopassenv" placeholder="REGISTRY_PASSWORD"><div class="h">Names a host variable, never the password.</div></div>
+      <div class="f"><label>Registry User</label><input id="i-img-user" placeholder="(only to create a pull secret)"><label class="h" style="display:flex;align-items:center;gap:.3rem;font-style:normal;cursor:pointer"><input type="checkbox" id="i-img-user-env" checked> env var (uncheck for a literal value)</label></div>
+      <div class="f"><label>Registry Pass</label><input id="i-img-pass" placeholder="REGISTRY_PASSWORD"><label class="h" style="display:flex;align-items:center;gap:.3rem;font-style:normal;cursor:pointer"><input type="checkbox" id="i-img-pass-env" checked> env var (uncheck for a literal value)</label></div>
     </div>
     <div class="f"><label>Timezone</label><input id="i-tz" placeholder="Asia/Singapore"><div class="h">Optional; sets the container TZ. Blank leaves the image default.</div></div>
   </div>
@@ -917,6 +917,13 @@ function readCredPair(root, cls){
 // readCredById is readCredPair for the page's singleton credential fields
 // (addressed by element id rather than a class scoped to a repeater row) --
 // the TLS store passwords and the inline leader-election session.
+// setCredById is readCredById's inverse for the load path: it writes the value
+// into the input and steers the checkbox to whichever form the model carries.
+function setCredById(valId, envId, cred){
+  const c = cred || { literal: '', env: '' };
+  setV(valId, c.env || c.literal);
+  setC(envId, !c.literal);
+}
 function readCredById(valId, envId){
   return C(envId) ? { literal: '', env: V(valId) } : { literal: V(valId), env: '' };
 }
@@ -1024,7 +1031,10 @@ function readModel(){
   // retired because three copies of one decision drifted apart).
   m.image = {
     repo: V('i-img-repo'), name: V('i-img-name'), tag: V('i-img-tag'),
-    repoUser: V('i-img-repouser'), repoPassEnv: V('i-img-repopassenv')
+    // Credential pairs like every other one on the page: the checkbox picks
+    // whether the input holds a host variable name or the value itself.
+    user: readCredById('i-img-user', 'i-img-user-env'),
+    pass: readCredById('i-img-pass', 'i-img-pass-env')
   };
   m.timezone = V('i-tz');
 
@@ -1164,10 +1174,11 @@ function emitEnv(m){
 
   // Shared by every platform, so emitted once above the target sections.
   const img = m.image || {};
-  if(img.repo || img.name || img.tag || img.repoUser || img.repoPassEnv){
+  const hasAcct = c => c && (c.literal || c.env);
+  if(img.repo || img.name || img.tag || hasAcct(img.user) || hasAcct(img.pass)){
     y += '\n# ---- image (one declaration, every platform) ----\nimage:\n'
        + kv('repo', img.repo, '  ') + kv('name', img.name, '  ') + kv('tag', img.tag, '  ')
-       + kv('repo-username', img.repoUser, '  ') + kv('repo-password-env', img.repoPassEnv, '  ');
+       + kcred('user', img.user, '  ') + kcred('pass', img.pass, '  ');
   }
   if(m.timezone) y += '\n' + kv('timezone', m.timezone, '');
 
@@ -1638,11 +1649,15 @@ function checkImageBlock(add, warn, m){
   const i = m.image || {};
   if(!i.name) add(ENV_FILE, 'image.name is required');
   if(!i.tag) add(ENV_FILE, 'image.tag is required: an untagged image resolves to :latest, which pins nothing. Use a version tag, or a sha256: digest to pin exactly');
-  [['repo', i.repo], ['name', i.name], ['tag', i.tag], ['repo-username', i.repoUser], ['repo-password-env', i.repoPassEnv]]
+  [['repo', i.repo], ['name', i.name], ['tag', i.tag]]
     .forEach(([key, val]) => {
       if(val && !safeToken(val)) add(ENV_FILE, `image.${key} "${val}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
       checkExpansion(warn, ENV_FILE, `image.${key}`, val);
     });
+  // The registry account is a credential pair, so it gets the same check as
+  // every other one: literal xor -env, and a valid variable name.
+  checkCred(add, warn, ENV_FILE, 'image.user', i.user);
+  checkCred(add, warn, ENV_FILE, 'image.pass', i.pass);
   if(m.timezone && !safeToken(m.timezone)) add(ENV_FILE, `timezone "${m.timezone}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
   checkExpansion(warn, ENV_FILE, 'timezone', m.timezone);
 }
@@ -1665,8 +1680,9 @@ function checkKube(add, warn, m){
   if(k.imagePull){
     if(!k.imagePull.name) add(ENV_FILE, 'kubernetes.secrets.image-pull.name is required');
     else if(!isDNS1123(k.imagePull.name)) add(ENV_FILE, `kubernetes.secrets.image-pull.name "${k.imagePull.name}" is not a valid DNS-1123 label`);
-    if(k.imagePull.create && (!m.image.repoUser || !m.image.repoPassEnv)){
-      add(ENV_FILE, 'kubernetes.secrets.image-pull.create requires image.repo-username and image.repo-password-env: the Secret is built from them. Reference an existing Secret instead to need neither');
+    const set = c => !!(c && (c.literal || c.env));
+    if(k.imagePull.create && (!set(m.image.user) || !set(m.image.pass))){
+      add(ENV_FILE, 'kubernetes.secrets.image-pull.create requires image.user and image.pass (or their -env forms): the Secret is built from them. Reference an existing Secret instead to need neither');
     }
   }
   checkExpansion(warn, ENV_FILE, 'kubernetes.command', k.command);
@@ -2796,7 +2812,8 @@ function sampleModel(){
     // One image, one timezone, shared by every platform. repo stays blank for
     // Docker Hub: the "solace" namespace is part of the repository path, so it
     // belongs in name -- putting it in repo would break the credential lookup.
-    image: { repo: '', name: 'solace/solace-pubsub-connector-ibmmq', tag: '2.13.0', repoUser: '', repoPassEnv: '' },
+    image: { repo: '', name: 'solace/solace-pubsub-connector-ibmmq', tag: '2.13.0',
+             user: { literal: '', env: '' }, pass: { literal: '', env: '' } },
     timezone: 'Asia/Singapore',
     connections: [
       { name: 'prod-solace', side: mkSide({
@@ -2911,10 +2928,11 @@ function clearForm(){
   ['conns-list', 'wfs-list', 'users-list', 'dk-ports', 'pd-ports'].forEach(id => { $(id).innerHTML = ''; });
   ['i-ts-on', 'i-ks-on', 'i-mgmt-on', 'i-sec-on', 'i-k8s-on', 'i-dk-on', 'i-pd-on',
    'i-k8s-sl-on', 'i-k8s-svc', 'i-dk-stores', 'i-pd-stores', 'i-dk-libs-on', 'i-pd-libs-on'].forEach(id => setC(id, false));
-  ['i-ts-pass-env', 'i-ks-pass-env', 'i-le-user-env', 'i-le-pass-env'].forEach(id => setC(id, true));
+  ['i-ts-pass-env', 'i-ks-pass-env', 'i-le-user-env', 'i-le-pass-env',
+   'i-img-user-env', 'i-img-pass-env'].forEach(id => setC(id, true));
   ['i-log', 'i-soldef', 'i-le-queue', 'i-le-fo', 'i-k8s-name', 'i-k8s-ns',
    'i-k8s-cpu', 'i-k8s-mem', 'i-k8s-ipull-name',
-   'i-img-repo', 'i-img-name', 'i-img-tag', 'i-img-repouser', 'i-img-repopassenv', 'i-tz',
+   'i-img-repo', 'i-img-name', 'i-img-tag', 'i-img-user', 'i-img-pass', 'i-tz',
    'i-ts-file', 'i-ts-pass', 'i-ks-file', 'i-ks-pass'].forEach(id => setV(id, ''));
   setV('i-wf-dir', '.'); setV('i-wf-pat', '*');
   setV('i-le-mode', ''); setV('i-k8s-libs', ''); setV('i-k8s-cred', ''); setV('i-k8s-stores', '');
@@ -2965,7 +2983,8 @@ function loadSample(){
   // Shared by every platform, so loaded once rather than per section.
   const im = m.image || {};
   setV('i-img-repo', im.repo); setV('i-img-name', im.name); setV('i-img-tag', im.tag);
-  setV('i-img-repouser', im.repoUser); setV('i-img-repopassenv', im.repoPassEnv);
+  setCredById('i-img-user', 'i-img-user-env', im.user);
+  setCredById('i-img-pass', 'i-img-pass-env', im.pass);
   setV('i-tz', m.timezone);
 
   const k = m.kube;

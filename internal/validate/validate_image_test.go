@@ -70,8 +70,9 @@ func TestImageBlockRequired(t *testing.T) {
 		{"unsafe name", &spec.Image{Name: "c;rm -rf /", Tag: "1"}, "image.name"},
 		{"unsafe repo", &spec.Image{Repo: "reg $(evil)", Name: "c", Tag: "1"}, "image.repo"},
 		{"unsafe tag", &spec.Image{Name: "c", Tag: "1 2"}, "image.tag"},
-		{"unsafe repo-username", &spec.Image{Name: "c", Tag: "1", RepoUser: "a b"}, "image.repo-username"},
-		{"unsafe repo-password-env", &spec.Image{Name: "c", Tag: "1", RepoPassEnv: "A B"}, "image.repo-password-env"},
+		{"bad pass-env name", &spec.Image{Name: "c", Tag: "1", PassEnv: "A B"}, "image.pass-env"},
+		{"pass set both ways", &spec.Image{Name: "c", Tag: "1", Pass: "pw", PassEnv: "V"}, "use one or the other"},
+		{"user set both ways", &spec.Image{Name: "c", Tag: "1", User: "u", UserEnv: "V"}, "use one or the other"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -123,7 +124,7 @@ func TestImagePullSecretChecks(t *testing.T) {
 	})
 	t.Run("create without registry credentials", func(t *testing.T) {
 		errs, _ := run(&spec.ImagePullSecret{Name: "regcred", Create: true}, imageOK(), nil)
-		if !hasErr(errs, "requires image.repo-username and image.repo-password-env") {
+		if !hasErr(errs, "requires image.user and image.pass") {
 			t.Fatalf("want a missing-credentials error, got %v", errs)
 		}
 	})
@@ -139,8 +140,8 @@ func TestImagePullSecretChecks(t *testing.T) {
 	}
 	credsImage := func() *spec.Image {
 		img := imageOK()
-		img.RepoUser = "svc"
-		img.RepoPassEnv = "REGISTRY_PASSWORD"
+		img.User = "svc"
+		img.PassEnv = "REGISTRY_PASSWORD"
 		return img
 	}
 

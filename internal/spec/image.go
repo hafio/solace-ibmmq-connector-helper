@@ -18,15 +18,40 @@ const DefaultRegistry = "https://index.docker.io/v1/"
 // "solace" namespace in Repo would render the same reference but look up
 // credentials under a registry that does not exist.
 //
-// RepoUser/RepoPassEnv are consulted only when the tool is asked to build a
-// registry pull secret (kubernetes.secrets.image-pull.create); referencing a
-// secret you made yourself needs neither, which is why they are optional.
+// The registry account is consulted only when the tool is asked to build a pull
+// secret (kubernetes.secrets.image-pull.create); referencing a secret you made
+// yourself needs neither field, which is why both are optional.
+//
+// Both are literal/-env pairs like every other credential here, so they get the
+// same treatment from validate.checkCred and gen.ResolveCredentials: one form or
+// the other but never both, the variable name checked, and a warning when it is
+// not exported.
 type Image struct {
-	Repo        string `yaml:"repo"` // registry host (and port); empty means Docker Hub. A Hub namespace belongs in Name
-	Name        string `yaml:"name"`
-	Tag         string `yaml:"tag"`
-	RepoUser    string `yaml:"repo-username"`
-	RepoPassEnv string `yaml:"repo-password-env" expand:"no"` // names a host var; expanding it would defeat the -env indirection
+	Repo string `yaml:"repo"` // registry host (and port); empty means Docker Hub. A Hub namespace belongs in Name
+	Name string `yaml:"name"`
+	Tag  string `yaml:"tag"`
+
+	User    string `yaml:"user" expand:"no"`     // credential: out of scope (rule 5)
+	UserEnv string `yaml:"user-env" expand:"no"` // names a host var; expanding it would defeat the -env indirection
+	Pass    string `yaml:"pass" expand:"no"`     // credential: out of scope (rule 5)
+	PassEnv string `yaml:"pass-env" expand:"no"` // names a host var; expanding it would defeat the -env indirection
+}
+
+// UserCred and PassCred expose the registry account as the same Cred pair every
+// other credential position uses, so one set of checks and one resolver serve
+// all of them.
+func (i *Image) UserCred() Cred {
+	if i == nil {
+		return Cred{}
+	}
+	return Cred{i.User, i.UserEnv}
+}
+
+func (i *Image) PassCred() Cred {
+	if i == nil {
+		return Cred{}
+	}
+	return Cred{i.Pass, i.PassEnv}
 }
 
 // Ref assembles the reference the container engines pull -- repo/name:tag, with

@@ -143,7 +143,7 @@ func Run(ctx Context) (errs, warns []Issue) {
 	checkSecurityUserRoles(add, d)
 
 	// The image every platform deploys, and then the per-target deploy-grade checks.
-	checkImage(add, ctx)
+	checkImage(add, warn, ctx)
 	checkTargets(add, warn, ctx, resolved)
 
 	return errs, warns
@@ -795,7 +795,7 @@ func isDNS1123(s string) bool { return len(s) <= 63 && dns1123RE.MatchString(s) 
 // checkImage validates the top-level image: block -- the one declaration every
 // platform deploys from. It runs only when a platform is in play: `generate
 // config` renders application.yml alone and never needs an image.
-func checkImage(add func(string, string, ...any), ctx Context) {
+func checkImage(add, warn func(string, string, ...any), ctx Context) {
 	if !ctx.CheckKubernetes && !ctx.CheckDocker && !ctx.CheckPodman {
 		return
 	}
@@ -825,13 +825,16 @@ func checkImage(add func(string, string, ...any), ctx Context) {
 		{"repo", i.Repo},
 		{"name", i.Name},
 		{"tag", i.Tag},
-		{"repo-username", i.RepoUser},
-		{"repo-password-env", i.RepoPassEnv},
 	} {
 		if f.val != "" && !SafeToken(f.val) {
 			add(fileEnv, "image.%s %q contains an unsafe character (%s)", f.key, f.val, UnsafeTokenReason)
 		}
 	}
+	// The registry account is a credential pair like every other one, so it gets
+	// the shared check: literal xor -env, a valid variable name, and a warning
+	// when the variable is not exported.
+	checkCred(add, warn, ctx.Env, fileEnv, "image.user", i.UserCred())
+	checkCred(add, warn, ctx.Env, fileEnv, "image.pass", i.PassCred())
 }
 
 // checkImagePull validates kubernetes.secrets.image-pull. The name alone
@@ -847,16 +850,8 @@ func checkImagePull(add, warn func(string, string, ...any), ctx Context) {
 	if !ip.Create {
 		return
 	}
-	if ctx.Image == nil || ctx.Image.RepoUser == "" || ctx.Image.RepoPassEnv == "" {
-		add(fileEnv, "kubernetes.secrets.image-pull.create requires image.repo-username and image.repo-password-env: the Secret is built from them. Omit create to reference a Secret you manage yourself instead")
-		return
-	}
-	// Same shape as every other -env reference: a warning, not an error, so a
-	// config can be linted on a machine that does not hold the deploy secrets.
-	if ctx.Env != nil {
-		if _, ok := ctx.Env(ctx.Image.RepoPassEnv); !ok {
-			warn(fileEnv, "image.repo-password-env names %s, which is not set in this environment; deploying will fail until it is exported", ctx.Image.RepoPassEnv)
-		}
+	if ctx.Image.UserCred().Empty() || ctx.Image.PassCred().Empty() {
+		add(fileEnv, "kubernetes.secrets.image-pull.create requires image.user and image.pass (or their -env forms): the Secret is built from them. Omit create to reference a Secret you manage yourself instead")
 	}
 }
 

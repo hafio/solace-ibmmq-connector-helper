@@ -242,19 +242,24 @@ func resolvePullSecret(ip *spec.ImagePullSecret, img *spec.Image, res Resolver) 
 	if !ip.Create {
 		return out, nil
 	}
-	// validate rejects create without both fields, so this only guards against a
-	// future caller reaching here without having run it.
-	if img == nil || img.RepoUser == "" || img.RepoPassEnv == "" {
-		return nil, fmt.Errorf("kubernetes.secrets.image-pull.create needs image.repo-username and image.repo-password-env")
+	user, pass := img.UserCred(), img.PassCred()
+	// validate rejects create without both, so reaching here means a caller
+	// skipped it. The guard makes that an error rather than a Secret built from
+	// an empty account.
+	if user.Empty() || pass.Empty() {
+		return nil, fmt.Errorf("kubernetes.secrets.image-pull.create needs image.user and image.pass (or their -env forms)")
 	}
-	if res.Env == nil {
-		return nil, fmt.Errorf("kubernetes.secrets.image-pull.create reads environment variable %s, but this command has no environment access", img.RepoPassEnv)
+	// Resolved through the same path as every other credential, so a literal
+	// passes through, an -env form is read from the environment, and an unset
+	// variable fails with a message naming both the position and the variable.
+	kvs, err := ResolveCredentials([]consolidate.SecretRef{
+		{Stable: "image.user", Literal: user.Literal, EnvVar: user.EnvVar},
+		{Stable: "image.pass", Literal: pass.Literal, EnvVar: pass.EnvVar},
+	}, res)
+	if err != nil {
+		return nil, err
 	}
-	pass, ok := res.Env(img.RepoPassEnv)
-	if !ok {
-		return nil, fmt.Errorf("kubernetes.secrets.image-pull.create: environment variable %s is not set; export it before deploying", img.RepoPassEnv)
-	}
-	doc, err := dockerConfigJSON(img.Registry(), img.RepoUser, pass)
+	doc, err := dockerConfigJSON(img.Registry(), kvs[0].Val, kvs[1].Val)
 	if err != nil {
 		return nil, fmt.Errorf("building the image-pull secret: %w", err)
 	}
