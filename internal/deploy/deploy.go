@@ -28,9 +28,23 @@ type StoreFile struct {
 	Base64 string // base64 of the file bytes
 }
 
+// PullSecret is the resolved registry-credential wiring for the pod template.
+//
+// Name is set whenever an image-pull block is present and always reaches the
+// pod as an imagePullSecrets entry. DockerConfigJSON is the base64
+// .dockerconfigjson payload and is non-empty only when the tool was asked to
+// build the Secret itself -- referencing one the operator manages leaves it
+// empty, so no Secret object is rendered and theirs is not overwritten.
+type PullSecret struct {
+	Name             string
+	DockerConfigJSON string
+}
+
 // Instance is the connector: its ConfigMap + Deployment + Service.
 type Instance struct {
 	Name         string             // deployment name
+	Image        string             // the reference to pull, from the top-level image: block
+	Timezone     string             // container TZ, from the top-level timezone: key
 	AppYAML      string             // the rendered application.yml (trailing newline)
 	StatusScript string             // the rendered status script the operator execs inside the container
 	Model        *consolidate.Model // the consolidated model (drives MQTLS etc.)
@@ -38,11 +52,12 @@ type Instance struct {
 
 // Input is everything needed to render the manifests.
 type Input struct {
-	Kube     *spec.Kubernetes
-	Defaults *spec.Defaults
-	CredKVs  []KV        // resolved credential values (only when credentials.create)
-	Stores   []StoreFile // resolved .jks files (only when stores.create)
-	Instance Instance
+	Kube      *spec.Kubernetes
+	Defaults  *spec.Defaults
+	CredKVs   []KV        // resolved credential values (only when credentials.create)
+	Stores    []StoreFile // resolved .jks files (only when stores.create)
+	ImagePull *PullSecret // nil when no image-pull block is configured
+	Instance  Instance
 }
 
 // yw is the indentation-aware line writer used by every renderer here.
@@ -232,6 +247,21 @@ func Render(in Input) string {
 		}
 	}
 
+	// 3c. image-pull Secret, only when the tool was asked to build one. A
+	// reference-only block renders no Secret here, so a Secret the operator
+	// created and manages is never overwritten by an apply.
+	if ip := in.ImagePull; ip != nil && ip.DockerConfigJSON != "" {
+		sep()
+		w.Line(0, "apiVersion: v1")
+		w.Line(0, "kind: Secret")
+		w.Line(0, "metadata:")
+		w.Line(2, "name: "+ip.Name)
+		w.Line(2, "namespace: "+ns)
+		w.Line(0, "type: kubernetes.io/dockerconfigjson")
+		w.Line(0, "data:")
+		w.Line(2, ".dockerconfigjson: "+ip.DockerConfigJSON)
+	}
+
 	// 3b. libs PV + PVC (only for libs.pvc.create; PV is cluster-scoped).
 	if lb := in.Kube.Libs; lb != nil && lb.PVC != nil && lb.PVC.Create != nil {
 		c := lb.PVC.Create
@@ -354,6 +384,13 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 	// account token would land under the same /run/secrets tree the configtree
 	// import reads -- turning the token into stray connector properties.
 	w.Line(6, "automountServiceAccountToken: false")
+	// The kubelet, not the connector, consumes this -- it is how the image is
+	// pulled at all from a registry that needs credentials. Emitted for a
+	// created and an existing Secret alike; only rendering the Secret differs.
+	if ip := in.ImagePull; ip != nil && ip.Name != "" {
+		w.Line(6, "imagePullSecrets:")
+		w.Line(8, "- name: "+ip.Name)
+	}
 	lb := in.Kube.Libs
 	if lb != nil && lb.Download != nil {
 		d := lb.Download
@@ -371,19 +408,26 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 	}
 	w.Line(6, "containers:")
 	w.Line(8, "- name: connector")
-	w.Line(10, "image: "+dep.Image)
+	w.Line(10, "image: "+inst.Image)
 	w.Line(10, "ports:")
 	w.Line(12, "- name: management")
 	w.Line(14, "containerPort: "+strconv.Itoa(mgmtPort))
-	// env
-	w.Line(10, "env:")
-	w.Line(12, "- name: TZ")
-	w.Line(14, "value: "+dep.Timezone)
+	// env: guarded as a whole, because every entry under it is optional now that
+	// the timezone is a top-level key rather than a required per-platform one --
+	// an unguarded "env:" with nothing beneath it is a null, not an empty list.
+	sys := syslogOf(in.Kube)
+	if inst.Timezone != "" || inst.Model.MQTLS || sys != nil {
+		w.Line(10, "env:")
+	}
+	if inst.Timezone != "" {
+		w.Line(12, "- name: TZ")
+		w.Line(14, "value: "+inst.Timezone)
+	}
 	if inst.Model.MQTLS {
 		w.Line(12, "- name: JAVA_TOOL_OPTIONS")
 		w.Line(14, `value: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"`)
 	}
-	if sys := syslogOf(in.Kube); sys != nil {
+	if sys != nil {
 		w.Line(12, "- name: LOGGING_SYSLOG_APPNAME")
 		w.Line(14, "value: "+name)
 		w.Line(12, "- name: LOGGING_SYSLOG_HOST")

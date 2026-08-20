@@ -33,14 +33,14 @@ curl -fsS "$STATUS_URL"
 func TestRenderFull_WithEverything(t *testing.T) {
 	in := Input{
 		Docker: &spec.Docker{
-			Image:    "solace/solace-pubsub-connector-ibmmq:2.13.0",
-			Name:     "solmq-connector",
-			Restart:  "unless-stopped",
-			Ports:    []spec.Port{{Host: 8090, Container: 8090}, {Host: 8080, Container: 8091}},
-			Timezone: "Asia/Singapore",
+			Name:    "solmq-connector",
+			Restart: "unless-stopped",
+			Ports:   []spec.Port{{Host: 8090, Container: 8090}, {Host: 8080, Container: 8091}},
 		},
 		Instance: Instance{
 			Name:         "solmq-connector",
+			Image:        "solace/solace-pubsub-connector-ibmmq:2.13.0",
+			Timezone:     "Asia/Singapore",
 			AppYAML:      appYAML1,
 			MQTLS:        true,
 			StatusScript: statusScript1,
@@ -124,10 +124,9 @@ secrets:
 func TestRenderFull_Minimal(t *testing.T) {
 	in := Input{
 		Docker: &spec.Docker{
-			Image: "img:1",
-			Name:  "solmq",
+			Name: "solmq",
 		},
-		Instance: Instance{Name: "solmq", AppYAML: "key: value\n", MQTLS: false, StatusScript: "echo ok\n"},
+		Instance: Instance{Name: "solmq", Image: "img:1", AppYAML: "key: value\n", MQTLS: false, StatusScript: "echo ok\n"},
 	}
 
 	want := `services:
@@ -162,8 +161,8 @@ configs:
 // any env_file line, is ever emitted).
 func TestSecretsBranches(t *testing.T) {
 	withSecret := Render(Input{
-		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
+		Docker:   &spec.Docker{Name: "s"},
+		Instance: Instance{Name: "s", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 		Secrets:  []string{"MQ_USER"},
 	})
 	if !strings.Contains(withSecret, "    secrets:\n      - MQ_USER\n") {
@@ -174,8 +173,8 @@ func TestSecretsBranches(t *testing.T) {
 	}
 
 	noSecrets := Render(Input{
-		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
+		Docker:   &spec.Docker{Name: "s"},
+		Instance: Instance{Name: "s", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
 	if strings.Contains(noSecrets, "secrets:") {
 		t.Errorf("secrets block should be absent when Secrets is empty:\n%s", noSecrets)
@@ -189,8 +188,8 @@ func TestSecretsBranches(t *testing.T) {
 func TestEnvironmentBranches(t *testing.T) {
 	// TZ only (no MQTLS).
 	tzOnly := Render(Input{
-		Docker:   &spec.Docker{Image: "img", Name: "s", Timezone: "UTC"},
-		Instance: Instance{Name: "s", AppYAML: "k: v\n", MQTLS: false, StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
+		Docker:   &spec.Docker{Name: "s"},
+		Instance: Instance{Name: "s", Image: "img", Timezone: "UTC", AppYAML: "k: v\n", MQTLS: false, StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
 	if !strings.Contains(tzOnly, "    environment:\n      TZ: UTC\n") {
 		t.Errorf("TZ-only environment block missing:\n%s", tzOnly)
@@ -201,8 +200,8 @@ func TestEnvironmentBranches(t *testing.T) {
 
 	// MQTLS only (no timezone).
 	mqOnly := Render(Input{
-		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "k: v\n", MQTLS: true, StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
+		Docker:   &spec.Docker{Name: "s"},
+		Instance: Instance{Name: "s", Image: "img", AppYAML: "k: v\n", MQTLS: true, StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
 	if !strings.Contains(mqOnly, `    environment:
       JAVA_TOOL_OPTIONS: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"
@@ -218,8 +217,8 @@ func TestEnvironmentBranches(t *testing.T) {
 // are indented 6 spaces under content: and that blank lines stay truly empty.
 func TestContentIndentationAndBlankLines(t *testing.T) {
 	out := Render(Input{
-		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "root:\n  child: v\n\ntail: end\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
+		Docker:   &spec.Docker{Name: "s"},
+		Instance: Instance{Name: "s", Image: "img", AppYAML: "root:\n  child: v\n\ntail: end\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
 	// A nested line keeps its own indentation on top of the 6-space block indent.
 	if !strings.Contains(out, "      root:\n        child: v\n") {
@@ -240,8 +239,8 @@ func TestContentIndentationAndBlankLines(t *testing.T) {
 // TestStoresOnlyAndLibsOnly covers the two partial-volumes shapes.
 func TestStoresOnlyAndLibsOnly(t *testing.T) {
 	storesOnly := Render(Input{
-		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
+		Docker:   &spec.Docker{Name: "s"},
+		Instance: Instance{Name: "s", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 		Stores:   []Mount{{Source: "/h/a.jks", Target: "/c/a.jks"}},
 	})
 	if !strings.Contains(storesOnly, "    volumes:\n      - /h/a.jks:/c/a.jks:ro\n") {
@@ -249,8 +248,8 @@ func TestStoresOnlyAndLibsOnly(t *testing.T) {
 	}
 
 	libsOnly := Render(Input{
-		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
+		Docker:   &spec.Docker{Name: "s"},
+		Instance: Instance{Name: "s", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 		Libs:     &Mount{Source: "/h/libs", Target: "/c/libs"},
 	})
 	if !strings.Contains(libsOnly, "    volumes:\n      - /h/libs:/c/libs:ro\n") {
@@ -264,8 +263,8 @@ func TestStoresOnlyAndLibsOnly(t *testing.T) {
 // present rather than that it is the final block.
 func TestSplitLinesNoTrailingNewline(t *testing.T) {
 	out := Render(Input{
-		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "only: line", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
+		Docker:   &spec.Docker{Name: "s"},
+		Instance: Instance{Name: "s", Image: "img", AppYAML: "only: line", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
 	if !strings.Contains(out, "    content: |\n      only: line\n") {
 		t.Errorf("no-trailing-newline content not rendered as expected:\n%s", out)
@@ -291,8 +290,8 @@ func TestLabelsPerMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := Render(Input{
-				Docker:   &spec.Docker{Image: "img", Name: "s"},
-				Instance: Instance{Name: "s", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: tt.mode},
+				Docker:   &spec.Docker{Name: "s"},
+				Instance: Instance{Name: "s", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: tt.mode},
 			})
 			wantModeLine := "    labels:\n      " + spec.LabelModeKey + ": " + tt.wantMode + "\n"
 			if !strings.Contains(out, wantModeLine) {
@@ -311,8 +310,8 @@ func TestLabelsPerMode(t *testing.T) {
 // /app/external/libs/status.
 func TestStatusScriptConfigSourceAndTarget(t *testing.T) {
 	out := Render(Input{
-		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "solmq", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
+		Docker:   &spec.Docker{Name: "s"},
+		Instance: Instance{Name: "solmq", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
 	if !strings.Contains(out, "      - source: solmq-status\n        target: /app/external/libs/status\n") {
 		t.Errorf("status config source/target pair missing:\n%s", out)
@@ -328,8 +327,8 @@ func TestStatusScriptConfigSourceAndTarget(t *testing.T) {
 // renderContentConfig applies to application.yml.
 func TestStatusScriptContentIsEscaped(t *testing.T) {
 	out := Render(Input{
-		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "k: v\n", StatusScript: statusScript1, LeaderMode: spec.LeaderStandalone},
+		Docker:   &spec.Docker{Name: "s"},
+		Instance: Instance{Name: "s", Image: "img", AppYAML: "k: v\n", StatusScript: statusScript1, LeaderMode: spec.LeaderStandalone},
 	})
 	want := "  s-status:\n    content: |\n      #!/bin/sh\n      STATUS_URL=\"http://localhost:8080/actuator/health\"\n\n      curl -fsS \"$$STATUS_URL\"\n"
 	if !strings.Contains(out, want) {
@@ -347,8 +346,8 @@ func TestStatusScriptContentIsEscaped(t *testing.T) {
 func TestContentEscapesDollarsForCompose(t *testing.T) {
 	script := "P=$PORT\nQ=${VAR}\nR=${SPRING_CONFIG_LOCATION:-}\nS=$(printf %s x)\nT=$$\n"
 	out := Render(Input{
-		Docker:   &spec.Docker{Image: "img", Name: "s"},
-		Instance: Instance{Name: "s", AppYAML: "k: $LITERAL\n", StatusScript: script, LeaderMode: spec.LeaderStandalone},
+		Docker:   &spec.Docker{Name: "s"},
+		Instance: Instance{Name: "s", Image: "img", AppYAML: "k: $LITERAL\n", StatusScript: script, LeaderMode: spec.LeaderStandalone},
 	})
 	for _, want := range []string{
 		"      k: $$LITERAL\n",
@@ -379,7 +378,7 @@ func TestContentEscapesDollarsForCompose(t *testing.T) {
 // document. The placeholder must survive to the container intact.
 func TestAppYAMLSecretPlaceholdersAreNotInterpolated(t *testing.T) {
 	out := Render(Input{
-		Docker: &spec.Docker{Image: "img", Name: "s"},
+		Docker: &spec.Docker{Name: "s"},
 		Instance: Instance{
 			Name:         "s",
 			AppYAML:      "client-username: ${LOCAL_SOLACE_CLIENT_USERNAME}\nclient-password: ${LOCAL_SOLACE_CLIENT_PASSWORD}\n",

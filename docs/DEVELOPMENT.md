@@ -98,6 +98,19 @@ shipped sample set against it. Two rules follow:
 - Changing the golden file means refreshing the embedded copy in the same change.
 - Changing `consolidate`, `render`, `tls` or the durable-name derivation means re-running
   Self-test (open the page, **Load sample**, **Self-test**) and porting the change.
+- Changing the **env.yaml schema** -- adding, moving or retiring a key -- means porting it
+  to the page too: the form field, `buildModel`, `emitEnv` and the `validate` mirror, plus
+  `sampleModel` and the load path. Self-test only diffs `application.yml`, so it cannot
+  catch a schema change on the deploy sections; a page left behind emits configs the CLI
+  rejects. The image and timezone hoist is the worked example.
+
+The port has no automated syntax gate, but it is plain JavaScript in one `<script>` block,
+so it can be checked outside a browser:
+
+```sh
+python -c "import re;print(re.findall(r'<script(?![^>]*text/plain)[^>]*>(.*?)</script>',open('solmq-conn-util-generator.html',encoding='utf-8').read(),re.S)[0])" > /tmp/page.js
+node --check /tmp/page.js
+```
 
 The page never ships secrets: every password field expects a `${VAR}` placeholder and a
 literal value is reported as a finding.

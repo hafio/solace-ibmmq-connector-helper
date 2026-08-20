@@ -20,13 +20,17 @@ type Resources struct {
 }
 
 // Deployment mirrors the kubernetes.deployment section of env.yaml.
+//
+// Image and Timezone are parsed but rejected: both moved to their own
+// top-level keys so one declaration serves every platform. The fields stay so a
+// stale config fails loudly in validate rather than being silently ignored.
 type Deployment struct {
 	Name      string    `yaml:"name"`
 	Namespace string    `yaml:"namespace"`
-	Image     string    `yaml:"image"`
+	Image     string    `yaml:"image"` // removed; non-empty is a validation error
 	Replicas  int       `yaml:"replicas"`
 	Resources Resources `yaml:"resources"`
-	Timezone  string    `yaml:"timezone"`
+	Timezone  string    `yaml:"timezone"` // removed; non-empty is a validation error
 }
 
 // Service mirrors the kubernetes.service section of env.yaml. Port.Host is
@@ -89,10 +93,24 @@ type StoresSecret struct {
 	Existing string       `yaml:"existing"`
 }
 
-// Secrets groups the two optional secret wirings.
+// Secrets groups the optional secret wirings.
 type Secrets struct {
 	Credentials *CredentialsSecret `yaml:"credentials"`
 	Stores      *StoresSecret      `yaml:"stores"`
+	ImagePull   *ImagePullSecret   `yaml:"image-pull"`
+}
+
+// ImagePullSecret wires the registry credential the kubelet pulls the image
+// with. Name always reaches the pod template as an imagePullSecrets entry;
+// Create additionally renders the Secret itself from the top-level image block.
+//
+// Create defaults to false -- absent and false mean the same thing, which is
+// why a plain bool is enough. Building a Secret is a mutation, and naming one
+// you manage yourself must not overwrite it; asking the tool to own it is the
+// explicit choice, matching how Credentials makes create/existing explicit.
+type ImagePullSecret struct {
+	Name   string `yaml:"name"`
+	Create bool   `yaml:"create"`
 }
 
 // Syslog mirrors the kubernetes.logging.syslog section of env.yaml.

@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -92,6 +93,8 @@ func Validate(r Request, res Resolver) (errs, warns []Issue) {
 	verrs, w := validate.Run(validate.Context{
 		Workflows:       wfs,
 		Defaults:        &e.Defaults,
+		Image:           e.Image,
+		Timezone:        e.Timezone,
 		Kube:            e.Kubernetes,
 		Docker:          e.Docker,
 		Podman:          e.Podman,
@@ -119,6 +122,8 @@ func GenerateKubernetes(r Request, res Resolver, extraAllowed ...string) (out st
 	verrs, w := validate.Run(validate.Context{
 		Workflows:       wfs,
 		Defaults:        &e.Defaults,
+		Image:           e.Image,
+		Timezone:        e.Timezone,
 		Kube:            k,
 		CheckKubernetes: true,
 		Env:             res.Env,
@@ -152,8 +157,17 @@ func GenerateKubernetes(r Request, res Resolver, extraAllowed ...string) (out st
 		}
 		in.Stores = files
 	}
+	if ip := k.Secrets.ImagePull; ip != nil {
+		ps, err := resolvePullSecret(ip, e.Image, res)
+		if err != nil {
+			return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+		}
+		in.ImagePull = ps
+	}
 	in.Instance = deploy.Instance{
 		Name:         k.Deployment.Name,
+		Image:        e.Image.Ref(),
+		Timezone:     e.Timezone,
 		AppYAML:      b.appYAML,
 		StatusScript: statusscript.Render(deploy.ManagementPort(in), spec.StatusUserName),
 		Model:        b.model,
@@ -183,7 +197,7 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 		pissues = append(pissues, Issue{File: fileEnv, Msg: "docker target requires a 'docker:' section in env.yaml"})
 	}
 	verrs, w := validate.Run(validate.Context{
-		Workflows: wfs, Defaults: &e.Defaults, Docker: d, CheckDocker: true, Env: res.Env,
+		Workflows: wfs, Defaults: &e.Defaults, Image: e.Image, Timezone: e.Timezone, Docker: d, CheckDocker: true, Env: res.Env,
 		AllowCommands: extraAllowed,
 	})
 	errs = append(pissues, verrs...)
@@ -207,6 +221,8 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 		Libs:    toDockerMount(lm),
 		Instance: dockergen.Instance{
 			Name:         d.Name,
+			Image:        e.Image.Ref(),
+			Timezone:     e.Timezone,
 			AppYAML:      b.appYAML,
 			MQTLS:        b.model.MQTLS,
 			StatusScript: statusscript.Render(e.Defaults.EffectiveManagementPort(), spec.StatusUserName),
@@ -214,6 +230,62 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 		},
 	}
 	return DockerPlan{Compose: dockergen.Render(in), Secrets: b.model.Secrets}, nil, warns
+}
+
+// resolvePullSecret turns the image-pull block into the wiring deploy renders.
+// A reference-only block resolves to the name alone -- deploy then emits the
+// imagePullSecrets entry and no Secret, so the one the operator manages is left
+// untouched. create additionally reads the registry password here and builds
+// the payload, keeping deploy pure and the value inside this call.
+func resolvePullSecret(ip *spec.ImagePullSecret, img *spec.Image, res Resolver) (*deploy.PullSecret, error) {
+	out := &deploy.PullSecret{Name: ip.Name}
+	if !ip.Create {
+		return out, nil
+	}
+	// validate rejects create without both fields, so this only guards against a
+	// future caller reaching here without having run it.
+	if img == nil || img.RepoUser == "" || img.RepoPassEnv == "" {
+		return nil, fmt.Errorf("kubernetes.secrets.image-pull.create needs image.repo-username and image.repo-password-env")
+	}
+	if res.Env == nil {
+		return nil, fmt.Errorf("kubernetes.secrets.image-pull.create reads environment variable %s, but this command has no environment access", img.RepoPassEnv)
+	}
+	pass, ok := res.Env(img.RepoPassEnv)
+	if !ok {
+		return nil, fmt.Errorf("kubernetes.secrets.image-pull.create: environment variable %s is not set; export it before deploying", img.RepoPassEnv)
+	}
+	doc, err := dockerConfigJSON(img.Registry(), img.RepoUser, pass)
+	if err != nil {
+		return nil, fmt.Errorf("building the image-pull secret: %w", err)
+	}
+	out.DockerConfigJSON = doc
+	return out, nil
+}
+
+// dockerConfigJSON renders the base64 .dockerconfigjson payload a
+// kubernetes.io/dockerconfigjson Secret carries: an auths map keyed by registry
+// host, holding the account plus the base64 "user:password" the engines send.
+//
+// It is marshalled rather than concatenated so a password carrying a quote or a
+// backslash cannot break the document -- or, worse, reshape it.
+func dockerConfigJSON(registry, user, pass string) (string, error) {
+	type entry struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Auth     string `json:"auth"`
+	}
+	doc := struct {
+		Auths map[string]entry `json:"auths"`
+	}{Auths: map[string]entry{registry: {
+		Username: user,
+		Password: pass,
+		Auth:     base64.StdEncoding.EncodeToString([]byte(user + ":" + pass)),
+	}}}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(b), nil
 }
 
 // stableNames projects secret references down to the names an artifact declares.
@@ -270,7 +342,7 @@ func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...st
 		pissues = append(pissues, Issue{File: fileEnv, Msg: "podman target requires a 'podman:' section in env.yaml"})
 	}
 	verrs, w := validate.Run(validate.Context{
-		Workflows: wfs, Defaults: &e.Defaults, Podman: p, CheckPodman: true, Env: res.Env,
+		Workflows: wfs, Defaults: &e.Defaults, Image: e.Image, Timezone: e.Timezone, Podman: p, CheckPodman: true, Env: res.Env,
 		AllowCommands: extraAllowed,
 	})
 	errs = append(pissues, verrs...)
@@ -305,6 +377,8 @@ func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...st
 		Libs:    toPodmanMount(lm),
 		Instance: podmangen.Instance{
 			Name:             p.Name,
+			Image:            e.Image.Ref(),
+			Timezone:         e.Timezone,
 			AppYAMLPath:      pathIn(opts.BaseDir, appName),
 			MQTLS:            b.model.MQTLS,
 			StatusScriptPath: pathIn(opts.BaseDir, statusName),

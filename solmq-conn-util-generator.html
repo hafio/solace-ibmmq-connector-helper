@@ -237,6 +237,23 @@ details[open]>summary::before{content:"- "}
     <div class="f"><label>solace-defaults</label><textarea id="i-soldef" rows="3" placeholder="connect-retries: -1"></textarea><div class="h">Merged into every Solace binder's solace.java.* block.</div></div>
   </div>
 
+  <!-- Image + timezone (shared by every platform) -->
+  <div class="sec"><h3>Image &amp; Timezone</h3>
+    <div class="h">One declaration, used by every platform. Repo is the registry
+    HOST only -- a Docker Hub namespace such as "solace/" is part of the
+    repository path and belongs in Name.</div>
+    <div class="fr">
+      <div class="f"><label>Registry Host</label><input id="i-img-repo" placeholder="(blank for Docker Hub)"><div class="h">e.g. registry.internal:5000</div></div>
+      <div class="f"><label>Image Name</label><input id="i-img-name" placeholder="solace/solace-pubsub-connector-ibmmq"></div>
+      <div class="f"><label>Tag</label><input id="i-img-tag" placeholder="2.13.0"><div class="h">Required. A sha256: digest pins exactly.</div></div>
+    </div>
+    <div class="fr">
+      <div class="f"><label>Registry Username</label><input id="i-img-repouser" placeholder="(only to create a pull secret)"></div>
+      <div class="f"><label>Registry Password Variable</label><input id="i-img-repopassenv" placeholder="REGISTRY_PASSWORD"><div class="h">Names a host variable, never the password.</div></div>
+    </div>
+    <div class="f"><label>Timezone</label><input id="i-tz" placeholder="Asia/Singapore"><div class="h">Optional; sets the container TZ. Blank leaves the image default.</div></div>
+  </div>
+
   <!-- Kubernetes -->
   <div class="sec sec-t" id="s-k8s"><h3>Kubernetes</h3>
     <div class="tgl"><input type="checkbox" id="i-k8s-on" onchange="togOpt('i-k8s-on','k8s-fields')"><label for="i-k8s-on">Include the kubernetes section</label></div>
@@ -246,13 +263,11 @@ details[open]>summary::before{content:"- "}
         <div class="f"><label>Deployment Name</label><input id="i-k8s-name" placeholder="solmq-connector"></div>
         <div class="f"><label>Namespace</label><input id="i-k8s-ns" placeholder="solace-connectors"></div>
       </div>
-      <div class="f"><label>Image</label><input id="i-k8s-img" placeholder="solace/solace-pubsub-connector-ibmmq:2.13.0"></div>
       <div class="fr">
         <div class="f"><label>Replicas</label><input id="i-k8s-rep" type="number" min="1" value="1"></div>
         <div class="f"><label>CPU</label><input id="i-k8s-cpu" placeholder="1"></div>
         <div class="f"><label>Memory</label><input id="i-k8s-mem" placeholder="1Gi"></div>
       </div>
-      <div class="f"><label>Timezone</label><input id="i-k8s-tz" placeholder="Asia/Singapore"></div>
       <div class="tgl"><input type="checkbox" id="i-k8s-svc"><label for="i-k8s-svc">Create a Service</label></div>
       <div class="f"><label>Service Port</label><input id="i-k8s-svcport" type="number" min="1" max="65535" value="8090"></div>
 
@@ -309,6 +324,12 @@ details[open]>summary::before{content:"- "}
       </select></div>
       <div class="opt-fields" id="k8s-stores-c"><div class="f"><label>Secret Name</label><input id="i-k8s-stores-name" placeholder="solmq-tls"></div></div>
       <div class="opt-fields" id="k8s-stores-e"><div class="f"><label>Existing Secret</label><input id="i-k8s-stores-existing" placeholder="my-tls"></div></div>
+      <div class="f"><label>Image Pull Secret</label><select id="i-k8s-ipull" onchange="syncK8s()">
+        <option value="">(none)</option>
+        <option value="reference">reference an existing Secret</option>
+        <option value="create">create it from the image credentials</option>
+      </select><div class="h">Reference leaves your Secret untouched; create builds it from the registry username/password variable above.</div></div>
+      <div class="opt-fields" id="k8s-ipull-f"><div class="f"><label>Secret Name</label><input id="i-k8s-ipull-name" placeholder="regcred"></div></div>
     </div>
   </div>
 
@@ -320,10 +341,8 @@ details[open]>summary::before{content:"- "}
         <div class="f"><label>Deploy Command</label><input id="i-dk-cmd" value="docker"></div>
         <div class="f"><label>Container Name</label><input id="i-dk-name" value="solmq-connector"></div>
       </div>
-      <div class="f"><label>Image</label><input id="i-dk-img" placeholder="solace/solace-pubsub-connector-ibmmq:2.13.0"></div>
       <div class="fr">
         <div class="f"><label>Restart Policy</label><input id="i-dk-restart" value="unless-stopped"></div>
-        <div class="f"><label>Timezone</label><input id="i-dk-tz" placeholder="Asia/Singapore"></div>
       </div>
       <div class="sub-h">Published Ports</div>
       <div id="dk-ports"></div>
@@ -345,7 +364,6 @@ details[open]>summary::before{content:"- "}
         <div class="f"><label>Deploy Command</label><input id="i-pd-cmd" value="podman"></div>
         <div class="f"><label>Container Name</label><input id="i-pd-name" value="solmq-connector"></div>
       </div>
-      <div class="f"><label>Image</label><input id="i-pd-img" placeholder="solace/solace-pubsub-connector-ibmmq:2.13.0"></div>
       <div class="fr">
         <div class="f"><label>Generate Mode</label><select id="i-pd-mode"><option value="run">run</option><option value="quadlet">quadlet</option></select><div class="h">Controls generate only; deploy is always quadlet + systemctl.</div></div>
         <div class="f"><label>Quadlet Scope</label><select id="i-pd-scope"><option value="auto">auto</option><option value="user">user</option><option value="system">system</option></select></div>
@@ -354,7 +372,6 @@ details[open]>summary::before{content:"- "}
         <div class="f"><label>Quadlet Directory</label><input id="i-pd-qdir" placeholder="(default for the resolved scope)"></div>
         <div class="f"><label>Restart Policy</label><input id="i-pd-restart" value="unless-stopped"></div>
       </div>
-      <div class="f"><label>Timezone</label><input id="i-pd-tz" placeholder="Asia/Singapore"></div>
       <div class="sub-h">Published Ports</div>
       <div id="pd-ports"></div>
       <button type="button" class="add" onclick="addPort('pd-ports');gen()">+ Add port</button>
@@ -847,6 +864,8 @@ function syncK8s(){
   const st = V('i-k8s-stores');
   show('k8s-stores-c', st === 'create');
   show('k8s-stores-e', st === 'existing');
+  // Both pull-secret modes need a name: one references it, the other creates it.
+  show('k8s-ipull-f', V('i-k8s-ipull') !== '');
   gen();
 }
 function syncCtr(p){
@@ -1001,19 +1020,28 @@ function readModel(){
     }
   }
 
+  // One image and one timezone for every platform (the per-platform keys were
+  // retired because three copies of one decision drifted apart).
+  m.image = {
+    repo: V('i-img-repo'), name: V('i-img-name'), tag: V('i-img-tag'),
+    repoUser: V('i-img-repouser'), repoPassEnv: V('i-img-repopassenv')
+  };
+  m.timezone = V('i-tz');
+
   m.kube = C('i-k8s-on') ? {
     command: V('i-k8s-cmd') || 'kubectl',
     deployment: {
-      name: V('i-k8s-name'), namespace: V('i-k8s-ns'), image: V('i-k8s-img'),
+      name: V('i-k8s-name'), namespace: V('i-k8s-ns'),
       replicas: parseInt(V('i-k8s-rep') || '1', 10) || 1,
-      cpu: V('i-k8s-cpu'), memory: V('i-k8s-mem'), timezone: V('i-k8s-tz')
+      cpu: V('i-k8s-cpu'), memory: V('i-k8s-mem')
     },
     service: { enabled: C('i-k8s-svc'), port: V('i-k8s-svcport') },
     syslog: C('i-k8s-sl-on') ? { host: V('i-k8s-sl-host'), port: parseInt(V('i-k8s-sl-port') || '0', 10), protocol: V('i-k8s-sl-proto') } : null,
     libs: readLibs(),
     cred: readCred('k8s'),
     stores: V('i-k8s-stores') === 'create' ? { create: V('i-k8s-stores-name') }
-          : V('i-k8s-stores') === 'existing' ? { existing: V('i-k8s-stores-existing') } : null
+          : V('i-k8s-stores') === 'existing' ? { existing: V('i-k8s-stores-existing') } : null,
+    imagePull: V('i-k8s-ipull') ? { name: V('i-k8s-ipull-name'), create: V('i-k8s-ipull') === 'create' } : null
   } : null;
 
   m.docker = C('i-dk-on') ? readCtr('dk', 'docker') : null;
@@ -1043,10 +1071,8 @@ function readCtr(p, section){
   return {
     section: section,
     command: V('i-' + p + '-cmd') || section,
-    image: V('i-' + p + '-img'),
     name: V('i-' + p + '-name') || 'solmq-connector',
     restart: V('i-' + p + '-restart') || 'unless-stopped',
-    timezone: V('i-' + p + '-tz'),
     ports: Array.from(document.querySelectorAll('#' + p + '-ports .p-val')).map(i => i.value.trim()).filter(Boolean),
     cred: readCred(p),
     stores: C('i-' + p + '-stores'),
@@ -1136,6 +1162,15 @@ function emitEnv(m){
 
   if(m.solaceDefaults.length) y += '\nsolace-defaults:\n' + emitProps(m.solaceDefaults, '  ');
 
+  // Shared by every platform, so emitted once above the target sections.
+  const img = m.image || {};
+  if(img.repo || img.name || img.tag || img.repoUser || img.repoPassEnv){
+    y += '\n# ---- image (one declaration, every platform) ----\nimage:\n'
+       + kv('repo', img.repo, '  ') + kv('name', img.name, '  ') + kv('tag', img.tag, '  ')
+       + kv('repo-username', img.repoUser, '  ') + kv('repo-password-env', img.repoPassEnv, '  ');
+  }
+  if(m.timezone) y += '\n' + kv('timezone', m.timezone, '');
+
   if(m.kube) y += '\n' + emitKube(m.kube);
   if(m.docker) y += '\n' + emitCtr(m.docker);
   if(m.podman) y += '\n' + emitCtr(m.podman);
@@ -1152,9 +1187,8 @@ function emitKube(k){
   let y = '# ---- kubernetes target ----\nkubernetes:\n' + kv('command', k.command, '  ');
   const d = k.deployment;
   y += '  deployment:\n' + kv('name', d.name, '    ') + kv('namespace', d.namespace, '    ')
-     + kv('image', d.image, '    ') + knum('replicas', d.replicas, '    ');
+     + knum('replicas', d.replicas, '    ');
   if(d.cpu || d.memory) y += '    resources:\n' + kv('cpu', d.cpu, '      ') + kv('memory', d.memory, '      ');
-  y += kv('timezone', d.timezone, '    ');
   y += '  service:\n' + kbool('enabled', k.service.enabled, '    ') + knum('port', k.service.port, '    ');
   if(k.syslog){
     y += '  logging:\n    syslog:\n' + kv('host', k.syslog.host, '      ')
@@ -1178,6 +1212,12 @@ function emitKube(k){
       ? '      create:\n' + kv('name', k.stores.create, '        ')
       : kv('existing', k.stores.existing, '      '));
   }
+  if(k.imagePull){
+    sb += '    image-pull:\n' + kv('name', k.imagePull.name, '      ');
+    // create is only emitted when true: absent means reference-only, the
+    // default, and the state that leaves an operator-managed Secret alone.
+    if(k.imagePull.create) sb += kbool('create', true, '      ');
+  }
   if(sb) y += '  secrets:\n' + sb;
   return y;
 }
@@ -1190,8 +1230,8 @@ function emitCtr(c){
       y += '  quadlet:\n' + kv('scope', c.quadlet.scope, '    ') + kv('dir', c.quadlet.dir, '    ');
     }
   }
-  y += kv('image', c.image, '  ') + kv('name', c.name, '  ') + kv('restart', c.restart, '  ');
-  y += klist('ports', c.ports, '  ') + kv('timezone', c.timezone, '  ');
+  y += kv('name', c.name, '  ') + kv('restart', c.restart, '  ');
+  y += klist('ports', c.ports, '  ');
   // No secrets: block at all -- credentials are derived from the connection's
   // own client-username/-password (or user/password) fields and mounted at
   // /run/secrets by the deploy step.
@@ -1366,6 +1406,10 @@ function validateModel(m){
   if(m.management.present){
     checkExpansion(warn, ENV_FILE, 'management.health-show-details', m.management.healthShowDetails);
   }
+
+  // The image and timezone are only required once a platform is in play: a
+  // config-only render (application.yml) pulls nothing.
+  if(m.kube || m.docker || m.podman) checkImageBlock(add, warn, m);
 
   if(m.kube) checkKube(add, warn, m);
   if(m.docker) checkContainerTarget(add, warn, m, m.docker);
@@ -1587,6 +1631,22 @@ function checkLeaderElection(add, warn, m, haveKeystore){
 // Secret wiring (Change 1: credentials.create is now just a name; any
 // source/variables/values-file left over from the old schema is rejected),
 // syslog, and libs.
+// checkImageBlock mirrors validate.checkImage: the one image every platform
+// deploys, plus the timezone that moved the same way. tag is required rather
+// than defaulted to latest, because an untagged image pins nothing.
+function checkImageBlock(add, warn, m){
+  const i = m.image || {};
+  if(!i.name) add(ENV_FILE, 'image.name is required');
+  if(!i.tag) add(ENV_FILE, 'image.tag is required: an untagged image resolves to :latest, which pins nothing. Use a version tag, or a sha256: digest to pin exactly');
+  [['repo', i.repo], ['name', i.name], ['tag', i.tag], ['repo-username', i.repoUser], ['repo-password-env', i.repoPassEnv]]
+    .forEach(([key, val]) => {
+      if(val && !safeToken(val)) add(ENV_FILE, `image.${key} "${val}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
+      checkExpansion(warn, ENV_FILE, `image.${key}`, val);
+    });
+  if(m.timezone && !safeToken(m.timezone)) add(ENV_FILE, `timezone "${m.timezone}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
+  checkExpansion(warn, ENV_FILE, 'timezone', m.timezone);
+}
+
 function checkKube(add, warn, m){
   const k = m.kube, d = k.deployment;
   checkCommand(add, 'kubernetes.command', k.command, 'kubernetes');
@@ -1602,9 +1662,13 @@ function checkKube(add, warn, m){
   if(!d.namespace) add(ENV_FILE, 'deployment.namespace is required');
   else if(!isDNS1123(d.namespace)) add(ENV_FILE, `deployment.namespace "${d.namespace}" is not a valid DNS-1123 label`);
   checkExpansion(warn, ENV_FILE, 'deployment.namespace', d.namespace);
-  if(!d.image) add(ENV_FILE, 'deployment.image is required');
-  checkExpansion(warn, ENV_FILE, 'deployment.image', d.image);
-  checkExpansion(warn, ENV_FILE, 'deployment.timezone', d.timezone);
+  if(k.imagePull){
+    if(!k.imagePull.name) add(ENV_FILE, 'kubernetes.secrets.image-pull.name is required');
+    else if(!isDNS1123(k.imagePull.name)) add(ENV_FILE, `kubernetes.secrets.image-pull.name "${k.imagePull.name}" is not a valid DNS-1123 label`);
+    if(k.imagePull.create && (!m.image.repoUser || !m.image.repoPassEnv)){
+      add(ENV_FILE, 'kubernetes.secrets.image-pull.create requires image.repo-username and image.repo-password-env: the Secret is built from them. Reference an existing Secret instead to need neither');
+    }
+  }
   checkExpansion(warn, ENV_FILE, 'kubernetes.command', k.command);
 
   const mode = m.leader.mode;
@@ -1779,13 +1843,8 @@ function checkContainerTarget(add, warn, m, c){
   if(!isDNS1123(c.name)) add(ENV_FILE, `${c.section}.name "${c.name}" is not a valid DNS-1123 label`);
   checkExpansion(warn, ENV_FILE, `${c.section}.name`, c.name);
   checkCommand(add, c.section + '.command', c.command, c.section);
-  if(!c.image) add(ENV_FILE, `${c.section}.image is required`);
-  else if(!safeToken(c.image)) add(ENV_FILE, `${c.section}.image "${c.image}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
-  checkExpansion(warn, ENV_FILE, `${c.section}.image`, c.image);
   if(c.restart && !safeToken(c.restart)) add(ENV_FILE, `${c.section}.restart "${c.restart}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
   checkExpansion(warn, ENV_FILE, `${c.section}.restart`, c.restart);
-  if(c.timezone && !safeToken(c.timezone)) add(ENV_FILE, `${c.section}.timezone "${c.timezone}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
-  checkExpansion(warn, ENV_FILE, `${c.section}.timezone`, c.timezone);
   c.ports.forEach(p => {
     const parts = p.split(':');
     if(parts.length > 2){ add(ENV_FILE, `${c.section}.ports entry "${p}" must be "host:container" (exactly one colon)`); return; }
@@ -2732,9 +2791,13 @@ function sampleModel(){
     tls: true, cipher: 'TLS_RSA_WITH_AES_256_CBC_SHA256', keyAlias: 'mq-client'
   });
   const cred = { create: { name: 'solmq-credentials' } };
-  const image = 'solace/solace-pubsub-connector-ibmmq:2.13.0';
   return {
     workflows: { dir: '.', filePattern: '*' },
+    // One image, one timezone, shared by every platform. repo stays blank for
+    // Docker Hub: the "solace" namespace is part of the repository path, so it
+    // belongs in name -- putting it in repo would break the credential lookup.
+    image: { repo: '', name: 'solace/solace-pubsub-connector-ibmmq', tag: '2.13.0', repoUser: '', repoPassEnv: '' },
+    timezone: 'Asia/Singapore',
     connections: [
       { name: 'prod-solace', side: mkSide({
           system: 'solace', host: 'tcps://broker.internal:55443', msgVpn: 'prod',
@@ -2776,19 +2839,19 @@ function sampleModel(){
     },
     kube: {
       command: 'kubectl',
-      deployment: { name: 'solmq-connector', namespace: 'solace-connectors', image: image,
-                    replicas: 2, cpu: '1', memory: '1Gi', timezone: 'Asia/Singapore' },
+      deployment: { name: 'solmq-connector', namespace: 'solace-connectors',
+                    replicas: 2, cpu: '1', memory: '1Gi' },
       service: { enabled: true, port: '8090' },
-      syslog: null, libs: null, cred: cred, stores: { create: 'solmq-tls' }
+      syslog: null, libs: null, cred: cred, stores: { create: 'solmq-tls' }, imagePull: null
     },
     docker: {
-      section: 'docker', command: 'docker', image: image, name: 'solmq-connector',
-      restart: 'unless-stopped', timezone: 'Asia/Singapore', ports: ['8090'],
+      section: 'docker', command: 'docker', name: 'solmq-connector',
+      restart: 'unless-stopped', ports: ['8090'],
       cred: null, stores: true, libsDir: ''
     },
     podman: {
-      section: 'podman', command: 'podman', image: image, name: 'solmq-connector',
-      restart: 'unless-stopped', timezone: 'Asia/Singapore', ports: ['8090'],
+      section: 'podman', command: 'podman', name: 'solmq-connector',
+      restart: 'unless-stopped', ports: ['8090'],
       cred: null, stores: true, libsDir: '',
       mode: 'run', quadlet: { scope: 'auto', dir: '' }
     }
@@ -2849,8 +2912,9 @@ function clearForm(){
   ['i-ts-on', 'i-ks-on', 'i-mgmt-on', 'i-sec-on', 'i-k8s-on', 'i-dk-on', 'i-pd-on',
    'i-k8s-sl-on', 'i-k8s-svc', 'i-dk-stores', 'i-pd-stores', 'i-dk-libs-on', 'i-pd-libs-on'].forEach(id => setC(id, false));
   ['i-ts-pass-env', 'i-ks-pass-env', 'i-le-user-env', 'i-le-pass-env'].forEach(id => setC(id, true));
-  ['i-log', 'i-soldef', 'i-le-queue', 'i-le-fo', 'i-k8s-name', 'i-k8s-ns', 'i-k8s-img', 'i-k8s-tz',
-   'i-k8s-cpu', 'i-k8s-mem', 'i-dk-img', 'i-pd-img', 'i-dk-tz', 'i-pd-tz',
+  ['i-log', 'i-soldef', 'i-le-queue', 'i-le-fo', 'i-k8s-name', 'i-k8s-ns',
+   'i-k8s-cpu', 'i-k8s-mem', 'i-k8s-ipull-name',
+   'i-img-repo', 'i-img-name', 'i-img-tag', 'i-img-repouser', 'i-img-repopassenv', 'i-tz',
    'i-ts-file', 'i-ts-pass', 'i-ks-file', 'i-ks-pass'].forEach(id => setV(id, ''));
   setV('i-wf-dir', '.'); setV('i-wf-pat', '*');
   setV('i-le-mode', ''); setV('i-k8s-libs', ''); setV('i-k8s-cred', ''); setV('i-k8s-stores', '');
@@ -2898,21 +2962,30 @@ function loadSample(){
   setV('i-le-mode', m.leader.mode); setV('i-le-queue', m.leader.queue);
   setV('i-le-src', 'ref'); setV('i-le-fo', emitProps(m.leader.failOver, ''));
 
+  // Shared by every platform, so loaded once rather than per section.
+  const im = m.image || {};
+  setV('i-img-repo', im.repo); setV('i-img-name', im.name); setV('i-img-tag', im.tag);
+  setV('i-img-repouser', im.repoUser); setV('i-img-repopassenv', im.repoPassEnv);
+  setV('i-tz', m.timezone);
+
   const k = m.kube;
   setC('i-k8s-on', true);
   setV('i-k8s-cmd', k.command); setV('i-k8s-name', k.deployment.name);
-  setV('i-k8s-ns', k.deployment.namespace); setV('i-k8s-img', k.deployment.image);
+  setV('i-k8s-ns', k.deployment.namespace);
   setV('i-k8s-rep', k.deployment.replicas); setV('i-k8s-cpu', k.deployment.cpu);
-  setV('i-k8s-mem', k.deployment.memory); setV('i-k8s-tz', k.deployment.timezone);
+  setV('i-k8s-mem', k.deployment.memory);
   setC('i-k8s-svc', k.service.enabled); setV('i-k8s-svcport', k.service.port);
   setV('i-k8s-cred', 'create'); setV('i-k8s-cred-name', k.cred.create.name);
   setV('i-k8s-stores', 'create'); setV('i-k8s-stores-name', k.stores.create);
+  if(k.imagePull){
+    setV('i-k8s-ipull', k.imagePull.create ? 'create' : 'reference');
+    setV('i-k8s-ipull-name', k.imagePull.name);
+  }
 
   [['dk', m.docker], ['pd', m.podman]].forEach(([p, c]) => {
     setC('i-' + p + '-on', true);
-    setV('i-' + p + '-cmd', c.command); setV('i-' + p + '-img', c.image);
+    setV('i-' + p + '-cmd', c.command);
     setV('i-' + p + '-name', c.name); setV('i-' + p + '-restart', c.restart);
-    setV('i-' + p + '-tz', c.timezone);
     c.ports.forEach(v => addPort(p + '-ports', v));
     setC('i-' + p + '-stores', true);
   });

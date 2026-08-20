@@ -82,16 +82,26 @@ const bareEnv = `workflows:
   file_pattern: "*"
 `
 
+// sharedEnv carries the keys that are declared once for every platform. It is
+// a separate const because the fixtures below get concatenated to build
+// multi-section configs, and two copies of a top-level key is a yaml error --
+// which is exactly what the tool would hit if these keys were still per-section.
+const sharedEnv = `
+image:
+  name: img
+  tag: "1"
+timezone: UTC
+`
+
 // kubeEnv is a minimal-but-valid kubernetes: section for the deploy/remove/
-// platform-resolution seam tests -- a safe command, and the three fields
-// checkKube requires.
+// platform-resolution seam tests -- a safe command, and the fields checkKube
+// requires.
 const kubeEnv = `
 kubernetes:
   command: kubectl
   deployment:
     name: solmq-connector
     namespace: solace-connectors
-    image: img:1
 `
 
 // kubeEnvUnsafeCommand mirrors kubeEnv but with a command containing a shell
@@ -104,7 +114,6 @@ kubernetes:
   deployment:
     name: solmq-connector
     namespace: solace-connectors
-    image: img:1
 `
 
 // ---- generic fixture helpers ---------------------------------------------------
@@ -625,7 +634,7 @@ func TestLoadEnvExcludesEnvFileFromWorkflowSet(t *testing.T) {
 func TestDeployKubernetesSeamHappyPath(t *testing.T) {
 	f := useFakeRunner(t)
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", kubeEnv)
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
@@ -652,7 +661,7 @@ func TestDeployKubernetesSeamHappyPath(t *testing.T) {
 func TestRemoveKubernetesSeamHappyPath(t *testing.T) {
 	f := useFakeRunner(t)
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", kubeEnv)
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
@@ -677,7 +686,7 @@ func TestRemoveKubernetesSeamHappyPath(t *testing.T) {
 func TestDeployKubernetesSeamRejectsUnsafeCommand(t *testing.T) {
 	f := useFakeRunner(t)
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", kubeEnvUnsafeCommand)
+	write(t, dir, "env.yaml", sharedEnv+kubeEnvUnsafeCommand)
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
@@ -756,11 +765,10 @@ func TestExamplesDefaultDir(t *testing.T) {
 // ---- generate kubernetes / docker / podman ---------------------------------------
 
 // dockerEnv is a minimal-but-valid docker: section (checkContainerTarget needs a
-// DNS-1123 name, a safe command, a non-empty image, and in-range ports).
+// DNS-1123 name, a safe command and in-range ports; the image is a top-level key).
 const dockerEnv = `
 docker:
   command: docker
-  image: img:1
   name: solmq-conn
   ports:
     - 8090
@@ -773,7 +781,6 @@ func podmanEnv(quadletDir string) string {
 	return fmt.Sprintf(`
 podman:
   command: podman
-  image: img:1
   name: solmq-conn
   ports:
     - 8090
@@ -792,7 +799,6 @@ func podmanEnvSudo(quadletDir string) string {
 	return fmt.Sprintf(`
 podman:
   command: sudo podman
-  image: img:1
   name: solmq-conn
   ports:
     - 8090
@@ -805,7 +811,7 @@ podman:
 
 func TestGenerateKubernetesStdout(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", kubeEnv)
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 	var code int
 	stdout := captureStdout(t, func() {
@@ -821,7 +827,7 @@ func TestGenerateKubernetesStdout(t *testing.T) {
 
 func TestGenerateDockerToFile(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", dockerEnv)
+	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 	out := filepath.Join(t.TempDir(), "compose.yml")
 	if code := run([]string{"generate", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml"), "-o", out}); code != 0 {
@@ -843,7 +849,7 @@ func TestGenerateDockerToFile(t *testing.T) {
 // there is only ever one instance).
 func TestGeneratePodmanQuadletStdout(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", podmanEnv(t.TempDir()))
+	write(t, dir, "env.yaml", sharedEnv+podmanEnv(t.TempDir()))
 	write(t, dir, "10.yaml", validWF)
 	var code int
 	stdout := captureStdout(t, func() {
@@ -864,7 +870,7 @@ func TestGeneratePodmanQuadletStdout(t *testing.T) {
 func TestDeployDockerSeamWritesComposeAndRuns(t *testing.T) {
 	f := useFakeRunner(t)
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", dockerEnv)
+	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
@@ -901,7 +907,7 @@ func TestDeployDockerSeamComposeFileSurvivesFailedRun(t *testing.T) {
 	f.err = fmt.Errorf("boom")
 	f.failFrom = 1
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", dockerEnv)
+	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
@@ -922,7 +928,7 @@ func TestDeployDockerSeamChildEnvCarriesCredentials(t *testing.T) {
 	t.Setenv("SOLACE_PASS", "envpass")
 	f := useFakeRunner(t)
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", dockerEnv)
+	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	write(t, dir, "10.yaml", envCredWF)
 
 	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
@@ -947,7 +953,7 @@ func TestDeployDockerSeamChildEnvCarriesCredentials(t *testing.T) {
 func TestRemoveDockerSeam(t *testing.T) {
 	f := useFakeRunner(t)
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", dockerEnv)
+	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"remove", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
@@ -971,7 +977,7 @@ func TestDeployPodmanSeamWritesUnitsAndStarts(t *testing.T) {
 	f := useFakeRunner(t)
 	quadletDir := t.TempDir()
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", podmanEnv(quadletDir))
+	write(t, dir, "env.yaml", sharedEnv+podmanEnv(quadletDir))
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
@@ -1029,7 +1035,7 @@ func TestRemovePodmanSeamStopsRemovesReloads(t *testing.T) {
 	f := useFakeRunner(t)
 	quadletDir := t.TempDir()
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", podmanEnv(quadletDir))
+	write(t, dir, "env.yaml", sharedEnv+podmanEnv(quadletDir))
 	write(t, dir, "10.yaml", validWF)
 	// Pre-seed the files a deploy would have written; remove must clear all
 	// three: the unit, the generated app yaml, and the status script.
@@ -1076,7 +1082,7 @@ func TestRemovePodmanSeamStopsRemovesReloads(t *testing.T) {
 // contract) before anything reaches loadEnv/validate/the runner.
 func TestAllowCommandFlagBadValueExitsUsageError(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", kubeEnv)
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 	envPath := filepath.Join(dir, "env.yaml")
 
@@ -1127,7 +1133,7 @@ func TestAllowCommandFlagRejectedOnGenerateAndValidate(t *testing.T) {
 func TestAllowCommandFlagRepeatableThreadsToRunner(t *testing.T) {
 	quadletDir := t.TempDir()
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", podmanEnvSudo(quadletDir))
+	write(t, dir, "env.yaml", sharedEnv+podmanEnvSudo(quadletDir))
 	write(t, dir, "10.yaml", validWF)
 	envPath := filepath.Join(dir, "env.yaml")
 
@@ -1175,7 +1181,7 @@ func TestDeployKubernetesPreflightFailureStopsBeforeApply(t *testing.T) {
 	f := useFakeRunner(t)
 	f.err = fmt.Errorf("not logged in")
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", kubeEnv)
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
@@ -1194,7 +1200,7 @@ func TestDeployDockerPreflightFailureStopsBeforeWrite(t *testing.T) {
 	f := useFakeRunner(t)
 	f.err = fmt.Errorf("daemon unreachable")
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", dockerEnv)
+	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
@@ -1217,7 +1223,7 @@ func TestDeployPodmanPreflightFailureStopsBeforeWrite(t *testing.T) {
 	f.err = fmt.Errorf("podman unreachable")
 	quadletDir := t.TempDir()
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", podmanEnv(quadletDir))
+	write(t, dir, "env.yaml", sharedEnv+podmanEnv(quadletDir))
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
@@ -1249,7 +1255,7 @@ func TestDeployPodmanPreflightFailureStopsBeforeWrite(t *testing.T) {
 func TestPlatformFlagHitOverridesInference(t *testing.T) {
 	f := useFakeRunner(t)
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", kubeEnv+dockerEnv)
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
@@ -1274,7 +1280,7 @@ func TestPlatformAliasesResolveToCanonical(t *testing.T) {
 	} {
 		f := useFakeRunner(t)
 		dir := t.TempDir()
-		write(t, dir, "env.yaml", kubeEnv+dockerEnv+podmanEnv(t.TempDir()))
+		write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv+podmanEnv(t.TempDir()))
 		write(t, dir, "10.yaml", validWF)
 
 		if code := dispatch([]string{"deploy", "--platform", c.alias, "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
@@ -1294,7 +1300,7 @@ func TestPlatformAliasesResolveToCanonical(t *testing.T) {
 // section: key to add rather than echoing the alias they typed.
 func TestPlatformAliasMissingSectionNamesCanonicalSection(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", dockerEnv)
+	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	f := &fakeRunner{}
 	stderr := captureStderr(t, func() {
 		code := dispatch([]string{"deploy", "--platform", "kube", "-e", filepath.Join(dir, "env.yaml")}, f)
@@ -1315,7 +1321,7 @@ func TestPlatformAliasMissingSectionNamesCanonicalSection(t *testing.T) {
 // can see the alias set without reaching for the docs.
 func TestPlatformUnknownValueListsEverySpelling(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", dockerEnv)
+	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	f := &fakeRunner{}
 	stderr := captureStderr(t, func() {
 		code := dispatch([]string{"deploy", "--platform", "k8s", "-e", filepath.Join(dir, "env.yaml")}, f)
@@ -1381,7 +1387,7 @@ func TestPlatformAliasesCoverEveryPlatformExactlyOnce(t *testing.T) {
 // present, before anything reaches the runner.
 func TestPlatformFlagMissingSectionIsLoudError(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", dockerEnv)
+	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	f := &fakeRunner{}
 	stderr := captureStderr(t, func() {
 		code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f)
@@ -1402,7 +1408,7 @@ func TestPlatformFlagMissingSectionIsLoudError(t *testing.T) {
 func TestPlatformSingleSectionInferred(t *testing.T) {
 	f := useFakeRunner(t)
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", kubeEnv)
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 
 	stderr := captureStderr(t, func() {
@@ -1426,7 +1432,7 @@ func TestPlatformMenuOnMultipleSections(t *testing.T) {
 	withPromptAnswer(t, "2") // present order is [kubernetes, docker]; 2 = docker
 	f := useFakeRunner(t)
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", kubeEnv+dockerEnv)
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
@@ -1445,7 +1451,7 @@ func TestPlatformMenuOnMultipleSections(t *testing.T) {
 // flake or block regardless of how the tests are invoked.
 func TestPlatformMenuNonTTYRefusesWithPlatformHint(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", kubeEnv+dockerEnv)
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv)
 
 	oldStdin := os.Stdin
 	pr, pw, perr := os.Pipe()

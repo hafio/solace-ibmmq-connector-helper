@@ -127,14 +127,16 @@ func (p Port) String() string {
 // credential fields and delivered as compose secrets, so there is nothing left
 // to configure here. Secrets is kept unexported-in-spirit (parsed but rejected)
 // so an old env.yaml fails loudly instead of silently losing its credentials.
+// Image and Timezone are kept on the same terms, both having moved to their own
+// top-level keys.
 type Docker struct {
 	Command  string       `yaml:"command"` // default docker; e.g. "podman" or "docker --context foo"
-	Image    string       `yaml:"image"`
+	Image    string       `yaml:"image"`   // removed; non-empty is a validation error
 	Name     string       `yaml:"name"`
 	Restart  string       `yaml:"restart"`
 	Ports    []Port       `yaml:"ports"`
-	Timezone string       `yaml:"timezone"`
-	Secrets  *Secrets     `yaml:"secrets"` // removed; non-nil is a validation error
+	Timezone string       `yaml:"timezone"` // removed; non-empty is a validation error
+	Secrets  *Secrets     `yaml:"secrets"`  // removed; non-nil is a validation error
 	Stores   *StoresMount `yaml:"stores"`
 	Libs     *LibsMount   `yaml:"libs"`
 }
@@ -151,12 +153,12 @@ type Podman struct {
 	Command  string       `yaml:"command"` // default podman
 	Mode     string       `yaml:"mode"`    // run (default) | quadlet -- controls generate only
 	Quadlet  *Quadlet     `yaml:"quadlet"`
-	Image    string       `yaml:"image"`
+	Image    string       `yaml:"image"` // removed; non-empty is a validation error (see Docker)
 	Name     string       `yaml:"name"`
 	Ports    []Port       `yaml:"ports"`
 	Restart  string       `yaml:"restart"`
-	Timezone string       `yaml:"timezone"`
-	Secrets  *Secrets     `yaml:"secrets"` // removed; non-nil is a validation error (see Docker)
+	Timezone string       `yaml:"timezone"` // removed; non-empty is a validation error (see Docker)
+	Secrets  *Secrets     `yaml:"secrets"`  // removed; non-nil is a validation error (see Docker)
 	Stores   *StoresMount `yaml:"stores"`
 	Libs     *LibsMount   `yaml:"libs"`
 }

@@ -14,15 +14,13 @@ const testImage = "solace/solace-pubsub-connector-ibmmq:2.13.0"
 func fullInput() Input {
 	return Input{
 		Podman: &spec.Podman{
-			Command:  "podman",
-			Mode:     spec.PodmanModeRun,
-			Image:    testImage,
-			Name:     "solmq-connector",
-			Ports:    []spec.Port{{Host: 8090, Container: 8090}, {Host: 8080, Container: 8091}},
-			Restart:  "unless-stopped",
-			Timezone: "Asia/Singapore",
+			Command: "podman",
+			Mode:    spec.PodmanModeRun,
+			Name:    "solmq-connector",
+			Ports:   []spec.Port{{Host: 8090, Container: 8090}, {Host: 8080, Container: 8091}},
+			Restart: "unless-stopped",
 		},
-		Instance: Instance{Name: "solmq-connector", AppYAMLPath: "./solmq-connector-application.yml", MQTLS: true, StatusScriptPath: "./solmq-connector-status", LeaderMode: spec.LeaderActiveActive},
+		Instance: Instance{Name: "solmq-connector", Image: testImage, Timezone: "Asia/Singapore", AppYAMLPath: "./solmq-connector-application.yml", MQTLS: true, StatusScriptPath: "./solmq-connector-status", LeaderMode: spec.LeaderActiveActive},
 		Secrets: []SecretRef{
 			{StoreName: "solmq-connector-MQ_CONN_1_USER", Target: "MQ_CONN_1_USER"},
 			{StoreName: "solmq-connector-MQ_CONN_1_PASSWORD", Target: "MQ_CONN_1_PASSWORD"},
@@ -40,11 +38,10 @@ func minimalInput() Input {
 	return Input{
 		Podman: &spec.Podman{
 			Mode:  spec.PodmanModeRun,
-			Image: testImage,
 			Name:  "solmq-connector",
 			Ports: []spec.Port{{Host: 8090, Container: 8090}},
 		},
-		Instance: Instance{Name: "solmq-connector", AppYAMLPath: "./solmq-connector-application.yml", MQTLS: false, StatusScriptPath: "./solmq-connector-status", LeaderMode: ""},
+		Instance: Instance{Name: "solmq-connector", Image: testImage, AppYAMLPath: "./solmq-connector-application.yml", MQTLS: false, StatusScriptPath: "./solmq-connector-status", LeaderMode: ""},
 	}
 }
 

@@ -75,8 +75,7 @@ func TestMQKeyAliasRequiresKeystore(t *testing.T) {
 
 func TestCheckKubeRequiredAndReplicas(t *testing.T) {
 	k := &spec.Kubernetes{Deployment: spec.Deployment{Replicas: 3}}
-	errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
-	// deployment.image-required is already pinned by TestDeployKubeChecks (validate_test.go).
+	errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
 	for _, sub := range []string{"deployment.name is required", "deployment.namespace is required", "replicas: 1"} {
 		if !hasErr(errs, sub) {
 			t.Errorf("want %q, got %v", sub, errs)
@@ -93,7 +92,7 @@ func TestCheckKubeRequiredAndReplicas(t *testing.T) {
 func TestCheckKubeServicePort(t *testing.T) {
 	run := func(p spec.Port) []Issue {
 		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand, Service: spec.Service{Port: p}}
-		errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
+		errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
 		return errs
 	}
 	// Scalar form (host == container): valid.
@@ -126,10 +125,10 @@ func TestCheckKubeServicePort(t *testing.T) {
 // source/variables/values-file must fail loudly instead of silently losing its
 // credentials.
 func TestCheckKubeCredentialCreateRemovedKeys(t *testing.T) {
-	base := spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1}
+	base := spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}
 	run := func(c *spec.CredCreate) []Issue {
 		k := &spec.Kubernetes{Deployment: base, Secrets: spec.Secrets{Credentials: &spec.CredentialsSecret{Create: c}}}
-		errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
+		errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
 		return errs
 	}
 	if e := run(&spec.CredCreate{Name: "s", Source: "env", Variables: []string{"P"}, ValuesFile: "vals.yaml"}); !hasErr(e, "no longer takes source/variables/values-file") || !hasErr(e, "Remove source, variables, values-file") {
@@ -145,23 +144,23 @@ func TestCheckKubeCredentialCreateRemovedKeys(t *testing.T) {
 }
 
 func TestCheckKubeStoresRequireTruststore(t *testing.T) {
-	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1}, Secrets: spec.Secrets{Stores: &spec.StoresSecret{Create: &spec.StoreCreate{Name: "t"}}}}
-	if errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true}); !hasErr(errs, "requires tls.truststore") {
+	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}, Secrets: spec.Secrets{Stores: &spec.StoresSecret{Create: &spec.StoreCreate{Name: "t"}}}}
+	if errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true}); !hasErr(errs, "requires tls.truststore") {
 		t.Errorf("want truststore requirement, got %v", errs)
 	}
 }
 
 func TestStoresNotWiredWarning(t *testing.T) {
-	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1}}
-	_, warns := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}, Defaults: defsWithStores(), Kube: k, CheckKubernetes: true})
+	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}}
+	_, warns := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}, Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true})
 	if !hasErr(warns, "secrets.stores is omitted") {
 		t.Errorf("want stores-omitted warning, got %v", warns)
 	}
 }
 
 func TestStoresWiredExistingNoWarning(t *testing.T) {
-	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1}, Secrets: spec.Secrets{Stores: &spec.StoresSecret{Existing: "my-tls"}}}
-	_, warns := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}, Defaults: defsWithStores(), Kube: k, CheckKubernetes: true})
+	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}, Secrets: spec.Secrets{Stores: &spec.StoresSecret{Existing: "my-tls"}}}
+	_, warns := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}, Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true})
 	if hasErr(warns, "secrets.stores is omitted") {
 		t.Errorf("stores wired via existing should not warn: %v", warns)
 	}
@@ -234,7 +233,7 @@ func TestConnRefValidResolvesNoError(t *testing.T) {
 }
 
 func baseKubeDeploy() spec.Deployment {
-	return spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1}
+	return spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}
 }
 
 // baseKubeService is a valid kubernetes.service (matching the port docker/podman
@@ -247,7 +246,7 @@ func baseKubeService() spec.Service {
 func TestCheckSyslog(t *testing.T) {
 	run := func(sys *spec.Syslog) (errs, warns []Issue) {
 		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand, Service: baseKubeService(), Logging: &spec.Logging{Syslog: sys}}
-		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
+		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
 	}
 	if e, _ := run(&spec.Syslog{Port: 514, Protocol: spec.SyslogUDP}); !hasErr(e, "logging.syslog.host is required") {
 		t.Errorf("want missing host, got %v", e)
@@ -275,7 +274,7 @@ func TestCheckSyslog(t *testing.T) {
 func TestCheckLibs(t *testing.T) {
 	run := func(lb *spec.Libs) (errs, warns []Issue) {
 		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand, Service: baseKubeService(), Libs: lb}
-		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
+		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
 	}
 	if e, _ := run(&spec.Libs{}); !hasErr(e, "exactly one of 'pvc' or 'download'") {
 		t.Errorf("want zero-modes error, got %v", e)
@@ -319,41 +318,44 @@ func TestCheckLibs(t *testing.T) {
 }
 
 func dockerOK() *spec.Docker {
-	return &spec.Docker{Command: "docker", Image: "img", Name: "c", Restart: "unless-stopped", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
+	return &spec.Docker{Command: "docker", Name: "c", Restart: "unless-stopped", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
 }
 
 func TestCheckDocker(t *testing.T) {
 	// Valid docker section: no errors.
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: dockerOK(), CheckDocker: true}); len(e) != 0 {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); len(e) != 0 {
 		t.Fatalf("valid docker should pass, got %v", e)
 	}
-	// Missing image + empty command + bad port.
+	// Empty command + bad port (the image is a top-level key now).
 	d := &spec.Docker{Command: "", Ports: []spec.Port{{Host: 0, Container: 0}}}
-	e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true})
-	for _, sub := range []string{"docker.image is required", "docker.command must not be empty", "docker.ports host port 0 must be 1-65535"} {
+	e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d, CheckDocker: true})
+	for _, sub := range []string{"docker.command must not be empty", "docker.ports host port 0 must be 1-65535"} {
 		if !hasErr(e, sub) {
 			t.Errorf("want %q, got %v", sub, e)
 		}
 	}
 	// A command with a shell metacharacter is rejected as unsafe.
-	d2 := &spec.Docker{Command: "docker; rm -rf /", Image: "img", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d2, CheckDocker: true}); !hasErr(e, "unsafe character") {
+	d2 := &spec.Docker{Command: "docker; rm -rf /", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d2, CheckDocker: true}); !hasErr(e, "unsafe character") {
 		t.Errorf("want unsafe-command error, got %v", e)
 	}
 	// stores set but no truststore defined.
 	d3 := dockerOK()
 	d3.Stores = &spec.StoresMount{MountPath: "/x"}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d3, CheckDocker: true}); !hasErr(e, "docker.stores requires tls.truststore") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d3, CheckDocker: true}); !hasErr(e, "docker.stores requires tls.truststore") {
 		t.Errorf("want stores-truststore error, got %v", e)
 	}
 	// libs set but no dir.
 	d4 := dockerOK()
 	d4.Libs = &spec.LibsMount{MountPath: "/x"}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d4, CheckDocker: true}); !hasErr(e, "docker.libs.dir is required") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d4, CheckDocker: true}); !hasErr(e, "docker.libs.dir is required") {
 		t.Errorf("want libs-dir error, got %v", e)
 	}
-	// Gate off: docker section is not checked when CheckDocker is false.
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: &spec.Docker{}}); hasErr(e, "docker.image is required") {
+	// Gate off: the docker section is not checked when CheckDocker is false. The
+	// probe has to name an error an unchecked empty section WOULD produce -- the
+	// old "docker.image is required" no longer exists, so asserting its absence
+	// would pass whether the gate worked or not.
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: &spec.Docker{}}); hasErr(e, "docker.command must not be empty") {
 		t.Errorf("docker checks must be gated by CheckDocker, got %v", e)
 	}
 }
@@ -365,34 +367,34 @@ func TestCheckDocker(t *testing.T) {
 func TestCheckDockerPodmanSecretsRemoved(t *testing.T) {
 	d := dockerOK()
 	d.Secrets = &spec.Secrets{Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "s"}}}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true}); !hasErr(e, "docker.secrets is no longer configured") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d, CheckDocker: true}); !hasErr(e, "docker.secrets is no longer configured") {
 		t.Errorf("want docker secrets-removed error, got %v", e)
 	}
 	p := podmanOK()
 	p.Secrets = &spec.Secrets{Stores: &spec.StoresSecret{Existing: "x"}}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p, CheckPodman: true}); !hasErr(e, "podman.secrets is no longer configured") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true}); !hasErr(e, "podman.secrets is no longer configured") {
 		t.Errorf("want podman secrets-removed error, got %v", e)
 	}
 	// Nil secrets -- the new default shape -- trips no such error.
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: dockerOK(), CheckDocker: true}); hasErr(e, "secrets is no longer configured") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); hasErr(e, "secrets is no longer configured") {
 		t.Errorf("nil docker.secrets should not be rejected, got %v", e)
 	}
 }
 
 func TestCheckPodmanModeAndScope(t *testing.T) {
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: podmanOK(), CheckPodman: true}); len(e) != 0 {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); len(e) != 0 {
 		t.Fatalf("valid podman should pass, got %v", e)
 	}
 	// Bad mode.
 	p1 := podmanOK()
 	p1.Mode = "swarm"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p1, CheckPodman: true}); !hasErr(e, "podman.mode must be") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p1, CheckPodman: true}); !hasErr(e, "podman.mode must be") {
 		t.Errorf("want bad-mode error, got %v", e)
 	}
 	// Bad quadlet scope.
 	p2 := podmanOK()
 	p2.Quadlet = &spec.Quadlet{Scope: "root"}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p2, CheckPodman: true}); !hasErr(e, "podman.quadlet.scope must be auto, user, or system") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p2, CheckPodman: true}); !hasErr(e, "podman.quadlet.scope must be auto, user, or system") {
 		t.Errorf("want bad-scope error, got %v", e)
 	}
 }
@@ -400,12 +402,12 @@ func TestCheckPodmanModeAndScope(t *testing.T) {
 func TestCheckCommandMultiToken(t *testing.T) {
 	// A multi-token command (extra kubeconfig/context args) is fine when every
 	// token is safe; an unsafe token anywhere is flagged.
-	d := &spec.Docker{Command: "docker --context prod", Image: "img", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true}); hasErr(e, "unsafe character") {
+	d := &spec.Docker{Command: "docker --context prod", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d, CheckDocker: true}); hasErr(e, "unsafe character") {
 		t.Errorf("safe multi-token command should pass, got %v", e)
 	}
-	d2 := &spec.Docker{Command: "docker --host $(evil)", Image: "img", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d2, CheckDocker: true}); !hasErr(e, "unsafe character") {
+	d2 := &spec.Docker{Command: "docker --host $(evil)", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d2, CheckDocker: true}); !hasErr(e, "unsafe character") {
 		t.Errorf("want unsafe-token error, got %v", e)
 	}
 }
@@ -480,7 +482,7 @@ func TestConnectionDefinitionValidation(t *testing.T) {
 }
 
 func podmanOK() *spec.Podman {
-	return &spec.Podman{Command: "podman", Image: "img", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}, Mode: spec.PodmanModeRun, Quadlet: &spec.Quadlet{Scope: spec.QuadletScopeAuto}}
+	return &spec.Podman{Command: "podman", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}, Mode: spec.PodmanModeRun, Quadlet: &spec.Quadlet{Scope: spec.QuadletScopeAuto}}
 }
 
 func TestCheckContainerNameRejected(t *testing.T) {
@@ -491,19 +493,19 @@ func TestCheckContainerNameRejected(t *testing.T) {
 	for _, bad := range []string{"../evil", "Bad_Name"} {
 		d := dockerOK()
 		d.Name = bad
-		if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true}); !hasErr(e, "docker.name") {
+		if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d, CheckDocker: true}); !hasErr(e, "docker.name") {
 			t.Errorf("docker.name %q should be rejected, got %v", bad, e)
 		}
 		p := podmanOK()
 		p.Name = bad
-		if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p, CheckPodman: true}); !hasErr(e, "podman.name") {
+		if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true}); !hasErr(e, "podman.name") {
 			t.Errorf("podman.name %q should be rejected, got %v", bad, e)
 		}
 	}
 	// The default name is a valid DNS-1123 label and passes.
 	d := dockerOK()
 	d.Name = "solmq-connector"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true}); hasErr(e, "docker.name") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d, CheckDocker: true}); hasErr(e, "docker.name") {
 		t.Errorf("default docker.name should be accepted, got %v", e)
 	}
 }
@@ -514,12 +516,12 @@ func TestCheckStoresMountPathRejected(t *testing.T) {
 	// moving the mounted files. The fixed path is accepted.
 	d := dockerOK()
 	d.Stores = &spec.StoresMount{MountPath: "/custom/path"}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Docker: d, CheckDocker: true}); !hasErr(e, "mount-path") || !hasErr(e, "is not supported") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Image: imageOK(), Docker: d, CheckDocker: true}); !hasErr(e, "mount-path") || !hasErr(e, "is not supported") {
 		t.Errorf("non-default docker.stores.mount-path should be rejected, got %v", e)
 	}
 	d2 := dockerOK()
 	d2.Stores = &spec.StoresMount{MountPath: spec.DefaultStoresMountPath}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Docker: d2, CheckDocker: true}); hasErr(e, "mount-path") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Image: imageOK(), Docker: d2, CheckDocker: true}); hasErr(e, "mount-path") {
 		t.Errorf("the fixed docker.stores.mount-path should be accepted, got %v", e)
 	}
 }
@@ -530,21 +532,21 @@ func TestDockerPodmanTLSWithoutStoresWarning(t *testing.T) {
 	// omitted and stays quiet once stores is wired.
 	tlsWF := []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}
 
-	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Docker: dockerOK(), CheckDocker: true}); !hasErr(w, "docker.stores is omitted") {
+	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(w, "docker.stores is omitted") {
 		t.Errorf("want docker TLS-without-stores warning, got %v", w)
 	}
 	dYes := dockerOK()
 	dYes.Stores = &spec.StoresMount{MountPath: spec.DefaultStoresMountPath}
-	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Docker: dYes, CheckDocker: true}); hasErr(w, "docker.stores is omitted") {
+	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Image: imageOK(), Docker: dYes, CheckDocker: true}); hasErr(w, "docker.stores is omitted") {
 		t.Errorf("docker stores wired should not warn, got %v", w)
 	}
 
-	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Podman: podmanOK(), CheckPodman: true}); !hasErr(w, "podman.stores is omitted") {
+	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); !hasErr(w, "podman.stores is omitted") {
 		t.Errorf("want podman TLS-without-stores warning, got %v", w)
 	}
 	pYes := podmanOK()
 	pYes.Stores = &spec.StoresMount{MountPath: spec.DefaultStoresMountPath}
-	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Podman: pYes, CheckPodman: true}); hasErr(w, "podman.stores is omitted") {
+	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Image: imageOK(), Podman: pYes, CheckPodman: true}); hasErr(w, "podman.stores is omitted") {
 		t.Errorf("podman stores wired should not warn, got %v", w)
 	}
 }
@@ -591,7 +593,7 @@ func TestMQOnlyTLSStoresOmittedWarning(t *testing.T) {
 	// with stores omitted: the stores-missing warning must still be emitted, since
 	// usesTLS is reached via the MQ TLS branch rather than a tcps Solace side.
 	mqOnlyTLS := []spec.Workflow{wf("x.yaml", vMQ("Q1", spec.DestQueue, false), vMQ("M1", spec.DestQueue, true))}
-	_, warns := Run(Context{Workflows: mqOnlyTLS, Defaults: &spec.Defaults{}, Docker: dockerOK(), CheckDocker: true})
+	_, warns := Run(Context{Workflows: mqOnlyTLS, Defaults: &spec.Defaults{}, Image: imageOK(), Docker: dockerOK(), CheckDocker: true})
 	if !hasErr(warns, "a TLS/mTLS connection exists but docker.stores is omitted; the store files will be missing at runtime") {
 		t.Errorf("want docker stores-missing warning, got %v", warns)
 	}
@@ -602,7 +604,7 @@ func TestPlainTCPStoresOmittedNoWarning(t *testing.T) {
 	// stores-missing warning must be absent. Other warnings may still fire, so
 	// this asserts the specific text is missing rather than warns being empty.
 	plainTCP := []spec.Workflow{wf("x.yaml", vSolacePlainTCP("Q", spec.DestQueue), vMQ("M", spec.DestQueue, false))}
-	_, warns := Run(Context{Workflows: plainTCP, Defaults: &spec.Defaults{}, Docker: dockerOK(), CheckDocker: true})
+	_, warns := Run(Context{Workflows: plainTCP, Defaults: &spec.Defaults{}, Image: imageOK(), Docker: dockerOK(), CheckDocker: true})
 	if hasErr(warns, "store files will be missing at runtime") {
 		t.Errorf("plain-tcp workflow with no TLS should not warn about missing store files, got %v", warns)
 	}
@@ -641,41 +643,24 @@ func TestBinderIdentityUsesTheCredentialPair(t *testing.T) {
 	}
 }
 
-func TestCheckContainerImageRestartTimezoneUnsafe(t *testing.T) {
-	// image/restart/timezone are concatenated unquoted into the podman run script,
-	// the quadlet unit and the compose YAML, so an embedded newline or shell
-	// metacharacter is rejected at the gate for both targets. A realistic value
-	// (registry image with a tag, tz with a slash) must still pass.
-	bad := []string{"img\nprivileged: true", "img; rm -rf /", "img $(evil)", "im g"}
-	for _, v := range bad {
-		d := dockerOK()
-		d.Image = v
-		if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true}); !hasErr(e, "docker.image") {
-			t.Errorf("docker.image %q should be rejected, got %v", v, e)
-		}
-		p := podmanOK()
-		p.Image = v
-		if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p, CheckPodman: true}); !hasErr(e, "podman.image") {
-			t.Errorf("podman.image %q should be rejected, got %v", v, e)
-		}
-	}
+// TestCheckContainerRestartUnsafe covers what is left of the per-platform
+// charset gate now that image and timezone have moved to top-level keys (their
+// retirement is covered in validate_image_test.go, their charset in
+// TestImageBlockRequired and TestTopLevelTimezoneUnsafe).
+//
+// restart is still concatenated unquoted into the podman run script, the quadlet
+// unit and the compose YAML, so an embedded newline or metacharacter is rejected
+// at the gate. A realistic value (on-failure:N) must still pass.
+func TestCheckContainerRestartUnsafe(t *testing.T) {
 	dR := dockerOK()
 	dR.Restart = "unless-stopped\nprivileged: true"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: dR, CheckDocker: true}); !hasErr(e, "docker.restart") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: dR, CheckDocker: true}); !hasErr(e, "docker.restart") {
 		t.Errorf("want docker.restart rejection, got %v", e)
 	}
-	pT := podmanOK()
-	pT.Timezone = "Asia/Singapore`id`"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: pT, CheckPodman: true}); !hasErr(e, "podman.timezone") {
-		t.Errorf("want podman.timezone rejection, got %v", e)
-	}
-	// Real-world values pass: a tagged registry image, a tz region, on-failure:N.
 	dOK := dockerOK()
-	dOK.Image = "solace/solace-pubsub-connector-ibmmq:2.13.0"
-	dOK.Timezone = "Asia/Singapore"
 	dOK.Restart = "on-failure:5"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: dOK, CheckDocker: true}); len(e) != 0 {
-		t.Errorf("realistic image/timezone/restart should pass, got %v", e)
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: dOK, CheckDocker: true}); len(e) != 0 {
+		t.Errorf("a realistic restart policy should pass, got %v", e)
 	}
 }
 
@@ -688,12 +673,12 @@ func TestCheckContainerHostPathsUnsafe(t *testing.T) {
 	badStores.TLS.Truststore.File = "t.jks\nprivileged: true"
 	d := dockerOK()
 	d.Stores = &spec.StoresMount{MountPath: spec.DefaultStoresMountPath}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: badStores, Docker: d, CheckDocker: true}); !hasErr(e, "tls.truststore.file") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: badStores, Image: imageOK(), Docker: d, CheckDocker: true}); !hasErr(e, "tls.truststore.file") {
 		t.Errorf("want unsafe truststore path rejection, got %v", e)
 	}
 	p := podmanOK()
 	p.Libs = &spec.LibsMount{Dir: "/opt/my libs", MountPath: spec.DefaultLibsMountPath}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p, CheckPodman: true}); !hasErr(e, "podman.libs.dir") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true}); !hasErr(e, "podman.libs.dir") {
 		t.Errorf("want unsafe libs.dir rejection, got %v", e)
 	}
 	winStores := defsWithStores()
@@ -702,7 +687,7 @@ func TestCheckContainerHostPathsUnsafe(t *testing.T) {
 	dWin := dockerOK()
 	dWin.Stores = &spec.StoresMount{MountPath: spec.DefaultStoresMountPath}
 	dWin.Libs = &spec.LibsMount{Dir: `C:\libs`, MountPath: spec.DefaultLibsMountPath}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: winStores, Docker: dWin, CheckDocker: true}); hasErr(e, "unsafe character") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: winStores, Image: imageOK(), Docker: dWin, CheckDocker: true}); hasErr(e, "unsafe character") {
 		t.Errorf("Windows-style host paths should validate, got %v", e)
 	}
 }
@@ -710,7 +695,7 @@ func TestCheckContainerHostPathsUnsafe(t *testing.T) {
 func TestCheckKubeSecretNames(t *testing.T) {
 	// Every Secret name is emitted verbatim as metadata.name / secretRef, so a
 	// non-DNS-1123 or missing name is rejected before the manifest is built.
-	base := spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1}
+	base := spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}
 	cases := []struct {
 		name string
 		sec  spec.Secrets
@@ -724,7 +709,7 @@ func TestCheckKubeSecretNames(t *testing.T) {
 	}
 	for _, c := range cases {
 		k := &spec.Kubernetes{Deployment: base, Secrets: c.sec}
-		e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Kube: k, CheckKubernetes: true, Env: func(string) (string, bool) { return "v", true }})
+		e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true, Env: func(string) (string, bool) { return "v", true }})
 		if !hasErr(e, c.want) {
 			t.Errorf("%s: want %q, got %v", c.name, c.want, e)
 		}
@@ -734,7 +719,7 @@ func TestCheckKubeSecretNames(t *testing.T) {
 		Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "solmq-credentials"}},
 		Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{Name: "solmq-tls"}},
 	}}
-	e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Kube: k, CheckKubernetes: true, Env: func(string) (string, bool) { return "v", true }})
+	e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true, Env: func(string) (string, bool) { return "v", true }})
 	if hasErr(e, "DNS-1123") || hasErr(e, "is required") {
 		t.Errorf("valid secret names should pass, got %v", e)
 	}
@@ -743,19 +728,19 @@ func TestCheckKubeSecretNames(t *testing.T) {
 func TestCheckLibsNFSFields(t *testing.T) {
 	// nfs.server/path land unquoted in the PersistentVolume manifest piped to
 	// kubectl, so a newline (which would inject a sibling key) is rejected.
-	base := spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1}
+	base := spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}
 	kube := func(server, path string) *spec.Kubernetes {
 		return &spec.Kubernetes{Deployment: base, Libs: &spec.Libs{PVC: &spec.LibsPVC{
 			Create: &spec.PVCCreate{Name: "libs-pvc", Storage: "1Gi", NFS: spec.NFS{Server: server, Path: path}},
 		}}}
 	}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: kube("nfs1.corp\nreadOnly: false", "/libs"), CheckKubernetes: true}); !hasErr(e, "nfs.server") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: kube("nfs1.corp\nreadOnly: false", "/libs"), CheckKubernetes: true}); !hasErr(e, "nfs.server") {
 		t.Errorf("want nfs.server rejection, got %v", e)
 	}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: kube("nfs1.corp.example", "/libs\nreadOnly: false"), CheckKubernetes: true}); !hasErr(e, "nfs.path") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: kube("nfs1.corp.example", "/libs\nreadOnly: false"), CheckKubernetes: true}); !hasErr(e, "nfs.path") {
 		t.Errorf("want nfs.path rejection, got %v", e)
 	}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: kube("nfs1.corp.example", "/solace-libs"), CheckKubernetes: true}); hasErr(e, "nfs.") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: kube("nfs1.corp.example", "/solace-libs"), CheckKubernetes: true}); hasErr(e, "nfs.") {
 		t.Errorf("valid nfs server/path should pass, got %v", e)
 	}
 }

@@ -738,6 +738,42 @@ them first.
 Credentials and stores use the **same schema across all three targets** -- see
 section 8.
 
+### 7.0 image and timezone (shared by every platform)
+
+The image is declared **once**, at the top level, and every platform deploys it.
+It used to be a per-platform key, which drifted -- the shipped example ended up
+pinning two different versions -- so all three per-platform `image:` keys are now
+rejected with an error naming this block.
+
+```yaml
+image:
+  repo: registry.internal:5000   # optional; omit for Docker Hub
+  name: solace/solace-pubsub-connector-ibmmq
+  tag: 2.13.0
+  repo-username: svc-puller      # only for kubernetes.secrets.image-pull.create
+  repo-password-env: REGISTRY_PASSWORD
+```
+
+| option | notes |
+|--------|-------|
+| `repo` | the **registry host** (and port) only. A Docker Hub namespace such as `solace/` is part of the repository path and belongs in `name` -- putting it here renders the same reference but looks up credentials under a registry that does not exist. Omit for Docker Hub |
+| `name` | required; the repository path, including any namespace |
+| `tag` | required. An untagged image resolves to `:latest`, which pins nothing; a `sha256:...` digest is joined with `@` and pins exactly |
+| `repo-username` | registry account, needed only when the tool builds a pull secret (section 8) |
+| `repo-password-env` | **names a host variable**, never the password itself -- the same indirection every other credential in this file uses |
+
+The container timezone moved the same way, and for the same reason -- it was
+three keys deciding one thing:
+
+```yaml
+timezone: Asia/Singapore   # -> the container's TZ env var
+```
+
+Optional. Unset, no `TZ` is set at all and the image's own default applies; the
+per-platform `timezone:` keys are rejected with an error naming this one. On
+kubernetes the whole `env:` block is omitted when nothing goes in it, rather
+than emitted with nothing beneath it.
+
 ### 7.1 kubernetes
 
 `generate --platform kubernetes` emits the manifest set; `deploy --platform
@@ -761,12 +797,10 @@ kubernetes:
   deployment:
     name: solmq-connector        # DNS-1123 label
     namespace: solace-connectors # DNS-1123 label; also emitted as a kind: Namespace doc
-    image: solace/solace-pubsub-connector-ibmmq:2.13.0
     replicas: 2                  # active_standby: 1 leader + standbys (standalone needs 1)
     resources:                   # requests and limits are set to the same value
       cpu: "1"
       memory: 1Gi
-    timezone: Asia/Singapore     # -> container TZ env var
   service:
     enabled: true
     port: 8090                   # optional; bare or "host:container" (same syntax as docker/podman
@@ -820,10 +854,9 @@ kubernetes:
 | section | option | notes |
 |---------|--------|-------|
 | `deployment` | `name`, `namespace` | required; must be valid DNS-1123 labels; a `kind: Namespace` doc for `namespace` is always emitted first. Keep `name` short enough that the derived `<name>-config` stays within 63 chars |
-| `deployment` | `image` | required |
 | `deployment` | `replicas` | default `1`; `standalone` leader-election requires `1`, `active_*` allow more. Replicas are copies of the one connector, and leader-election picks the active one |
 | `deployment` | `resources.cpu`, `resources.memory` | one value each; emitted as identical requests **and** limits (guaranteed QoS); a bare integer like `cpu: 1` is auto-quoted |
-| `deployment` | `timezone` | sets the container `TZ` env var |
+| `secrets.image-pull` | `name`, `create` | optional registry credential for pulling the image. `name` alone references a Secret you made (`kubectl create secret docker-registry`); adding `create: true` has the tool build it from the top-level `image` block instead. Omitted, nothing is created -- see section 8 |
 | `service` | `enabled`, `port` | emit a Service on this port; `port` accepts a bare port or `host:container`, the same syntax as docker/podman `ports` (7.2/7.3); unset defaults to the effective management port |
 | `logging.syslog` | `host`, `port`, `protocol` | optional; emits `logback-spring.xml` into the ConfigMap (mounted at `/app/external/classpath/logback-spring.xml`) plus `LOGGING_SYSLOG_*` env vars (appname = `deployment.name`); `protocol` is `udp` (default) or `tcp` -- **tcp requires the `logstash-logback-encoder` jar on the connector classpath** (provide it via `libs`) |
 | `libs` | `pvc` \| `download` | optional; exactly one mode; makes the IBM MQ java libraries available at `/app/external/libs` (read-only) |
@@ -866,13 +899,11 @@ generated compose file by hand, keep the doubling.
 ```yaml
 docker:
   command: docker                # or "docker --context foo"
-  image: solace/solace-pubsub-connector-ibmmq:2.13.0
   name: solmq-connector
   restart: unless-stopped
   ports:
     - 8090                       # bare: publish to the same host port (8090:8090)
     - "8081:8090"                # or "host:container" to map a distinct host port
-  timezone: Asia/Singapore
   # No secrets: section -- credentials come from the connection fields themselves.
   stores:                        # opt in to bind-mounting tls.*.file host paths
     mount-path: /app/external/classpath/truststores   # fixed in-container path; must be this value
@@ -911,13 +942,11 @@ podman:
   quadlet:
     scope: auto                  # auto | user | system
     dir: ""                      # overrides the default dir for the resolved scope
-  image: solace/solace-pubsub-connector-ibmmq:2.13.0
   name: solmq-connector
   restart: unless-stopped
   ports:
     - 8090                       # bare: publish to the same host port (8090:8090)
     - "8081:8090"                # or "host:container" to map a distinct host port
-  timezone: Asia/Singapore
   # No secrets: section -- credentials come from the connection fields themselves.
   stores:                        # opt in to bind-mounting tls.*.file host paths
     mount-path: /app/external/classpath/truststores   # fixed in-container path; must be this value
@@ -925,13 +954,13 @@ podman:
   #   dir: ./libs
 ```
 
-Common docker/podman options: `image` (required); `name` (a DNS-1123 label -- it flows
+Common docker/podman options: `name` (a DNS-1123 label -- it flows
 into filenames, a systemctl unit, and the podman secret-store namespace); `restart`;
 `ports` (a bare port, or `host:container` to map a distinct host port; each 1-65535;
 **omit it and nothing is published** -- exposing a container port to the host is
 your decision, and `status` reaches the connector by exec'ing into it rather than
 over a published port, so the tool never needs one);
-`timezone` (container `TZ`); `stores` (opt in to bind-mounting the truststore/keystore;
+`stores` (opt in to bind-mounting the truststore/keystore;
 the in-container path is fixed); `libs.dir`. Neither section takes a `secrets:` key --
 setting one is an error naming the credential fields that replaced it.
 
@@ -1022,6 +1051,50 @@ error, as is a `kubernetes.secrets.credentials.create` still carrying the remove
 `source` / `variables` / `values-file` keys.
 
 ---
+
+### 8.4 Registry credentials (pulling the image)
+
+Everything above is about credentials the **connector** reads. Pulling the image
+is a different job, done by the container engine or the kubelet before the
+connector starts, and the platforms differ in what they can even express.
+
+**Kubernetes** is the one with a first-class mechanism:
+
+```yaml
+kubernetes:
+  secrets:
+    image-pull:
+      name: regcred      # references a Secret you made
+      create: true       # ...or has the tool build it
+```
+
+| Config | Result |
+|--------|--------|
+| no `image-pull:` block | no pull secret, no `imagePullSecrets` -- nothing changes |
+| `name` only | the pod template gets `imagePullSecrets`, and **no Secret is rendered**. Make it yourself: `kubectl create secret docker-registry regcred ...` |
+| `name` + `create: true` | the tool also renders a `kubernetes.io/dockerconfigjson` Secret, built from `image.repo`, `image.repo-username` and `image.repo-password-env` (section 7.0) |
+
+`create` defaults to **false** deliberately: building a Secret is a mutation, and
+naming one you manage must not overwrite it. It also keeps the registry account
+optional -- referencing a Secret needs no credentials in `env.yaml` at all.
+
+**Docker and podman have no equivalent, and none is generated.** Compose has no
+registry-auth field whatsoever; `docker compose up` authenticates from the CLI's
+own `~/.docker/config.json`. Podman reads an auth file (`--authfile`, default
+written by `podman login`) rather than a secret, and its secret store cannot
+supply pull credentials either. Note that the compose `secrets:` this tool emits
+are *application* secrets mounted into the container -- despite the name they
+have nothing to do with pulling. So on both platforms a private registry means
+logging the host in first:
+
+```sh
+docker login registry.internal
+podman login registry.internal
+```
+
+Whether the tool should run that login itself is an **open decision**: it would
+mean executing a credential-bearing command rather than rendering a file, which
+is a different trust posture from everything else here. Raise it if you need it.
 
 ## 9. What gets generated
 
@@ -1331,7 +1404,7 @@ always generates cleanly:
   (`no`, `0123`) is double-quoted; everything else stays plain, so output is stable.
   Multi-line passthrough values keep their block form.
 - **The safe-charset gate covers more than `command:`.** `image`, `restart` and
-  `timezone` in the docker/podman sections, the `tls.*.file` paths those sections
+  the top-level `timezone`, the `tls.*.file` paths the docker/podman sections
   bind-mount, `libs.dir`, the kubernetes Secret names, and `libs.pvc.create.nfs.*`
   are all rejected when they carry whitespace, quotes, control characters, or shell
   metacharacters — each one lands unquoted in a generated script, unit, or manifest.

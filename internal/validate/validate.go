@@ -66,6 +66,8 @@ func (i Issue) String() string {
 type Context struct {
 	Workflows []spec.Workflow
 	Defaults  *spec.Defaults
+	Image     *spec.Image      // the one image every platform deploys; nil when the block is absent
+	Timezone  string           // the container TZ every platform sets; empty when unset
 	Kube      *spec.Kubernetes // nil when the kubernetes section is absent/unused
 	Docker    *spec.Docker     // nil when the docker section is absent/unused
 	Podman    *spec.Podman     // nil when the podman section is absent/unused
@@ -140,7 +142,8 @@ func Run(ctx Context) (errs, warns []Issue) {
 	checkStatusUser(add, ctx.Env, d)
 	checkSecurityUserRoles(add, d)
 
-	// Per-target deploy-grade checks.
+	// The image every platform deploys, and then the per-target deploy-grade checks.
+	checkImage(add, ctx)
 	checkTargets(add, warn, ctx, resolved)
 
 	return errs, warns
@@ -583,8 +586,11 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 	} else if !isDNS1123(dep.Namespace) {
 		add(fileEnv, "deployment.namespace %q is not a valid DNS-1123 label", dep.Namespace)
 	}
-	if dep.Image == "" {
-		add(fileEnv, "deployment.image is required")
+	if dep.Image != "" {
+		add(fileEnv, "kubernetes.deployment.image is no longer configured here: the image moved to the top-level image: block (repo/name/tag) so one declaration serves every platform. Remove kubernetes.deployment.image")
+	}
+	if dep.Timezone != "" {
+		add(fileEnv, "kubernetes.deployment.timezone is no longer configured here: the container timezone moved to the top-level timezone: key so one declaration serves every platform. Remove kubernetes.deployment.timezone")
 	}
 
 	// service.port is the same scalar / "host:container" shape as docker/podman
@@ -626,6 +632,7 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 			checkSecretName(add, "kubernetes.secrets.stores.existing", s.Existing)
 		}
 	}
+	checkImagePull(add, warn, ctx)
 
 	checkSyslog(add, warn, ctx.Kube)
 	checkLibs(add, ctx.Kube)
@@ -785,6 +792,74 @@ func isDNS1123(s string) bool { return len(s) <= 63 && dns1123RE.MatchString(s) 
 // checkSecretName gates a Secret name that is emitted verbatim into the manifest
 // (metadata.name, secretRef.name, volumes[].secret.secretName). An empty name is
 // its own message: a create block without one renders a nameless object.
+// checkImage validates the top-level image: block -- the one declaration every
+// platform deploys from. It runs only when a platform is in play: `generate
+// config` renders application.yml alone and never needs an image.
+func checkImage(add func(string, string, ...any), ctx Context) {
+	if !ctx.CheckKubernetes && !ctx.CheckDocker && !ctx.CheckPodman {
+		return
+	}
+	// The timezone rides along here: it is the other value every platform now
+	// shares, it lands in a manifest, a compose file and a podman argv exactly as
+	// the image fields do, and it is optional -- so only the charset is checked.
+	if ctx.Timezone != "" && !SafeToken(ctx.Timezone) {
+		add(fileEnv, "timezone %q contains an unsafe character (%s)", ctx.Timezone, UnsafeTokenReason)
+	}
+	i := ctx.Image
+	if i == nil {
+		add(fileEnv, "image: is required: set image.name and image.tag, plus image.repo for a registry other than Docker Hub")
+		return
+	}
+	if i.Name == "" {
+		add(fileEnv, "image.name is required")
+	}
+	// An untagged reference resolves to :latest, which pins nothing -- the same
+	// reason every other dependency here carries an explicit version.
+	if i.Tag == "" {
+		add(fileEnv, "image.tag is required: an untagged image resolves to :latest, which pins nothing. Use a version tag, or a sha256: digest to pin exactly")
+	}
+	// Every field lands in a manifest, a compose file or a podman argv, so all of
+	// them are held to the safe charset rather than only the ones that reach a
+	// command line.
+	for _, f := range []struct{ key, val string }{
+		{"repo", i.Repo},
+		{"name", i.Name},
+		{"tag", i.Tag},
+		{"repo-username", i.RepoUser},
+		{"repo-password-env", i.RepoPassEnv},
+	} {
+		if f.val != "" && !SafeToken(f.val) {
+			add(fileEnv, "image.%s %q contains an unsafe character (%s)", f.key, f.val, UnsafeTokenReason)
+		}
+	}
+}
+
+// checkImagePull validates kubernetes.secrets.image-pull. The name alone
+// references a Secret the operator manages; create additionally builds one from
+// the registry account in the image: block, which is the only case that needs
+// those credentials -- so they are required there and optional everywhere else.
+func checkImagePull(add, warn func(string, string, ...any), ctx Context) {
+	ip := ctx.Kube.Secrets.ImagePull
+	if ip == nil {
+		return
+	}
+	checkSecretName(add, "kubernetes.secrets.image-pull.name", ip.Name)
+	if !ip.Create {
+		return
+	}
+	if ctx.Image == nil || ctx.Image.RepoUser == "" || ctx.Image.RepoPassEnv == "" {
+		add(fileEnv, "kubernetes.secrets.image-pull.create requires image.repo-username and image.repo-password-env: the Secret is built from them. Omit create to reference a Secret you manage yourself instead")
+		return
+	}
+	// Same shape as every other -env reference: a warning, not an error, so a
+	// config can be linted on a machine that does not hold the deploy secrets.
+	if ctx.Env != nil {
+		if _, ok := ctx.Env(ctx.Image.RepoPassEnv); !ok {
+			warn(fileEnv, "image.repo-password-env names %s, which is not set in this environment; deploying will fail until it is exported", ctx.Image.RepoPassEnv)
+		}
+	}
+}
+
 func checkSecretName(add func(string, string, ...any), field, name string) {
 	if name == "" {
 		add(fileEnv, "%s is required", field)
@@ -965,16 +1040,14 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 	if err := CheckDeployCommand(t.Platform, t.Command, ctx.AllowCommands); err != nil {
 		add(fileEnv, "%s.command %s", section, err)
 	}
-	if t.Image == "" {
-		add(fileEnv, "%s.image is required", section)
-	} else if !SafeToken(t.Image) {
-		add(fileEnv, "%s.image %q contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)", section, t.Image)
+	if t.Image != "" {
+		add(fileEnv, "%s.image is no longer configured here: the image moved to the top-level image: block (repo/name/tag) so one declaration serves every platform. Remove %s.image", section, section)
 	}
 	if t.Restart != "" && !SafeToken(t.Restart) {
 		add(fileEnv, "%s.restart %q contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)", section, t.Restart)
 	}
-	if t.Timezone != "" && !SafeToken(t.Timezone) {
-		add(fileEnv, "%s.timezone %q contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)", section, t.Timezone)
+	if t.Timezone != "" {
+		add(fileEnv, "%s.timezone is no longer configured here: the container timezone moved to the top-level timezone: key so one declaration serves every platform. Remove %s.timezone", section, section)
 	}
 	checkPorts(add, section, t.Ports)
 	if t.Stores != nil {

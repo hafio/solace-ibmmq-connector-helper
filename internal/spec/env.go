@@ -12,6 +12,8 @@ import (
 type Env struct {
 	Defaults              // connections, tls, logging.level, management, security, leader-election, solace-defaults
 	Workflows  *Workflows // discovery config (never nil after ParseEnv)
+	Image      *Image     // the one image every platform deploys
+	Timezone   string     // the container TZ every platform sets
 	Kubernetes *Kubernetes
 	Docker     *Docker
 	Podman     *Podman
@@ -28,6 +30,8 @@ type Workflows struct {
 type rawEnv struct {
 	rawDefaults `yaml:",inline"`
 	Workflows   *rawWorkflows `yaml:"workflows"`
+	Image       *Image        `yaml:"image"`
+	Timezone    string        `yaml:"timezone"`
 	Kubernetes  *Kubernetes   `yaml:"kubernetes"`
 	Docker      *Docker       `yaml:"docker"`
 	Podman      *Podman       `yaml:"podman"`
@@ -48,6 +52,8 @@ func ParseEnv(data []byte) (*Env, error) {
 	e := &Env{
 		Defaults:  *defaultsFromRaw(raw.rawDefaults),
 		Workflows: workflowsFromRaw(raw.Workflows),
+		Image:     raw.Image,
+		Timezone:  raw.Timezone,
 	}
 	// The effective management port drives the kubernetes service default, so an
 	// unset service.port targets the port the connector actually listens on

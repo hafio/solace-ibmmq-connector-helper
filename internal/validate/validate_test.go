@@ -25,6 +25,15 @@ func defsWithStores() *spec.Defaults {
 		Keystore:   &spec.Store{File: "k.jks", PasswordEnv: "KEYSTORE_PASSWORD", Type: "JKS"},
 	}}
 }
+
+// imageOK is the top-level image: block every platform-checking context needs
+// now that the image is declared once rather than per platform. A context that
+// enables any Check* flag without it fails on "image: is required", which is
+// the point -- but it is not what most of these tests are about.
+func imageOK() *spec.Image {
+	return &spec.Image{Name: "solace/connector", Tag: "9.9"}
+}
+
 func hasErr(errs []Issue, sub string) bool {
 	for _, e := range errs {
 		if strings.Contains(e.String(), sub) {
@@ -140,14 +149,14 @@ func TestWorkflowCap(t *testing.T) {
 // "-config" <= 63.
 func TestDeployNameTooLong(t *testing.T) {
 	longName := strings.Repeat("a", 57) // 57 + len("-config")=7 -> 64 > 63
-	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: longName, Namespace: "ns", Image: "img", Replicas: 1}}
-	errs, _ := Run(Context{Workflows: leWorkflows(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
+	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: longName, Namespace: "ns", Replicas: 1}}
+	errs, _ := Run(Context{Workflows: leWorkflows(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
 	if !hasErr(errs, "exceeds the 63-char DNS-1123 limit") {
 		t.Fatalf("want too-long name error, got %v", errs)
 	}
 	// A short name is fine.
 	k.Deployment.Name = "solmq"
-	errs2, _ := Run(Context{Workflows: leWorkflows(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
+	errs2, _ := Run(Context{Workflows: leWorkflows(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
 	if hasErr(errs2, "exceeds the 63-char DNS-1123 limit") {
 		t.Fatalf("short name should not trip the length guard, got %v", errs2)
 	}
@@ -202,16 +211,13 @@ func TestMQCipherRequiresTLS(t *testing.T) {
 }
 
 func TestDeployKubeChecks(t *testing.T) {
-	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "Bad_Name", Namespace: "ns", Image: ""}}
+	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "Bad_Name", Namespace: "ns"}}
 	errs, _ := Run(Context{
 		Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("MQ", spec.DestQueue, false))},
-		Defaults:  &spec.Defaults{}, Kube: k, CheckKubernetes: true,
+		Defaults:  &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true,
 	})
 	if !hasErr(errs, "not a valid DNS-1123 label") {
 		t.Fatalf("want DNS-1123 error, got %v", errs)
-	}
-	if !hasErr(errs, "deployment.image is required") {
-		t.Fatalf("want image-required error, got %v", errs)
 	}
 }
 

@@ -12,9 +12,8 @@ import (
 func baseKube() *spec.Kubernetes {
 	return &spec.Kubernetes{
 		Deployment: spec.Deployment{
-			Name: "solmq", Namespace: "ns", Image: "img:1", Replicas: 1,
+			Name: "solmq", Namespace: "ns", Replicas: 1,
 			Resources: spec.Resources{CPU: "1", Memory: "1Gi"},
-			Timezone:  "UTC",
 		},
 		Service: spec.Service{Enabled: true, Port: spec.Port{Host: 8090, Container: 8090}},
 	}
@@ -22,7 +21,7 @@ func baseKube() *spec.Kubernetes {
 
 // one builds a connector instance (the common test-fixture case).
 func one(name, appYAML string, m *consolidate.Model) Instance {
-	return Instance{Name: name, AppYAML: appYAML, StatusScript: "#!/bin/sh\necho status\n", Model: m}
+	return Instance{Name: name, Image: "img:1", Timezone: "UTC", AppYAML: appYAML, StatusScript: "#!/bin/sh\necho status\n", Model: m}
 }
 
 // fullFixtureInput builds the everything-on fixture shared by TestRenderFull

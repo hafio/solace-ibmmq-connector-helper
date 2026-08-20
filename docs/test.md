@@ -102,6 +102,11 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestUserSecretLiteralAndEnv | - | a security user's Secret() carries the literal or the -env variable, matching what was set |
 | TestCredCreateRemovedKeys | - | RemovedKeys reports each removed key (source, variables, values-file) alone and all three in order; a nil receiver and a bare create.name report none |
 
+| TestImageRef | hub / private registry / digest / trailing slash / no tag / no name / nil | Ref() assembles repo/name:tag, drops an unset repo, and joins a sha256: tag with `@` so a digest pin is a reference an engine accepts |
+| TestImageRegistry | hub fallback / private / nil / trailing slash | the auths key is the registry host, falling back to Docker Hub's v1 URL -- a Hub namespace lives in name and never reaches the lookup |
+| TestRetiredPerPlatformImageStillParses | - | kubernetes.deployment.image, docker.image and podman.image still parse into their retained fields, which is what lets validate reject them instead of yaml dropping them silently |
+| TestImagePullSecretCreateDefaultsFalse | absent / explicit true | create defaults to false so naming a Secret only references it; an explicit true is honoured |
+
 ## internal/validate
 
 Validate the parsed model -- per-side rules, connection refs, leader election, the docker/podman/kubernetes target sections, ports, container names, TLS/stores wiring, and the safe-token charset.
@@ -129,7 +134,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestLeaderElectionConnRefMustBeSolace | - | leader-election conn-ref pointing to mq connection errors must be a solace connection |
 | TestLeaderElectionInvalidMode | - | unknown leader-election mode 'bogus' errors is invalid |
 | TestMQCipherRequiresTLS | - | mq cipher set with tls false errors require 'tls: true' |
-| TestDeployKubeChecks | - | bad name and empty image error not a valid DNS-1123 label and deployment.image is required |
+| TestDeployKubeChecks | - | a bad deployment name errors with not a valid DNS-1123 label |
 | TestCredentialsEnvChecks | - | unset env var for credentials errors variable MISSING_VAR is not set |
 | TestCheckSideMQMissingFields | - | mq side missing conn-name/queue-manager/channel errors each; user/password not flagged missing |
 | TestCheckSideSolaceMissingAndBadScheme | missing-host-vpn | empty solace side errors missing host and msg-vpn; client creds not flagged |
@@ -245,12 +250,8 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestUsesTLS | plain-tcp-mq-false | plain tcp solace and mq tls false returns usesTLS false |
 | TestMQOnlyTLSStoresOmittedWarning | - | mq-only TLS workflow with docker stores omitted still warns store files missing at runtime |
 | TestPlainTCPStoresOmittedNoWarning | - | plain-tcp workflow with stores omitted has no store-files-missing warning |
-| TestCheckContainerImageRestartTimezoneUnsafe | newline in image | rejected for both docker.image and podman.image |
-| TestCheckContainerImageRestartTimezoneUnsafe | metacharacter in image | `img; rm -rf /` and `img $(evil)` rejected for both targets |
-| TestCheckContainerImageRestartTimezoneUnsafe | space in image | rejected for both targets |
-| TestCheckContainerImageRestartTimezoneUnsafe | newline in restart | docker.restart rejected |
-| TestCheckContainerImageRestartTimezoneUnsafe | backtick in timezone | podman.timezone rejected |
-| TestCheckContainerImageRestartTimezoneUnsafe | realistic values | tagged registry image, Asia/Singapore and on-failure:5 all accepted |
+| TestCheckContainerRestartUnsafe | newline in restart | docker.restart is rejected; image and timezone moved to top-level keys and are covered by their own retirement and charset tests |
+| TestCheckContainerRestartUnsafe | realistic value | on-failure:5 is accepted |
 | TestCheckContainerHostPathsUnsafe | newline in tls.truststore.file | bind-mounted store path rejected once docker.stores opts in |
 | TestCheckContainerHostPathsUnsafe | space in libs.dir | podman.libs.dir rejected |
 | TestCheckContainerHostPathsUnsafe | windows paths | `C:\certs\...` store paths and `C:\libs` accepted (backslash and colon permitted) |
@@ -425,6 +426,16 @@ Tests: [render_test.go](../internal/render/render_test.go)
 | TestApplicationConfigImport | ConfigImport set / empty | Application() leads with spring.config.import when Model.ConfigImport is set, and omits the block entirely when it is empty |
 | TestApplicationSecurityUserRoles | - | a roles-bearing user renders a block-style roles sequence under its password; a role-less user and the reserved solmq-status account emit no roles key at all, keeping pre-roles output byte-identical |
 
+| TestRetiredPerPlatformImageRejected | kubernetes / docker / podman | each retired per-platform image key errors, and the message names the top-level image: block that replaced it |
+| TestImageBlockRequired | absent / no name / no tag / unsafe repo, name, tag, repo-username, repo-password-env | the top-level block is required once a platform is in play, tag included (an untagged image resolves to :latest and pins nothing), and every field is charset-checked |
+| TestImageNotRequiredWithoutAPlatform | - | `generate config` renders application.yml alone and pulls nothing, so no image is demanded |
+| TestImagePullSecretChecks | name alone | referencing a Secret requires no registry credentials at all |
+| TestImagePullSecretChecks | name required / DNS-1123 | the Secret name is required and held to the label rule the cluster would apply |
+| TestImagePullSecretChecks | create without credentials | create errors unless image.repo-username and image.repo-password-env are both set |
+| TestImagePullSecretChecks | create, variable unset / set | an unset variable warns rather than errors, so a config can be linted without the deploy secrets |
+| TestRetiredPerPlatformTimezoneRejected | kubernetes / docker / podman | each retired per-platform timezone key errors and names the top-level timezone: key |
+| TestTopLevelTimezoneUnsafe | unsafe / realistic | the top-level timezone keeps the charset gate the per-platform key had, and an empty value is not an error |
+
 ## internal/deploy
 
 Render the Kubernetes manifests -- Namespace/ConfigMap/Secret/Deployment/Service, syslog, libs (PVC or download), and multi-instance layout.
@@ -509,6 +520,11 @@ Tests: [podmangen_test.go](../internal/podmangen/podmangen_test.go)
 | TestStatusScriptMountNestsAfterLibs | - | in both renderers, the status script mount/volume is declared after the libs mount, so it nests rather than being shadowed |
 | TestStatusScriptMountOmittedWhenPathEmpty | - | an empty StatusScriptPath omits the status mount entirely in both renderers, rather than mounting an empty source |
 
+| TestImagePullSecretStates | no block / name alone / created | imagePullSecrets is absent, rendered without a Secret, or rendered with one -- the middle case is what stops an apply overwriting a Secret the operator built |
+| TestImagePullSecretPayloadIsOpaqueToDeploy | - | deploy places the already-encoded payload verbatim and the registry password appears nowhere outside it |
+| TestEnvBlockOmittedWhenEmpty | nothing to emit | env: is omitted entirely rather than rendered with nothing beneath it, now that the timezone is one optional top-level key |
+| TestEnvBlockOmittedWhenEmpty | TZ only / MQTLS only | either entry alone opens the block, and no timezone means no TZ entry |
+
 ## internal/gen
 
 Orchestrate parse -> validate -> consolidate -> render, resolve credentials/stores, and assert the byte-for-byte golden fixtures.
@@ -554,6 +570,16 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestGoldenConfig | - | generated config output matches testdata/golden/application.yml byte-for-byte, one instance |
 | TestGoldenKubernetesCreate | - | generated kubernetes manifests (namespace, configmap incl. status script, secret, stores, pv, pvc, deployment with secrets-volume/stores/syslog/libs mounts and le-mode/role labels, service) match golden fixture byte-for-byte |
 | TestGoldenKubernetesNoSecrets | - | generated manifests without secrets/syslog/libs (namespace, configmap incl. status script, deployment, service) match golden fixture byte-for-byte |
+
+| TestDockerConfigJSON | private registry / docker hub fallback | the payload is an auths map keyed by registry carrying the account plus the base64 user:password the engines send |
+| TestDockerConfigJSONEscapesAwkwardValues | - | a password carrying quotes, a backslash or JSON of its own round-trips as data rather than reshaping the document -- which is why it is marshalled, not concatenated |
+| TestResolvePullSecret | reference only | resolves to the name alone and never reads the registry password |
+| TestResolvePullSecret | create | builds the payload from the environment |
+| TestResolvePullSecret | variable unset / no environment access | both fail loudly, naming the variable |
+| TestResolvePullSecret | no image block / partial image block | the guard that exists so a caller who skipped validate gets an error rather than a nil dereference |
+| TestGenerateKubernetesImagePull | no block / reference / create | the wiring from config to rendered manifest: nothing, an imagePullSecrets entry alone, or the entry plus the dockerconfigjson Secret -- the integration point TestResolvePullSecret skips |
+| TestGenerateKubernetesImagePull | payload and leak check | the rendered payload decodes to the real account, and the registry password appears nowhere else in the manifest |
+| TestGenerateKubernetesImagePull | variable unset | create fails the generate with an issue naming the variable |
 
 ## internal/runner
 

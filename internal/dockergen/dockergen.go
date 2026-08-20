@@ -15,6 +15,8 @@ import (
 // Instance is the connector: its compose service name and rendered config.
 type Instance struct {
 	Name         string // service/container name
+	Image        string // the reference to pull, from the top-level image: block
+	Timezone     string // container TZ, from the top-level timezone: key
 	AppYAML      string // the rendered application.yml (has a trailing newline)
 	MQTLS        bool   // when true, add JAVA_TOOL_OPTIONS for IBM cipher mappings
 	StatusScript string // the rendered status script, inlined as a second compose config
@@ -83,7 +85,7 @@ func renderSecrets(w *yw, names []string) {
 func renderService(w *yw, in Input, inst Instance) {
 	d := in.Docker
 	w.Line(2, inst.Name+":")
-	w.Line(4, "image: "+d.Image)
+	w.Line(4, "image: "+inst.Image)
 	w.Line(4, "container_name: "+inst.Name)
 	// labels: le-mode is always set; role: active only for standalone and
 	// active_active -- an active_standby role is only knowable live from the
@@ -108,10 +110,10 @@ func renderService(w *yw, in Input, inst Instance) {
 	}
 	// environment: TZ only when set, JAVA_TOOL_OPTIONS only when the connector
 	// uses MQ TLS. Omit the whole key when neither applies.
-	if d.Timezone != "" || inst.MQTLS {
+	if inst.Timezone != "" || inst.MQTLS {
 		w.Line(4, "environment:")
-		if d.Timezone != "" {
-			w.Line(6, "TZ: "+d.Timezone)
+		if inst.Timezone != "" {
+			w.Line(6, "TZ: "+inst.Timezone)
 		}
 		if inst.MQTLS {
 			w.Line(6, `JAVA_TOOL_OPTIONS: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"`)

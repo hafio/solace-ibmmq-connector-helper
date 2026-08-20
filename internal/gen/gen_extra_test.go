@@ -234,7 +234,7 @@ func TestConfigWorkflowCap(t *testing.T) {
 // TestGenerateKubernetesWorkflowCap covers the same cap through the
 // kubernetes target: over the limit is fatal and produces no manifest.
 func TestGenerateKubernetesWorkflowCap(t *testing.T) {
-	envData := "kubernetes:\n  deployment:\n    name: solmq\n    namespace: ns\n    image: img\n  service:\n    enabled: true\n    port: 8090\n"
+	envData := "image:\n  name: img\n  tag: v1\nkubernetes:\n  deployment:\n    name: solmq\n    namespace: ns\n  service:\n    enabled: true\n    port: 8090\n"
 	req := Request{
 		Env:       &File{Name: "env.yaml", Data: []byte(envData)},
 		Workflows: synthWorkflowFiles(21),
@@ -342,19 +342,21 @@ func TestConfigNoSecretsLeak(t *testing.T) {
 // ---- docker / podman generation ---------------------------------------------
 
 func TestGenerateDockerBasics(t *testing.T) {
-	envData := `tls:
+	envData := `timezone: UTC
+image:
+  name: solace/connector
+  tag: "9.9"
+tls:
   truststore:
     file: ./certs/truststore.jks
     password: ts
     type: JKS
 docker:
   command: docker
-  image: solace/connector:9.9
   name: solmq-connector
   restart: unless-stopped
   ports:
     - 8090
-  timezone: UTC
   stores:
     mount-path: /app/external/classpath/truststores
 `
@@ -408,15 +410,17 @@ docker:
 }
 
 func TestGeneratePodmanRunAndQuadlet(t *testing.T) {
-	envData := `podman:
+	envData := `timezone: UTC
+image:
+  name: solace/connector
+  tag: "9.9"
+podman:
   command: podman
   mode: run
-  image: solace/connector:9.9
   name: solmq-connector
   restart: unless-stopped
   ports:
     - 8090
-  timezone: UTC
 `
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
 	res := Resolver{Env: func(string) (string, bool) { return "v", true }}
@@ -556,7 +560,7 @@ func TestConfigStatusPasswordRandErrorNoOutput(t *testing.T) {
 // the reserved account and the port GenerateKubernetes itself resolved (the
 // same fallback chain deploy.ManagementPort implements).
 func TestGenerateKubernetesCarriesStatusScript(t *testing.T) {
-	envData := "kubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n    image: img\n"
+	envData := "image:\n  name: img\n  tag: v1\nkubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n"
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
 	out, errs, _ := GenerateKubernetes(req, Resolver{Rand: fixedStatusRand})
 	if len(errs) > 0 {
@@ -577,7 +581,7 @@ func TestGenerateKubernetesCarriesStatusScript(t *testing.T) {
 // top-level config (<name>-status) inlines the rendered script and the
 // service mounts it at statusscript.ContainerPath.
 func TestGenerateDockerCarriesStatusScript(t *testing.T) {
-	envData := "docker:\n  command: docker\n  image: img\n  name: solmq-connector\n"
+	envData := "image:\n  name: img\n  tag: v1\ndocker:\n  command: docker\n  name: solmq-connector\n"
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
 	plan, errs, _ := GenerateDocker(req, Resolver{Rand: fixedStatusRand})
 	if len(errs) > 0 {
@@ -599,7 +603,7 @@ func TestGenerateDockerCarriesStatusScript(t *testing.T) {
 // script, and the on-disk mount path is BaseDir-resolved exactly like
 // AppYAML.
 func TestGeneratePodmanCarriesStatusScript(t *testing.T) {
-	envData := "podman:\n  command: podman\n  mode: run\n  image: img\n  name: solmq-connector\n"
+	envData := "image:\n  name: img\n  tag: v1\npodman:\n  command: podman\n  mode: run\n  name: solmq-connector\n"
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
 	res := Resolver{Env: func(string) (string, bool) { return "v", true }, Rand: fixedStatusRand}
 
@@ -684,11 +688,13 @@ target:
     password: p
     queue: OUT
 `
-	envData := `kubernetes:
+	envData := `image:
+  name: img
+  tag: v1
+kubernetes:
   deployment:
     name: c
     namespace: ns
-    image: img
   secrets:
     credentials:
       create:

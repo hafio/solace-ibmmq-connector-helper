@@ -28,6 +28,8 @@ const javaToolOptions = "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"
 // Instance is the connector: its container name and on-disk config path.
 type Instance struct {
 	Name             string // container name
+	Image            string // the reference to pull, from the top-level image: block
+	Timezone         string // container TZ, from the top-level timezone: key
 	AppYAMLPath      string // host path to the application.yml on disk (bind-mounted)
 	MQTLS            bool   // when true, add JAVA_TOOL_OPTIONS env for IBM cipher mappings
 	StatusScriptPath string // host path to the rendered status script on disk (bind-mounted); empty omits the mount
@@ -149,8 +151,8 @@ func runArgs(in Input, p *spec.Podman, inst Instance) []string {
 	for _, port := range p.Ports {
 		args = append(args, "-p "+port.String())
 	}
-	if p.Timezone != "" {
-		args = append(args, "-e TZ="+p.Timezone)
+	if inst.Timezone != "" {
+		args = append(args, "-e TZ="+inst.Timezone)
 	}
 	if inst.MQTLS {
 		args = append(args, "-e JAVA_TOOL_OPTIONS="+javaToolOptions)
@@ -171,7 +173,7 @@ func runArgs(in Input, p *spec.Podman, inst Instance) []string {
 		// the same path.
 		args = append(args, "-v "+inst.StatusScriptPath+":"+statusTarget+":ro")
 	}
-	args = append(args, p.Image)
+	args = append(args, inst.Image)
 	return args
 }
 
@@ -192,7 +194,7 @@ func RenderQuadlet(in Input) Unit {
 	w.Line(0, "")
 
 	w.Line(0, "[Container]")
-	w.Line(0, "Image="+p.Image)
+	w.Line(0, "Image="+inst.Image)
 	w.Line(0, "ContainerName="+inst.Name)
 	for _, l := range leaderLabels(inst.LeaderMode) {
 		w.Line(0, "Label="+l[0]+"="+l[1])
@@ -200,8 +202,8 @@ func RenderQuadlet(in Input) Unit {
 	for _, port := range p.Ports {
 		w.Line(0, "PublishPort="+port.String())
 	}
-	if p.Timezone != "" {
-		w.Line(0, "Environment=TZ="+p.Timezone)
+	if inst.Timezone != "" {
+		w.Line(0, "Environment=TZ="+inst.Timezone)
 	}
 	if inst.MQTLS {
 		w.Line(0, "Environment=JAVA_TOOL_OPTIONS="+javaToolOptions)

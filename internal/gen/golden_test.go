@@ -417,12 +417,10 @@ const kubeNoSecrets = `kubernetes:
   deployment:
     name: solmq-connector
     namespace: solace-connectors
-    image: solace/solace-pubsub-connector-ibmmq:2.13.0
     replicas: 2
     resources:
       cpu: "1"
       memory: 1Gi
-    timezone: Asia/Singapore
   service:
     enabled: true
     port: 8090

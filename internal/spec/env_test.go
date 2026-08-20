@@ -24,7 +24,7 @@ func TestParseEnvEmpty(t *testing.T) {
 }
 
 func TestWorkflowsFromRawDefaultWhenAbsent(t *testing.T) {
-	e, err := ParseEnv([]byte("docker:\n  image: x\n"))
+	e, err := ParseEnv([]byte("docker:\n  name: x\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,11 +64,11 @@ func TestWorkflowsFromRawFilePatternOverride(t *testing.T) {
 // top-level key is silently dropped rather than erroring. This pins that
 // behavior; it does not endorse non-strict parsing as desirable.
 func TestParseEnvUnknownKeyIgnored(t *testing.T) {
-	e, err := ParseEnv([]byte("bogus-key: 1\ndocker:\n  image: x\n"))
+	e, err := ParseEnv([]byte("bogus-key: 1\ndocker:\n  name: x\n"))
 	if err != nil {
 		t.Fatalf("unknown top-level key should not error: %v", err)
 	}
-	if e.Docker == nil || e.Docker.Image != "x" {
+	if e.Docker == nil || e.Docker.Name != "x" {
 		t.Errorf("docker section should still parse: %+v", e.Docker)
 	}
 }
