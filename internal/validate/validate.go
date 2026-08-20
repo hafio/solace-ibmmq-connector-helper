@@ -36,7 +36,7 @@ const (
 
 // AllowedCommands is the argv[0] allowlist for each deploy platform's
 // `command:` field. CheckDeployCommand also honors any names passed as
-// extraAllowed (deploy/delete's repeatable --allow-command flag), which is
+// extraAllowed (deploy/remove's repeatable --allow-command flag), which is
 // how an operator approves a chained binary (e.g. `sudo podman`) that the
 // yaml author cannot grant on their own.
 var AllowedCommands = map[string][]string{
@@ -83,9 +83,9 @@ type Context struct {
 	Env func(string) (string, bool)
 
 	// AllowCommands extends the platform binary allowlist for CheckDeployCommand,
-	// threaded from deploy/delete's repeatable --allow-command flag. Plain
+	// threaded from deploy/remove's repeatable --allow-command flag. Plain
 	// `validate` leaves this nil: an exotic command (a chained binary like `sudo
-	// podman`) validates clean only at deploy/delete time with the flag, and the
+	// podman`) validates clean only at deploy/remove time with the flag, and the
 	// error text says so.
 	AllowCommands []string
 }
@@ -116,6 +116,11 @@ func Run(ctx Context) (errs, warns []Issue) {
 		resolved[i].Target = d.Resolve(wf.Target)
 	}
 
+	// Removed keys: still parsed (spec.Security.Enabled / spec.Management.Exposure),
+	// always rejected, so an old env.yaml fails loudly instead of silently keeping
+	// a toggle that no longer has any effect (mirrors docker/podman .secrets).
+	checkRemovedDefaultsKeys(add, d)
+
 	checkWorkflowCount(add, len(ctx.Workflows))
 
 	// Reusable connection definitions + per-workflow structural checks.
@@ -133,6 +138,7 @@ func Run(ctx Context) (errs, warns []Issue) {
 
 	// Reserved status-account name, and its password override charset.
 	checkStatusUser(add, ctx.Env, d)
+	checkSecurityUserRoles(add, d)
 
 	// Per-target deploy-grade checks.
 	checkTargets(add, warn, ctx, resolved)
@@ -150,6 +156,21 @@ func checkWorkflowCount(add func(string, string, ...any), n int) {
 	}
 	add(fileEnv, "%d workflows found, but one connector instance runs at most %d (workflow ids 0..%d). Split them across separate folders, each with its own env.yaml and its own deployment.name/docker.name/podman.name, and deploy each as its own connector",
 		n, MaxWorkflows, MaxWorkflows-1)
+}
+
+// checkRemovedDefaultsKeys rejects the two connector-defaults keys the tool
+// retired now that management is unconditionally locked down: security.enabled
+// (management security can no longer be turned off) and management.exposure
+// (the actuator exposure list is no longer configurable). Both fields still
+// parse a value through from env.yaml purely so a stale key is caught here
+// instead of silently doing nothing.
+func checkRemovedDefaultsKeys(add func(string, string, ...any), d *spec.Defaults) {
+	if d.Security.Enabled != nil {
+		add(fileEnv, "security.enabled is no longer configurable: the tool always injects a read-only actuator account (%s) so a running instance can always be queried for its leader-election state, and disabling auth would also leave the write-capable /actuator/workflows endpoint open. Remove the key", spec.StatusUserName)
+	}
+	if d.Management.Exposure != nil {
+		add(fileEnv, "management.exposure is no longer configurable: the tool always exposes exactly health,info,metrics,leaderelection,workflows. Remove the key")
+	}
 }
 
 // checkWorkflowSides runs the per-workflow structural + semantic checks on the
@@ -415,17 +436,14 @@ func checkLeaderElection(add func(string, string, ...any), d *spec.Defaults, hav
 }
 
 // checkStatusUser guards the reserved read-only actuator account the tool
-// injects into every rendered application.yml (named spec.StatusUserName)
-// once management security is effectively enabled. No author-configured user
-// may claim that name -- it would collide with the account the tool adds
+// injects into every rendered application.yml (named spec.StatusUserName).
+// Management security is always on, so this always runs. No author-configured
+// user may claim that name -- it would collide with the account the tool adds
 // itself. If the account's generated password is overridden via
 // spec.StatusUserPasswordEnvVar, the override must survive being rendered as
 // a literal into application.yml and parsed back out of that file by the
 // generated status script.
 func checkStatusUser(add func(string, string, ...any), env func(string) (string, bool), d *spec.Defaults) {
-	if !d.Security.EffectivelyEnabled() {
-		return
-	}
 	for i, u := range d.Security.Users {
 		if u.Name == spec.StatusUserName {
 			add(fileEnv, "security.users[%d].name %q is reserved for the tool's own read-only status account used by the generated status script; choose a different name", i, u.Name)
@@ -440,6 +458,31 @@ func checkStatusUser(add func(string, string, ...any), env func(string) (string,
 	}
 	if !safeStatusPassword(v) {
 		add(fileEnv, "%s is set but its value contains a character the generated status script cannot round-trip: the password is rendered as a literal into application.yml and parsed back out by a shell script, so whitespace, quotes, backslash, and ${...} would corrupt the YAML or break the parse. Use only printable ASCII, excluding those characters", spec.StatusUserPasswordEnvVar)
+	}
+}
+
+// checkSecurityUserRoles gates the roles an operator grants their own actuator
+// accounts. Roles are passed through to the connector verbatim, so this is not
+// an allowlist of known names -- the connector owns that vocabulary and a
+// hardcoded list here would reject a role it adds later. What is checked is that
+// each entry is usable at all: an empty role would render as a bare "- " item
+// the connector cannot map to an authority, and an unsafe-charset role is far
+// more likely a typo than a real authority name.
+//
+// The reserved status account is not covered here: the tool appends it with no
+// roles at all (consolidate.applyStatusAccess), which is what keeps it
+// read-only, and checkStatusUser already rejects an operator claiming its name.
+func checkSecurityUserRoles(add func(string, string, ...any), d *spec.Defaults) {
+	for i, u := range d.Security.Users {
+		for j, r := range u.Roles {
+			if strings.TrimSpace(r) == "" {
+				add(fileEnv, "security.users[%d].roles[%d] is empty: give the role a name (for example %q, which grants the read/write access needed to POST to /actuator/workflows) or drop the entry", i, j, "admin")
+				continue
+			}
+			if !SafeToken(r) {
+				add(fileEnv, "security.users[%d].roles[%d] %q contains an unsafe character (%s); a role is an authority name passed to the connector verbatim", i, j, r, UnsafeTokenReason)
+			}
+		}
 	}
 }
 
@@ -543,6 +586,12 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 	if dep.Image == "" {
 		add(fileEnv, "deployment.image is required")
 	}
+
+	// service.port is the same scalar / "host:container" shape as docker/podman
+	// ports (Port.UnmarshalYAML enforces the shape itself at parse); range-check
+	// both sides regardless of service.enabled, since an unset port is already
+	// defaulted to management.port by the time validate sees it.
+	checkPortRange(add, "kubernetes.service.port", ctx.Kube.Service.Port)
 
 	// standalone requires a single replica.
 	mode := ctx.Defaults.LeaderElection.Mode
@@ -746,20 +795,28 @@ func checkSecretName(add func(string, string, ...any), field, name string) {
 	}
 }
 
-// checkPorts flags any host or container port outside the valid 1-65535 range
-// (the "host:container" shape itself is enforced at parse in spec.Port).
-func checkPorts(add func(string, string, ...any), section string, ports []spec.Port) {
-	for _, p := range ports {
-		if p.Host < 1 || p.Host > 65535 {
-			add(fileEnv, "%s.ports host port %d must be 1-65535", section, p.Host)
-		}
-		if p.Container < 1 || p.Container > 65535 {
-			add(fileEnv, "%s.ports container port %d must be 1-65535", section, p.Container)
-		}
+// checkPortRange flags a spec.Port whose host or container side falls outside
+// the valid 1-65535 range (the "host:container" shape itself is enforced at
+// parse in spec.Port). label is the field path prefixed onto "host port"/
+// "container port" in the message, e.g. "docker.ports" or
+// "kubernetes.service.port".
+func checkPortRange(add func(string, string, ...any), label string, p spec.Port) {
+	if p.Host < 1 || p.Host > 65535 {
+		add(fileEnv, "%s host port %d must be 1-65535", label, p.Host)
+	}
+	if p.Container < 1 || p.Container > 65535 {
+		add(fileEnv, "%s container port %d must be 1-65535", label, p.Container)
 	}
 }
 
-// CheckDeployCommand is the single shared gate for a deploy/delete `command:`
+// checkPorts runs checkPortRange over a docker/podman ports list.
+func checkPorts(add func(string, string, ...any), section string, ports []spec.Port) {
+	for _, p := range ports {
+		checkPortRange(add, section+".ports", p)
+	}
+}
+
+// CheckDeployCommand is the single shared gate for a deploy/remove `command:`
 // field, used by both the validator (nil extraAllowed) and the runner (the
 // operator's --allow-command values). It layers three checks on top of
 // Tokenize's charset gate, in order, and returns nil or one error naming the
@@ -818,7 +875,7 @@ func CheckDeployCommand(platform, cmd string, extraAllowed []string) error {
 	if binName := stripExe(bin); strings.Contains(binName, "/") {
 		return fmt.Errorf("%q: a path is not accepted here; use a bare binary name, resolved from PATH", bin)
 	} else if !isAllowed(binName) {
-		return fmt.Errorf("%q: binary must be one of %s; deploy/delete can approve another with --allow-command <name>", bin, strings.Join(allowed, ", "))
+		return fmt.Errorf("%q: binary must be one of %s; deploy/remove can approve another with --allow-command <name>", bin, strings.Join(allowed, ", "))
 	}
 
 	for i := 1; i < len(tokens); i++ {
@@ -973,7 +1030,7 @@ func checkDocker(add func(string, string, ...any), ctx Context) {
 }
 
 // checkPodman validates the podman section, including the generate mode and the
-// quadlet scope (deploy/delete are always quadlet + systemctl).
+// quadlet scope (deploy/remove are always quadlet + systemctl).
 func checkPodman(add func(string, string, ...any), ctx Context) {
 	p := ctx.Podman
 	checkContainerTarget(add, ctx, containerTarget{

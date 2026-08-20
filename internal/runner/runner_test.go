@@ -259,9 +259,9 @@ func TestKubernetesDeployApplyOnStdin(t *testing.T) {
 	}
 }
 
-func TestKubernetesDeleteUsesDeleteVerb(t *testing.T) {
+func TestKubernetesRemoveUsesDeleteVerb(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Kubernetes(f, "oc", ActionDelete, "x", nil); err != nil {
+	if _, err := Kubernetes(f, "oc", ActionRemove, "x", nil); err != nil {
 		t.Fatal(err)
 	}
 	wantArgv := []string{"oc", "delete", "-f", "-"}
@@ -303,7 +303,7 @@ func TestDockerUpAndDown(t *testing.T) {
 	if !reflect.DeepEqual(f.calls[0].env, env) {
 		t.Errorf("up env = %v, want %v (credential values must cross via Cmd.Env, never argv)", f.calls[0].env, env)
 	}
-	if _, err := Docker(f, "docker", ActionDelete, "/tmp/docker-compose.yml", env, nil); err != nil {
+	if _, err := Docker(f, "docker", ActionRemove, "/tmp/docker-compose.yml", env, nil); err != nil {
 		t.Fatal(err)
 	}
 	wantDown := []string{"docker", "compose", "-f", "/tmp/docker-compose.yml", "down"}
@@ -383,7 +383,7 @@ func TestPodmanDeploySystemModeNoUserFlag(t *testing.T) {
 	}
 }
 
-func TestPodmanDeleteStopsRemovesReloads(t *testing.T) {
+func TestPodmanRemoveStopsRemovesReloads(t *testing.T) {
 	f := &fakeRunner{}
 	dir := t.TempDir()
 	unit := "solmq-connector.container"
@@ -391,7 +391,7 @@ func TestPodmanDeleteStopsRemovesReloads(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := QuadletScope{Dir: dir, UserMode: false}
-	if _, err := PodmanDelete(f, sc, []string{"solmq-connector.service"}, []string{unit}); err != nil {
+	if _, err := PodmanRemove(f, sc, []string{"solmq-connector.service"}, []string{unit}); err != nil {
 		t.Fatal(err)
 	}
 	want := [][]string{
@@ -435,12 +435,12 @@ func TestDockerUnknownAction(t *testing.T) {
 	}
 }
 
-func TestPodmanDeleteStopFailureIsReported(t *testing.T) {
-	// The first call PodmanDelete makes is the per-service stop, so a runner that
+func TestPodmanRemoveStopFailureIsReported(t *testing.T) {
+	// The first call PodmanRemove makes is the per-service stop, so a runner that
 	// fails every call exercises the stop-failure branch.
 	f := &fakeRunner{err: fmt.Errorf("boom")}
 	sc := QuadletScope{Dir: t.TempDir(), UserMode: false}
-	_, err := PodmanDelete(f, sc, []string{"solmq-connector.service"}, []string{"solmq-connector.container"})
+	_, err := PodmanRemove(f, sc, []string{"solmq-connector.service"}, []string{"solmq-connector.container"})
 	if err == nil {
 		t.Fatal("a systemctl stop failure must surface")
 	}
@@ -666,11 +666,13 @@ func TestWriteFileTargetIsDirectoryReturnsError(t *testing.T) {
 	}
 }
 
-// TestOSRunEchoesResolvedPathToStderr pins the stderr echo Run must print before
-// exec'ing: "exec: <resolved-path> <remaining args>". It reuses the
-// TestHelperProcess re-exec trick already used above so no external binary is
-// needed, and temporarily swaps os.Stderr for a pipe to capture the line.
-func TestOSRunEchoesResolvedPathToStderr(t *testing.T) {
+// TestOSRunWritesNothingToStderr pins that Run prints nothing of its own: the
+// child's streams are captured into the returned combined output, and the
+// caller (cmd/solmq-conn-util's report) decides what an operator sees. It
+// reuses the TestHelperProcess re-exec trick already used above so no external
+// binary is needed, and temporarily swaps os.Stderr for a pipe to capture
+// anything that leaks past the buffer.
+func TestOSRunWritesNothingToStderr(t *testing.T) {
 	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
 	exe, err := os.Executable()
 	if err != nil {
@@ -684,7 +686,7 @@ func TestOSRunEchoesResolvedPathToStderr(t *testing.T) {
 	os.Stderr = w
 
 	argv := helperProcessArgv(exe, "stdin")
-	_, runErr := (OS{}).Run(Cmd{Argv: argv, Stdin: "echo-test\n"})
+	out, runErr := (OS{}).Run(Cmd{Argv: argv, Stdin: "echo-test\n"})
 
 	w.Close()
 	os.Stderr = origStderr
@@ -695,10 +697,13 @@ func TestOSRunEchoesResolvedPathToStderr(t *testing.T) {
 	if runErr != nil {
 		t.Fatalf("Run returned error: %v", runErr)
 	}
-	want := "exec: " + exe + " " + strings.Join(argv[1:], " ")
-	got := strings.TrimRight(string(data), "\n")
-	if got != want {
-		t.Errorf("stderr echo = %q, want %q", got, want)
+	if got := string(data); got != "" {
+		t.Errorf("Run wrote %q to stderr, want nothing", got)
+	}
+	// The child's own output still reaches the caller through the return value,
+	// which is what the removed echo used to duplicate.
+	if !strings.Contains(out, "echo-test") {
+		t.Errorf("combined output = %q, want it to carry the child's output", out)
 	}
 }
 
@@ -725,9 +730,9 @@ func TestPreflightKubernetesArgvDeployNoNamespace(t *testing.T) {
 	}
 }
 
-func TestPreflightKubernetesArgvDeleteWithNamespace(t *testing.T) {
+func TestPreflightKubernetesArgvRemoveWithNamespace(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformKubernetes, "oc", ActionDelete, "solace", nil); err != nil {
+	if _, err := Preflight(f, validate.PlatformKubernetes, "oc", ActionRemove, "solace", nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"oc", "auth", "can-i", "delete", "deployment", "--namespace", "solace"}
@@ -749,7 +754,7 @@ func TestPreflightDockerArgvIsInfo(t *testing.T) {
 
 func TestPreflightPodmanArgvIsInfo(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformPodman, "podman", ActionDelete, "", nil); err != nil {
+	if _, err := Preflight(f, validate.PlatformPodman, "podman", ActionRemove, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"podman", "info"}
@@ -840,6 +845,47 @@ func TestKubernetesPodNamesArgv(t *testing.T) {
 		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
 			t.Errorf("%s: argv = %v, want %v", c.name, f.calls[0].argv, c.want)
 		}
+	}
+}
+
+// TestDockerComposeProjectArgvAndValue covers the read that labels a docker
+// target with the compose project it belongs to. The project is read back from
+// the container rather than derived from the compose file's directory, so a
+// container brought up under a different project name still reports the truth.
+func TestDockerComposeProjectArgvAndValue(t *testing.T) {
+	f := &fakeRunner{out: "eg\n"}
+	if got := DockerComposeProject(f, []string{"docker"}, "solmq-connector"); got != "eg" {
+		t.Errorf("project = %q, want %q", got, "eg")
+	}
+	want := []string{
+		"docker", "inspect", "--format",
+		`{{index .Config.Labels "com.docker.compose.project"}}`,
+		"solmq-connector",
+	}
+	if !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	}
+}
+
+// TestDockerComposeProjectDegradesToEmpty covers every way the lookup can fail
+// to produce a name. None of them is an error: the project only labels a target
+// in the status banner, so a missing one drops that segment rather than failing
+// a report that is otherwise fine.
+func TestDockerComposeProjectDegradesToEmpty(t *testing.T) {
+	cases := []struct {
+		name string
+		f    *fakeRunner
+	}{
+		{"inspect failed", &fakeRunner{err: fmt.Errorf("no such container")}},
+		{"nil label map renders as Go's no-value", &fakeRunner{outByCall: map[int]string{0: "<no value>\n"}}},
+		{"label absent, so the template renders nothing", &fakeRunner{outByCall: map[int]string{0: "\n"}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := DockerComposeProject(c.f, []string{"docker"}, "solmq-connector"); got != "" {
+				t.Errorf("project = %q, want empty", got)
+			}
+		})
 	}
 }
 

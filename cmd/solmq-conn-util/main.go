@@ -6,12 +6,12 @@
 //
 //	solmq-conn-util generate [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
 //	solmq-conn-util deploy   [--platform kubernetes|docker|podman] [-e env.yaml]
-//	solmq-conn-util delete   [--platform kubernetes|docker|podman] [-e env.yaml]
+//	solmq-conn-util remove   [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util status   [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util version
 //	solmq-conn-util validate [-e env.yaml]
 //	solmq-conn-util examples [dir] [-f]
-//	solmq-conn-util completion bash|zsh|fish|powershell
+//	solmq-conn-util auto-complete bash|zsh|fish|powershell
 package main
 
 import (
@@ -45,10 +45,59 @@ const (
 
 // platformNames lists the three deploy-platform section keys, in the order
 // commands.go's --platform meaning documents them. generate (without
-// "config"), deploy, delete, and status all resolve to one of these three via
+// "config"), deploy, remove, and status all resolve to one of these three via
 // resolvePlatform; every platform-keyed map in this file (platformGenerators,
 // actTargets) is gated against this same list by TestPlatformMapsCoverThreeNames.
 var platformNames = []string{tgtKubernetes, tgtDocker, tgtPodman}
+
+// platformAliasList is the accepted short spellings of a --platform value,
+// paired with the canonical section key each resolves to. A slice rather than
+// a bare map so the order is fixed: platformSpellings renders it into the
+// "must be" error, and map iteration order would make that message -- and any
+// test asserting it -- vary between runs once a platform has more than one
+// alias.
+//
+// Curated rather than derived from a prefix rule, for the same reason the verb
+// aliases are (cliVerb.Aliases): a prefix scheme silently changes meaning when
+// a name is added. Only kubernetes has a widely recognized short form; dk and
+// pm are this tool's own, which is why the --platform meaning and the user
+// guide spell them out rather than leaving them to be guessed.
+var platformAliasList = []struct{ Alias, Canonical string }{
+	{"kube", tgtKubernetes},
+	{"dk", tgtDocker},
+	{"pm", tgtPodman},
+}
+
+// platformAliases is platformAliasList keyed for lookup.
+var platformAliases = buildPlatformAliases()
+
+func buildPlatformAliases() map[string]string {
+	m := make(map[string]string, len(platformAliasList))
+	for _, e := range platformAliasList {
+		m[e.Alias] = e.Canonical
+	}
+	return m
+}
+
+// platformSpellings lists every accepted --platform value, canonical names
+// first, for the "must be" error so a rejected value names its alternatives.
+func platformSpellings() []string {
+	out := append([]string(nil), platformNames...)
+	for _, e := range platformAliasList {
+		out = append(out, e.Alias)
+	}
+	return out
+}
+
+// resolvePlatformAlias returns val's canonical platform name when val is a
+// known alias, otherwise val unchanged -- resolvePlatform's validation is what
+// rejects an unknown value.
+func resolvePlatformAlias(val string) string {
+	if canon, ok := platformAliases[val]; ok {
+		return canon
+	}
+	return val
+}
 
 // version is solmq-conn-util's own version, stamped at build time via
 // -ldflags "-X main.version=<tag>"; "dev" is what an un-injected local build
@@ -72,20 +121,48 @@ func run(args []string) int {
 // other fails that test rather than drifting silently (see task 2's
 // examples-default-dir drift for what this class of bug looks like).
 var verbHandlers = map[string]func(args []string, r runner.Runner) int{
-	"generate":   func(args []string, r runner.Runner) int { return runGenerate(args) },
-	"deploy":     func(args []string, r runner.Runner) int { return runAction(runner.ActionDeploy, args, r) },
-	"delete":     func(args []string, r runner.Runner) int { return runAction(runner.ActionDelete, args, r) },
-	"status":     func(args []string, r runner.Runner) int { return runStatus(args, r) },
-	"version":    func(args []string, r runner.Runner) int { return actVersion() },
-	"validate":   func(args []string, r runner.Runner) int { return runValidate(args) },
-	"examples":   func(args []string, r runner.Runner) int { return runExamples(args) },
-	"completion": func(args []string, r runner.Runner) int { return runCompletion(args) },
-	"help":       func(args []string, r runner.Runner) int { usage(); return 0 },
+	"generate":      func(args []string, r runner.Runner) int { return runGenerate(args) },
+	"deploy":        func(args []string, r runner.Runner) int { return runAction(runner.ActionDeploy, args, r) },
+	"remove":        func(args []string, r runner.Runner) int { return runAction(runner.ActionRemove, args, r) },
+	"status":        func(args []string, r runner.Runner) int { return runStatus(args, r) },
+	"version":       func(args []string, r runner.Runner) int { return actVersion() },
+	"validate":      func(args []string, r runner.Runner) int { return runValidate(args) },
+	"examples":      func(args []string, r runner.Runner) int { return runExamples(args) },
+	"auto-complete": func(args []string, r runner.Runner) int { return runAutoComplete(args) },
+	"help":          func(args []string, r runner.Runner) int { usage(); return 0 },
+}
+
+// verbAliases maps each alternate spelling (cliVerb.Aliases in commands.go) to
+// its canonical verb name. Built from the model instead of hand-written so it
+// can never drift from cliVerbs -- see resolveVerb.
+var verbAliases = buildVerbAliases()
+
+func buildVerbAliases() map[string]string {
+	m := make(map[string]string)
+	for _, v := range cliVerbs {
+		for _, a := range v.Aliases {
+			m[a] = v.Name
+		}
+	}
+	return m
+}
+
+// resolveVerb returns name's canonical verb if name is a modeled alias,
+// otherwise name unchanged (already canonical, or unknown -- either way
+// dispatch's verbHandlers lookup is what decides that).
+func resolveVerb(name string) string {
+	if canon, ok := verbAliases[name]; ok {
+		return canon
+	}
+	return name
 }
 
 // dispatch resolves args[0] against verbHandlers. -h/--help are aliases of the
 // modeled "help" verb, handled before the lookup since they are not spellable
-// as args[0] in the model itself.
+// as args[0] in the model itself. An alias from cliVerb.Aliases is resolved to
+// its canonical verb the same way, right after that -h/--help normalization;
+// the unknown-command message below still echoes args[0] as typed, never the
+// resolved name.
 func dispatch(args []string, r runner.Runner) int {
 	if len(args) == 0 {
 		usage()
@@ -95,7 +172,8 @@ func dispatch(args []string, r runner.Runner) int {
 		usage()
 		return 0
 	}
-	h, ok := verbHandlers[args[0]]
+	verb := resolveVerb(args[0])
+	h, ok := verbHandlers[verb]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", args[0])
 		usage()
@@ -253,11 +331,11 @@ func genPodman(envPath, out string) int {
 	return emit(out, plan.RunScript)
 }
 
-// ---- deploy / delete ---------------------------------------------------------
+// ---- deploy / remove ---------------------------------------------------------
 
-// actTargets maps each of platformNames to its deploy/delete implementation.
+// actTargets maps each of platformNames to its deploy/remove implementation.
 // Gated against platformNames by TestPlatformMapsCoverThreeNames (deploy/
-// delete no longer model a positional Targets list in commands.go -- the
+// remove no longer model a positional Targets list in commands.go -- the
 // platform is resolved by resolvePlatform, not looked up from args[0]).
 // extraAllowed carries the values of a repeatable --allow-command flag (nil
 // when unused).
@@ -268,7 +346,7 @@ var actTargets = map[string]func(action, envPath string, r runner.Runner, extraA
 }
 
 // runAction resolves --platform (or infers/prompts, see resolvePlatform) for
-// deploy/delete and dispatches to actTargets. A positional argument is never
+// deploy/remove and dispatches to actTargets. A positional argument is never
 // a platform anymore: one naming an old-grammar platform (deploy kubernetes,
 // ...) is rejected with a hint at --platform, and anything else is an
 // unexpected argument -- both usage errors (exit 2), per
@@ -363,7 +441,7 @@ func actDocker(action, envPath string, r runner.Runner, extraAllowed []string) i
 		return errExit(werr)
 	}
 	out, rerr := runner.Docker(r, e.Docker.Command, action, path, envPairs(kvs), extraAllowed)
-	// The compose file is regenerated by every deploy and delete, so it is
+	// The compose file is regenerated by every deploy and remove, so it is
 	// scratch. It is kept after a failure: a half-started `up` still needs a
 	// compose file to `down` with.
 	if rerr == nil {
@@ -396,7 +474,7 @@ func actPodman(action, envPath string, r runner.Runner, extraAllowed []string) i
 		return errExit(serr)
 	}
 	res := resolver(envDir)
-	// deploy/delete are always quadlet; BaseDir bakes absolute on-disk paths into
+	// deploy/remove are always quadlet; BaseDir bakes absolute on-disk paths into
 	// the units so systemd resolves them regardless of cwd.
 	plan, errs, warns := gen.GeneratePodman(req, res, gen.PodmanOpts{ForceQuadlet: true, BaseDir: sc.Dir}, extraAllowed...)
 	printWarnings(warns)
@@ -406,8 +484,8 @@ func actPodman(action, envPath string, r runner.Runner, extraAllowed []string) i
 	if code, ok := preflight(r, action, validate.PlatformPodman, e.Podman.Command, "", extraAllowed); !ok {
 		return code
 	}
-	if action == runner.ActionDelete {
-		return podmanDelete(sc, plan, e.Podman, r, extraAllowed)
+	if action == runner.ActionRemove {
+		return podmanRemove(sc, plan, e.Podman, r, extraAllowed)
 	}
 	return podmanDeploy(sc, plan, e.Podman, res, r, extraAllowed)
 }
@@ -444,8 +522,8 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	return report(runner.ActionDeploy, tgtPodman, out, rerr)
 }
 
-func podmanDelete(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r runner.Runner, extraAllowed []string) int {
-	out, rerr := runner.PodmanDelete(r, sc, []string{plan.Service}, []string{plan.Unit.Filename})
+func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r runner.Runner, extraAllowed []string) int {
+	out, rerr := runner.PodmanRemove(r, sc, []string{plan.Service}, []string{plan.Unit.Filename})
 	// Best-effort cleanup of the files we generated.
 	_ = os.Remove(filepath.Join(sc.Dir, plan.AppYAML.Name))
 	_ = os.Remove(filepath.Join(sc.Dir, plan.StatusScript.Name))
@@ -462,10 +540,10 @@ func podmanDelete(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	if rerr == nil {
 		rerr = serr
 	}
-	return report(runner.ActionDelete, tgtPodman, out, rerr)
+	return report(runner.ActionRemove, tgtPodman, out, rerr)
 }
 
-// ---- platform resolution (shared by generate/deploy/delete/status) ----------
+// ---- platform resolution (shared by generate/deploy/remove/status) ----------
 
 // contains reports whether s appears in names.
 func contains(names []string, s string) bool {
@@ -498,7 +576,7 @@ func presentPlatforms(e *spec.Env) []string {
 }
 
 // resolvePlatform implements the order platformResolutionDetail (commands.go)
-// documents for generate/deploy/delete/status: flagVal if set; otherwise the
+// documents for generate/deploy/remove/status: flagVal if set; otherwise the
 // single entry in present, echoed to stderr so the operator sees what ran;
 // otherwise an interactive numbered menu over present; zero entries in
 // present is a loud error naming all three section keys.
@@ -509,8 +587,12 @@ func presentPlatforms(e *spec.Env) []string {
 // against them (see actStatus).
 func resolvePlatform(flagVal string, present []string, requireSection bool) (string, error) {
 	if flagVal != "" {
+		// Resolved first so the section check, the messages below, and every
+		// caller see a canonical name -- an operator who typed an alias is told
+		// which section: key to add, not which alias they used.
+		flagVal = resolvePlatformAlias(flagVal)
 		if !contains(platformNames, flagVal) {
-			return "", fmt.Errorf("--platform %q must be %s", flagVal, wantList(platformNames))
+			return "", fmt.Errorf("--platform %q must be %s", flagVal, wantList(platformSpellings()))
 		}
 		if requireSection && !contains(present, flagVal) {
 			if len(present) == 0 {
@@ -577,7 +659,7 @@ func promptPlatformMenu(present []string) (string, error) {
 }
 
 // platformFlag registers the shared --platform selector (generate/deploy/
-// delete/status; no short alias) and returns its raw value for
+// remove/status; no short alias) and returns its raw value for
 // resolvePlatform to interpret.
 func platformFlag(fs *flag.FlagSet) *string {
 	const u = "the platform: kubernetes, docker, or podman (default: resolved from env.yaml, or an interactive menu)"
@@ -586,7 +668,7 @@ func platformFlag(fs *flag.FlagSet) *string {
 
 // loadEnvFile reads and parses env.yaml only, with no workflow scan: platform
 // resolution and status need the parsed sections but never the workflow set
-// loadEnv additionally reads for generate/deploy/delete.
+// loadEnv additionally reads for generate/deploy/remove.
 func loadEnvFile(envPath string) (*spec.Env, error) {
 	data, err := os.ReadFile(envPath)
 	if err != nil {
@@ -802,7 +884,7 @@ func actStatus(envPath string, install bool, platformFlagVal string, pods, conta
 	}
 
 	// Reuse the read-only preflight probe before touching anything, same as
-	// deploy/delete. The action argument only steers kubernetes' can-i verb
+	// deploy/remove. The action argument only steers kubernetes' can-i verb
 	// (docker/podman ignore it); status never creates or deletes a deployment,
 	// so deploy's "create" is used as the closer of the two existing checks.
 	if code, ok := preflight(r, runner.ActionDeploy, platform, command, namespace, extraAllowed); !ok {
@@ -815,7 +897,7 @@ func actStatus(envPath string, install bool, platformFlagVal string, pods, conta
 	}
 
 	script := statusscript.Render(port, user)
-	return runStatusOnTargets(r, cmdArgv, platform, namespace, targets, script, install)
+	return runStatusOnTargets(r, cmdArgv, platform, namespace, e, targets, script, install)
 }
 
 // runStatusOnTargets ensures the status script is present on each target and
@@ -826,7 +908,7 @@ func actStatus(envPath string, install bool, platformFlagVal string, pods, conta
 // the script's documented convention (1 standby, 2 error), data to report,
 // not a crash. It returns 0 only when every target reached the run step; a
 // probe/install failure or a declined install both count toward exit 1.
-func runStatusOnTargets(r runner.Runner, cmdArgv []string, platform, namespace string, targets []string, script string, install bool) int {
+func runStatusOnTargets(r runner.Runner, cmdArgv []string, platform, namespace string, e *spec.Env, targets []string, script string, install bool) int {
 	var present, missing []string
 	failed := false
 
@@ -872,6 +954,13 @@ func runStatusOnTargets(r runner.Runner, cmdArgv []string, platform, namespace s
 		}
 	}
 
+	// The deployment name exists only on kubernetes, and only when env.yaml was
+	// read at all -- explicit --pod targets can run with no section present.
+	deployment := ""
+	if platform == validate.PlatformKubernetes && e != nil && e.Kubernetes != nil {
+		deployment = e.Kubernetes.Deployment.Name
+	}
+	reported := false
 	for _, t := range toRun {
 		// The script always exits 0 and puts its findings in the output, so an
 		// error here is the exec failing rather than a standby instance -- report
@@ -882,7 +971,18 @@ func runStatusOnTargets(r runner.Runner, cmdArgv []string, platform, namespace s
 			failed = true
 			continue
 		}
-		printTargetReport(t, out)
+		// Only docker has a group above the container, and it is read back from
+		// the container rather than assumed from the compose file's directory --
+		// one extra read-only inspect per target, skipped on the other platforms.
+		group := ""
+		if platform == validate.PlatformDocker {
+			group = runner.DockerComposeProject(r, cmdArgv, t)
+		}
+		if reported {
+			fmt.Println()
+		}
+		printTargetReport(statusBanner(platform, namespace, deployment, group, t), out)
+		reported = true
 	}
 
 	if failed {
@@ -891,12 +991,36 @@ func runStatusOnTargets(r runner.Runner, cmdArgv []string, platform, namespace s
 	return 0
 }
 
-// printTargetReport prints target's status report with a "<target>: " lead-in
-// on the first line and every continuation line indented under it.
-func printTargetReport(target, out string) {
-	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	fmt.Printf("%s: %s\n", target, lines[0])
-	for _, l := range lines[1:] {
+// statusBanner is the one-line identity printed above a target's report: the
+// platform, then the names that locate that instance on it -- namespace /
+// deployment / pod on kubernetes, compose project / container on docker, the
+// container alone on podman. None of it can come from the report itself: the
+// script runs inside the container and knows nothing of what surrounds it.
+//
+// A name that is not set (no namespace configured, a container compose did not
+// create) is dropped rather than rendered as an empty segment, so a separator
+// always sits between two real names.
+func statusBanner(platform, namespace, deployment, group, target string) string {
+	parts := make([]string, 0, 4)
+	for _, s := range []string{namespace, deployment, group, target} {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return platform + "  " + strings.Join(parts, " / ")
+}
+
+// printTargetReport prints one target's report under its banner, indenting
+// every line by two. The identity is a banner rather than a lead-in on the
+// first line so the report lines stay left-aligned with each other however
+// long the pod name is.
+func printTargetReport(banner, out string) {
+	fmt.Printf("=== %s ===\n", banner)
+	body := strings.TrimRight(out, "\n")
+	if body == "" {
+		return
+	}
+	for _, l := range strings.Split(body, "\n") {
 		fmt.Printf("  %s\n", l)
 	}
 }
@@ -982,11 +1106,11 @@ func runExamples(args []string) int {
 	return 0
 }
 
-// ---- completion --------------------------------------------------------------
+// ---- auto-complete -------------------------------------------------------
 
-// completionShellRenderers maps each modeled "completion" shell (cliVerbs in
-// commands.go) to its renderer, so runCompletion's accepted set can never drift
-// from the model -- see TestDispatchHandlersMatchModel.
+// completionShellRenderers maps each modeled "auto-complete" shell (cliVerbs in
+// commands.go) to its renderer, so runAutoComplete's accepted set can never
+// drift from the model -- see TestDispatchHandlersMatchModel.
 var completionShellRenderers = map[string]func() string{
 	"bash":       renderBashCompletion,
 	"zsh":        renderZshCompletion,
@@ -994,24 +1118,24 @@ var completionShellRenderers = map[string]func() string{
 	"powershell": renderPowerShellCompletion,
 }
 
-// runCompletion prints the named shell's completion script on stdout, for the
-// caller to redirect or source. Nothing is read or written beyond that: the
-// script is rendered from the compiled-in command model, so it needs no env.yaml
-// and matches the binary that printed it.
-func runCompletion(args []string) int {
-	fs := flag.NewFlagSet("completion", flag.ContinueOnError)
+// runAutoComplete prints the named shell's completion script on stdout, for
+// the caller to redirect or source. Nothing is read or written beyond that:
+// the script is rendered from the compiled-in command model, so it needs no
+// env.yaml and matches the binary that printed it.
+func runAutoComplete(args []string) int {
+	fs := flag.NewFlagSet("auto-complete", flag.ContinueOnError)
 	pos, err := collectFlagsAndDirs(fs, args)
 	if err != nil {
 		return 2
 	}
 	if len(pos) == 0 {
-		fmt.Fprintf(os.Stderr, "completion: missing shell (%s)\n", pipeList(targetNames("completion")))
+		fmt.Fprintf(os.Stderr, "auto-complete: missing shell (%s)\n", pipeList(targetNames("auto-complete")))
 		usage()
 		return 2
 	}
 	h, ok := completionShellRenderers[pos[0]]
 	if !ok {
-		fmt.Fprintf(os.Stderr, "completion: unknown shell %q (want %s)\n", pos[0], wantList(targetNames("completion")))
+		fmt.Fprintf(os.Stderr, "auto-complete: unknown shell %q (want %s)\n", pos[0], wantList(targetNames("auto-complete")))
 		return 2
 	}
 	return emit("", h())
@@ -1054,7 +1178,7 @@ func (v allowCommandValue) Set(s string) error {
 	return nil
 }
 
-// allowCommandFlag registers the repeatable --allow-command flag (deploy/delete
+// allowCommandFlag registers the repeatable --allow-command flag (deploy/remove
 // only -- runGenerate/runValidate never call this) and returns the accumulated,
 // already-validated values. A bad value fails fs.Parse, which callers surface
 // as the standard usage-error exit (2).

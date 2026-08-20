@@ -18,7 +18,7 @@ func TestParseEnvEmpty(t *testing.T) {
 	if e.Kubernetes != nil || e.Docker != nil || e.Podman != nil {
 		t.Errorf("sections should stay nil when absent: k=%+v d=%+v p=%+v", e.Kubernetes, e.Docker, e.Podman)
 	}
-	if e.Management.Present || e.Security.Present || e.LeaderElection.Present || e.TLS.Truststore != nil {
+	if e.Management != (Management{}) || e.Security.Enabled != nil || len(e.Security.Users) != 0 || e.LeaderElection.Present || e.TLS.Truststore != nil {
 		t.Errorf("defaults should be zero-valued: %+v", e.Defaults)
 	}
 }

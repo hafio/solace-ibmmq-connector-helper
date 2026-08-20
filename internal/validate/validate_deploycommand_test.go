@@ -65,7 +65,7 @@ func TestCheckDeployCommandErrorTexts(t *testing.T) {
 		err.Error() != `"/tmp/evil": a path is not accepted here; use a bare binary name, resolved from PATH` {
 		t.Errorf("path error text = %v", err)
 	}
-	wantAllowlist := fmt.Sprintf(`"curl": binary must be one of %s; deploy/delete can approve another with --allow-command <name>`,
+	wantAllowlist := fmt.Sprintf(`"curl": binary must be one of %s; deploy/remove can approve another with --allow-command <name>`,
 		strings.Join(AllowedCommands[PlatformKubernetes], ", "))
 	if err := CheckDeployCommand(PlatformKubernetes, "curl", nil); err == nil || err.Error() != wantAllowlist {
 		t.Errorf("allowlist error text = %v, want %v", err, wantAllowlist)

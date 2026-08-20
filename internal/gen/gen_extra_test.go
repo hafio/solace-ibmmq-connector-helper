@@ -260,14 +260,51 @@ func fixedStatusRand(b []byte) error {
 
 // Every generated application.yml must import the mounted secret files and
 // must never carry a credential value or a host variable name -- only the
-// ${STABLE} placeholder, with exactly one carve-out: security defaults to
-// effectively enabled (no security: block here), so
+// ${STABLE} placeholder, with exactly one carve-out: management security is
+// always on (no operator toggle left, no security: block needed here), so
 // consolidate.applyStatusAccess unconditionally appends the reserved
 // spec.StatusUserName account carrying its password as a literal -- the
 // generated status script reads that literal back out of application.yml at
 // run time, so it has nothing else to read. This guards both invariants
 // end-to-end through Config: every ordinary password is a placeholder, and
 // the one literal that exists is exactly the expected status-account value.
+// TestConfigCarriesSecurityUserRoles is the end-to-end proof that an operator's
+// roles survive the whole chain -- validate accepts them, consolidate carries
+// them, render emits them -- and that the reserved status account still renders
+// without any, which is what keeps it read-only. Guards the gap this test was
+// written for: roles used to be documented but silently dropped, since nothing
+// in the model carried the key.
+func TestConfigCarriesSecurityUserRoles(t *testing.T) {
+	env := &File{Name: "env.yaml", Data: []byte(`
+security:
+  users:
+    - name: ops
+      password-env: OPS_PASS
+      roles:
+        - admin
+`)}
+	res := Resolver{
+		Rand: fixedStatusRand,
+		Env: func(k string) (string, bool) {
+			if k == "OPS_PASS" {
+				return "ops-pw", true
+			}
+			return "", false
+		},
+	}
+	out, errs, _ := Config(Request{Env: env, Workflows: synthWorkflowFiles(1)}, res)
+	if len(errs) > 0 {
+		t.Fatalf("a roles-bearing env.yaml must generate cleanly, got: %v", errs)
+	}
+	want := "          roles:\n            - admin\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("missing the ops user's rendered roles block:\n%s", out)
+	}
+	if n := strings.Count(out, "roles:"); n != 1 {
+		t.Errorf("roles: appears %d times, want 1 -- the reserved account must not emit it\n%s", n, out)
+	}
+}
+
 func TestConfigNoSecretsLeak(t *testing.T) {
 	out, errs, _ := Config(Request{Workflows: synthWorkflowFiles(1)}, Resolver{Rand: fixedStatusRand})
 	if len(errs) > 0 {
@@ -358,6 +395,14 @@ docker:
 		}
 		if strings.Contains(plan.Compose, s.Stable+": "+s.Literal) {
 			t.Errorf("compose must never carry a secret value inline (%q):\n%s", s.Stable, plan.Compose)
+		}
+		// The ${STABLE} placeholder application.yml carries is Spring's, resolved
+		// from the configtree import of /run/secrets. It reaches the container only
+		// if it is escaped for compose's interpolation pass: left bare, compose
+		// substitutes it from the environment the CLI hands the compose child, and
+		// the plaintext credential is written into the document after all.
+		if !strings.Contains(plan.Compose, "$${"+s.Stable+"}") {
+			t.Errorf("compose placeholder for %q is not escaped against interpolation:\n%s", s.Stable, plan.Compose)
 		}
 	}
 }

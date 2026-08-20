@@ -201,6 +201,43 @@ func TestParseWorkflowSyntaxError(t *testing.T) {
 	}
 }
 
+// TestParseSecurityUserRoles pins roles parsing on security.users[]: absent
+// (the connector's read-only default), one, and several, plus that a role is
+// carried verbatim. Roles are not a credential, so unlike password/password-env
+// they are expanded like any other identity field -- covered by the ${VAR} case.
+func TestParseSecurityUserRoles(t *testing.T) {
+	d, err := ParseDefaults([]byte(`
+security:
+  users:
+    - name: readonly
+      password-env: RO_PASS
+    - name: ops
+      password-env: OPS_PASS
+      roles:
+        - admin
+    - name: multi
+      password-env: MULTI_PASS
+      roles:
+        - admin
+        - auditor
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Security.Users) != 3 {
+		t.Fatalf("users = %+v, want 3", d.Security.Users)
+	}
+	if got := d.Security.Users[0].Roles; len(got) != 0 {
+		t.Errorf("readonly roles = %v, want none (an absent list is the read-only default)", got)
+	}
+	if got := d.Security.Users[1].Roles; len(got) != 1 || got[0] != "admin" {
+		t.Errorf("ops roles = %v, want [admin]", got)
+	}
+	if got := d.Security.Users[2].Roles; len(got) != 2 || got[0] != "admin" || got[1] != "auditor" {
+		t.Errorf("multi roles = %v, want [admin auditor] in order", got)
+	}
+}
+
 func TestParseDefaultsFull(t *testing.T) {
 	d, err := ParseDefaults([]byte(`
 tls:
@@ -240,10 +277,10 @@ solace-defaults:
 	if d.TLS.Keystore.Secret().Literal != "keystore-literal-pw" {
 		t.Errorf("keystore secret = %+v", d.TLS.Keystore.Secret())
 	}
-	if !d.Management.Present || d.Management.Port != 8090 {
+	if d.Management.Port != 8090 || d.Management.Exposure == nil || *d.Management.Exposure != "health" {
 		t.Errorf("management: %+v", d.Management)
 	}
-	if !d.Security.Present || d.Security.Enabled || len(d.Security.Users) != 1 {
+	if d.Security.Enabled == nil || *d.Security.Enabled || len(d.Security.Users) != 1 {
 		t.Errorf("security: %+v", d.Security)
 	}
 	if d.Security.Users[0].Secret().EnvVar != "HEALTHCHECK_PASS" {
@@ -257,13 +294,16 @@ solace-defaults:
 	}
 }
 
-func TestParseDefaultsSecurityDefaultsEnabled(t *testing.T) {
+func TestParseDefaultsSecurityEnabledKeyOmittedStaysNil(t *testing.T) {
+	// security.enabled is a removed key: defaultsFromRaw must copy it straight
+	// through rather than default it, so an absent key is reachable as nil and
+	// validate can tell "omitted" apart from "set to false".
 	d, err := ParseDefaults([]byte("security:\n  users: []\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !d.Security.Present || !d.Security.Enabled {
-		t.Errorf("security should default enabled when present: %+v", d.Security)
+	if d.Security.Enabled != nil {
+		t.Errorf("security.enabled should stay nil when omitted: %+v", d.Security.Enabled)
 	}
 }
 
@@ -272,7 +312,7 @@ func TestParseDefaultsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Management.Present || d.Security.Present || d.TLS.Truststore != nil {
+	if d.Management != (Management{}) || d.Security.Enabled != nil || len(d.Security.Users) != 0 || d.TLS.Truststore != nil {
 		t.Errorf("empty defaults should be zero-valued: %+v", d)
 	}
 }
@@ -306,7 +346,7 @@ secrets:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if k.Deployment.Replicas != 2 || !k.Service.Enabled || k.Service.Port != 8090 {
+	if k.Deployment.Replicas != 2 || !k.Service.Enabled || k.Service.Port != (Port{Host: 8090, Container: 8090}) {
 		t.Errorf("kube: %+v", k)
 	}
 	if k.Secrets.Credentials == nil || k.Secrets.Credentials.Create == nil || k.Secrets.Credentials.Create.Name != "s" {
@@ -510,5 +550,38 @@ func TestBaseName(t *testing.T) {
 		if got := BaseName(c.in); got != c.want {
 			t.Errorf("BaseName(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// TestWorkflowFileLess covers the ordering workflow ids are assigned from:
+// digit runs compare as numbers, everything else byte by byte. The sort/reverse
+// pairs also pin that the comparator is a strict order (never true both ways),
+// which sort.Slice relies on.
+func TestWorkflowFileLess(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool // want WorkflowFileLess(a, b); the reverse must be false
+	}{
+		{"2.yaml", "10.yaml", true},                   // the case plain lexical order gets wrong
+		{"9.yaml", "10.yaml", true},                   // ...and its 9/10 boundary
+		{"workflow-2.yaml", "workflow-10.yaml", true}, // digits after a shared prefix
+		{"1.yaml", "2.yaml", true},                    // same width, still numeric
+		{"10.yaml", "10.yml", true},                   // equal numbers fall through to the suffix
+		{"a.yaml", "b.yaml", true},                    // no digits at all: byte order
+		{"7.yaml", "007.yaml", false},                 // same value, padding breaks the tie
+		{"2.yaml", "2b.yaml", true},                   // equal digits, then '.' before 'b'
+	}
+	for _, c := range cases {
+		if got := WorkflowFileLess(c.a, c.b); got != c.want {
+			t.Errorf("WorkflowFileLess(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+		if got := WorkflowFileLess(c.b, c.a); got == c.want {
+			t.Errorf("WorkflowFileLess(%q, %q) = %v: not a strict order", c.b, c.a, got)
+		}
+	}
+	// A name compared with itself is never less than itself -- the irreflexivity
+	// sort.Slice needs to avoid an inconsistent comparator.
+	if WorkflowFileLess("10.yaml", "10.yaml") {
+		t.Error("WorkflowFileLess(x, x) must be false")
 	}
 }

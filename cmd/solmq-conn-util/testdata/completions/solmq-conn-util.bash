@@ -1,17 +1,17 @@
 # solmq-conn-util bash completion -- GENERATED, do not edit by hand.
 #
 # Rendered from the command model in cmd/solmq-conn-util/commands.go by
-# `solmq-conn-util completion bash`, so it matches the binary that printed it.
+# `solmq-conn-util auto-complete bash`, so it matches the binary that printed it.
 # Re-run that command after upgrading solmq-conn-util.
 #
 # Install:
 #   Add this to ~/.bashrc. It depends on nothing but bash itself:
-#   source <(solmq-conn-util completion bash)
+#   source <(solmq-conn-util auto-complete bash)
 #   
 #   System-wide instead -- but only where the bash-completion package is
 #   installed and sourced from the profile, since that is what reads the
 #   directory. Without it the file is never loaded:
-#   solmq-conn-util completion bash > /etc/bash_completion.d/solmq-conn-util
+#   solmq-conn-util auto-complete bash > /etc/bash_completion.d/solmq-conn-util
 #
 # _solmq_conn_util_flag_arg <word> prints the value kind the flag consumes:
 # 'file', 'name', or nothing. Boolean flags consume no value and so are
@@ -37,7 +37,7 @@ _solmq_conn_util_flag_arg() {
 _solmq_conn_util_targets() {
   case "$1" in
     generate) printf 'config' ;;
-    completion) printf 'bash zsh fish powershell' ;;
+    auto-complete) printf 'bash zsh fish powershell' ;;
     *) printf '' ;;
   esac
 }
@@ -47,7 +47,7 @@ _solmq_conn_util_flags() {
   case "$1" in
     generate) printf '--platform -e --env -o --out' ;;
     deploy) printf '--platform -e --env --allow-command' ;;
-    delete) printf '--platform -e --env --allow-command' ;;
+    remove) printf '--platform -e --env --allow-command' ;;
     status) printf '--install --platform -e --env --pod --container --namespace --management-port --user --command --allow-command' ;;
     validate) printf '-e --env' ;;
     examples) printf '-f --force' ;;
@@ -108,8 +108,22 @@ _solmq_conn_util() {
     i=$((i + 1))
   done
 
+  # Aliases resolve to their canonical verb here, once, so the lookup
+  # blocks above stay keyed by canonical verb names only.
+  case "$verb" in
+    gen) verb="generate" ;;
+    dep) verb="deploy" ;;
+    rm) verb="remove" ;;
+    sts) verb="status" ;;
+    ver) verb="version" ;;
+    vld) verb="validate" ;;
+    eg) verb="examples" ;;
+  esac
+
+  # Aliases are deliberately absent from this word list -- the TAB menu for
+  # word 1 keeps showing only canonical verbs.
   if [ -z "$verb" ]; then
-    COMPREPLY=( $(compgen -W 'generate deploy delete status version validate examples completion help -h --help' -- "$cur") )
+    COMPREPLY=( $(compgen -W 'generate deploy remove status version validate examples auto-complete help -h --help' -- "$cur") )
     return
   fi
 

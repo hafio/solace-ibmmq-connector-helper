@@ -186,19 +186,16 @@ details[open]>summary::before{content:"- "}
   <div class="sec" id="s-mgmt"><h3>Management</h3>
     <div class="tgl"><input type="checkbox" id="i-mgmt-on" onchange="togOpt('i-mgmt-on','mgmt-fields')"><label for="i-mgmt-on">Configure the actuator management endpoint</label></div>
     <div class="opt-fields" id="mgmt-fields">
-      <div class="fr">
-        <div class="f"><label>Port</label><input id="i-mgmt-port" type="number" min="1" max="65535" value="8090"></div>
-        <div class="f"><label>Exposure</label><input id="i-mgmt-exp" value="health,info,workflows"></div>
-      </div>
+      <div class="f"><label>Port</label><input id="i-mgmt-port" type="number" min="1" max="65535" value="8090"></div>
       <div class="f"><label>Health Show Details</label><input id="i-mgmt-hsd" value="always"></div>
     </div>
   </div>
 
   <!-- Security -->
   <div class="sec" id="s-sec"><h3>Security</h3>
-    <div class="tgl"><input type="checkbox" id="i-sec-on" onchange="togOpt('i-sec-on','sec-fields')"><label for="i-sec-on">Configure management-endpoint security</label></div>
+    <div class="h" style="margin-bottom:.5rem;font-size:.7rem;color:var(--tm);font-style:italic">Management-endpoint security is always on: the tool injects its own read-only actuator account. Add an admin or extra read-only account here if you need one. Leave Roles empty for a read-only (GET-only) account; enter <code>admin</code> for the read/write access needed to POST to /actuator/workflows. Separate several roles with commas.</div>
+    <div class="tgl"><input type="checkbox" id="i-sec-on" onchange="togOpt('i-sec-on','sec-fields')"><label for="i-sec-on">Add operator-defined users</label></div>
     <div class="opt-fields" id="sec-fields">
-      <div class="tgl"><input type="checkbox" id="i-sec-en" checked><label for="i-sec-en">Enabled</label></div>
       <div class="sub-h">Users</div>
       <div id="users-list"></div>
       <button type="button" class="add" onclick="addUser();gen()">+ Add user</button>
@@ -534,8 +531,6 @@ solace:
     security:
       enabled: true
       users:
-        - name: healthcheck
-          password: ${SECURITY_USER_HEALTHCHECK_PASSWORD}
         - name: solmq-status
           password: 0123456789abcdef0123456789abcdef
     management:
@@ -567,7 +562,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,workflows,leaderelection
+        include: health,info,metrics,leaderelection,workflows
   endpoint:
     health:
       show-details: always
@@ -780,14 +775,22 @@ function addWf(w){
 function addUser(u){
   const r = document.createElement('div');
   r.className = 'pr';
-  r.innerHTML = `<input class="u-name grow" placeholder="healthcheck"><input class="u-pass grow" placeholder="HEALTHCHECK_PASSWORD"><label style="display:flex;align-items:center;gap:.3rem;font-size:.68rem;color:var(--tm);cursor:pointer;white-space:nowrap"><input type="checkbox" class="u-pass-env" checked>env var</label><button type="button" class="rm" title="Remove" onclick="this.parentElement.remove();gen()">x</button>`;
+  r.innerHTML = `<input class="u-name grow" placeholder="healthcheck"><input class="u-pass grow" placeholder="HEALTHCHECK_PASSWORD"><label style="display:flex;align-items:center;gap:.3rem;font-size:.68rem;color:var(--tm);cursor:pointer;white-space:nowrap"><input type="checkbox" class="u-pass-env" checked>env var</label><input class="u-roles grow" placeholder="roles (e.g. admin)"><button type="button" class="rm" title="Remove" onclick="this.parentElement.remove();gen()">x</button>`;
   $('users-list').appendChild(r);
   if(u){
     r.querySelector('.u-name').value = u.name || '';
     const p = u.password || emptyCred();
     r.querySelector('.u-pass-env').checked = !p.literal;
     r.querySelector('.u-pass').value = p.literal || p.env || '';
+    r.querySelector('.u-roles').value = (u.roles || []).join(', ');
   }
+}
+
+// readRoles parses the comma-separated roles field into the list the model
+// carries. Left empty for a read-only account: an empty list is the connector's
+// read-only default, and "admin" is what grants POST to /actuator/workflows.
+function readRoles(r){
+  return r.querySelector('.u-roles').value.split(',').map(s => s.trim()).filter(Boolean);
 }
 
 function addPort(listId, val){
@@ -968,14 +971,15 @@ function readModel(){
   m.loggingLevel = parseProps(V('i-log'));
   m.solaceDefaults = parseProps(V('i-soldef'));
   m.management = C('i-mgmt-on')
-    ? { present: true, port: V('i-mgmt-port'), exposure: V('i-mgmt-exp'), healthShowDetails: V('i-mgmt-hsd') }
+    ? { present: true, port: V('i-mgmt-port'), healthShowDetails: V('i-mgmt-hsd') }
     : { present: false };
   m.security = C('i-sec-on')
     ? {
-        present: true, enabled: C('i-sec-en'),
+        present: true,
         users: Array.from(document.querySelectorAll('#users-list .pr')).map(r => ({
           name: r.querySelector('.u-name').value.trim(),
-          password: readCredPair(r, 'u-pass')
+          password: readCredPair(r, 'u-pass'),
+          roles: readRoles(r)
         })).filter(u => u.name || !credEmpty(u.password))
       }
     : { present: false, users: [] };
@@ -1103,16 +1107,24 @@ function emitEnv(m){
 
   if(m.management.present){
     y += '\nmanagement:\n' + knum('port', m.management.port, '  ')
-       + kv('exposure', m.management.exposure, '  ')
        + kv('health-show-details', m.management.healthShowDetails, '  ');
   }
 
-  if(m.security.present){
-    y += '\nsecurity:\n' + kbool('enabled', m.security.enabled, '  ');
-    if(m.security.users.length){
-      y += '  users:\n';
-      m.security.users.forEach(u => { y += `    - name: ${yq(u.name)}\n` + kcred('password', u.password, '      '); });
-    }
+  // security.enabled is gone -- management security is always on -- so this
+  // block is written only when the operator adds a user; an empty list is
+  // dropped entirely rather than emitting a bare "security:" key (the tool
+  // injects its own read-only account regardless).
+  if(m.security.present && m.security.users.length){
+    y += '\nsecurity:\n  users:\n';
+    m.security.users.forEach(u => {
+      y += `    - name: ${yq(u.name)}\n` + kcred('password', u.password, '      ');
+      // Block style, never flow [ ]: an omitted list is the connector's
+      // read-only default, so only emit the key when a role was given.
+      if((u.roles || []).length){
+        y += '      roles:\n';
+        u.roles.forEach(r => { y += `        - ${yq(r)}\n`; });
+      }
+    });
   }
 
   if(m.leader.present){
@@ -1207,19 +1219,19 @@ function emitCommands(m){
   o += `solmq-conn-util validate            -e ${env}\n`;
   o += `solmq-conn-util generate config     -e ${env} -o application.yml\n`;
   if(m.kube){
-    o += `solmq-conn-util generate kubernetes -e ${env} -o manifests.yaml\n`;
-    o += `solmq-conn-util deploy   kubernetes -e ${env}\n`;
-    o += `solmq-conn-util delete   kubernetes -e ${env}\n`;
+    o += `solmq-conn-util generate --platform kubernetes -e ${env} -o manifests.yaml\n`;
+    o += `solmq-conn-util deploy   --platform kubernetes -e ${env}\n`;
+    o += `solmq-conn-util remove   --platform kubernetes -e ${env}\n`;
   }
   if(m.docker){
-    o += `solmq-conn-util generate docker     -e ${env} -o docker-compose.yml\n`;
-    o += `solmq-conn-util deploy   docker     -e ${env}\n`;
-    o += `solmq-conn-util delete   docker     -e ${env}\n`;
+    o += `solmq-conn-util generate --platform docker     -e ${env} -o docker-compose.yml\n`;
+    o += `solmq-conn-util deploy   --platform docker     -e ${env}\n`;
+    o += `solmq-conn-util remove   --platform docker     -e ${env}\n`;
   }
   if(m.podman){
-    o += `solmq-conn-util generate podman     -e ${env} -o run-connector.sh\n`;
-    o += `solmq-conn-util deploy   podman     -e ${env}\n`;
-    o += `solmq-conn-util delete   podman     -e ${env}\n`;
+    o += `solmq-conn-util generate --platform podman     -e ${env} -o run-connector.sh\n`;
+    o += `solmq-conn-util deploy   --platform podman     -e ${env}\n`;
+    o += `solmq-conn-util remove   --platform podman     -e ${env}\n`;
   }
   const vars = Array.from(collectVars(m)).sort();
   if(vars.length){
@@ -1262,11 +1274,6 @@ const ENV_FILE = 'env.yaml';
 
 function isDNS1123(s){ return s.length <= 63 && RE_DNS1123.test(s); }
 function isTCPS(h){ return String(h || '').startsWith('tcps://'); }
-// securityEffectivelyEnabled mirrors spec.Security.EffectivelyEnabled(): the
-// connector defaults solace.connector.security.enabled to true, so an absent
-// security block still means auth is on.
-function securityEffectivelyEnabled(sec){ return !sec.present || sec.enabled; }
-
 const RE_ENVNAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 // checkWorkflowCount rejects a folder holding more workflows than one connector
@@ -1357,7 +1364,6 @@ function validateModel(m){
   checkLeaderElection(add, warn, m, haveKeystore);
 
   if(m.management.present){
-    checkExpansion(warn, ENV_FILE, 'management.exposure', m.management.exposure);
     checkExpansion(warn, ENV_FILE, 'management.health-show-details', m.management.healthShowDetails);
   }
 
@@ -1380,16 +1386,26 @@ function validateModel(m){
     }
   });
 
-  // checkStatusUser: no author-configured user may claim the reserved status
-  // account's name -- it would collide with the account the tool adds itself
-  // once security is effectively enabled. Mirrors Go's checkStatusUser.
-  const statusUserGuarded = securityEffectivelyEnabled(m.security);
+  // checkStatusUser: management security is always on, so this always runs --
+  // no author-configured user may claim the reserved status account's name, as
+  // it would collide with the account the tool adds itself. Mirrors Go's
+  // checkStatusUser.
   (m.security.users || []).forEach((u, i) => {
     if(!u.name) add(ENV_FILE, 'security.users entry needs a name');
     checkExpansion(warn, ENV_FILE, `security.users[${i}].name`, u.name);
-    if(statusUserGuarded && u.name === STATUS_USER_NAME){
+    if(u.name === STATUS_USER_NAME){
       add(ENV_FILE, `security.users[${i}].name "${u.name}" is reserved for the tool's own read-only status account used by the generated status script; choose a different name`);
     }
+    // checkSecurityUserRoles: roles reach the connector verbatim, so this is
+    // not an allowlist of known names -- only a check that each entry is
+    // usable at all. Mirrors Go's checkSecurityUserRoles.
+    (u.roles || []).forEach((r, j) => {
+      if(!r.trim()){
+        add(ENV_FILE, `security.users[${i}].roles[${j}] is empty: give the role a name (for example "admin", which grants the read/write access needed to POST to /actuator/workflows) or drop the entry`);
+      } else if(!safeToken(r)){
+        add(ENV_FILE, `security.users[${i}].roles[${j}] "${r}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters); a role is an authority name passed to the connector verbatim`);
+      }
+    });
   });
   return { errs: errs, warns: warns };
 }
@@ -1687,7 +1703,7 @@ function stripExeSuffix(tok){
   if(tok.endsWith('.EXE')) return tok.slice(0, -4);
   return tok;
 }
-// checkCommand gates a deploy/delete command: field. It layers three checks
+// checkCommand gates a deploy/remove command: field. It layers three checks
 // on top of the safe-token charset gate (mirrors Go's CheckDeployCommand):
 // bare-name argv[0] (no path separators, PATH-resolved only), a per-platform
 // binary allowlist (a ".exe"/".EXE" suffix is stripped before comparing), and
@@ -1712,7 +1728,7 @@ function checkCommand(add, field, cmd, platform){
     return;
   }
   if(!isAllowed(binName)){
-    add(ENV_FILE, `${field} "${bin}": binary must be one of ${allowed.join(', ')}; deploy/delete can approve another with --allow-command <name>`);
+    add(ENV_FILE, `${field} "${bin}": binary must be one of ${allowed.join(', ')}; deploy/remove can approve another with --allow-command <name>`);
     return;
   }
 
@@ -1892,6 +1908,25 @@ const CONFIG_IMPORT = 'optional:configtree:/run/secrets/';
 // STATUS_USER_NAME is the tool-reserved, read-only actuator account the
 // generated status script authenticates as. Mirrors spec.StatusUserName.
 const STATUS_USER_NAME = 'solmq-status';
+// DEFAULT_MGMT_PORT mirrors spec.DefaultMgmtPort.
+const DEFAULT_MGMT_PORT = 8090;
+// MANAGEMENT_EXPOSURE is the actuator exposure list every render carries. It
+// is fixed rather than derived from the operator's configuration: the
+// generated status script depends on leaderelection and workflows being
+// exposed, and a fixed list is the only way the tool can promise a running
+// instance is queryable. Mirrors consolidate.go's managementExposure.
+const MANAGEMENT_EXPOSURE = 'health,info,metrics,leaderelection,workflows';
+
+// effectiveManagementPort mirrors spec.Defaults.EffectiveManagementPort():
+// the operator's management.port when the block is present and set, else
+// DEFAULT_MGMT_PORT.
+function effectiveManagementPort(m){
+  if(m.management.present){
+    const p = parseInt(m.management.port, 10);
+    if(p) return p;
+  }
+  return DEFAULT_MGMT_PORT;
+}
 
 // randomStatusPassword generates the STATUS_USER_NAME account's password: 32
 // lowercase hex characters from a cryptographically strong RNG (never
@@ -1987,12 +2022,16 @@ function buildBundle(a, m, secretRef){
 function consolidateBuild(wfs, m, statusPassword){
   const model = {
     bundles: [], binders: [], bindings: [], jms: [], solaceB: [], workflows: [],
-    // Present/enabled start as copies of the operator's config (mirrors
-    // consolidate.Build's "Security: d.Security"); applyStatusAccess is the
-    // only place that forces them and it always rebuilds users, below.
-    security: { present: m.security.present, enabled: !!m.security.enabled, users: [] },
-    management: { present: m.management.present, port: m.management.port,
-                  exposure: m.management.exposure, healthShowDetails: m.management.healthShowDetails },
+    // users starts empty; applyStatusAccess is the only place that fills it,
+    // from the operator's users plus the reserved account it always appends.
+    // Mirrors consolidate.Build's "Security: d.Security".
+    security: { users: [] },
+    // Port always reflects the effective management port (operator value or
+    // DEFAULT_MGMT_PORT); exposure is fixed by applyStatusAccess rather than
+    // carried through from the operator's config. Mirrors consolidate.Build's
+    // Management seed.
+    management: { port: effectiveManagementPort(m),
+                  healthShowDetails: m.management.present ? m.management.healthShowDetails : '' },
     loggingLevel: m.loggingLevel,
     leader: null, mqTLS: false, secrets: [], configImport: CONFIG_IMPORT
   };
@@ -2125,47 +2164,31 @@ function consolidateBuild(wfs, m, statusPassword){
   return { model: model, warns: warns };
 }
 
-// hasExposureEntry reports whether entry appears in csv, Spring's own
-// comma-separated management.endpoints.web.exposure.include syntax. Matching
-// is exact per comma-separated part (after trimming spaces) so "leaderelection2"
-// or "leaderelectionx" never counts as "leaderelection". A "*" entry is
-// Spring's wildcard for "everything is already exposed", so it always matches.
-// Mirrors consolidate.go's hasExposureEntry.
-function hasExposureEntry(csv, entry){
-  return csv.split(',').some(part => { part = part.trim(); return part === '*' || part === entry; });
-}
-
 // applyStatusAccess forces the actuator surface the generated status script
-// depends on: the leaderelection/workflows exposure entries and the reserved
-// read-only account (STATUS_USER_NAME), regardless of what the operator
-// configured. Mirrors consolidate.go's applyStatusAccess.
+// depends on: the fixed exposure list and the reserved read-only account
+// (STATUS_USER_NAME), regardless of what the operator configured. Mirrors
+// consolidate.go's applyStatusAccess.
 function applyStatusAccess(model, m, statusPassword, secretRef){
   // Management users authenticate against the actuator endpoint, so their
-  // passwords are credentials like any other.
-  const users = (m.security.users || []).map(u => ({
+  // passwords are credentials like any other. Only the password is rewritten;
+  // roles pass through as authored.
+  const users = (m.security.present ? m.security.users : []).map(u => ({
     name: u.name,
-    password: secretRef(securityUserPasswordName(u.name), userCred(u))
+    password: secretRef(securityUserPasswordName(u.name), userCred(u)),
+    roles: u.roles || []
   }));
 
-  // The generated status script queries /actuator/leaderelection and
-  // /actuator/workflows, so both are guaranteed exposed in every
-  // leader-election mode instead of leaving it to the operator to remember.
-  model.management.present = true;
-  let exposure = model.management.exposure || 'health'; // Spring's own default, made explicit now that entries are appended
-  if(!hasExposureEntry(exposure, 'leaderelection')) exposure += ',leaderelection';
-  if(!hasExposureEntry(exposure, 'workflows')) exposure += ',workflows';
-  model.management.exposure = exposure;
+  model.management.exposure = MANAGEMENT_EXPOSURE;
 
-  if(securityEffectivelyEnabled(m.security)){
-    model.security.present = true;
-    model.security.enabled = true;
-    // The status password is a literal and never routed through secretRef:
-    // the generated script reads it back out of the mounted application.yml,
-    // so putting it through the secrets model would leave the script with
-    // nothing to read.
-    users.push({ name: STATUS_USER_NAME, password: statusPassword });
-  }
-  model.security.users = users;
+  // The reserved account is always appended last, after the operator's own
+  // users -- management security is always on now, so there is no
+  // enabled/disabled branch left to gate on. The status password is a
+  // literal and never routed through secretRef: the generated script reads
+  // it back out of the mounted application.yml, so putting it through the
+  // secrets model would leave the script with nothing to read.
+  // No roles on the reserved account: an empty list is the connector's
+  // read-only default, which is exactly what keeps this account read-only.
+  model.security.users = users.concat([{ name: STATUS_USER_NAME, password: statusPassword, roles: [] }]);
 }
 
 // buildConfig mirrors gen.build: sharding is gone (validate now rejects a folder
@@ -2337,16 +2360,21 @@ function renderConnector(line, mm){
     line(6, wf.id + ':');
     line(8, 'enabled: ' + (wf.enabled ? 'true' : 'false'));
   });
-  if(mm.security.present){
-    line(4, 'security:');
-    line(6, 'enabled: ' + (mm.security.enabled ? 'true' : 'false'));
-    if(mm.security.users.length){
-      line(6, 'users:');
-      mm.security.users.forEach(u => {
-        line(8, '- name: ' + yq(u.name));
-        line(10, 'password: ' + yq(u.password));
-      });
-    }
+  // Management security is always on now (see STATUS_USER_NAME): the block is
+  // unconditional and enabled is always true, so there is no operator toggle
+  // left to gate on. Mirrors render.go's renderConnector.
+  line(4, 'security:');
+  line(6, 'enabled: true');
+  if(mm.security.users.length){
+    line(6, 'users:');
+    mm.security.users.forEach(u => {
+      line(8, '- name: ' + yq(u.name));
+      line(10, 'password: ' + yq(u.password));
+      if((u.roles || []).length){
+        line(10, 'roles:');
+        u.roles.forEach(r => line(12, '- ' + yq(r)));
+      }
+    });
   }
   if(mm.leader) renderLeaderElection(line, mm.leader);
 }
@@ -2374,12 +2402,14 @@ function renderLeaderElection(line, le){
     }
   }
 }
+// renderManagement always emits the management block: server.port and the
+// fixed actuator exposure list are unconditional (applyStatusAccess guarantees
+// both are always set), endpoint.health.show-details only when the operator
+// configured one. Mirrors render.go's renderManagement.
 function renderManagement(line, mg){
-  if(!mg.present) return;
   line(0, 'management:');
-  const port = parseInt(mg.port, 10);
-  if(port){ line(2, 'server:'); line(4, 'port: ' + port); }
-  if(mg.exposure){ line(2, 'endpoints:'); line(4, 'web:'); line(6, 'exposure:'); line(8, 'include: ' + yq(mg.exposure)); }
+  line(2, 'server:'); line(4, 'port: ' + mg.port);
+  line(2, 'endpoints:'); line(4, 'web:'); line(6, 'exposure:'); line(8, 'include: ' + mg.exposure);
   if(mg.healthShowDetails){ line(2, 'endpoint:'); line(4, 'health:'); line(6, 'show-details: ' + yq(mg.healthShowDetails)); }
 }
 function renderLoggingLevel(line, level){
@@ -2736,8 +2766,10 @@ function sampleModel(){
     },
     loggingLevel: parseProps('root: INFO\ncom.solace.connector: INFO'),
     solaceDefaults: parseProps('connect-retries: -1\nreconnect-retries: -1'),
-    management: { present: true, port: '8090', exposure: 'health,info,workflows', healthShowDetails: 'always' },
-    security: { present: true, enabled: true, users: [{ name: 'healthcheck', password: envCred('HEALTHCHECK_PASSWORD') }] },
+    management: { present: true, port: '8090', healthShowDetails: 'always' },
+    // No operator users in the shipped sample -- the tool injects its own
+    // read-only account regardless, so a config with none is the normal case.
+    security: { present: false, users: [] },
     leader: {
       present: true, mode: 'active_standby', queue: 'solmq-connector-mgmt', connRef: 'prod-solace', session: null,
       failOver: parseProps('max-attempts: 5\nback-off-initial-interval: 1000\nback-off-max-interval: 10000\nback-off-multiplier: 1.5')
@@ -2858,9 +2890,9 @@ function loadSample(){
   setV('i-soldef', emitProps(m.solaceDefaults, ''));
 
   setC('i-mgmt-on', true);
-  setV('i-mgmt-port', m.management.port); setV('i-mgmt-exp', m.management.exposure);
+  setV('i-mgmt-port', m.management.port);
   setV('i-mgmt-hsd', m.management.healthShowDetails);
-  setC('i-sec-on', true); setC('i-sec-en', m.security.enabled);
+  setC('i-sec-on', m.security.present);
   m.security.users.forEach(u => addUser(u));
 
   setV('i-le-mode', m.leader.mode); setV('i-le-queue', m.leader.queue);

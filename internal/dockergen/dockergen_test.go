@@ -93,7 +93,7 @@ configs:
       #!/bin/sh
       STATUS_URL="http://localhost:8080/actuator/health"
 
-      curl -fsS "$STATUS_URL"
+      curl -fsS "$$STATUS_URL"
 secrets:
   SOLACE_CLIENT_USERNAME:
     environment: SOLACE_CLIENT_USERNAME
@@ -322,17 +322,81 @@ func TestStatusScriptConfigSourceAndTarget(t *testing.T) {
 	}
 }
 
-// TestStatusScriptContentIsVerbatim checks the status script body is inlined
-// under the status config's content: block, indented 6 spaces, with its
-// blank line preserved as truly empty -- the same rules renderConfig applies
-// to application.yml.
-func TestStatusScriptContentIsVerbatim(t *testing.T) {
+// TestStatusScriptContentIsEscaped checks the status script body is inlined
+// under the status config's content: block, indented 6 spaces, with its blank
+// line preserved as truly empty and its shell '$' doubled -- the same rules
+// renderContentConfig applies to application.yml.
+func TestStatusScriptContentIsEscaped(t *testing.T) {
 	out := Render(Input{
 		Docker:   &spec.Docker{Image: "img", Name: "s"},
 		Instance: Instance{Name: "s", AppYAML: "k: v\n", StatusScript: statusScript1, LeaderMode: spec.LeaderStandalone},
 	})
-	want := "  s-status:\n    content: |\n      #!/bin/sh\n      STATUS_URL=\"http://localhost:8080/actuator/health\"\n\n      curl -fsS \"$STATUS_URL\"\n"
+	want := "  s-status:\n    content: |\n      #!/bin/sh\n      STATUS_URL=\"http://localhost:8080/actuator/health\"\n\n      curl -fsS \"$$STATUS_URL\"\n"
 	if !strings.Contains(out, want) {
-		t.Errorf("status script content not inlined verbatim:\n%s", out)
+		t.Errorf("status script content not inlined as expected:\n%s", out)
+	}
+}
+
+// TestContentEscapesDollarsForCompose covers every '$' shape the two payloads
+// actually carry. Docker Compose interpolates the whole document including
+// configs content, so each must reach the file doubled: a bare $VAR and a
+// ${VAR} would otherwise be substituted away, a ${VAR:-default} likewise, and a
+// $( makes compose reject the document ("invalid interpolation format") because
+// command substitution is not interpolation syntax at all. A '$' that is
+// already doubled in the payload is data like any other and becomes four.
+func TestContentEscapesDollarsForCompose(t *testing.T) {
+	script := "P=$PORT\nQ=${VAR}\nR=${SPRING_CONFIG_LOCATION:-}\nS=$(printf %s x)\nT=$$\n"
+	out := Render(Input{
+		Docker:   &spec.Docker{Image: "img", Name: "s"},
+		Instance: Instance{Name: "s", AppYAML: "k: $LITERAL\n", StatusScript: script, LeaderMode: spec.LeaderStandalone},
+	})
+	for _, want := range []string{
+		"      k: $$LITERAL\n",
+		"      P=$$PORT\n",
+		"      Q=$${VAR}\n",
+		"      R=$${SPRING_CONFIG_LOCATION:-}\n",
+		"      S=$$(printf %s x)\n",
+		"      T=$$$$\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing escaped line %q in:\n%s", want, out)
+		}
+	}
+	// No lone '$' may survive anywhere in the document: compose reads one as the
+	// start of an interpolation, so a single survivor is the whole bug back
+	// again. Dropping every "$$" pair leaves exactly the unescaped ones behind.
+	if bare := strings.ReplaceAll(out, "$$", ""); strings.Contains(bare, "$") {
+		t.Errorf("unescaped '$' survives in:\n%s", out)
+	}
+}
+
+// TestAppYAMLSecretPlaceholdersAreNotInterpolated pins the security half of the
+// escape. The ${...} placeholders in application.yml are Spring's, resolved
+// from the configtree import of /run/secrets. The CLI hands the compose child
+// those same names as environment entries so the secrets: environment provider
+// can mount them, which means an unescaped placeholder is not merely blanked --
+// compose substitutes the real credential and the plaintext lands in the
+// document. The placeholder must survive to the container intact.
+func TestAppYAMLSecretPlaceholdersAreNotInterpolated(t *testing.T) {
+	out := Render(Input{
+		Docker: &spec.Docker{Image: "img", Name: "s"},
+		Instance: Instance{
+			Name:         "s",
+			AppYAML:      "client-username: ${LOCAL_SOLACE_CLIENT_USERNAME}\nclient-password: ${LOCAL_SOLACE_CLIENT_PASSWORD}\n",
+			StatusScript: "echo ok\n",
+			LeaderMode:   spec.LeaderStandalone,
+		},
+		Secrets: []string{"LOCAL_SOLACE_CLIENT_USERNAME", "LOCAL_SOLACE_CLIENT_PASSWORD"},
+	})
+	if !strings.Contains(out, "      client-username: $${LOCAL_SOLACE_CLIENT_USERNAME}\n") {
+		t.Errorf("username placeholder not escaped:\n%s", out)
+	}
+	if !strings.Contains(out, "      client-password: $${LOCAL_SOLACE_CLIENT_PASSWORD}\n") {
+		t.Errorf("password placeholder not escaped:\n%s", out)
+	}
+	// The secrets blocks reference the same names and must stay unescaped:
+	// those are compose's own, not Spring's.
+	if !strings.Contains(out, "  LOCAL_SOLACE_CLIENT_USERNAME:\n    environment: LOCAL_SOLACE_CLIENT_USERNAME\n") {
+		t.Errorf("secrets provider entry should not be escaped:\n%s", out)
 	}
 }

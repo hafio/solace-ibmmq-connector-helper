@@ -45,6 +45,11 @@ type completionVerb struct {
 	PosArg  string
 	Targets []completionItem
 	Flags   []completionFlag
+	// Aliases are cliVerb.Aliases, the verb's alternate spellings -- not to be
+	// confused with completionFlag.Aliases above, which is a flag's accepted
+	// spellings. Every renderer recognizes an alias wherever Name is, but never
+	// offers it as a position-1 candidate; see verbsWithAliases.
+	Aliases []string
 }
 
 // ---- model flattening ---------------------------------------------------------
@@ -70,7 +75,7 @@ func completionVerbs() []completionVerb {
 	}
 	out := make([]completionVerb, 0, len(cliVerbs))
 	for _, v := range cliVerbs {
-		cv := completionVerb{Name: v.Name, Desc: plainText(verbBlurb(v)), PosArg: v.PosArg}
+		cv := completionVerb{Name: v.Name, Desc: plainText(verbBlurb(v)), PosArg: v.PosArg, Aliases: v.Aliases}
 		for _, tg := range v.Targets {
 			cv.Targets = append(cv.Targets, completionItem{Name: tg.Name, Desc: plainText(tg.Summary)})
 		}
@@ -86,6 +91,20 @@ func completionVerbs() []completionVerb {
 			})
 		}
 		out = append(out, cv)
+	}
+	return out
+}
+
+// verbsWithAliases returns the flattened verbs that declare at least one
+// alias, in cliVerbs order. Shared by the bash/zsh alias-normalization case
+// blocks and the powershell $verbAlias table, so a verb with no alias adds
+// nothing to any of them.
+func verbsWithAliases() []completionVerb {
+	var out []completionVerb
+	for _, v := range completionVerbs() {
+		if len(v.Aliases) > 0 {
+			out = append(out, v)
+		}
 	}
 	return out
 }
@@ -122,7 +141,7 @@ func flagAliases(f cliFlag) []string {
 
 // completionShells returns the modeled shell names, in the order cliVerbs
 // declares them under the completion verb.
-func completionShells() []string { return targetNames("completion") }
+func completionShells() []string { return targetNames("auto-complete") }
 
 // ---- text helpers -------------------------------------------------------------
 
@@ -182,7 +201,7 @@ func scriptHeader(shell, marker string, install []string) []string {
 		marker + " solmq-conn-util " + shell + " completion -- GENERATED, do not edit by hand.",
 		marker + "",
 		marker + " Rendered from the command model in cmd/solmq-conn-util/commands.go by",
-		marker + " `solmq-conn-util completion " + shell + "`, so it matches the binary that printed it.",
+		marker + " `solmq-conn-util auto-complete " + shell + "`, so it matches the binary that printed it.",
 		marker + " Re-run that command after upgrading solmq-conn-util.",
 		marker + "",
 		marker + " Install:",
@@ -201,12 +220,12 @@ func renderBashCompletion() string {
 
 	l = append(l, scriptHeader("bash", "#", []string{
 		"Add this to ~/.bashrc. It depends on nothing but bash itself:",
-		"source <(solmq-conn-util completion bash)",
+		"source <(solmq-conn-util auto-complete bash)",
 		"",
 		"System-wide instead -- but only where the bash-completion package is",
 		"installed and sourced from the profile, since that is what reads the",
 		"directory. Without it the file is never loaded:",
-		"solmq-conn-util completion bash > /etc/bash_completion.d/solmq-conn-util",
+		"solmq-conn-util auto-complete bash > /etc/bash_completion.d/solmq-conn-util",
 	})...)
 
 	add("# _solmq_conn_util_flag_arg <word> prints the value kind the flag consumes:")
@@ -314,6 +333,18 @@ func renderBashCompletion() string {
 	add("    i=$((i + 1))")
 	add("  done")
 	add("")
+	if aliased := verbsWithAliases(); len(aliased) > 0 {
+		add("  # Aliases resolve to their canonical verb here, once, so the lookup")
+		add("  # blocks above stay keyed by canonical verb names only.")
+		add(`  case "$verb" in`)
+		for _, v := range aliased {
+			add("    " + strings.Join(v.Aliases, "|") + `) verb="` + v.Name + `" ;;`)
+		}
+		add("  esac")
+		add("")
+	}
+	add("  # Aliases are deliberately absent from this word list -- the TAB menu for")
+	add("  # word 1 keeps showing only canonical verbs.")
 	add(`  if [ -z "$verb" ]; then`)
 	add("    COMPREPLY=( $(compgen -W " + bashQuote(verbNamesAndHelp()) + ` -- "$cur") )`)
 	add("    return")
@@ -354,7 +385,7 @@ func renderZshCompletion() string {
 	add("#compdef solmq-conn-util")
 	l = append(l, scriptHeader("zsh", "#", []string{
 		"mkdir -p ~/.zsh/completions",
-		"solmq-conn-util completion zsh > ~/.zsh/completions/_solmq-conn-util",
+		"solmq-conn-util auto-complete zsh > ~/.zsh/completions/_solmq-conn-util",
 		"",
 		"The #compdef line above is what zsh autoloads on, so the directory must",
 		"be on $fpath BEFORE compinit runs -- in ~/.zshrc:",
@@ -466,6 +497,18 @@ func renderZshCompletion() string {
 	add("    esac")
 	add("  done")
 	add("")
+	if aliased := verbsWithAliases(); len(aliased) > 0 {
+		add("  # Aliases resolve to their canonical verb here, once, so the lookup")
+		add("  # blocks above stay keyed by canonical verb names only.")
+		add(`  case "$verb" in`)
+		for _, v := range aliased {
+			add("    " + strings.Join(v.Aliases, "|") + `) verb="` + v.Name + `" ;;`)
+		}
+		add("  esac")
+		add("")
+	}
+	add("  # Aliases are deliberately absent from this list -- the TAB menu for word 1")
+	add("  # keeps showing only canonical verbs.")
 	add(`  if [[ -z "$verb" ]]; then`)
 	add("    verbs=(")
 	for _, v := range completionVerbs() {
@@ -512,10 +555,10 @@ func renderFishCompletion() string {
 		"fish autoloads this path, so writing the file is the whole install --",
 		"no rc edit, and new shells pick it up:",
 		"mkdir -p ~/.config/fish/completions",
-		"solmq-conn-util completion fish > ~/.config/fish/completions/solmq-conn-util.fish",
+		"solmq-conn-util auto-complete fish > ~/.config/fish/completions/solmq-conn-util.fish",
 		"",
 		"This session only, without installing anything:",
-		"solmq-conn-util completion fish | source",
+		"solmq-conn-util auto-complete fish | source",
 	})...)
 
 	add("# No bare filename completion: every position below opts back in explicitly.")
@@ -524,19 +567,22 @@ func renderFishCompletion() string {
 
 	verbs := completionVerbs()
 
-	add("# Verbs, offered only while no verb has been given yet.")
+	add("# Verbs, offered only while no verb has been given yet. Aliases are")
+	add("# deliberately absent here -- the TAB menu for word 1 keeps showing only")
+	add("# canonical verbs.")
 	for _, v := range verbs {
 		add("complete -c solmq-conn-util -n '__fish_use_subcommand' -a " + fishQuote(v.Name) + " -d " + fishQuote(v.Desc))
 	}
 	add("complete -c solmq-conn-util -n '__fish_use_subcommand' -s h -l help -d " + fishQuote("Print the usage summary"))
 	add("")
 
-	add("# Targets, offered once their verb is seen and until one is chosen.")
+	add("# Targets, offered once their verb (or an alias of it) is seen and until one")
+	add("# is chosen.")
 	for _, v := range verbs {
 		if len(v.Targets) == 0 {
 			continue
 		}
-		cond := "__fish_seen_subcommand_from " + v.Name +
+		cond := "__fish_seen_subcommand_from " + fishSeenNames(v) +
 			"; and not __fish_seen_subcommand_from " + itemNames(v.Targets)
 		for _, tg := range v.Targets {
 			add("complete -c solmq-conn-util -n " + fishQuote(cond) + " -a " + fishQuote(tg.Name) + " -d " + fishQuote(tg.Desc))
@@ -552,18 +598,19 @@ func renderFishCompletion() string {
 		// posDir is the only non-none kind; TestCompletionModelMetadataComplete
 		// fails loudly if a verb ever declares one the renderers do not handle.
 		if v.PosArg == posDir {
-			cond := "__fish_seen_subcommand_from " + v.Name
+			cond := "__fish_seen_subcommand_from " + fishSeenNames(v)
 			add("complete -c solmq-conn-util -n " + fishQuote(cond) + " -a '(__fish_complete_directories)' -d " + fishQuote("directory"))
 		}
 	}
 	add("")
 
-	add("# Flags, scoped to the verbs that accept them. -r means the flag takes a value;")
-	add("# -F completes a file for it. --allow-command takes a value but not a filename,")
-	add("# so it gets -r without -F and offers nothing.")
+	add("# Flags, scoped to the verbs that accept them (recognizing any alias too).")
+	add("# -r means the flag takes a value; -F completes a file for it.")
+	add("# --allow-command takes a value but not a filename, so it gets -r without -F")
+	add("# and offers nothing.")
 	for _, v := range verbs {
 		for _, f := range v.Flags {
-			spec := "complete -c solmq-conn-util -n " + fishQuote("__fish_seen_subcommand_from "+v.Name) +
+			spec := "complete -c solmq-conn-util -n " + fishQuote("__fish_seen_subcommand_from "+fishSeenNames(v)) +
 				" " + fishFlagSpec(f)
 			switch f.Arg {
 			case argFile:
@@ -576,6 +623,18 @@ func renderFishCompletion() string {
 	}
 
 	return strings.Join(l, "\n") + "\n"
+}
+
+// fishSeenNames returns v's canonical name plus its aliases, space-joined, for
+// __fish_seen_subcommand_from -- which matches if ANY listed name was typed.
+// Fish has no single $verb variable to normalize the way bash/zsh do, so a
+// condition scoped to v recognizes an alias by listing it alongside Name here
+// instead.
+func fishSeenNames(v completionVerb) string {
+	if len(v.Aliases) == 0 {
+		return v.Name
+	}
+	return v.Name + " " + strings.Join(v.Aliases, " ")
 }
 
 // fishFlagSpec renders a flag as fish's selectors: a short+long pair becomes
@@ -598,10 +657,10 @@ func renderPowerShellCompletion() string {
 	l = append(l, scriptHeader("PowerShell", "#", []string{
 		"Register-ArgumentCompleter below is per-session, so appending to the",
 		"profile is what makes it stick:",
-		"solmq-conn-util completion powershell >> $PROFILE",
+		"solmq-conn-util auto-complete powershell >> $PROFILE",
 		"",
 		"This session only, without touching the profile:",
-		"solmq-conn-util completion powershell | Out-String | Invoke-Expression",
+		"solmq-conn-util auto-complete powershell | Out-String | Invoke-Expression",
 	})...)
 
 	add("# Windows PowerShell 5.1 compatible: no &&/||, no ternary, no null-coalescing.")
@@ -623,6 +682,8 @@ func renderPowerShellCompletion() string {
 	}
 	add("")
 
+	add("    # Aliases are deliberately absent from $verbs -- the TAB menu for word 1")
+	add("    # keeps showing only canonical verbs.")
 	add("    $verbs = @(")
 	for _, v := range completionVerbs() {
 		add("        @{ Name = " + psQuote(v.Name) + "; Desc = " + psQuote(v.Desc) + " }")
@@ -630,6 +691,16 @@ func renderPowerShellCompletion() string {
 	add("        @{ Name = '-h'; Desc = 'Print the usage summary' }")
 	add("        @{ Name = '--help'; Desc = 'Print the usage summary' }")
 	add("    )")
+	add("")
+
+	add("    # Every alias resolves to its canonical verb below, once, so $targets/")
+	add("    # $flags/$posArg stay keyed by canonical verb names only.")
+	add("    $verbAlias = @{}")
+	for _, v := range verbsWithAliases() {
+		for _, a := range v.Aliases {
+			add("    $verbAlias[" + psQuote(a) + "] = " + psQuote(v.Name))
+		}
+	}
 	add("")
 
 	add("    $targets = @{}")
@@ -745,6 +816,9 @@ func renderPowerShellCompletion() string {
 	add("        }")
 	add("        $i++")
 	add("    }")
+	add("")
+
+	add("    if ($verbAlias.ContainsKey($verb)) { $verb = $verbAlias[$verb] }")
 	add("")
 
 	add("    if ($verb -eq '') {")

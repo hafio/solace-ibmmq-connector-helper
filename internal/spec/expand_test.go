@@ -111,6 +111,20 @@ func TestExpandDefaultsConnectionsMapEntry(t *testing.T) {
 	}
 }
 
+// TestExpandSecurityUserRole covers the one expansion consequence of User.Roles
+// not being tagged expand:"no": a role is an identity like Name, not a
+// credential, so a ${VAR} in it resolves. Proves Expand reaches into a []string
+// field inside a slice of structs under Defaults.
+func TestExpandSecurityUserRole(t *testing.T) {
+	e := &Env{Defaults: Defaults{Security: Security{Users: []User{
+		{Name: "ops", Roles: []string{"${ROLE}"}},
+	}}}}
+	Expand(Expander{Lookup: lookupOf(map[string]string{"ROLE": "admin"})}, e, nil)
+	if got, want := e.Security.Users[0].Roles[0], "admin"; got != want {
+		t.Errorf("role = %q, want the expanded %q", got, want)
+	}
+}
+
 func TestExpandNilLookupDisablesEverything(t *testing.T) {
 	wfs := []Workflow{{Source: Side{Host: "tcps://${HOST}:55443"}}}
 	Expand(Expander{}, &Env{}, wfs)

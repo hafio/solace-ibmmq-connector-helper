@@ -137,8 +137,6 @@ solace:
     security:
       enabled: true
       users:
-        - name: healthcheck
-          password: ${SECURITY_USER_HEALTHCHECK_PASSWORD}
         - name: solmq-status
           password: 0123456789abcdef0123456789abcdef
     management:
@@ -170,7 +168,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,workflows,leaderelection
+        include: health,info,metrics,leaderelection,workflows
   endpoint:
     health:
       show-details: always

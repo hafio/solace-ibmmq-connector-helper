@@ -47,6 +47,18 @@ func TestCommandsModelMatchesUsage(t *testing.T) {
 	u := usageText()
 	collapsed := strings.Join(strings.Fields(u), " ") // fold the help's alignment padding
 
+	// usageName is how a verb heads its usage line: bare when it has no alias,
+	// and <name|alias> when it does, so -h shows both spellings. Building the
+	// expectation from the model is also what makes the alias genuinely
+	// asserted here -- a bare strings.Contains(u, "gen") would pass on the
+	// "generate" already in the text without the alias appearing at all.
+	usageName := func(v cliVerb) string {
+		if len(v.Aliases) == 0 {
+			return v.Name
+		}
+		return "<" + strings.Join(append([]string{v.Name}, v.Aliases...), "|") + ">"
+	}
+
 	leaves := 0
 	for _, v := range cliVerbs {
 		if !v.InUsage {
@@ -54,14 +66,14 @@ func TestCommandsModelMatchesUsage(t *testing.T) {
 		}
 		if len(v.Targets) == 0 {
 			leaves++
-			if !strings.Contains(collapsed, "solmq-conn-util "+v.Name) {
-				t.Errorf("usage() is missing command %q", v.Name)
+			if want := "solmq-conn-util " + usageName(v); !strings.Contains(collapsed, want) {
+				t.Errorf("usage() is missing command %q", want)
 			}
 			continue
 		}
 		for _, tg := range v.Targets {
 			leaves++
-			inv := "solmq-conn-util " + v.Name + " " + tg.Name
+			inv := "solmq-conn-util " + usageName(v) + " " + tg.Name
 			if !strings.Contains(collapsed, inv) {
 				t.Errorf("usage() is missing command %q", inv)
 			}
@@ -82,5 +94,19 @@ func TestCommandsModelMatchesUsage(t *testing.T) {
 		if !strings.Contains(u, f.Short) || !strings.Contains(u, f.Long) {
 			t.Errorf("usage() is missing flag %s/%s", f.Short, f.Long)
 		}
+	}
+
+	// --platform accepts short spellings too, and -h is where someone looks
+	// first: the docs carried them while usage() did not, so this keeps the two
+	// from diverging again as the table changes. Asserted as the pipe-joined
+	// list rather than one alias at a time, because "kube" on its own is a
+	// substring of "kubernetes" and would pass against usage text that never
+	// mentions a short spelling at all.
+	shorts := make([]string, 0, len(platformAliasList))
+	for _, e := range platformAliasList {
+		shorts = append(shorts, e.Alias)
+	}
+	if want := strings.Join(shorts, "|"); !strings.Contains(u, want) {
+		t.Errorf("usage() should list the platform short spellings as %q", want)
 	}
 }

@@ -141,7 +141,9 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
   (kubectl/oc, docker, podman; `--allow-command` approves an extra one per invocation) and
   requires later tokens to be flag-shaped. Before anything mutating runs, `runner.Preflight`
   probes login/daemon reachability read-only; the real Runner resolves argv[0] via
-  `exec.LookPath` and echoes the resolved path to stderr before exec'ing. Credential
+  `exec.LookPath` (rejecting an `exec.ErrDot` same-directory match) and prints
+  nothing of its own -- the child's combined output is returned to the caller,
+  which reports it. Credential
   env-files are written `0600` and never logged. Kubernetes manifests are piped on
   **stdin** (`apply -f -`), not argv.
 - **Durable names** use UUIDv5 (namespace `6ba7f4e2-9c1d-5a3b-8e47-2f9a0c7d13e5`, key =

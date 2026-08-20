@@ -82,7 +82,7 @@ const bareEnv = `workflows:
   file_pattern: "*"
 `
 
-// kubeEnv is a minimal-but-valid kubernetes: section for the deploy/delete/
+// kubeEnv is a minimal-but-valid kubernetes: section for the deploy/remove/
 // platform-resolution seam tests -- a safe command, and the three fields
 // checkKube requires.
 const kubeEnv = `
@@ -212,16 +212,16 @@ func withPromptAnswer(t *testing.T, answer string) {
 	t.Cleanup(func() { promptLine = old })
 }
 
-// ---- deploy/delete seam helpers -------------------------------------------------
+// ---- deploy/remove seam helpers -------------------------------------------------
 
-// fakeRunner records every invocation reaching the deploy/delete seam so tests
+// fakeRunner records every invocation reaching the deploy/remove seam so tests
 // can assert the exact argv/stdin/env without starting a process (mirrors
 // internal/runner/runner_test.go's fakeRunner).
 //
 // err, when set, fails every call from index failFrom onward (0 by default, so
 // it fails from the very first call -- the preflight probe, now that one always
 // precedes the mutating command). A test that needs the probe to succeed but
-// the real deploy/delete call to fail sets failFrom to the index of that call.
+// the real deploy/remove call to fail sets failFrom to the index of that call.
 type fakeRunner struct {
 	calls    []fakeCall
 	err      error
@@ -245,7 +245,7 @@ func (f *fakeRunner) Run(c runner.Cmd) (string, error) {
 
 // useFakeRunner returns a fake that captures argv instead of starting a
 // process. Callers pass it to dispatch (not run, which always uses the
-// production runner.OS{}) so the fake reaches the deploy/delete seam as an
+// production runner.OS{}) so the fake reaches the deploy/remove seam as an
 // explicit argument rather than through mutable package state.
 func useFakeRunner(t *testing.T) *fakeRunner {
 	t.Helper()
@@ -296,8 +296,22 @@ func TestExitCodeContract(t *testing.T) {
 		{"invalid spec", []string{"generate", "config", "-e", filepath.Join(invalidDir, "env.yaml")}, 1},
 		{"generate bogus target", []string{"generate", "bogus"}, 2},
 		{"deploy bogus platform", []string{"deploy", "bogus"}, 2},
-		{"completion no shell", []string{"completion"}, 2},
-		{"completion bogus shell", []string{"completion", "bogus"}, 2},
+		{"auto-complete no shell", []string{"auto-complete"}, 2},
+		{"auto-complete bogus shell", []string{"auto-complete", "bogus"}, 2},
+		// "completion" was the verb's old name; the rename to "auto-complete" is a
+		// deliberate clean break with no compatibility alias, so this now exits 2
+		// as an unknown command rather than reaching runAutoComplete.
+		{"completion is no longer a command", []string{"completion", "bash"}, 2},
+		// Deliberately unassigned near misses for the alias table below: none of
+		// these short forms were picked as an alias, so each must stay unknown.
+		{"near miss d", []string{"d"}, 2},
+		{"near miss v", []string{"v"}, 2},
+		{"near miss s", []string{"s"}, 2},
+		{"near miss g", []string{"g"}, 2},
+		{"near miss comp", []string{"comp"}, 2},
+		{"near miss h", []string{"h"}, 2},
+		{"near miss hlp", []string{"hlp"}, 2},
+		{"near miss stat", []string{"stat"}, 2},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -314,24 +328,24 @@ func TestExitCodeContract(t *testing.T) {
 	}
 }
 
-// TestCompletionDispatchPrintsScript covers the success path the exit-code table
-// cannot: every modeled shell exits 0, writes its script to stdout (never a
-// file), and never reaches the runner -- rendering is compiled-in, so it needs
-// no env.yaml and no exec.
-func TestCompletionDispatchPrintsScript(t *testing.T) {
-	for _, shell := range targetNames("completion") {
+// TestAutoCompleteDispatchPrintsScript covers the success path the exit-code
+// table cannot: every modeled shell exits 0, writes its script to stdout
+// (never a file), and never reaches the runner -- rendering is compiled-in, so
+// it needs no env.yaml and no exec.
+func TestAutoCompleteDispatchPrintsScript(t *testing.T) {
+	for _, shell := range targetNames("auto-complete") {
 		t.Run(shell, func(t *testing.T) {
 			f := &fakeRunner{}
 			code := -1
-			out := captureStdout(t, func() { code = dispatch([]string{"completion", shell}, f) })
+			out := captureStdout(t, func() { code = dispatch([]string{"auto-complete", shell}, f) })
 			if code != 0 {
-				t.Errorf("dispatch(completion %s) = %d, want 0", shell, code)
+				t.Errorf("dispatch(auto-complete %s) = %d, want 0", shell, code)
 			}
 			if !strings.Contains(out, "solmq-conn-util") {
-				t.Errorf("completion %s: stdout does not look like a completion script: %q", shell, truncate(out))
+				t.Errorf("auto-complete %s: stdout does not look like a completion script: %q", shell, truncate(out))
 			}
 			if len(f.calls) != 0 {
-				t.Errorf("completion %s: runner must not be invoked, got %d calls", shell, len(f.calls))
+				t.Errorf("auto-complete %s: runner must not be invoked, got %d calls", shell, len(f.calls))
 			}
 		})
 	}
@@ -347,6 +361,62 @@ func truncate(s string) string {
 	return s[:max] + "..."
 }
 
+// ---- a1) alias resolution ---------------------------------------------------
+
+// TestVerbAliasesDispatchLikeCanonical checks each of the seven modeled
+// aliases (cliVerb.Aliases in commands.go) reaches exactly the same handler as
+// its canonical verb: the same trailing args, dispatched once under the alias
+// and once under the canonical name, must produce the same exit code, the
+// same stdout/stderr, and the same runner calls. Each rest is picked to fail
+// fast (a bad positional, a missing env file, an unknown flag) so the pair
+// never reaches the runner or touches the filesystem beyond a failed open,
+// keeping the comparison cheap and deterministic.
+func TestVerbAliasesDispatchLikeCanonical(t *testing.T) {
+	missingEnv := filepath.Join(t.TempDir(), "does-not-exist.yaml")
+	cases := []struct {
+		canonical string
+		alias     string
+		rest      []string
+	}{
+		{"generate", "gen", []string{"bogus"}},
+		{"deploy", "dep", []string{"bogus"}},
+		{"remove", "rm", []string{"bogus"}},
+		{"status", "sts", []string{"bogus"}},
+		{"version", "ver", nil},
+		{"validate", "vld", []string{"-e", missingEnv}},
+		{"examples", "eg", []string{"-nope"}},
+	}
+	for _, c := range cases {
+		t.Run(c.alias, func(t *testing.T) {
+			fCanon, fAlias := &fakeRunner{}, &fakeRunner{}
+			var canonCode, aliasCode int
+			var canonErrOut, aliasErrOut string
+			canonOut := captureStdout(t, func() {
+				canonErrOut = captureStderr(t, func() {
+					canonCode = dispatch(append([]string{c.canonical}, c.rest...), fCanon)
+				})
+			})
+			aliasOut := captureStdout(t, func() {
+				aliasErrOut = captureStderr(t, func() {
+					aliasCode = dispatch(append([]string{c.alias}, c.rest...), fAlias)
+				})
+			})
+			if aliasCode != canonCode {
+				t.Errorf("dispatch(%s %v) = %d, want %d (canonical %s)", c.alias, c.rest, aliasCode, canonCode, c.canonical)
+			}
+			if aliasOut != canonOut {
+				t.Errorf("dispatch(%s %v) stdout = %q, want %q (canonical %s)", c.alias, c.rest, aliasOut, canonOut, c.canonical)
+			}
+			if aliasErrOut != canonErrOut {
+				t.Errorf("dispatch(%s %v) stderr = %q, want %q (canonical %s)", c.alias, c.rest, aliasErrOut, canonErrOut, c.canonical)
+			}
+			if !reflect.DeepEqual(fAlias.calls, fCanon.calls) {
+				t.Errorf("dispatch(%s %v) runner calls = %v, want %v (canonical %s)", c.alias, c.rest, fAlias.calls, fCanon.calls, c.canonical)
+			}
+		})
+	}
+}
+
 // ---- a2) command-model / dispatch drift guard ------------------------------------
 
 // TestDispatchHandlersMatchModel guards against the class of drift task 2 fixed
@@ -354,7 +424,7 @@ func truncate(s string) string {
 // disagreed with both): the handler maps dispatch/runGenerate/runAction actually
 // use must name exactly the verbs/targets cliVerbs (commands.go) documents, in
 // both directions -- a modeled entry with no handler, or a handler with no
-// modeled entry, must fail. deploy/delete no longer model a positional Targets
+// modeled entry, must fail. deploy/remove no longer model a positional Targets
 // list (the platform is resolved via --platform, not looked up from args[0]),
 // so their platform-map coverage is gated separately by
 // TestPlatformMapsCoverThreeNames instead of against cliVerbs here.
@@ -365,17 +435,17 @@ func TestDispatchHandlersMatchModel(t *testing.T) {
 	}
 	assertSameNameSet(t, "verb", verbNames, keySet(verbHandlers))
 	assertSameNameSet(t, "generate target", nameSet(targetNames("generate")), keySet(genTargets))
-	assertSameNameSet(t, "completion shell", nameSet(targetNames("completion")), keySet(completionShellRenderers))
+	assertSameNameSet(t, "completion shell", nameSet(targetNames("auto-complete")), keySet(completionShellRenderers))
 }
 
 // TestPlatformMapsCoverThreeNames guards every platform-keyed map in this file
-// (generate's platform fallback, deploy/delete's platform dispatch) against the
+// (generate's platform fallback, deploy/remove's platform dispatch) against the
 // same platformNames list resolvePlatform validates --platform against, so a
 // platform added to one and not the other fails here instead of drifting
 // silently.
 func TestPlatformMapsCoverThreeNames(t *testing.T) {
 	assertSameNameSet(t, "generate platform renderer", nameSet(platformNames), keySet(platformGenerators))
-	assertSameNameSet(t, "deploy/delete platform handler", nameSet(platformNames), keySet(actTargets))
+	assertSameNameSet(t, "deploy/remove platform handler", nameSet(platformNames), keySet(actTargets))
 }
 
 func nameSet(names []string) map[string]bool {
@@ -547,7 +617,7 @@ func TestLoadEnvExcludesEnvFileFromWorkflowSet(t *testing.T) {
 	}
 }
 
-// ---- g) deploy/delete via the runner seam ----------------------------------------
+// ---- g) deploy/remove via the runner seam ----------------------------------------
 //
 // These tests call dispatch directly (not run) so they can pass a fakeRunner
 // explicitly instead of mutating package-level state.
@@ -579,17 +649,17 @@ func TestDeployKubernetesSeamHappyPath(t *testing.T) {
 	}
 }
 
-func TestDeleteKubernetesSeamHappyPath(t *testing.T) {
+func TestRemoveKubernetesSeamHappyPath(t *testing.T) {
 	f := useFakeRunner(t)
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"delete", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	if len(f.calls) != 2 {
-		t.Fatalf("want 2 calls to the runner (preflight, delete), got %d: %+v", len(f.calls), f.calls)
+		t.Fatalf("want 2 calls to the runner (preflight, remove), got %d: %+v", len(f.calls), f.calls)
 	}
 	wantPreflight := []string{"kubectl", "auth", "can-i", "delete", "deployment", "--namespace", "solace-connectors"}
 	if !reflect.DeepEqual(f.calls[0].argv, wantPreflight) {
@@ -634,12 +704,13 @@ func TestValidateOKAndErrors(t *testing.T) {
 // ---- i) examples CLI contract ------------------------------------------------------
 
 func TestExamplesWriteSkipForceThenGenerate(t *testing.T) {
-	// The shipped example's connections/workflows/tls/security all reference
-	// their credentials via -env (never a literal), so generating it for real
-	// needs every one of those host variables set.
+	// The shipped example's connections/workflows/tls all reference their
+	// credentials via -env (never a literal), so generating it for real needs
+	// every one of those host variables set. The reserved status account needs
+	// nothing here: its password is generated when the override is unset.
 	for _, v := range []string{
 		"SOL_PASSWORD", "MQ_ARCHIVE_PASSWORD", "MQ_CORE_PASSWORD", "EDGE_SOL_PASSWORD",
-		"TRUSTSTORE_PASSWORD", "KEYSTORE_PASSWORD", "HEALTHCHECK_PASSWORD",
+		"TRUSTSTORE_PASSWORD", "KEYSTORE_PASSWORD",
 	} {
 		t.Setenv(v, "x")
 	}
@@ -788,7 +859,7 @@ func TestGeneratePodmanQuadletStdout(t *testing.T) {
 	}
 }
 
-// ---- deploy / delete: docker and podman seams -------------------------------------
+// ---- deploy / remove: docker and podman seams -------------------------------------
 
 func TestDeployDockerSeamWritesComposeAndRuns(t *testing.T) {
 	f := useFakeRunner(t)
@@ -800,7 +871,7 @@ func TestDeployDockerSeamWritesComposeAndRuns(t *testing.T) {
 		t.Fatalf("exit=%d", code)
 	}
 	compose := filepath.Join(dir, "docker-compose.yml")
-	// The compose file is scratch, regenerated by every deploy/delete, and is
+	// The compose file is scratch, regenerated by every deploy/remove, and is
 	// removed once a deploy succeeds.
 	if _, err := os.Stat(compose); !os.IsNotExist(err) {
 		t.Fatalf("compose file should be removed after a successful deploy, stat err=%v", err)
@@ -873,13 +944,13 @@ func TestDeployDockerSeamChildEnvCarriesCredentials(t *testing.T) {
 	}
 }
 
-func TestDeleteDockerSeam(t *testing.T) {
+func TestRemoveDockerSeam(t *testing.T) {
 	f := useFakeRunner(t)
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"delete", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"remove", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	wantCalls := [][]string{
@@ -954,25 +1025,25 @@ func TestDeployPodmanSeamWritesUnitsAndStarts(t *testing.T) {
 	}
 }
 
-func TestDeletePodmanSeamStopsRemovesReloads(t *testing.T) {
+func TestRemovePodmanSeamStopsRemovesReloads(t *testing.T) {
 	f := useFakeRunner(t)
 	quadletDir := t.TempDir()
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", podmanEnv(quadletDir))
 	write(t, dir, "10.yaml", validWF)
-	// Pre-seed the files a deploy would have written; delete must remove all
+	// Pre-seed the files a deploy would have written; remove must clear all
 	// three: the unit, the generated app yaml, and the status script.
 	write(t, quadletDir, "solmq-conn.container", "[Container]\n")
 	write(t, quadletDir, "solmq-conn-application.yml", "x\n")
 	write(t, quadletDir, "solmq-conn-status", "#!/bin/sh\n")
 
-	if code := dispatch([]string{"delete", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"remove", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	// Secrets are removed from podman's store only AFTER the unit is stopped and
 	// the generator reloaded, mirroring deploy's create-before-start ordering in
 	// reverse: a failure removing them still surfaces (see main.go's
-	// podmanDelete), but the units referencing them are gone first. Call 0 is
+	// podmanRemove), but the units referencing them are gone first. Call 0 is
 	// the read-only preflight probe, which runs before any of that.
 	wantCalls := [][]string{
 		{"podman", "info"},
@@ -992,7 +1063,7 @@ func TestDeletePodmanSeamStopsRemovesReloads(t *testing.T) {
 	}
 	for _, name := range []string{"solmq-conn.container", "solmq-conn-application.yml", "solmq-conn-status"} {
 		if _, err := os.Stat(filepath.Join(quadletDir, name)); !os.IsNotExist(err) {
-			t.Errorf("%s should be removed by delete", name)
+			t.Errorf("%s should be removed by the remove verb", name)
 		}
 	}
 }
@@ -1031,7 +1102,7 @@ func TestAllowCommandFlagBadValueExitsUsageError(t *testing.T) {
 }
 
 // TestAllowCommandFlagRejectedOnGenerateAndValidate pins --allow-command as
-// deploy/delete/status-only: generate config and validate never register the
+// deploy/remove/status-only: generate config and validate never register the
 // flag, so passing it is an unknown-flag usage error, same as any other
 // undefined flag.
 func TestAllowCommandFlagRejectedOnGenerateAndValidate(t *testing.T) {
@@ -1169,7 +1240,7 @@ func TestDeployPodmanPreflightFailureStopsBeforeWrite(t *testing.T) {
 //
 // These pin resolvePlatform's shared order (platformResolutionDetail in
 // commands.go): --platform, then single-section inference, then an
-// interactive menu, then a loud error -- shared by generate/deploy/delete
+// interactive menu, then a loud error -- shared by generate/deploy/remove
 // (status has its own matrix further down, since it also has the
 // explicit-target exception).
 
@@ -1186,6 +1257,122 @@ func TestPlatformFlagHitOverridesInference(t *testing.T) {
 	}
 	if want := []string{"docker", "info"}; len(f.calls) == 0 || !reflect.DeepEqual(f.calls[0].argv, want) {
 		t.Errorf("explicit --platform docker should be used even though kubernetes is also present, got %+v", f.calls)
+	}
+}
+
+// TestPlatformAliasesResolveToCanonical asserts each short --platform spelling
+// selects the same platform as its canonical name. Resolution happens before
+// validation and before the section lookup, so an alias works anywhere the full
+// name does. The assertion is on the binary the run reaches for rather than the
+// whole argv: which platform got selected is the claim, and the exact preflight
+// arguments are pinned by the per-platform deploy tests already.
+func TestPlatformAliasesResolveToCanonical(t *testing.T) {
+	for _, c := range []struct{ alias, wantBinary string }{
+		{alias: "kube", wantBinary: "kubectl"},
+		{alias: "dk", wantBinary: "docker"},
+		{alias: "pm", wantBinary: "podman"},
+	} {
+		f := useFakeRunner(t)
+		dir := t.TempDir()
+		write(t, dir, "env.yaml", kubeEnv+dockerEnv+podmanEnv(t.TempDir()))
+		write(t, dir, "10.yaml", validWF)
+
+		if code := dispatch([]string{"deploy", "--platform", c.alias, "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+			t.Fatalf("--platform %s: exit=%d, want 0", c.alias, code)
+		}
+		if len(f.calls) == 0 {
+			t.Fatalf("--platform %s reached no command", c.alias)
+		}
+		if got := f.calls[0].argv[0]; got != c.wantBinary {
+			t.Errorf("--platform %s reached %q, want %q", c.alias, got, c.wantBinary)
+		}
+	}
+}
+
+// TestPlatformAliasMissingSectionNamesCanonicalSection asserts the alias is
+// resolved before the section check, so the error tells the operator which
+// section: key to add rather than echoing the alias they typed.
+func TestPlatformAliasMissingSectionNamesCanonicalSection(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", dockerEnv)
+	f := &fakeRunner{}
+	stderr := captureStderr(t, func() {
+		code := dispatch([]string{"deploy", "--platform", "kube", "-e", filepath.Join(dir, "env.yaml")}, f)
+		if code != 1 {
+			t.Fatalf("exit=%d, want 1", code)
+		}
+	})
+	if !strings.Contains(stderr, "kubernetes") {
+		t.Errorf("error should name the kubernetes section, not just the alias, got:\n%s", stderr)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("runner must not be invoked, got %d calls", len(f.calls))
+	}
+}
+
+// TestPlatformUnknownValueListsEverySpelling asserts a bogus --platform value
+// is rejected with all accepted spellings, canonical and short, so the operator
+// can see the alias set without reaching for the docs.
+func TestPlatformUnknownValueListsEverySpelling(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", dockerEnv)
+	f := &fakeRunner{}
+	stderr := captureStderr(t, func() {
+		code := dispatch([]string{"deploy", "--platform", "k8s", "-e", filepath.Join(dir, "env.yaml")}, f)
+		if code != 1 {
+			t.Fatalf("exit=%d, want 1", code)
+		}
+	})
+	for _, want := range []string{"kubernetes", "docker", "podman", "kube", "dk", "pm"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("rejection should list %q, got:\n%s", want, stderr)
+		}
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("runner must not be invoked, got %d calls", len(f.calls))
+	}
+}
+
+// TestPlatformSpellingsAreDeterministic pins the ordering contract behind the
+// rejection message: platformSpellings is built from an ordered slice, not from
+// map iteration, so the message cannot vary between runs.
+func TestPlatformSpellingsAreDeterministic(t *testing.T) {
+	first := platformSpellings()
+	for i := 0; i < 20; i++ {
+		if got := platformSpellings(); !reflect.DeepEqual(got, first) {
+			t.Fatalf("platformSpellings varies between calls: %v then %v", first, got)
+		}
+	}
+	// Canonical names lead, so the message reads as names-then-shorthand.
+	for i, want := range platformNames {
+		if first[i] != want {
+			t.Errorf("position %d = %q, want the canonical %q first", i, first[i], want)
+		}
+	}
+	if len(first) != len(platformNames)+len(platformAliasList) {
+		t.Errorf("spellings = %v, want every canonical name plus every alias", first)
+	}
+}
+
+// TestPlatformAliasesCoverEveryPlatformExactlyOnce guards the table itself: an
+// alias pointing at an unknown platform, or a duplicate alias, would silently
+// misroute a --platform value.
+func TestPlatformAliasesCoverEveryPlatformExactlyOnce(t *testing.T) {
+	seen := map[string]bool{}
+	for _, e := range platformAliasList {
+		if !contains(platformNames, e.Canonical) {
+			t.Errorf("alias %q maps to %q, which is not a platform", e.Alias, e.Canonical)
+		}
+		if seen[e.Alias] {
+			t.Errorf("alias %q is declared twice", e.Alias)
+		}
+		seen[e.Alias] = true
+		if contains(platformNames, e.Alias) {
+			t.Errorf("alias %q collides with a canonical platform name", e.Alias)
+		}
+	}
+	if len(platformAliases) != len(platformAliasList) {
+		t.Errorf("lookup map has %d entries for %d declared aliases", len(platformAliases), len(platformAliasList))
 	}
 }
 
@@ -1315,7 +1502,7 @@ func TestPlatformZeroSectionsIsLoudError(t *testing.T) {
 func TestOldPositionalFormsRejectedWithPlatformHint(t *testing.T) {
 	cases := [][]string{
 		{"deploy", "kubernetes"},
-		{"delete", "docker"},
+		{"remove", "docker"},
 		{"generate", "podman"},
 	}
 	for _, args := range cases {
@@ -1341,7 +1528,7 @@ func TestOldPositionalFormsRejectedWithPlatformHint(t *testing.T) {
 
 // TestStatusScriptPresentRunsAndReportsOutput covers the simplest matrix
 // entry: the script is already installed, so status just runs it and prints
-// "<target>: " followed by its output, one line per continuation.
+// its output under the target's banner, every line indented by two.
 func TestStatusScriptPresentRunsAndReportsOutput(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
 		{"", nil},                                // preflight: kubectl auth can-i create deployment
@@ -1355,7 +1542,12 @@ func TestStatusScriptPresentRunsAndReportsOutput(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
-	want := "pod-a: leader-election mode: standalone\n  leader-election state: active\n"
+	// No env.yaml behind an explicit --pod, so the banner carries the platform
+	// and the pod alone -- an unresolved namespace or deployment is dropped
+	// rather than printed as an empty segment.
+	want := "=== kubernetes  pod-a ===\n" +
+		"  leader-election mode: standalone\n" +
+		"  leader-election state: active\n"
 	if stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
@@ -1459,6 +1651,100 @@ func TestStatusInstallPromptNonTTYRefusesWithInstallHint(t *testing.T) {
 	}
 }
 
+// TestStatusBannerNamesTheInstancePerPlatform covers the identity line above
+// each report. It exists because the report itself cannot carry any of this:
+// the script runs inside the container and knows nothing of the namespace,
+// deployment or compose project that locate it from outside.
+//
+// Every unresolved name is dropped rather than rendered as an empty segment,
+// which is what an explicit --pod with no env.yaml, or a container compose did
+// not create, actually produces.
+func TestStatusBannerNamesTheInstancePerPlatform(t *testing.T) {
+	tests := []struct {
+		name                                           string
+		platform, namespace, deployment, group, target string
+		want                                           string
+	}{
+		{
+			name: "kubernetes, everything resolved", platform: "kubernetes",
+			namespace: "prod", deployment: "solmq-connector", target: "solmq-connector-7d9f8c6b5-x2n4q",
+			want: "kubernetes  prod / solmq-connector / solmq-connector-7d9f8c6b5-x2n4q",
+		},
+		{
+			name: "kubernetes, explicit --pod with no env.yaml", platform: "kubernetes",
+			target: "pod-a", want: "kubernetes  pod-a",
+		},
+		{
+			name: "docker, container in a compose project", platform: "docker",
+			group: "eg", target: "solmq-connector", want: "docker  eg / solmq-connector",
+		},
+		{
+			name: "docker, container compose did not create", platform: "docker",
+			target: "solmq-connector", want: "docker  solmq-connector",
+		},
+		{
+			name: "podman, container only", platform: "podman",
+			target: "solmq-connector", want: "podman  solmq-connector",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := statusBanner(tt.platform, tt.namespace, tt.deployment, tt.group, tt.target); got != tt.want {
+				t.Errorf("statusBanner = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStatusDockerBannerCarriesComposeProject pins the one platform whose
+// banner needs a second lookup: the compose project is read back from the
+// container's own label rather than guessed from the compose file's directory,
+// so it costs one read-only inspect per target, after the report is run.
+func TestStatusDockerBannerCarriesComposeProject(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},                                // preflight: docker info
+		{runner.ScriptPresentMarker + "\n", nil}, // probe: present
+		{"leader-election mode: standalone\nleader-election state: active\n", nil}, // run
+		{"eg\n", nil}, // inspect: the compose project label
+	}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "--platform", "docker", "--container", "solmq-connector"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if !strings.Contains(stdout, "=== docker  eg / solmq-connector ===") {
+		t.Errorf("banner missing the compose project, got:\n%s", stdout)
+	}
+	last := q.calls[len(q.calls)-1].argv
+	if len(last) < 2 || last[1] != "inspect" {
+		t.Errorf("last call = %v, want a docker inspect", last)
+	}
+}
+
+// TestStatusDockerBannerWithoutComposeProject covers the same path when the
+// container was not created by compose: the inspect answers nothing usable and
+// the group segment is dropped instead of leaving a dangling separator.
+func TestStatusDockerBannerWithoutComposeProject(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},
+		{runner.ScriptPresentMarker + "\n", nil},
+		{"leader-election mode: standalone\nleader-election state: active\n", nil},
+		{"<no value>\n", nil}, // inspect: no such label
+	}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "--platform", "docker", "--container", "solmq-connector"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if !strings.Contains(stdout, "=== docker  solmq-connector ===") {
+		t.Errorf("banner should carry the container alone, got:\n%s", stdout)
+	}
+}
+
 // TestStatusRejectsUnsafeUserBeforeAnyExec pins the boundary check on --user:
 // the account name reaches a sed address inside the generated script, so a
 // value carrying a regex or path metacharacter must be refused up front rather
@@ -1498,8 +1784,8 @@ func TestStatusStandbyReportedWithoutAbortingOtherTargets(t *testing.T) {
 		t.Fatalf("exit=%d, want 0 (standby is an answer, not a failure)", code)
 	}
 	for _, want := range []string{
-		"pod-a: leader-election mode: standalone", "leader-election state: standby",
-		"pod-b: leader-election mode: standalone", "leader-election state: active",
+		"=== kubernetes  pod-a ===\n  leader-election mode: standalone", "  leader-election state: standby",
+		"=== kubernetes  pod-b ===\n  leader-election mode: standalone", "  leader-election state: active",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout missing %q, got:\n%s", want, stdout)
@@ -1535,7 +1821,7 @@ func TestStatusRunFailureReportedAndExitsOne(t *testing.T) {
 	if !strings.Contains(stderr, "pod-a") {
 		t.Errorf("stderr should name the failed target, got:\n%s", stderr)
 	}
-	if !strings.Contains(stdout, "pod-b: leader-election mode: standalone") {
+	if !strings.Contains(stdout, "=== kubernetes  pod-b ===") {
 		t.Errorf("a reachable target must still report, got:\n%s", stdout)
 	}
 }

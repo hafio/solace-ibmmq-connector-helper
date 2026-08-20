@@ -146,7 +146,7 @@ type Quadlet struct {
 }
 
 // Podman is the parsed podman section of env.yaml. generate honours Mode
-// (run|quadlet); deploy/delete are always quadlet + systemctl.
+// (run|quadlet); deploy/remove are always quadlet + systemctl.
 type Podman struct {
 	Command  string       `yaml:"command"` // default podman
 	Mode     string       `yaml:"mode"`    // run (default) | quadlet -- controls generate only
@@ -161,7 +161,13 @@ type Podman struct {
 	Libs     *LibsMount   `yaml:"libs"`
 }
 
-// applyDockerDefaults fills command/name/restart/ports and the mount paths.
+// applyDockerDefaults fills command/name/restart and the mount paths.
+//
+// ports is deliberately not defaulted: publishing a container port to the host
+// is an exposure decision, and nothing the tool does needs one -- status execs
+// into the container rather than reaching it over a published port. An omitted
+// ports: therefore publishes nothing, and the operator opts in by listing the
+// ports they want.
 func applyDockerDefaults(d *Docker) {
 	if d.Command == "" {
 		d.Command = DefaultDockerCommand
@@ -172,14 +178,12 @@ func applyDockerDefaults(d *Docker) {
 	if d.Restart == "" {
 		d.Restart = DefaultRestart
 	}
-	if len(d.Ports) == 0 {
-		d.Ports = []Port{{Host: DefaultMgmtPort, Container: DefaultMgmtPort}}
-	}
 	applyMountDefaults(d.Stores, d.Libs)
 }
 
-// applyPodmanDefaults mirrors applyDockerDefaults and additionally defaults the
-// generate mode and the quadlet scope (auto).
+// applyPodmanDefaults mirrors applyDockerDefaults (ports left unpublished
+// included) and additionally defaults the generate mode and the quadlet scope
+// (auto).
 func applyPodmanDefaults(p *Podman) {
 	if p.Command == "" {
 		p.Command = DefaultPodmanCommand
@@ -192,9 +196,6 @@ func applyPodmanDefaults(p *Podman) {
 	}
 	if p.Restart == "" {
 		p.Restart = DefaultRestart
-	}
-	if len(p.Ports) == 0 {
-		p.Ports = []Port{{Host: DefaultMgmtPort, Container: DefaultMgmtPort}}
 	}
 	if p.Quadlet == nil {
 		p.Quadlet = &Quadlet{}

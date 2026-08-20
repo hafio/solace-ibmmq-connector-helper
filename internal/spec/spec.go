@@ -10,6 +10,7 @@ package spec
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -164,6 +165,57 @@ func ParseWorkflow(data []byte, path string) (*Workflow, error) {
 		wf.TargetSet = true
 	}
 	return wf, nil
+}
+
+// WorkflowFileLess orders workflow file names the way an operator numbers them:
+// runs of digits compare as numbers and everything else byte by byte, so
+// 2.yaml sorts before 10.yaml. Plain lexical order puts 10.yaml first, and
+// since a workflow's id is its position in this order (consolidate assigns
+// ID: i over the sorted set), that silently hands two files each other's id.
+//
+// The comparison never converts a digit run to an integer, so an absurdly long
+// run cannot overflow: leading zeros are stripped, then the longer run is the
+// larger number and equal-length runs compare lexically. Two runs of equal
+// value but different padding (007 vs 7) are ordered by the raw text, which
+// keeps the result a total order rather than leaving the pair unordered.
+//
+// Both call sites -- scan.Scan over the workflows folder and gen.parse over
+// whatever the caller supplied -- compare base names, so this takes plain
+// names rather than paths.
+func WorkflowFileLess(a, b string) bool {
+	for a != "" && b != "" {
+		if isDigit(a[0]) && isDigit(b[0]) {
+			aRun, aRest := digitRun(a)
+			bRun, bRest := digitRun(b)
+			aVal, bVal := strings.TrimLeft(aRun, "0"), strings.TrimLeft(bRun, "0")
+			switch {
+			case len(aVal) != len(bVal):
+				return len(aVal) < len(bVal)
+			case aVal != bVal:
+				return aVal < bVal
+			case aRun != bRun:
+				return aRun < bRun
+			}
+			a, b = aRest, bRest
+			continue
+		}
+		if a[0] != b[0] {
+			return a[0] < b[0]
+		}
+		a, b = a[1:], b[1:]
+	}
+	return len(a) < len(b)
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// digitRun splits s into its leading run of digits and the remainder.
+func digitRun(s string) (run, rest string) {
+	i := 0
+	for i < len(s) && isDigit(s[i]) {
+		i++
+	}
+	return s[:i], s[i:]
 }
 
 func (r *rawSide) toSide() Side {

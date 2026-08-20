@@ -64,7 +64,7 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 	mountStores := opts.MountStores
 	m := &Model{
 		Security:     d.Security,
-		Management:   d.Management,
+		Management:   Management{Port: d.EffectiveManagementPort(), HealthShowDetails: d.Management.HealthShowDetails},
 		LoggingLevel: d.LoggingLevel,
 		ConfigImport: opts.ConfigImport,
 	}
@@ -376,16 +376,29 @@ func buildLeaderElection(d *spec.Defaults, mount bool, secretRef secretFn) *Lead
 	return m
 }
 
+// managementExposure is the actuator exposure list every render carries. It is
+// fixed rather than derived from the operator's configuration: the generated
+// status script depends on leaderelection and workflows being exposed, and a
+// fixed list is the only way the tool can promise a running instance is
+// queryable.
+const managementExposure = "health,info,metrics,leaderelection,workflows"
+
 // applyStatusAccess forces the actuator surface the generated status script
-// depends on: the leaderelection/workflows exposure entries and the reserved
-// read-only account (spec.StatusUserName), regardless of what the operator
-// configured.
+// depends on: the fixed exposure list and the reserved read-only account
+// (spec.StatusUserName), regardless of what the operator configured.
 func applyStatusAccess(m *Model, d *spec.Defaults, statusPassword string, secretRef secretFn) {
+	m.Management.Exposure = managementExposure
+
 	// Management users authenticate against the actuator endpoint, so their
-	// passwords are credentials like any other. The slice is copied first:
-	// m.Security shares d.Security's backing array, and Build runs once per shard
-	// against the same Defaults, so substituting in place would let the second
-	// shard read the first shard's placeholder as a literal value.
+	// passwords are credentials like any other. The slice is copied first
+	// because m.Security was assigned from d.Security and the two share one
+	// backing array: rewriting passwords in place would replace the caller's
+	// own parsed values with ${...} placeholders, leaving Defaults describing
+	// something other than what the operator wrote.
+	//
+	// Only the password is rewritten. Roles pass through as authored -- the
+	// copy still shares their backing array with the caller, which stays safe
+	// precisely because nothing here mutates them.
 	users := make([]spec.User, len(d.Security.Users))
 	copy(users, d.Security.Users)
 	for i, u := range users {
@@ -393,54 +406,22 @@ func applyStatusAccess(m *Model, d *spec.Defaults, statusPassword string, secret
 		users[i].PasswordEnv = ""
 	}
 
-	// The generated status script queries /actuator/leaderelection and
-	// /actuator/workflows, so both are guaranteed exposed in every
-	// leader-election mode instead of leaving it to the operator to remember.
-	m.Management.Present = true
-	exposure := m.Management.Exposure
-	if exposure == "" {
-		exposure = "health" // Spring's own default, made explicit now that entries are appended
-	}
-	if !hasExposureEntry(exposure, "leaderelection") {
-		exposure += ",leaderelection"
-	}
-	if !hasExposureEntry(exposure, "workflows") {
-		exposure += ",workflows"
-	}
-	m.Management.Exposure = exposure
-
-	if d.Security.EffectivelyEnabled() {
-		m.Security.Present = true
-		m.Security.Enabled = true
-		// This one password is a literal rather than a secretRef placeholder --
-		// the deliberate exception to the rule the other users follow. Every
-		// credential in the secrets model is resolved from the operator's
-		// environment at deploy time, so routing this one through it would put
-		// an export back on the operator for an account the tool owns end to
-		// end and generates a fresh password for. The cost is that the value
-		// sits in the generated config artifacts (on Kubernetes, a ConfigMap
-		// rather than a Secret), which is why the account is read-only and the
-		// password is regenerated on every render. The script's own
-		// ${...} -> /run/secrets fallback still covers configs written before
-		// this account existed.
-		users = append(users, spec.User{Name: spec.StatusUserName, Password: statusPassword})
-	}
-	m.Security.Users = users
-}
-
-// hasExposureEntry reports whether entry appears in csv, Spring's own
-// comma-separated management.endpoints.web.exposure.include syntax. Matching
-// is exact per comma-separated part (after trimming spaces) so "leaderelection2"
-// or "leaderelectionx" never counts as "leaderelection". A "*" entry is
-// Spring's wildcard for "everything is already exposed", so it always matches.
-func hasExposureEntry(csv, entry string) bool {
-	for _, part := range strings.Split(csv, ",") {
-		part = strings.TrimSpace(part)
-		if part == "*" || part == entry {
-			return true
-		}
-	}
-	return false
+	// The reserved account is always appended last, after the operator's own
+	// users -- management security is always on now (see spec.StatusUserName),
+	// so there is no enabled/disabled branch left to gate on.
+	//
+	// This one password is a literal rather than a secretRef placeholder --
+	// the deliberate exception to the rule the other users follow. Every
+	// credential in the secrets model is resolved from the operator's
+	// environment at deploy time, so routing this one through it would put
+	// an export back on the operator for an account the tool owns end to
+	// end and generates a fresh password for. The cost is that the value
+	// sits in the generated config artifacts (on Kubernetes, a ConfigMap
+	// rather than a Secret), which is why the account is read-only and the
+	// password is regenerated on every render. The script's own
+	// ${...} -> /run/secrets fallback still covers configs written before
+	// this account existed.
+	m.Security.Users = append(users, spec.User{Name: spec.StatusUserName, Password: statusPassword})
 }
 
 // nodeToProps converts a mapping node into ordered Props (scalar value -> Val,

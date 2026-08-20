@@ -26,6 +26,9 @@ so splitting them across connectors stays your decision.
   into each running instance and reading its own actuator; `version` prints the
   build's own version plus its Go/OS/arch, for bug reports.
 
+Every term above -- binders, durable subscriptions, leader-election, the secrets
+model -- is explained in depth in [userguide.md](userguide.md).
+
 ## Quick start
 
 Grab the release binary for your platform (`solmq-conn-util-linux-amd64`,
@@ -63,7 +66,7 @@ connections:
       host: tcp://broker.internal:55555
       msg-vpn: prod
       client-username: connector
-      client-password: ${SOL_PASSWORD}
+      client-password-env: SOL_PASSWORD
 ```
 
 `specs/workflow-0.yaml` bridges an MQ queue to a Solace topic, referencing it:
@@ -75,7 +78,7 @@ source:
     queue-manager: QM1
     channel: DEV.APP.SVRCONN
     user: appuser
-    password: ${MQ_PASSWORD}
+    password-env: MQ_PASSWORD
     queue: ORDERS.OUT
 target:
   solace:
@@ -101,27 +104,37 @@ piping the manifest to `kubectl`/`oc`.
 > `env.yaml` has exactly one platform section. See [userguide.md](userguide.md)
 > for the full resolution order (flag, single section, interactive menu, or a
 > loud error) and why CI must pass `--platform` explicitly.
+>
+> **Breaking change:** the teardown verb `delete` (alias `del`) is now `remove`
+> (alias `rm`). The old spellings are not accepted -- update any script that ran
+> `solmq-conn-util delete ...`. Only the verb changed: a kubernetes teardown
+> still issues `kubectl delete -f -`.
 
 ```text
 solmq-conn-util generate [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
                                                                    Emit application.yml, or the resolved platform's artifacts
 solmq-conn-util deploy  [--platform kubernetes|docker|podman] [-e env.yaml]  Generate for the resolved platform, then apply it
-solmq-conn-util delete  [--platform kubernetes|docker|podman] [-e env.yaml]  Tear the same platform down
+solmq-conn-util remove  [--platform kubernetes|docker|podman] [-e env.yaml]  Tear the same platform down
 solmq-conn-util status  [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
-                                                                   Ensure and run the status script; report per-target leader-election + workflow state
+                                                                   Ensure and run the status script; report per-instance leader-election + workflow state
 solmq-conn-util version                                           Print the utility name, version, Go version and OS/arch
 solmq-conn-util validate            [-e env.yaml]                 Lint the whole env.yaml + workflows
 solmq-conn-util examples [dir] [-f]                               Write a starter env.yaml + workflows
-solmq-conn-util completion bash|zsh|fish|powershell               Print a shell completion script
+solmq-conn-util auto-complete bash|zsh|fish|powershell            Print a shell completion script
 
 -e, --env     Config file, relative or absolute path (default: env.yaml)
 -o, --out     generate output file (default: stdout)
 -f, --force   examples: overwrite existing files
 ```
 
+Every verb above except `auto-complete` and `help` also has a short alias
+(`gen`, `dep`, `rm`, `sts`, `ver`, `vld`, `eg`), and `--platform` accepts
+`kube`, `dk` and `pm` -- see [userguide.md](userguide.md) section 3 for both
+tables.
+
 `generate` fails fast (stops at the first error, writes nothing); `validate`
 reports every finding; generate output is buffered and only written on full
-success -- never a half-written `-o`. `deploy`/`delete`/`status` run the CLI
+success -- never a half-written `-o`. `deploy`/`remove`/`status` run the CLI
 named by each section's `command:` through an argv slice -- never a shell --
 with every token checked against a safe charset, argv[0] checked against a
 per-platform binary allowlist (escape hatch: `--allow-command`), and a
@@ -129,7 +142,7 @@ read-only login/daemon preflight before anything is written, applied, or
 queried. Details and exit codes: [userguide.md](userguide.md) section 3; the
 full generated command reference: [docs/commands.md](docs/commands.md).
 
-Tab completion for all of the above: `solmq-conn-util completion bash|zsh|fish|powershell`
+Tab completion for all of the above: `solmq-conn-util auto-complete bash|zsh|fish|powershell`
 prints a script for your shell, rendered from the binary's own command model so it
 never drifts from the commands that binary accepts
 ([userguide.md](userguide.md) section 1.1).
@@ -149,3 +162,8 @@ never drifts from the commands that binary accepts
 - [solmq-conn-util-generator.html](solmq-conn-util-generator.html) -- a standalone browser
   page (no install, no server) that generates the `env.yaml` + workflow files,
   reports the same findings as `validate`, and previews the `application.yml`.
+- [doc.md](doc.md) -- a configuration reference for the underlying connector's own
+  `application.yml` (the raw `solace.connector.*` and Spring keys), for hand-tuning
+  or debugging generated output beyond what `env.yaml` exposes. Parts are still
+  marked unverified -- check a key against the connector's official docs before
+  relying on it.

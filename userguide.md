@@ -13,8 +13,11 @@ All YAML shown here uses block style. Flow style (`{ }` / `[ ]`) also parses, bu
 `${VAR}` placeholders are invalid inside YAML flow `{ }`, so block style is
 recommended everywhere.
 
+New here? Start with the [README](README.md) -- it has the quick tour and the
+documentation index; this guide is the complete reference.
+
 > **Breaking change: platforms are no longer positional.** `generate`, `deploy`,
-> `delete`, and `status` used to take the platform as a second positional argument
+> `remove`, and `status` used to take the platform as a second positional argument
 > (`deploy kubernetes`). That is now the `--platform` flag: `deploy --platform
 > kubernetes`, or just `deploy` when `env.yaml` has exactly one of
 > `kubernetes:`/`docker:`/`podman:`. The platform resolves in this order:
@@ -32,6 +35,29 @@ recommended everywhere.
 > pass the flag explicitly instead of hanging. **CI and scripts must therefore
 > pass `--platform` (and, for `status`, `--install`) rather than rely on either
 > prompt.**
+>
+> **Breaking change: `delete` is now `remove`.** The teardown verb is spelled
+> `remove`, with `rm` as its short alias -- `del` is gone. `delete` is not kept
+> as a hidden alias: typing it reports an unknown command and prints the usage
+> summary, which lists `remove`. Update any script or CI job that ran
+> `solmq-conn-util delete ...` (or `del`) to `solmq-conn-util remove ...`. Only
+> the CLI verb changed; the platform CLI each run shells out to is untouched, so
+> a kubernetes teardown still issues `kubectl delete -f -`.
+
+## Contents
+
+1. [Running solmq-conn-util](#1-running-solmq-conn-util)
+2. [Quick start](#2-quick-start)
+3. [Commands](#3-commands)
+4. [The config file and workflow discovery](#4-the-config-file-and-workflow-discovery)
+5. [Workflow file](#5-workflow-file)
+6. [Connector defaults (env.yaml top level)](#6-connector-defaults-envyaml-top-level)
+7. [Deploy targets (kubernetes, docker, podman)](#7-deploy-targets-kubernetes-docker-podman)
+8. [Secrets model](#8-secrets-model)
+9. [What gets generated](#9-what-gets-generated)
+10. [Status: which instance is active](#10-status-which-instance-is-active)
+11. [examples](#11-examples)
+12. [Notes and gotchas](#12-notes-and-gotchas)
 
 ---
 
@@ -54,13 +80,20 @@ solmq-conn-util <verb> <target> [-e env.yaml] ...   # run a command (see section
 `solmq-conn-util` reads one `env.yaml` (chosen with `-e`, default `env.yaml`) plus the
 workflow files it discovers alongside it. `generate`, `validate`, and `examples`
 are pure build-time steps: they read and write plain files and need no network,
-broker, or cluster. `deploy`/`delete` additionally shell out to the target CLI
+broker, or cluster. `deploy`/`remove` additionally shell out to the target CLI
 (`kubectl`/`oc`, `docker`, or `podman` + `systemctl`) to apply or tear down what was
 generated -- run those where that CLI and its context are available.
 
 ### 1.1 Shell completion
 
-`solmq-conn-util completion <shell>` prints a completion script on stdout for `bash`,
+> **Breaking change: the `completion` verb is renamed to `auto-complete`.**
+> There is no compatibility alias -- `solmq-conn-util completion bash` (and any
+> `~/.bashrc`, `~/.zshrc`, fish completions file, or `$PROFILE` line still
+> calling `completion`) now fails as an unknown command (exit 2) on every new
+> shell. Update every recipe below, and any install you already made, to
+> `auto-complete`.
+
+`solmq-conn-util auto-complete <shell>` prints a completion script on stdout for `bash`,
 `zsh`, `fish`, or `powershell`. It completes the verbs, each verb's targets, the
 flags valid under that verb, a file path after `-e`/`-o`, and a directory after
 `examples` -- including when a flag comes before the target, as in
@@ -75,15 +108,15 @@ Printing the script installs nothing -- it goes to stdout. What makes a shell
 
 ```sh
 # bash -- add the source line to ~/.bashrc; depends on nothing but bash
-source <(solmq-conn-util completion bash)
+source <(solmq-conn-util auto-complete bash)
 
 # fish -- writing the file IS the install; fish autoloads that path
 mkdir -p ~/.config/fish/completions
-solmq-conn-util completion fish > ~/.config/fish/completions/solmq-conn-util.fish
+solmq-conn-util auto-complete fish > ~/.config/fish/completions/solmq-conn-util.fish
 
 # zsh -- the file must be named _solmq-conn-util and sit on $fpath BEFORE compinit
 mkdir -p ~/.zsh/completions
-solmq-conn-util completion zsh > ~/.zsh/completions/_solmq-conn-util
+solmq-conn-util auto-complete zsh > ~/.zsh/completions/_solmq-conn-util
 #   ...then in ~/.zshrc, ahead of any existing compinit call:
 #   fpath=(~/.zsh/completions $fpath)
 #   autoload -Uz compinit && compinit
@@ -91,7 +124,7 @@ solmq-conn-util completion zsh > ~/.zsh/completions/_solmq-conn-util
 
 ```powershell
 # PowerShell -- Register-ArgumentCompleter is per-session, so persist it
-solmq-conn-util completion powershell >> $PROFILE
+solmq-conn-util auto-complete powershell >> $PROFILE
 ```
 
 Each shell has one thing that catches people out:
@@ -100,7 +133,7 @@ Each shell has one thing that catches people out:
 |-------|--------|
 | bash | `/etc/bash_completion.d/` works only where the **bash-completion package** is installed and sourced from the profile -- it is what reads that directory. Without it the file is never loaded; the `~/.bashrc` `source` line has no such dependency. |
 | zsh | `compinit` caches. If nothing completes, `rm -f ~/.zcompdump* && exec zsh`. |
-| fish | None -- it autoloads. `solmq-conn-util completion fish \| source` covers the current session if you would rather not install. |
+| fish | None -- it autoloads. `solmq-conn-util auto-complete fish \| source` covers the current session if you would rather not install. |
 | PowerShell | `\| Out-String \| Invoke-Expression` is the current session only; it does not survive a restart. |
 
 The scripts complete the command named `solmq-conn-util` (and `solmq-conn-util.exe` on
@@ -118,7 +151,7 @@ solmq-conn-util generate config -e examples/env.yaml  # print the application.ym
 ```
 
 Then edit the files under `examples/` (start with `examples/env.yaml`), drop your
-`.jks` stores under `examples/certs/`, and re-run. See section 10 for the
+`.jks` stores under `examples/certs/`, and re-run. See section 11 for the
 `examples` command.
 
 ### The spec generator (no editor required)
@@ -136,7 +169,7 @@ It builds the whole spec folder for you:
 - a preview of the `application.yml` the spec consolidates into (section 9);
 - **Download all (.zip)** writes `specs/env.yaml` plus one file per workflow,
   ready to unzip and hand to `-e specs/env.yaml`; **Load sample** fills in the
-  same starter set `examples` writes (section 10).
+  same starter set `examples` writes (section 11).
 
 Credentials are entered as the name of an environment variable (the `-env` form,
 section 8) rather than as values, so the generated `env.yaml` stays safe to commit.
@@ -149,23 +182,60 @@ says so (section 4.1).
 
 ## 3. Commands
 
-The first argument is a **verb**; the second names the **target** (for `generate`)
-or **platform** (for `deploy`/`delete`).
+The first argument is a **verb**. `generate` takes an optional second argument,
+`config`, which emits `application.yml`; the platform for
+`generate`/`deploy`/`remove`/`status` comes from `--platform` (or the resolution
+order in the note above), never from a positional argument.
 
 ```text
-solmq-conn-util generate [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
+solmq-conn-util generate (gen) [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
                                                                    Emit application.yml, or the resolved platform's artifacts
-solmq-conn-util deploy  [--platform kubernetes|docker|podman] [-e env.yaml] [--allow-command name]
+solmq-conn-util deploy (dep)   [--platform kubernetes|docker|podman] [-e env.yaml] [--allow-command name]
                                                                    Generate for the resolved platform, then apply it
-solmq-conn-util delete  [--platform kubernetes|docker|podman] [-e env.yaml] [--allow-command name]
+solmq-conn-util remove (rm)    [--platform kubernetes|docker|podman] [-e env.yaml] [--allow-command name]
                                                                    Tear down what deploy created for the resolved platform
-solmq-conn-util status  [--install] [--platform kubernetes|docker|podman] [-e env.yaml] [flags...]
-                                                                   Ensure and run the status script; print per-target leader-election + workflow state
-solmq-conn-util version                                           Print the utility name, version, Go version and OS/arch
-solmq-conn-util validate            [-e env.yaml]                 Lint the whole env.yaml + workflows
-solmq-conn-util examples [dir] [-f]                               Write a starter env.yaml + workflows
-solmq-conn-util completion bash|zsh|fish|powershell               Print a shell completion script (section 1.1)
+solmq-conn-util status (sts)   [--install] [--platform kubernetes|docker|podman] [-e env.yaml] [flags...]
+                                                                   Ensure and run the status script; print per-instance leader-election + workflow state
+solmq-conn-util version (ver)                                     Print the utility name, version, Go version and OS/arch
+solmq-conn-util validate (vld)      [-e env.yaml]                 Lint the whole env.yaml + workflows
+solmq-conn-util examples (eg) [dir] [-f]                          Write a starter env.yaml + workflows
+solmq-conn-util auto-complete bash|zsh|fish|powershell            Print a shell completion script (section 1.1)
 ```
+
+Every verb has exactly one short alias, except `auto-complete` and `help`:
+
+| Verb | Alias |
+|------|-------|
+| `generate` | `gen` |
+| `deploy` | `dep` |
+| `remove` | `rm` |
+| `status` | `sts` |
+| `version` | `ver` |
+| `validate` | `vld` |
+| `examples` | `eg` |
+| `auto-complete` | none |
+| `help` | none (still answers to `-h`, `--help`) |
+
+An alias is recognized everywhere the full verb is, including shell completion
+(`solmq-conn-util dep <TAB>` completes `deploy`'s own flags and targets) -- but
+aliases are deliberately never offered as a TAB suggestion themselves, so the
+completion menu only ever lists the verbs above; that is intentional, not a bug.
+
+The `--platform` values have short spellings as well:
+
+| Platform | Short |
+|----------|-------|
+| `kubernetes` | `kube` |
+| `docker` | `dk` |
+| `podman` | `pm` |
+
+These are the flag values only -- the `env.yaml` section keys stay
+`kubernetes:`, `docker:` and `podman:`. A short spelling is resolved before
+anything else looks at it, so `--platform kube` behaves exactly like
+`--platform kubernetes`, and an error still names the section you would need to
+add rather than the spelling you typed. `kube` is the only one in common use
+outside this tool; `dk` and `pm` are this tool's own, which is why they are
+listed here rather than left to be guessed.
 
 The full command tree -- with an example for every command -- is the generated
 reference at [docs/commands.md](docs/commands.md).
@@ -175,22 +245,22 @@ reference at [docs/commands.md](docs/commands.md).
 | `-e`, `--env` | all except `examples` | config file, relative or absolute path (default: `env.yaml`) |
 | `-o`, `--out` | `generate` | write output to a file (default: stdout) |
 | `-f`, `--force` | `examples` | overwrite existing files |
-| `--platform` | `generate`/`deploy`/`delete`/`status` | the platform: `kubernetes`, `docker`, or `podman` (default: resolved from `env.yaml`, or an interactive menu -- see the breaking-change note above) |
-| `--allow-command` | `deploy`/`delete`/`status` | approve an extra command binary beyond the `command:` allowlist; repeatable |
-| `--install` | `status` | install the status script on every target without prompting |
-| `--pod` | `status` | limit checks to this kubernetes pod name; repeatable (default: every running pod) |
-| `--container` | `status` | limit checks to this docker/podman container name; repeatable (default: every running container) |
-| `--namespace` | `status` | kubernetes namespace to query (default: the deployment's namespace in `env.yaml`) |
-| `--management-port` | `status` | actuator management port to reach inside each target (default: the management port configured for the target) |
+| `--platform` | `generate`/`deploy`/`remove`/`status` | the platform: `kubernetes`, `docker`, or `podman` (short: `kube`, `dk`, `pm`; default: resolved from `env.yaml`, or an interactive menu -- see the breaking-change note above) |
+| `--allow-command` | `deploy`/`remove`/`status` | approve an extra command binary beyond the `command:` allowlist; repeatable |
+| `--install` | `status` | install the status script on every instance without prompting |
+| `--pod` | `status` | limit checks to this kubernetes pod name; repeatable (default: every running pod); no effect on docker/podman |
+| `--container` | `status` | limit checks to this docker/podman container name; repeatable (default: every running container); no effect on kubernetes |
+| `--namespace` | `status` | kubernetes namespace to query (default: the deployment's namespace in `env.yaml`); no effect on docker/podman |
+| `--management-port` | `status` | actuator management port to reach inside each instance (default: the configured management port) |
 | `--user` | `status` | actuator account the status script authenticates as (default `solmq-status`) |
-| `--command` | `status` | override the platform CLI binary used to reach each target, instead of the `command:` in that section |
+| `--command` | `status` | override the platform CLI binary used to reach each instance, instead of the `command:` in that section |
 
 Flags may appear before, after, or between the positional arguments. Exit codes:
 **0** success, **1** a processing error (bad input, unreadable file, missing env
 var, a deploy command that failed), **2** a usage error (missing/unknown verb or
-target, unknown flag). `status`'s own exit code is about whether every target
-could be reached and run, not whether each instance is active -- see section 10
-for how to read the per-target report.
+target, unknown flag). `status`'s own exit code is about whether every instance
+could be reached and run, not whether each is active -- see section 10
+for how to read the per-instance report.
 
 - **`generate config`** reads the workflow files + the connector defaults from
   `env.yaml` and prints `application.yml`. It **fails fast**: it stops at the first
@@ -201,13 +271,13 @@ for how to read the per-target report.
   **fails fast**.
 - **`deploy`** generates for the resolved platform and then applies it by
   shelling out to the section's `command:` (`kubectl`/`oc`, `docker`, or
-  `podman` + `systemctl`); **`delete`** tears the same thing down. The env file
+  `podman` + `systemctl`); **`remove`** tears the same thing down. The env file
   must contain the resolved section (a docker deploy needs `docker:`).
   `command:`'s binary must be on the platform allowlist (or approved with
   `--allow-command`), and both verbs run a read-only login/daemon preflight before
   writing or applying anything -- see section 7.
 - **`status`** ensures the status script is present on each running instance of
-  the resolved platform, runs it, and prints per-target leader-election and
+  the resolved platform, runs it, and prints per-instance leader-election and
   workflow state -- see section 10.
 - **`version`** prints the build's own version (stamped in at build time), the Go
   version it was built with, and its `GOOS`/`GOARCH` -- for bug reports and to
@@ -215,7 +285,7 @@ for how to read the per-target report.
 - **`validate`** runs **every** check across the whole `env.yaml` (including any
   present `kubernetes:`/`docker:`/`podman:` sections) and its workflows, and prints
   all findings (non-zero exit if any errors). Use it as a linter.
-- **`completion <shell>`** prints a completion script for `bash`, `zsh`, `fish` or
+- **`auto-complete <shell>`** prints a completion script for `bash`, `zsh`, `fish` or
   `powershell` on stdout -- see section 1.1. It reads no `env.yaml` and touches
   nothing on disk.
 - `generate` output is buffered and only written on full success -- you never get a
@@ -255,6 +325,12 @@ workflow's id in the output (`input-<N>` / `output-<N>` and
 `workflow-1.yaml`, ... keeps the mapping obvious, but any names work -- only sort
 order matters. Filtering with `file_pattern` happens **before** numbering, so the
 surviving files are numbered `0..N` among themselves.
+
+The sort is **numeric, not lexical**: runs of digits in a name compare as
+numbers, so `2.yaml` comes before `10.yaml` and `workflow-9.yaml` before
+`workflow-10.yaml` -- the order you numbered them in, not the order a plain
+string sort would give (`10, 19, 2, 9`). Names without digits fall back to
+ordinary character order.
 
 The connector runtime holds **up to 20 workflows** (ids `0..19`) per
 `application.yml`, so **one folder is one connector instance**. A folder holding more
@@ -325,7 +401,7 @@ source:                # exactly one of solace:/mq:, pointing at exactly one que
     queue-manager: QM1
     channel: DSU.SVRCONN
     user: appuser
-    password: ${MQ_PASSWORD}
+    password-env: MQ_PASSWORD
     tls: true
     cipher: TLS_RSA_WITH_AES_256_CBC_SHA256
     key-alias: mq-client
@@ -335,7 +411,7 @@ target:
     host: tcps://broker.internal:55443
     msg-vpn: prod
     client-username: connector
-    client-password: ${SOL_PASSWORD}
+    client-password-env: SOL_PASSWORD
     key-alias: solace-client
     queue: Q.FROM-MQ.ORDERS
 ```
@@ -343,7 +419,7 @@ target:
 Rules per side: **exactly one system** (`solace:` or `mq:`) and **exactly one
 destination** (`queue:` or `topic:`). Any direction is allowed — `mq→solace`,
 `solace→mq`, `mq→mq`, `solace→solace` — and every queue/topic combination is
-permitted (two Solace patterns emit an advisory **warning**, see §5.5). You never write
+permitted (two Solace patterns emit an advisory **warning**, see section 5.5). You never write
 `destination-type` or a durable name — both are derived.
 
 ### 5.1 Top-level
@@ -361,10 +437,10 @@ permitted (two Solace patterns emit an advisory **warning**, see §5.5). You nev
 | `host` | yes | must start with `tcp://` (plaintext) or `tcps://` (TLS) |
 | `msg-vpn` | yes | Solace message VPN |
 | `client-username` | no | needed by most brokers; omit only for cert-only/OAuth auth |
-| `client-password` | no | use a `${VAR}` placeholder; omit for cert-only/OAuth auth |
+| `client-password` | no | prefer the `client-password-env` twin (section 8.1); omit for cert-only/OAuth auth |
 | `key-alias` | no | selects a client key from the shared keystore ⇒ **mTLS**; requires a `tcps://` host and a keystore in `env.yaml` |
 | `queue` | one of | consume from / produce to a Solace queue |
-| `topic` | one of | Solace topic; also allowed as a `source`, but a topic source warns (§5.5) |
+| `topic` | one of | Solace topic; also allowed as a `source`, but a topic source warns (section 5.5) |
 | `api-properties` | no | verbatim map → `solace.java.api-properties` |
 | `consumer` / `producer` | no | verbatim per-binding tuning |
 
@@ -376,7 +452,7 @@ permitted (two Solace patterns emit an advisory **warning**, see §5.5). You nev
 | `queue-manager` | yes | |
 | `channel` | yes | server-connection channel |
 | `user` | no | omit for cert-based or channel (MCA) auth |
-| `password` | no | use a `${VAR}` placeholder; omit when not using password auth |
+| `password` | no | prefer the `password-env` twin (section 8.1); omit when not using password auth |
 | `tls` | no | `true` opts the connection into TLS (MQ has no URL scheme) |
 | `cipher` | no | JCE cipher → `WMQ_SSL_CIPHER_SUITE`; requires `tls: true` |
 | `key-alias` | no | client key from the shared keystore ⇒ **mTLS**; requires `tls: true` and a keystore |
@@ -386,7 +462,7 @@ permitted (two Solace patterns emit an advisory **warning**, see §5.5). You nev
 | `consumer` / `producer` | no | verbatim per-binding tuning |
 
 > A `solace:`/`mq:` side may instead set **`conn-ref: <name>`** to reuse a connection
-> from `env.yaml` (§5.6). A conn-ref side then sets *only* its `queue:`/`topic:` plus
+> from `env.yaml` (section 5.6). A conn-ref side then sets *only* its `queue:`/`topic:` plus
 > the per-binding `consumer:`/`producer:` tuning — any *connection* field is an error.
 
 ### 5.4 Destinations, durable names, passthrough
@@ -423,7 +499,7 @@ a queue). MQ topic/queue sources and destinations are never warned.
 
 ### 5.6 Reusable connections (`conn-ref`)
 
-Define a connection once under `connections.<name>` in `env.yaml` (§6), then
+Define a connection once under `connections.<name>` in `env.yaml` (section 6), then
 reference it from a workflow side with `conn-ref`. This avoids repeating host,
 credentials, and TLS on every workflow:
 
@@ -461,14 +537,36 @@ The **top level** of `env.yaml` holds the connector defaults -- the keys that sh
 (only `${VAR}` placeholders). The `workflows:` block (section 4) and the deploy
 sections (section 7) sit in the same file, alongside these keys.
 
+> **Breaking change: `security.enabled` and `management.exposure` are no longer
+> configurable.** The tool now guarantees that a running instance is always
+> queryable for its leader-election state, which makes three things
+> non-negotiable rather than optional:
+>
+> 1. Management security is **always on** -- there is no way to turn it off.
+> 2. A reserved read-only actuator account (`solmq-status`, section 6.1) is
+>    **always** injected into the rendered `application.yml`.
+> 3. The actuator exposure list is **always** exactly
+>    `health,info,metrics,leaderelection,workflows` (that order, comma
+>    separated, no spaces).
+>
+> `security.enabled` and `management.exposure` are therefore removed from the
+> config surface. An `env.yaml` still carrying either key is **rejected** by
+> `validate`/`generate` with an actionable error naming the key, rather than
+> silently ignored -- an old config gets corrected once instead of quietly
+> keeping a toggle that no longer does anything. `management.port` stays
+> configurable and is always emitted (default `8090`); the kubernetes
+> `service.port` defaults to it rather than to a hardcoded `8090` (section 7).
+> docker and podman publish only the ports you list -- omitting `ports:`
+> publishes none. `security.users` also stays -- see below.
+
 ```yaml
-connections:                     # reusable connections, referenced by conn-ref (§5.6)
+connections:                     # reusable connections, referenced by conn-ref (section 5.6)
   prod-solace:
     solace:
       host: tcps://broker.internal:55443
       msg-vpn: prod
       client-username: connector
-      client-password: ${SOL_PASSWORD}
+      client-password-env: SOL_PASSWORD
       key-alias: solace-client
       api-properties:              # optional; verbatim -> solace.java.api-properties
         REAPPLY_SUBSCRIPTIONS: true
@@ -478,17 +576,17 @@ connections:                     # reusable connections, referenced by conn-ref 
       queue-manager: QM_ARCHIVE
       channel: DSU.SVRCONN
       user: appuser
-      password: ${MQ_ARCHIVE_PASSWORD}
+      password-env: MQ_ARCHIVE_PASSWORD
       tls: true                    # TLS without key-alias => server-auth only (no mTLS)
       cipher: TLS_RSA_WITH_AES_256_CBC_SHA256
 tls:
   truststore:                    # one shared truststore for ALL Solace + MQ TLS connections
     file: ./certs/truststore.jks
-    password: ${TRUSTSTORE_PASSWORD}
+    password-env: TRUSTSTORE_PASSWORD
     type: JKS
   keystore:                      # one shared keystore; only needed when a side sets key-alias (mTLS)
     file: ./certs/keystore.jks
-    password: ${KEYSTORE_PASSWORD}
+    password-env: KEYSTORE_PASSWORD
     type: JKS
 logging:
   level:
@@ -496,13 +594,13 @@ logging:
     com.solace.connector: INFO
 management:
   port: 8090
-  exposure: health,info,workflows
   health-show-details: always
-security:
-  enabled: true
+security:                        # optional; the tool's own read-only account is added regardless
   users:
-    - name: healthcheck
-      password: ${HEALTHCHECK_PASSWORD}
+    - name: ops
+      password-env: OPS_PASSWORD
+      roles:
+        - admin                  # read/write: needed to POST to /actuator/workflows
 leader-election:                 # standalone | active_active | active_standby
   mode: active_standby
   queue: solmq-connector-mgmt    # exclusive management queue (active_* only)
@@ -519,15 +617,14 @@ solace-defaults:
 
 | section | option | notes |
 |---------|--------|-------|
-| `connections.<name>` | `solace:`/`mq:` block | a reusable connection tuple (no destination); referenced by `conn-ref` (§5.6) |
+| `connections.<name>` | `solace:`/`mq:` block | a reusable connection tuple (no destination); referenced by `conn-ref` (section 5.6) |
 | `tls.truststore` | `file`, `password`, `type` | the single shared truststore; `type` is `JKS` or `PKCS12` |
 | `tls.keystore` | `file`, `password`, `type` | the single shared keystore; required only for mTLS (`key-alias`) |
 | `logging.level` | `<logger>: <level>` | verbatim, order preserved → `logging.level` |
-| `management` | `port` | → `management.server.port` |
-| `management` | `exposure` | → `management.endpoints.web.exposure.include`; `leaderelection` and `workflows` are always appended on top of whatever you list (or Spring's own `health` default when you list nothing) -- see 6.1 |
-| `management` | `health-show-details` | → `management.endpoint.health.show-details` |
-| `security` | `enabled` | defaults to `true` when the `security` block is present |
-| `security` | `users` | list of `{ name, password }` → `solace.connector.security`; a reserved account is always added on top -- see 6.1 |
+| `management` | `port` | -> `management.server.port`; always emitted, default `8090`. The docker/podman published port and the kubernetes `service.port` (section 7) now default to it too |
+| `management` | `health-show-details` | -> `management.endpoint.health.show-details` |
+| `security` | `users` | list of `{ name, password` (or `password-env`)`, roles }` -> `solace.connector.security`; adds accounts on top of the tool's own reserved one (section 6.1). A read-only account purely for probing is no longer needed, since the tool always injects one -- what this is still for is an `admin` account, the only way to POST to `/actuator/workflows` |
+| `security` | `users[].roles` | optional list of connector authority names, passed through verbatim. **Omit it for a read-only (GET-only) account** -- an empty list is the connector's own default; add `admin` for read/write. Not an allowlist: an unrecognized but well-formed name is accepted, since the connector owns the vocabulary. An empty entry, or one containing whitespace or shell metacharacters, is rejected. The tool never adds a role itself, which is exactly what keeps the reserved `solmq-status` account read-only |
 | `leader-election` | `mode` | `standalone` (default; omitted from output), `active_active`, or `active_standby` |
 | `leader-election` | `queue` | management queue; **required** for `active_*` |
 | `leader-election` | `conn-ref` / `solace` | the Solace management **session** (`conn-ref` to a solace connection, or inline `solace:`); required for `active_*` |
@@ -547,12 +644,10 @@ connections can present different client certificates by using a different
 ### 6.1 The reserved status account (`solmq-status`)
 
 Every generated `application.yml` carries a read-only actuator account named
-`solmq-status` whenever security is **effectively enabled** -- that is, the
-`security` block is absent (its default) or present with `enabled: true`; only an
-explicit `security.enabled: false` turns it off along with the rest of the
-management endpoints' access control. It is what the generated `status` script
-(section 10) authenticates as, so it exists whether or not you configured a
-`security:` block yourself, and in every leader-election mode.
+`solmq-status`, **unconditionally** -- management security is always on, so
+there is no toggle that turns this account off. It is what the generated
+`status` script (section 10) authenticates as, so it exists whether or not you
+configured a `security:` block yourself, and in every leader-election mode.
 
 - **The name is reserved.** Naming a `security.users[]` entry `solmq-status`
   yourself is a `validate`/`generate` error -- choose a different name for your
@@ -585,10 +680,11 @@ management endpoints' access control. It is what the generated `status` script
 
 ## 7. Deploy targets (`kubernetes:`, `docker:`, `podman:`)
 
-Each deploy target is an optional top-level section of `env.yaml`. `generate
-<target>` renders that target's artifacts, `deploy <platform>` renders and applies
-them, and `delete <platform>` tears them down. A command whose section is absent
-errors (a `deploy docker` needs `docker:`).
+Each deploy target is an optional top-level section of `env.yaml`. `generate`
+renders the resolved platform's artifacts, `deploy` renders and applies them, and
+`remove` tears them down -- the platform comes from `--platform` or the resolution
+order in the note at the top, never from a positional argument. A run whose
+resolved section is absent errors (deploying to docker needs a `docker:` section).
 
 **The `command:` field** names the CLI each target shells out to (default `kubectl`
 / `docker` / `podman`). Put any extra global arguments inside it -- e.g. `command:
@@ -611,14 +707,15 @@ positional would land in the wrong place. `validate` runs this same check on
 `kubernetes.command` too, not just `docker`/`podman`.
 
 Need a binary outside the allowlist (a `sudo` prefix, an internal wrapper)?
-`deploy`/`delete` take a repeatable **`--allow-command <name>`** flag that approves
+`deploy`/`remove` take a repeatable **`--allow-command <name>`** flag that approves
 it for that invocation only -- authority lives with whoever runs the command, never
 with whoever wrote `env.yaml`. `command: sudo podman` fails both `validate` and
-`deploy podman` until you add `deploy podman --allow-command sudo`.
+`deploy` until you run `deploy --platform podman --allow-command sudo`.
 
-Before `deploy`/`delete` write or apply anything, they run a **read-only preflight
+Before `deploy`/`remove` write or apply anything, they run a **read-only preflight
 probe** against the target: kubernetes checks `auth can-i create|delete deployment`
-(the verb `deploy`/`delete` will actually need); docker/podman check `info`
+(the permission the run will actually need -- `create` for `deploy`, `delete` for
+`remove`, which are kubectl's own verb names); docker/podman check `info`
 (daemon/socket reachability). A failing probe stops the run before any file is
 written or any mutating command runs, with the underlying CLI error plus a login
 hint (e.g. "log in or select a context first ... then re-run" for kubernetes,
@@ -626,14 +723,15 @@ a daemon-unreachable hint for docker/podman). There is no way to skip it -- a
 failing preflight means the real command would fail anyway.
 
 The real runner also resolves argv[0] with `exec.LookPath` before exec'ing (a
-same-directory match via `exec.ErrDot` is rejected, matching Go 1.19+'s hardening)
-and echoes the resolved path to stderr first, e.g. `exec: /usr/local/bin/kubectl
-apply -f -`, so you can see exactly what ran.
+same-directory match via `exec.ErrDot` is rejected, matching Go 1.19+'s
+hardening). The runner prints nothing of its own: what you see is the command's
+own output, reported in full and followed by `ok: <action> <platform>` or
+`error: <action> <platform> failed: ...`.
 
 **Trust model:** `env.yaml` is executable configuration, not passive data -- its
 `command:` (plus manifests, compose files, and quadlet units it drives) runs with
 your privileges. Review a config someone else handed you the way you would a
-Makefile before running `deploy`/`delete` against it. `generate` is the dry-run: it
+Makefile before running `deploy`/`remove` against it. `generate` is the dry-run: it
 renders the same artifacts without shelling out to anything, so you can inspect
 them first.
 
@@ -642,8 +740,20 @@ section 8.
 
 ### 7.1 kubernetes
 
-`generate kubernetes` emits the manifest set; `deploy kubernetes` pipes it to
-`<command> apply -f -`, `delete kubernetes` to `<command> delete -f -`.
+`generate --platform kubernetes` emits the manifest set; `deploy --platform
+kubernetes` pipes it to `<command> apply -f -`, and `remove --platform kubernetes`
+to `<command> delete -f -`.
+
+> **Redeploying does not restart the pods.** `application.yml` and the status
+> script are mounted from the ConfigMap with `subPath`, and Kubernetes never
+> refreshes a `subPath` mount when its ConfigMap changes. A `deploy` that
+> changes either one updates the ConfigMap while the running pods keep the old
+> files -- including the old status script, which `status` will happily find
+> and run. Follow such a deploy with:
+>
+> ```sh
+> kubectl rollout restart deployment/<name>
+> ```
 
 ```yaml
 kubernetes:
@@ -659,7 +769,9 @@ kubernetes:
     timezone: Asia/Singapore     # -> container TZ env var
   service:
     enabled: true
-    port: 8090                   # optional; defaults to the management port (§below)
+    port: 8090                   # optional; bare or "host:container" (same syntax as docker/podman
+                                 # ports, sections 7.2/7.3); sets the Service port and its targetPort;
+                                 # defaults to the management port when omitted
   logging:                       # entirely optional
     syslog:
       host: syslog.corp
@@ -712,7 +824,7 @@ kubernetes:
 | `deployment` | `replicas` | default `1`; `standalone` leader-election requires `1`, `active_*` allow more. Replicas are copies of the one connector, and leader-election picks the active one |
 | `deployment` | `resources.cpu`, `resources.memory` | one value each; emitted as identical requests **and** limits (guaranteed QoS); a bare integer like `cpu: 1` is auto-quoted |
 | `deployment` | `timezone` | sets the container `TZ` env var |
-| `service` | `enabled`, `port` | emit a Service on this port |
+| `service` | `enabled`, `port` | emit a Service on this port; `port` accepts a bare port or `host:container`, the same syntax as docker/podman `ports` (7.2/7.3); unset defaults to the effective management port |
 | `logging.syslog` | `host`, `port`, `protocol` | optional; emits `logback-spring.xml` into the ConfigMap (mounted at `/app/external/classpath/logback-spring.xml`) plus `LOGGING_SYSLOG_*` env vars (appname = `deployment.name`); `protocol` is `udp` (default) or `tcp` -- **tcp requires the `logstash-logback-encoder` jar on the connector classpath** (provide it via `libs`) |
 | `libs` | `pvc` \| `download` | optional; exactly one mode; makes the IBM MQ java libraries available at `/app/external/libs` (read-only) |
 | `libs.pvc` | `create` / `existing` | `create` emits an NFS-backed PersistentVolume (`<name>-pv`) + PersistentVolumeClaim; `existing` references a pre-provisioned PVC (`create` XOR `existing`) |
@@ -729,13 +841,27 @@ Omit a `secrets` block and that credentials Secret / env-file is not produced; o
 
 ### 7.2 docker
 
-`generate docker` emits a `docker-compose.yml` with `application.yml` inlined under
-compose `configs:`; `deploy docker` runs `<command> compose -f <file> up -d`;
-`delete docker` runs `<command> compose -f <file> down`. Credentials render to an
-env-file (`env_file:`, mode `0600`, never logged) written alongside the compose file;
-a `stores:` block bind-mounts the `tls.*.file` host paths onto the fixed in-container
-store dir `/app/external/classpath/truststores`, and `libs.dir` bind-mounts a host jar
+`generate --platform docker` emits a `docker-compose.yml` with `application.yml`
+inlined under compose `configs:`; `deploy --platform docker` runs `<command>
+compose -f <file> up -d`; `remove --platform docker` runs `<command> compose -f
+<file> down`. Credentials become compose `secrets:` entries using the environment
+provider (section 8.3): `docker compose` reads each value from the environment it
+itself runs with -- the CLI injects them into that child process only, and no
+credential value is written to disk. A `stores:` block bind-mounts the
+`tls.*.file` host paths onto the fixed in-container store dir
+`/app/external/classpath/truststores`, and `libs.dir` bind-mounts a host jar
 directory to `/app/external/libs`.
+
+Every `$` inside those inlined `configs:` blocks is written **doubled** (`$$`).
+Docker Compose interpolates variables across the whole document, content blocks
+included, and turns `$$` back into a single `$` -- so the doubling is what makes
+the file the container receives identical to the one you see with `generate`. It
+matters in both directions: the status script's shell (`$PORT`, `$(...)`) would
+otherwise be blanked or rejected outright, and `application.yml`'s `${...}`
+credential placeholders -- which **Spring** resolves from its configtree import
+of `/run/secrets` -- would be substituted by compose from the environment the CLI
+hands it, writing the plaintext credentials into the compose file. If you edit a
+generated compose file by hand, keep the doubling.
 
 ```yaml
 docker:
@@ -747,15 +873,7 @@ docker:
     - 8090                       # bare: publish to the same host port (8090:8090)
     - "8081:8090"                # or "host:container" to map a distinct host port
   timezone: Asia/Singapore
-  secrets:
-    credentials:                 # rendered as an env_file; never logged
-      create:
-        name: solmq-credentials
-        source: env
-        variables:
-          - SOL_PASSWORD
-          # ...one per ${VAR} used across the workflows + defaults
-      # existing: solmq-connector.env   # ...or reference an existing env-file by name
+  # No secrets: section -- credentials come from the connection fields themselves.
   stores:                        # opt in to bind-mounting tls.*.file host paths
     mount-path: /app/external/classpath/truststores   # fixed in-container path; must be this value
   # libs:
@@ -764,9 +882,9 @@ docker:
 
 ### 7.3 podman
 
-`generate podman` honors `mode:` -- `run` (default) emits a `podman run` script,
-`quadlet` emits `.container` unit file(s). `deploy podman` / `delete podman` are
-**always quadlet + systemctl**, regardless of `mode`. Because a quadlet unit or run
+`generate --platform podman` honors `mode:` -- `run` (default) emits a `podman run`
+script, `quadlet` emits `.container` unit file(s). `deploy` / `remove` for podman
+are **always quadlet + systemctl**, regardless of `mode`. Because a quadlet unit or run
 script cannot inline file content, `generate`/`deploy` also write the rendered
 `application.yml` next to the unit/script and bind-mount it in. Credentials do not
 go on disk: `deploy` loads each into **podman's secret store** and the unit mounts
@@ -779,11 +897,12 @@ it (`Secret=<name>,type=mount,target=<KEY>`). Requires **podman 4.5+**.
 - `user` / `system`: force one; `quadlet.dir` overrides the directory for the
   resolved scope.
 
-`deploy podman` loads the credentials into podman's secret store, writes the units,
-then `systemctl [--user] daemon-reload` and `start`; `delete podman` `stop`s,
-removes the units, reloads, and removes the secrets. A `generate podman` run script
-in `mode: run` carries a preamble that creates the same secrets from **your**
-environment (`${NAME:?...}`) -- so the script itself holds no credential values.
+`deploy --platform podman` loads the credentials into podman's secret store, writes
+the units, then `systemctl [--user] daemon-reload` and `start`;
+`remove --platform podman` `stop`s, removes the units, reloads, and removes the
+secrets. A run script generated in `mode: run` carries a preamble that creates the
+same secrets from **your** environment (`${NAME:?...}`) -- so the script itself
+holds no credential values.
 
 ```yaml
 podman:
@@ -808,7 +927,10 @@ podman:
 
 Common docker/podman options: `image` (required); `name` (a DNS-1123 label -- it flows
 into filenames, a systemctl unit, and the podman secret-store namespace); `restart`;
-`ports` (a bare port, or `host:container` to map a distinct host port; each 1-65535);
+`ports` (a bare port, or `host:container` to map a distinct host port; each 1-65535;
+**omit it and nothing is published** -- exposing a container port to the host is
+your decision, and `status` reaches the connector by exec'ing into it rather than
+over a published port, so the tool never needs one);
 `timezone` (container `TZ`); `stores` (opt in to bind-mounting the truststore/keystore;
 the in-container path is fixed); `libs.dir`. Neither section takes a `secrets:` key --
 setting one is an error naming the credential fields that replaced it.
@@ -887,7 +1009,7 @@ names until a deploy target does.
   (values on stdin, never in argv) and units mount them with
   `Secret=<name>,type=mount,target=<KEY>`. Store entries are namespaced by the
   container name, since that store is shared across every project on the host.
-  `delete` removes them. Requires **podman 4.5+**.
+  `remove` removes them. Requires **podman 4.5+**.
 
 The `stores` wiring is unchanged and separate: the shared truststore/keystore is
 base64-embedded into a Kubernetes Secret mounted at
@@ -930,7 +1052,7 @@ label, `solace-connector/role: active`, is added only for `standalone` and
 instance is active; `active_standby` leaves the role for runtime (the connector's
 own leader election) to decide, so no static value would stay accurate.
 
-**`generate kubernetes` -> a multi-document manifest set:** a `Namespace` doc for
+**`generate --platform kubernetes` -> a multi-document manifest set:** a `Namespace` doc for
 `deployment.namespace` (emitted first; applying it when the namespace already
 exists is a no-op), then a `ConfigMap` mounting `application.yml` at
 `/app/external/spring/config/application.yml` (via `subPath`) and the status script
@@ -948,11 +1070,13 @@ volume mounted at `/app/external/libs`: either a PVC (`libs.pvc`, optionally
 provisioned from an NFS PV+PVC) or an initContainer that `wget`s jars into an
 `emptyDir`/PVC (`libs.download`) -- see section 7.
 
-**`generate docker` -> a `docker-compose.yml`** with `application.yml` inlined
-under compose `configs:`, the status script inlined as a second `configs:` entry
-mounted at `/app/external/libs/status`, the credentials env-file written
-alongside, bind mounts for stores/libs, and the `solace-connector/le-mode`/`role`
-labels above on the service. **`generate podman` -> a `podman run` script**
+**`generate --platform docker` -> a `docker-compose.yml`** with `application.yml`
+inlined under compose `configs:`, the status script inlined as a second `configs:`
+entry mounted at `/app/external/libs/status` (both with `$` doubled against
+compose interpolation -- section 7.2), the credential `secrets:` entries
+read from the environment (section 8.3), bind mounts for stores/libs, and the
+`solace-connector/le-mode`/`role`
+labels above on the service. **`generate --platform podman` -> a `podman run` script**
 (`mode: run`) **or a `.container` quadlet unit** (`mode: quadlet`); because
 neither can inline file content, the rendered `application.yml` **and** the
 status script are each written to disk next to the script/unit and bind-mounted
@@ -972,7 +1096,7 @@ the container.
 solmq-conn-util status --platform kubernetes -e env.yaml
 ```
 
-The platform resolves the same way as `generate`/`deploy`/`delete` (section 3):
+The platform resolves the same way as `generate`/`deploy`/`remove` (section 3):
 `--platform` if given, else the single section present in `env.yaml`, else an
 interactive menu. `status` then discovers every running instance of that
 platform -- every pod matching the deployment's `app=<name>` selector on
@@ -1000,21 +1124,66 @@ the run fails immediately with that guidance instead of hanging.
 ### Sample output
 
 ```
-solmq-connector-7d9f8c6b5-x2n4q: leader-election mode: active_standby
+=== kubernetes  prod / solmq-connector / solmq-connector-7d9f8c6b5-x2n4q ===
+  leader-election mode: active_standby
   leader-election state: active
-  workflow 0: STARTED
-  workflow 1: STARTED
-solmq-connector-7d9f8c6b5-k8m1r: leader-election mode: active_standby
+  health: UP
+  uptime: 3d 4h 31m
+  version: 2.14.1
+  workflows:
+     0: running
+     9: running
+    10: stopped
+
+=== kubernetes  prod / solmq-connector / solmq-connector-7d9f8c6b5-k8m1r ===
+  leader-election mode: active_standby
   leader-election state: standby
-  workflow 0: STOPPED
-  workflow 1: STOPPED
+  health: UP
+  uptime: 3d 4h 31m
+  version: 2.14.1
 ```
 
-One block per target: the leader-election **mode** (`standalone` /
-`active_active` / `active_standby`, from `leader-election.mode`, section 6), the
-leader-election **state** (`active` or `standby`) read from the instance's own
-`/actuator/leaderelection`, then one `workflow <id>: <state>` line per workflow
-from `/actuator/workflows`. A target that does not expose `workflows` in
+One block per instance, under a **banner naming the instance**: the platform,
+then whatever locates it there -- `namespace / deployment / pod` on kubernetes,
+`compose-project / container` on docker, the container alone on podman. None of
+that can come from the report itself, since the script runs inside the container
+and knows nothing of what surrounds it; the compose project is read back from
+the container's own `com.docker.compose.project` label rather than guessed from
+the compose file's directory. A name that is not set is dropped rather than
+printed as an empty segment.
+
+Under it, indented and left-aligned with each other:
+
+| Line | From | Notes |
+|------|------|-------|
+| `leader-election mode` | `leader-election.mode` (section 6) | `standalone` / `active_active` / `active_standby` |
+| `leader-election state` | `/actuator/leaderelection` | `active` or `standby`, read live per instance |
+| `health` | `/actuator/health` | `UP`, or the status plus a `health-detail` line carrying the whole document (`show-details` is always on, so it names the failing component) |
+| `uptime` | `/actuator/metrics/process.uptime` | `<d>d <h>h <m>m` |
+| `version` | `/actuator/info` | the build version, when the image publishes one |
+| `workflows` | `/actuator/workflows` | one `<id>: <state>` row per workflow, ids **ordered numerically** (`1..9..10..19`, not the actuator's own map order, which lists 10 before 2) and **right-aligned so the colons line up** |
+
+`health`, `uptime` and `version` are enrichment: each line is dropped when its
+endpoint answers nothing, rather than reported as missing, since none of them
+says whether the instance is doing its job. All three endpoints are in the fixed
+exposure list this tool writes, so they need no extra configuration.
+
+With `replicas: 2` (or more) you get one block per pod -- `status` selects
+`app=<deployment name>` and execs into every match, which is the whole point
+under `active_standby`: which pod is active is only knowable at runtime, so
+the manifest asserts no `role` label and the script answers per pod instead.
+The standby's block carries its leader-election lines and **no workflow
+lines** -- a standby runs none, so that is the normal shape and is
+deliberately not warned about. Use `--pod` to narrow to one.
+
+**Only configured workflows are listed.** The connector reports its full set
+of workflow slots and marks every unconfigured one `N/A`, so one real workflow
+would otherwise print twenty lines; those are filtered out, as is any entry
+with no state at all (a nested fragment of the JSON that the script's
+brace-splitting parser picked up). Real states are never filtered against a
+fixed list -- a state this tool has not seen before still reaches you, since
+hiding it would be worse than showing it. If *every* entry is empty or `N/A`,
+that is reported on stderr rather than silently leaving the workflow lines out. A target that does not expose `workflows` in
 `management.endpoints.web.exposure.include` still reports leader-election, with a
 warning on stderr that per-workflow state is missing; one that does not expose
 `leaderelection` reports nothing and explains why on stderr, since that is the
@@ -1053,9 +1222,9 @@ To branch on the result, read the output rather than `$?`:
 kubectl exec <pod> -- sh /app/external/libs/status | grep -q 'state: active'
 ```
 
-The `status` command's own exit code follows the same idea: 0 when every target
+The `status` command's own exit code follows the same idea: 0 when every instance
 could be reached and run, 1 when one could not -- never a statement about which
-instance is active. Read the per-target report lines for that.
+instance is active. Read the per-instance report lines for that.
 
 ### Instances this tool did not deploy
 
@@ -1075,7 +1244,7 @@ solmq-conn-util status --platform kubernetes --pod other-team-connector-0 \
 `--command` overrides the platform CLI binary used to reach a target (instead of
 the matching section's `command:`, which may not even exist for a foreign
 instance), and `--allow-command` approves an extra one beyond the platform
-allowlist, the same as `deploy`/`delete`.
+allowlist, the same as `deploy`/`remove`.
 
 The script does not assume this tool mounted the config. Inside the container it
 looks for the connector's configuration the way Spring itself resolves it, taking
@@ -1088,8 +1257,10 @@ inside the jar. That is where it reads the account password from, and a
 `${PLACEHOLDER}` value there is followed to `/run/secrets/<PLACEHOLDER>` -- so an
 instance whose password still flows through the secrets model works too. If no
 config can be found at all, the script says so and still queries the endpoint
-unauthenticated, which is the right answer for an instance with
-`security.enabled: false`.
+unauthenticated, which is the right answer for a foreign instance running with
+management security disabled in its own connector configuration. (This tool's
+`env.yaml` has no such switch -- instances it generates always carry the secured
+setup and the reserved account.)
 
 ---
 
@@ -1103,7 +1274,7 @@ Writes a ready-to-edit starter set into `<dir>` (default: the current directory)
 
 | file | contents |
 |------|----------|
-| `env.yaml` | the single config file: `workflows` discovery, `connections` (prod-solace, mq-archive), shared TLS stores, logging/management/security, `active_standby` leader-election, and the `kubernetes:` / `docker:` / `podman:` deploy sections |
+| `env.yaml` | the single config file: `workflows` discovery, `connections` (prod-solace, mq-archive), shared TLS stores, logging and management, `active_standby` leader-election, and the `kubernetes:` / `docker:` / `podman:` deploy sections |
 | `workflow-0.yaml` | IBM MQ -> Solace -- inline `mq-core` / `conn-ref: prod-solace` |
 | `workflow-1.yaml` | Solace -> IBM MQ -- `conn-ref: prod-solace` / inline `mq-core` (same block as wf-0) |
 | `workflow-2.yaml` | IBM MQ -> Solace -- `conn-ref: mq-archive` / `conn-ref: prod-solace` |
@@ -1131,19 +1302,21 @@ always generates cleanly:
 
 ---
 
-## 11. Notes and gotchas
+## 12. Notes and gotchas
 
 - **Deterministic, byte-for-byte output.** Regenerating from unchanged inputs
   produces identical bytes (an ordered emitter, not generic YAML marshaling), so
   files diff cleanly in review.
 - **Workflow numbering is filename-driven**; sort order decides the ids and gaps in
-  your naming are fine. A folder is capped at 20 workflows (ids `0..19`) -- past that
-  the run fails and you split the folder yourself.
+  your naming are fine. The sort reads digit runs as numbers (`2` before `10`), so
+  `1..9..10..19` numbers the way you would expect. A folder is capped at 20
+  workflows (ids `0..19`) -- past that the run fails and you split the folder
+  yourself.
 - **Renaming a workflow file changes its MQ durable subscription name** (it is part
   of the UUIDv5 key). Rename deliberately, or the old durable subscription is
   orphaned.
 - **`generate` fails fast; `validate` reports everything.** Use `validate` while
-  authoring, `generate`/`deploy`/`delete` to produce or apply output.
+  authoring, `generate`/`deploy`/`remove` to produce or apply output.
 - **One shared truststore + keystore** for all connections; per-connection client
   certs are selected by `key-alias` within that one keystore.
 - **TLS without a truststore emits no SSL bundle.** `tls: true` (or a `tcps://`

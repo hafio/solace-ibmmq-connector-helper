@@ -87,6 +87,17 @@ type WorkflowEnable struct {
 	Enabled bool
 }
 
+// Management is the rendered management.* block. Port always reflects the
+// effective management port (operator value or spec.DefaultMgmtPort);
+// Exposure is fixed by applyStatusAccess rather than carried through from
+// spec.Management.Exposure, which by this point is only a removed-key marker
+// for validate.
+type Management struct {
+	Port              int
+	Exposure          string
+	HealthShowDetails string
+}
+
 // Session is the Solace management session for leader-election (active_standby /
 // active_active).
 type Session struct {
@@ -128,7 +139,7 @@ type Model struct {
 	Workflows      []WorkflowEnable
 
 	Security       spec.Security
-	Management     spec.Management
+	Management     Management
 	LoggingLevel   *yaml.Node
 	LeaderElection *LeaderElectionModel // nil for standalone/absent
 

@@ -6,6 +6,8 @@
 package dockergen
 
 import (
+	"strings"
+
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/yamlwriter"
 )
@@ -50,8 +52,8 @@ func Render(in Input) string {
 	renderService(w, in, in.Instance)
 
 	w.Line(0, "configs:")
-	renderConfig(w, in.Instance)
-	renderStatusScriptConfig(w, in.Instance)
+	renderContentConfig(w, in.Instance.Name+"-app", in.Instance.AppYAML)
+	renderContentConfig(w, in.Instance.Name+"-status", in.Instance.StatusScript)
 
 	renderSecrets(w, in.Secrets)
 
@@ -150,33 +152,44 @@ func renderService(w *yw, in Input, inst Instance) {
 	}
 }
 
-// renderConfig emits the top-level configs entry inlining the application.yml as
-// a block scalar under content:. Blank lines are preserved as
-// truly empty lines (no indent, no trailing spaces).
-func renderConfig(w *yw, inst Instance) {
-	w.Line(2, inst.Name+"-app:")
+// renderContentConfig emits one top-level configs entry inlining payload as a
+// block scalar under content: -- the application.yml and the status script are
+// both rendered through it. Blank lines are preserved as truly empty lines (no
+// indent, no trailing spaces), and every line is composeEscape'd.
+//
+// The two entries share one renderer so neither can be escaped without the
+// other: an unescaped content block is not a cosmetic difference but a broken
+// deploy (the status script) or a leaked credential (application.yml).
+func renderContentConfig(w *yw, name, payload string) {
+	w.Line(2, name+":")
 	w.Line(4, "content: |")
-	for _, ln := range yamlwriter.SplitLines(inst.AppYAML) {
+	for _, ln := range yamlwriter.SplitLines(payload) {
 		if ln == "" {
 			w.Raw("\n")
 		} else {
-			w.Line(6, ln)
+			w.Line(6, composeEscape(ln))
 		}
 	}
 }
 
-// renderStatusScriptConfig emits the top-level configs entry inlining the
-// status script as a block scalar under content:, mirroring renderConfig.
-// Blank lines are preserved as truly empty lines (no indent, no trailing
-// spaces).
-func renderStatusScriptConfig(w *yw, inst Instance) {
-	w.Line(2, inst.Name+"-status:")
-	w.Line(4, "content: |")
-	for _, ln := range yamlwriter.SplitLines(inst.StatusScript) {
-		if ln == "" {
-			w.Raw("\n")
-		} else {
-			w.Line(6, ln)
-		}
-	}
-}
+// composeEscape doubles every '$'. Docker Compose interpolates the whole
+// document -- configs content included -- and renders "$$" back to a single
+// "$", so this is what makes the file the container receives identical to what
+// was generated. It applies to the inlined content only; the rest of the
+// document is built from charset-validated values that cannot carry a '$'.
+//
+// Without it, both content blocks are corrupted:
+//
+//   - The status script is shell. Its variables ($PORT, $CONFIGS, ...) are
+//     replaced with blanks, and compose refuses the document outright on the
+//     first $( -- command substitution is not valid interpolation syntax.
+//   - application.yml's ${...} placeholders are Spring's, resolved from the
+//     configtree import of /run/secrets. Compose resolves them first, from the
+//     environment the CLI hands the compose child (runner.Cmd.Env), inlining
+//     the credential values as plaintext into the document and bypassing the
+//     secrets model entirely.
+//
+// Only the compose renderer needs this: the kubernetes ConfigMap and the podman
+// quadlet (which writes both files to disk beside the unit) have no
+// interpolation layer between this generator and the container.
+func composeEscape(s string) string { return strings.ReplaceAll(s, "$", "$$") }

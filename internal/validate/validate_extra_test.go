@@ -84,6 +84,42 @@ func TestCheckKubeRequiredAndReplicas(t *testing.T) {
 	}
 }
 
+// TestCheckKubeServicePort pins checkPortRange applied to kubernetes.service.port
+// (a spec.Port, same host/container shape docker/podman ports already use):
+// each side is range-checked independently, and a "scalar" port (host ==
+// container, the common case) validates the same as a distinct host:container
+// pair -- the shape itself is enforced at parse in spec.Port.UnmarshalYAML,
+// not here.
+func TestCheckKubeServicePort(t *testing.T) {
+	run := func(p spec.Port) []Issue {
+		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand, Service: spec.Service{Port: p}}
+		errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
+		return errs
+	}
+	// Scalar form (host == container): valid.
+	if e := run(spec.Port{Host: 8090, Container: 8090}); hasErr(e, "kubernetes.service.port") {
+		t.Errorf("valid scalar service.port should pass, got %v", e)
+	}
+	// host:container form with distinct values: valid.
+	if e := run(spec.Port{Host: 8080, Container: 9090}); hasErr(e, "kubernetes.service.port") {
+		t.Errorf("valid host:container service.port should pass, got %v", e)
+	}
+	// Host side out of range, container side left valid.
+	if e := run(spec.Port{Host: 0, Container: 8090}); !hasErr(e, "kubernetes.service.port host port 0 must be 1-65535") {
+		t.Errorf("want host-port range error, got %v", e)
+	}
+	if e := run(spec.Port{Host: 70000, Container: 8090}); !hasErr(e, "kubernetes.service.port host port 70000 must be 1-65535") {
+		t.Errorf("want host-port range error, got %v", e)
+	}
+	// Container side out of range, host side left valid.
+	if e := run(spec.Port{Host: 8090, Container: 0}); !hasErr(e, "kubernetes.service.port container port 0 must be 1-65535") {
+		t.Errorf("want container-port range error, got %v", e)
+	}
+	if e := run(spec.Port{Host: 8090, Container: 70000}); !hasErr(e, "kubernetes.service.port container port 70000 must be 1-65535") {
+		t.Errorf("want container-port range error, got %v", e)
+	}
+}
+
 // TestCheckKubeCredentialCreateRemovedKeys covers CredCreate.RemovedKeys(): the
 // values-file/env-var-list mechanism is gone (the Secret's keys are now derived
 // from the config's own credential fields), so a config still setting
@@ -201,9 +237,16 @@ func baseKubeDeploy() spec.Deployment {
 	return spec.Deployment{Name: "c", Namespace: "ns", Image: "img", Replicas: 1}
 }
 
+// baseKubeService is a valid kubernetes.service (matching the port docker/podman
+// fixtures use) for tests that need checkPortRange to stay quiet while
+// exercising an unrelated check.
+func baseKubeService() spec.Service {
+	return spec.Service{Port: spec.Port{Host: 8090, Container: 8090}}
+}
+
 func TestCheckSyslog(t *testing.T) {
 	run := func(sys *spec.Syslog) (errs, warns []Issue) {
-		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand, Logging: &spec.Logging{Syslog: sys}}
+		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand, Service: baseKubeService(), Logging: &spec.Logging{Syslog: sys}}
 		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
 	}
 	if e, _ := run(&spec.Syslog{Port: 514, Protocol: spec.SyslogUDP}); !hasErr(e, "logging.syslog.host is required") {
@@ -231,7 +274,7 @@ func TestCheckSyslog(t *testing.T) {
 
 func TestCheckLibs(t *testing.T) {
 	run := func(lb *spec.Libs) (errs, warns []Issue) {
-		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand, Libs: lb}
+		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand, Service: baseKubeService(), Libs: lb}
 		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true})
 	}
 	if e, _ := run(&spec.Libs{}); !hasErr(e, "exactly one of 'pvc' or 'download'") {
@@ -751,6 +794,99 @@ func TestPasswordConflictOnSameBinder(t *testing.T) {
 	}
 	if e, _ := Run(Context{Workflows: distinct, Defaults: defsWithStores()}); hasErr(e, "conflicting password") {
 		t.Errorf("different binders may hold different passwords, got %v", e)
+	}
+}
+
+// TestRemovedDefaultsKeysRejected pins checkRemovedDefaultsKeys: security.enabled
+// and management.exposure are gone from the schema (management security can no
+// longer be turned off; the actuator exposure list is always the fixed one),
+// but both still parse a value through into spec.Defaults so a stale key from
+// an old env.yaml fails loudly here rather than being silently ignored.
+func TestRemovedDefaultsKeysRejected(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		enabled := enabled
+		d := defsWithStores()
+		d.Security.Enabled = &enabled
+		errs, _ := Run(Context{Workflows: wfOK(), Defaults: d})
+		if !hasErr(errs, "security.enabled is no longer configurable") {
+			t.Errorf("security.enabled=%v: want removed-key error, got %v", enabled, errs)
+		}
+	}
+
+	for _, exposure := range []string{"health,info", ""} {
+		exposure := exposure
+		d := defsWithStores()
+		d.Management.Exposure = &exposure
+		errs, _ := Run(Context{Workflows: wfOK(), Defaults: d})
+		if !hasErr(errs, "management.exposure is no longer configurable") {
+			t.Errorf("management.exposure=%q: want removed-key error, got %v", exposure, errs)
+		}
+	}
+
+	// Neither key set (the new default shape): no removed-key error.
+	if errs, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores()}); hasErr(errs, "no longer configurable") {
+		t.Errorf("neither removed key set should validate clean, got %v", errs)
+	}
+}
+
+// TestSecurityUserRoles pins checkSecurityUserRoles: an empty role and an
+// unsafe-charset role are each rejected naming both indices, while a real
+// authority name validates clean. Deliberately not an allowlist -- the
+// connector owns the role vocabulary, so an unrecognized-but-well-formed name
+// must pass rather than being second-guessed here.
+func TestSecurityUserRoles(t *testing.T) {
+	cases := []struct {
+		name  string
+		roles []string
+		want  string // "" means expect no roles error
+	}{
+		{"admin is fine", []string{"admin"}, ""},
+		{"unknown but well-formed role is not second-guessed", []string{"auditor"}, ""},
+		{"several roles", []string{"admin", "auditor"}, ""},
+		{"empty role", []string{""}, "security.users[0].roles[0] is empty"},
+		{"whitespace-only role", []string{"   "}, "security.users[0].roles[0] is empty"},
+		{"shell metacharacter", []string{"admin;rm"}, "contains an unsafe character"},
+		{"embedded space", []string{"read only"}, "contains an unsafe character"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			d := defsWithStores()
+			d.Security.Users = []spec.User{{Name: "ops", Password: "p", Roles: c.roles}}
+			errs, _ := Run(Context{Workflows: wfOK(), Defaults: d})
+			if c.want == "" {
+				if hasErr(errs, "roles") {
+					t.Errorf("roles %v should validate clean, got %v", c.roles, errs)
+				}
+				return
+			}
+			if !hasErr(errs, c.want) {
+				t.Errorf("roles %v: want error containing %q, got %v", c.roles, c.want, errs)
+			}
+		})
+	}
+
+	// Both texts are mirrored verbatim by the generator page's JS validator, so
+	// pin them in full the way TestCheckDeployCommandErrorTexts does for the
+	// deploy-command wording: the substring checks above would let the two
+	// validators drift in the half they do not cover.
+	dw := defsWithStores()
+	dw.Security.Users = []spec.User{{Name: "ops", Password: "p", Roles: []string{"", "bad;role"}}}
+	werrs, _ := Run(Context{Workflows: wfOK(), Defaults: dw})
+	for _, want := range []string{
+		`security.users[0].roles[0] is empty: give the role a name (for example "admin", which grants the read/write access needed to POST to /actuator/workflows) or drop the entry`,
+		`security.users[0].roles[1] "bad;role" contains an unsafe character (` + UnsafeTokenReason + `); a role is an authority name passed to the connector verbatim`,
+	} {
+		if !hasErr(werrs, want) {
+			t.Errorf("error wording drifted from the text the generator page mirrors:\n  want %s\n  got  %v", want, werrs)
+		}
+	}
+
+	// No roles at all is the read-only default and must stay clean.
+	d := defsWithStores()
+	d.Security.Users = []spec.User{{Name: "ops", Password: "p"}}
+	if errs, _ := Run(Context{Workflows: wfOK(), Defaults: d}); hasErr(errs, "roles") {
+		t.Errorf("a user with no roles should validate clean, got %v", errs)
 	}
 }
 

@@ -41,10 +41,18 @@ type TLSConfig struct {
 
 // User is a management-endpoint basic-auth user. Name is an identity, not a
 // credential, so it stays a plain literal; only the password is a Cred pair.
+//
+// Roles are the connector's own authority names, passed through verbatim. An
+// empty list is the connector's read-only default (GET only); "admin" is what
+// grants GET+POST, the only way to reach /actuator/workflows. Deliberately not
+// expand:"no" -- a role is an identity like Name, so ${VAR} resolves in it.
+// The tool never adds a role itself: the reserved status account it injects
+// carries none, which is exactly what keeps that account read-only.
 type User struct {
-	Name        string `yaml:"name"`
-	Password    string `yaml:"password" expand:"no"`     // credential: out of scope (rule 5)
-	PasswordEnv string `yaml:"password-env" expand:"no"` // names a host var; expanding it would defeat the -env indirection
+	Name        string   `yaml:"name"`
+	Password    string   `yaml:"password" expand:"no"`     // credential: out of scope (rule 5)
+	PasswordEnv string   `yaml:"password-env" expand:"no"` // names a host var; expanding it would defeat the -env indirection
+	Roles       []string `yaml:"roles"`
 }
 
 // Secret is the user's password credential.
@@ -67,26 +75,22 @@ const (
 	LabelRoleActive = "active"
 )
 
-// Security mirrors solace.connector.security.
+// Security mirrors solace.connector.security. Management security is always
+// on now (see StatusUserName), so there is no enabled/disabled toggle to
+// model here; Enabled only carries a parsed security.enabled value through
+// to validate so a stale key is rejected instead of silently ignored.
 type Security struct {
-	Present bool
-	Enabled bool
 	Users   []User
+	Enabled *bool // removed; non-nil is a validation error
 }
 
-// EffectivelyEnabled reports whether security is on. The connector defaults
-// solace.connector.security.enabled to true, so an absent security block
-// still means auth is on (see defaultsFromRaw, which only ever sets Enabled
-// to false when the block is present and says so explicitly).
-func (s Security) EffectivelyEnabled() bool {
-	return !s.Present || s.Enabled
-}
-
-// Management mirrors the Spring actuator settings.
+// Management mirrors the Spring actuator settings. The block is always
+// emitted now, so there is nothing conditional left in this struct; Exposure
+// only carries a parsed management.exposure value through to validate so a
+// stale key is rejected instead of silently ignored.
 type Management struct {
-	Present           bool
 	Port              int
-	Exposure          string
+	Exposure          *string // removed; non-nil is a validation error
 	HealthShowDetails string
 }
 
@@ -163,9 +167,9 @@ type rawLogging struct {
 }
 
 type rawManagement struct {
-	Port              int    `yaml:"port"`
-	Exposure          string `yaml:"exposure"`
-	HealthShowDetails string `yaml:"health-show-details"`
+	Port              int     `yaml:"port"`
+	Exposure          *string `yaml:"exposure"`
+	HealthShowDetails string  `yaml:"health-show-details"`
 }
 
 type rawSecurity struct {
@@ -204,17 +208,13 @@ func defaultsFromRaw(raw rawDefaults) *Defaults {
 	}
 	if raw.Management != nil {
 		d.Management = Management{
-			Present:           true,
 			Port:              raw.Management.Port,
 			Exposure:          raw.Management.Exposure,
 			HealthShowDetails: raw.Management.HealthShowDetails,
 		}
 	}
 	if raw.Security != nil {
-		d.Security = Security{Present: true, Enabled: true, Users: raw.Security.Users}
-		if raw.Security.Enabled != nil {
-			d.Security.Enabled = *raw.Security.Enabled
-		}
+		d.Security = Security{Enabled: raw.Security.Enabled, Users: raw.Security.Users}
 	}
 	if raw.LeaderElection != nil {
 		le := LeaderElection{

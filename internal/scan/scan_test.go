@@ -42,6 +42,55 @@ func TestScanSortsYAMLOnly(t *testing.T) {
 	}
 }
 
+// TestScanSortsNumericallyNotLexically pins the ordering operators actually
+// number files by: 2 before 9 before 10 before 19. Lexical order would give
+// 10, 19, 2, 9 -- and since a workflow's id is its position in this slice,
+// that would hand the files each other's ids.
+func TestScanSortsNumericallyNotLexically(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"19.yaml", "2.yaml", "10.yaml", "9.yaml"} {
+		write(t, dir, n, "x")
+	}
+	res, err := Scan(dir, "*", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"2.yaml", "9.yaml", "10.yaml", "19.yaml"}
+	got := bases(res.WorkflowFiles)
+	if len(got) != len(want) {
+		t.Fatalf("workflows = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("workflows = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestScanSortsPrefixedNamesNumerically covers the same ordering on the naming
+// the examples verb writes (workflow-0.yaml, workflow-1.yaml, ...), where the
+// digits sit after a shared prefix rather than at the start of the name.
+func TestScanSortsPrefixedNamesNumerically(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"workflow-10.yaml", "workflow-2.yaml", "workflow-1.yaml"} {
+		write(t, dir, n, "x")
+	}
+	res, err := Scan(dir, "*", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"workflow-1.yaml", "workflow-2.yaml", "workflow-10.yaml"}
+	got := bases(res.WorkflowFiles)
+	if len(got) != len(want) {
+		t.Fatalf("workflows = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("workflows = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestScanExcludesEnvFile(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", "x")

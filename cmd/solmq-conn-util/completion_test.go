@@ -3,12 +3,13 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
 
-// The completion scripts are not shipped as files -- `solmq-conn-util completion
-// <shell>` renders them from the compiled-in model -- so these snapshots under
+// The completion scripts are not shipped as files -- `solmq-conn-util
+// auto-complete <shell>` renders them from the compiled-in model -- so these snapshots under
 // testdata/ are fixtures, not artifacts. They exist so that a change to
 // cliVerbs/cliFlags shows up as a reviewable diff in the generated shell code
 // rather than only as a behaviour change nobody sees until they press TAB.
@@ -121,6 +122,17 @@ func TestCompletionCoversModel(t *testing.T) {
 				contains("verb", v.Name)
 				if describes[shell] {
 					contains("verb description", v.Desc)
+				}
+				// fish has no single $verb variable to normalize (unlike bash/zsh/
+				// powershell): it recognizes an alias only by widening a condition
+				// scoped to that verb's targets/posarg/flags. A verb with none of
+				// those (version) has nothing in the fish script to widen, but also
+				// nothing beyond word 1 to complete either way, so there is no
+				// normalization to forget and the alias is exempt there.
+				if shell != "fish" || len(v.Targets) > 0 || v.PosArg == posDir || len(v.Flags) > 0 {
+					for _, a := range v.Aliases {
+						contains("verb alias", a)
+					}
 				}
 				for _, tg := range v.Targets {
 					contains("target", tg.Name)
@@ -253,6 +265,16 @@ func TestCompletionModelMetadataComplete(t *testing.T) {
 	knownPosArgs := map[string]bool{posNone: true, posDir: true}
 	knownArgs := map[string]bool{argNone: true, argFile: true, argName: true}
 
+	// Collides with a verb name, another alias, or -h/--help would make dispatch's
+	// alias resolution (or a shell's own $verb-normalization case) ambiguous.
+	seen := map[string]string{
+		"-h":     "the -h help literal",
+		"--help": "the --help help literal",
+	}
+	for _, v := range cliVerbs {
+		seen[v.Name] = "verb " + v.Name
+	}
+
 	for _, v := range cliVerbs {
 		if verbBlurb(v) == "" {
 			t.Errorf("verb %q has neither Blurb nor Summary, so the completion scripts would describe it as nothing", v.Name)
@@ -261,6 +283,14 @@ func TestCompletionModelMetadataComplete(t *testing.T) {
 			t.Errorf("verb %q declares PosArg %q, which no renderer handles", v.Name, v.PosArg)
 		}
 		assertShellSafeName(t, "verb", v.Name)
+		for _, a := range v.Aliases {
+			assertShellSafeName(t, "verb alias", a)
+			if prior, ok := seen[a]; ok {
+				t.Errorf("verb %q alias %q collides with %s", v.Name, a, prior)
+				continue
+			}
+			seen[a] = "verb " + v.Name + " alias " + a
+		}
 		for _, tg := range v.Targets {
 			if plainText(tg.Summary) == "" {
 				t.Errorf("target %q under %q has an empty Summary", tg.Name, v.Name)
@@ -306,6 +336,140 @@ func assertShellSafeName(t *testing.T, kind, name string) {
 			return
 		}
 	}
+}
+
+// TestCompletionVerbAliasesResolveToCanonical checks the recognize half of
+// recognize-but-do-not-suggest: every verb alias appears paired with its
+// canonical verb in the construct that shell's own $verb (or, for fish, its
+// per-verb condition) normalizes through -- so typing the alias completes
+// exactly like the canonical verb. A renderer that forgot the normalization
+// step would never emit this pairing even though the alias name alone might
+// still show up elsewhere (TestCompletionCoversModel checks presence; this
+// checks the alias resolves to the right verb).
+func TestCompletionVerbAliasesResolveToCanonical(t *testing.T) {
+	scripts := renderedCompletions(t)
+
+	pairing := map[string]func(alias, canonical string) string{
+		"bash":       func(alias, canonical string) string { return alias + `) verb="` + canonical + `" ;;` },
+		"zsh":        func(alias, canonical string) string { return alias + `) verb="` + canonical + `" ;;` },
+		"fish":       func(alias, canonical string) string { return "__fish_seen_subcommand_from " + canonical + " " + alias },
+		"powershell": func(alias, canonical string) string { return "$verbAlias['" + alias + "'] = '" + canonical + "'" },
+	}
+
+	for shell, script := range scripts {
+		t.Run(shell, func(t *testing.T) {
+			build, ok := pairing[shell]
+			if !ok {
+				t.Fatalf("shell %q has no expected alias-pairing construct; add one when adding a shell", shell)
+			}
+			for _, v := range cliVerbs {
+				for _, a := range v.Aliases {
+					// fish only ever widens a condition scoped to a verb's targets/
+					// posarg/flags, so a verb with none of those (version) has no
+					// per-verb construct to pair the alias in -- but also nothing
+					// beyond word 1 to complete either way, canonical or alias, so
+					// there is no normalization to have forgotten. See the matching
+					// exemption in TestCompletionCoversModel.
+					if shell == "fish" && len(v.Targets) == 0 && v.PosArg != posDir && len(v.Flags) == 0 {
+						continue
+					}
+					want := build(a, v.Name)
+					if !strings.Contains(script, want) {
+						t.Errorf("%s completion does not map alias %q to canonical verb %q (want %q)", shell, a, v.Name, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestCompletionVerbAliasesNotOfferedAtWordOne is the other half of recognize-
+// but-do-not-suggest: no verb alias may appear in the position-1 candidate
+// list any shell's TAB menu draws from -- verbNamesAndHelp for bash, the zsh
+// verbs array, the fish __fish_use_subcommand lines, and the powershell
+// $verbs array. Checked against just that region, with word-boundary matching,
+// because an alias legitimately appears elsewhere in the script (the
+// normalization construct TestCompletionVerbAliasesResolveToCanonical checks)
+// and a plain substring search would also false-positive on a canonical verb
+// that happens to start with its own alias (e.g. "generate" contains "gen").
+func TestCompletionVerbAliasesNotOfferedAtWordOne(t *testing.T) {
+	scripts := renderedCompletions(t)
+
+	region := map[string]func(t *testing.T, script string) string{
+		"bash": func(t *testing.T, script string) string { return firstLineContaining(t, script, "compgen -W ") },
+		"zsh": func(t *testing.T, script string) string {
+			return between(t, script, "verbs=(", "_describe -t commands")
+		},
+		"fish": func(t *testing.T, script string) string { return linesContaining(script, "__fish_use_subcommand") },
+		"powershell": func(t *testing.T, script string) string {
+			return between(t, script, "$verbs = @(", "$verbAlias = @{}")
+		},
+	}
+
+	for shell, script := range scripts {
+		t.Run(shell, func(t *testing.T) {
+			extract, ok := region[shell]
+			if !ok {
+				t.Fatalf("shell %q has no word-1 region extractor; add one when adding a shell", shell)
+			}
+			r := extract(t, script)
+			for _, v := range cliVerbs {
+				for _, a := range v.Aliases {
+					if hasWord(r, a) {
+						t.Errorf("%s word-1 candidate list unexpectedly offers alias %q", shell, a)
+					}
+				}
+			}
+		})
+	}
+}
+
+// firstLineContaining returns the first line of script containing marker.
+func firstLineContaining(t *testing.T, script, marker string) string {
+	t.Helper()
+	for _, line := range strings.Split(script, "\n") {
+		if strings.Contains(line, marker) {
+			return line
+		}
+	}
+	t.Fatalf("no line contains %q", marker)
+	return ""
+}
+
+// linesContaining returns every line of script containing marker, joined.
+func linesContaining(script, marker string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(script, "\n") {
+		if strings.Contains(line, marker) {
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+// between returns the slice of script from start up to (not including) the
+// first end found after it.
+func between(t *testing.T, script, start, end string) string {
+	t.Helper()
+	i := strings.Index(script, start)
+	if i < 0 {
+		t.Fatalf("marker %q not found", start)
+	}
+	j := strings.Index(script[i:], end)
+	if j < 0 {
+		t.Fatalf("marker %q not found after %q", end, start)
+	}
+	return script[i : i+j]
+}
+
+// hasWord reports whether word appears in s at a regexp word boundary on both
+// sides, not merely as a substring -- "gen" must not match inside "generate".
+// Safe for every current alias (assertShellSafeName already limits a verb
+// name to [a-z0-9-], and none of the aliases contain a hyphen).
+func hasWord(s, word string) bool {
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(word) + `\b`)
+	return re.MatchString(s)
 }
 
 // ---- text helpers -------------------------------------------------------------

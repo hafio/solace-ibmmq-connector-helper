@@ -107,7 +107,7 @@ func Validate(r Request, res Resolver) (errs, warns []Issue) {
 // Credentials/stores are resolved and embedded (stringData/base64), so this is
 // the same rendered output the deploy path applies.
 //
-// extraAllowed threads deploy/delete's --allow-command values into the
+// extraAllowed threads deploy/remove's --allow-command values into the
 // kubernetes.command allowlist check; plain `generate kubernetes` calls this
 // with none, so an exotic command validates clean only at deploy time.
 func GenerateKubernetes(r Request, res Resolver, extraAllowed ...string) (out string, errs, warns []Issue) {
@@ -174,7 +174,7 @@ type DockerPlan struct {
 // application.yml inlined under compose configs:). Store/libs host paths are
 // resolved to absolute so the compose is portable regardless of cwd.
 //
-// extraAllowed threads deploy/delete's --allow-command values into the
+// extraAllowed threads deploy/remove's --allow-command values into the
 // docker.command allowlist check; plain `generate docker` calls this with none.
 func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan DockerPlan, errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
@@ -233,7 +233,7 @@ type NamedDoc struct {
 }
 
 // PodmanOpts tunes podman generation. ForceQuadlet overrides the config mode
-// (deploy/delete are always quadlet). BaseDir, when set, makes the on-disk file
+// (deploy/remove are always quadlet). BaseDir, when set, makes the on-disk file
 // paths (application.yml, env-file) absolute under it so systemd quadlet units
 // reference real locations; empty BaseDir keeps base names for a preview.
 type PodmanOpts struct {
@@ -261,7 +261,7 @@ type PodmanPlan struct {
 // opts.ForceQuadlet is set). application.yml documents are returned separately
 // for the caller to write to disk.
 //
-// extraAllowed threads deploy/delete's --allow-command values into the
+// extraAllowed threads deploy/remove's --allow-command values into the
 // podman.command allowlist check; plain `generate podman` calls this with none.
 func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...string) (plan PodmanPlan, errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
@@ -489,7 +489,9 @@ func pathIn(base, name string) string {
 
 func parse(r Request, res Resolver) (wfs []spec.Workflow, e *spec.Env, issues, warns []Issue) {
 	files := append([]File(nil), r.Workflows...)
-	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+	// Natural, not lexical: a workflow's id is its position here, so 10.yaml
+	// must not land ahead of 2.yaml (spec.WorkflowFileLess).
+	sort.Slice(files, func(i, j int) bool { return spec.WorkflowFileLess(files[i].Name, files[j].Name) })
 	for _, f := range files {
 		wf, err := spec.ParseWorkflow(f.Data, f.Name)
 		if err != nil {

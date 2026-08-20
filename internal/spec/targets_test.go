@@ -82,9 +82,10 @@ docker:
 	if d.Restart != DefaultRestart {
 		t.Errorf("restart = %q want %q", d.Restart, DefaultRestart)
 	}
-	want := Port{Host: DefaultMgmtPort, Container: DefaultMgmtPort}
-	if len(d.Ports) != 1 || d.Ports[0] != want {
-		t.Errorf("ports = %+v want [%+v]", d.Ports, want)
+	// Publishing a port is an exposure decision, so an omitted ports: stays
+	// omitted rather than defaulting to the management port.
+	if len(d.Ports) != 0 {
+		t.Errorf("ports = %+v, want none when ports: is omitted", d.Ports)
 	}
 	if d.Stores != nil || d.Libs != nil {
 		t.Errorf("stores/libs should stay nil when absent: %+v / %+v", d.Stores, d.Libs)
@@ -151,9 +152,8 @@ podman:
 	if p.Restart != DefaultRestart {
 		t.Errorf("restart = %q want %q", p.Restart, DefaultRestart)
 	}
-	want := Port{Host: DefaultMgmtPort, Container: DefaultMgmtPort}
-	if len(p.Ports) != 1 || p.Ports[0] != want {
-		t.Errorf("ports = %+v want [%+v]", p.Ports, want)
+	if len(p.Ports) != 0 {
+		t.Errorf("ports = %+v, want none when ports: is omitted", p.Ports)
 	}
 	if p.Quadlet == nil {
 		t.Fatal("quadlet should default to non-nil")
@@ -221,6 +221,111 @@ docker:
 	}
 	if d.Libs == nil || d.Libs.Dir != "/host/libs" || d.Libs.MountPath != DefaultLibsMountPath {
 		t.Errorf("libs = %+v want dir /host/libs mount-path %q", d.Libs, DefaultLibsMountPath)
+	}
+}
+
+// The kubernetes service port follows the effective management port (not the
+// bare DefaultMgmtPort constant), since that is the only port the connector
+// actually listens on once management.port is overridden. docker and podman
+// publish nothing they were not asked to: an omitted ports: stays omitted on
+// both, whatever management.port says.
+func TestPortDefaultsFollowManagementPort(t *testing.T) {
+	data := []byte(`
+management:
+  port: 9091
+docker:
+  image: myimg
+podman:
+  image: myimg
+kubernetes:
+  deployment: {name: c, namespace: ns, image: img}
+`)
+	e, err := ParseEnv(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Port{Host: 9091, Container: 9091}
+	if len(e.Docker.Ports) != 0 {
+		t.Errorf("docker ports = %+v, want none when ports: is omitted", e.Docker.Ports)
+	}
+	if len(e.Podman.Ports) != 0 {
+		t.Errorf("podman ports = %+v, want none when ports: is omitted", e.Podman.Ports)
+	}
+	if e.Kubernetes.Service.Port != want {
+		t.Errorf("kubernetes service.port = %+v want %+v", e.Kubernetes.Service.Port, want)
+	}
+}
+
+// With no management.port set, the kubernetes service port falls back to
+// DefaultMgmtPort (8090); docker and podman still publish nothing.
+func TestPortDefaultsFallBackWhenManagementPortUnset(t *testing.T) {
+	data := []byte(`
+docker:
+  image: myimg
+podman:
+  image: myimg
+kubernetes:
+  deployment: {name: c, namespace: ns, image: img}
+`)
+	e, err := ParseEnv(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Port{Host: DefaultMgmtPort, Container: DefaultMgmtPort}
+	if len(e.Docker.Ports) != 0 {
+		t.Errorf("docker ports = %+v, want none when ports: is omitted", e.Docker.Ports)
+	}
+	if len(e.Podman.Ports) != 0 {
+		t.Errorf("podman ports = %+v, want none when ports: is omitted", e.Podman.Ports)
+	}
+	if e.Kubernetes.Service.Port != want {
+		t.Errorf("kubernetes service.port = %+v want %+v", e.Kubernetes.Service.Port, want)
+	}
+}
+
+func TestKubernetesServicePortAcceptsBareAndHostContainerForms(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry string
+		want  Port
+	}{
+		{"bare int", "8090", Port{Host: 8090, Container: 8090}},
+		{"host:container", "8080:8090", Port{Host: 8080, Container: 8090}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := []byte("kubernetes:\n  deployment: {name: c, namespace: ns, image: img}\n  service: {port: " + tt.entry + "}\n")
+			e, err := ParseEnv(data)
+			if err != nil {
+				t.Fatalf("ParseEnv: %v", err)
+			}
+			if e.Kubernetes.Service.Port != tt.want {
+				t.Errorf("service.port = %+v want %+v", e.Kubernetes.Service.Port, tt.want)
+			}
+		})
+	}
+}
+
+func TestKubernetesServicePortRejectsInvalidForms(t *testing.T) {
+	tests := []struct {
+		name    string
+		entry   string
+		wantErr string
+	}{
+		{"multi-colon", "1:2:3", `env.yaml: ports entry "1:2:3" must be "host:container" (exactly one colon)`},
+		{"mapping node", "{a: 1}", `env.yaml: ports entry must be an integer or "host:container", got a !!map`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := []byte("kubernetes:\n  deployment: {name: c, namespace: ns, image: img}\n  service: {port: " + tt.entry + "}\n")
+			_, err := ParseEnv(data)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if err.Error() != tt.wantErr {
+				t.Errorf("err = %q, want %q", err.Error(), tt.wantErr)
+			}
+		})
 	}
 }
 

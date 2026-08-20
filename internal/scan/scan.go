@@ -1,7 +1,9 @@
 // Package scan walks the workflows folder (workflows.dir from env.yaml) and
-// returns the *.yaml/*.yml files whose base name matches file_pattern, sorted by
-// base name so workflow IDs are assigned deterministically. The env.yaml file
-// itself is always excluded, regardless of dir/pattern.
+// returns the *.yaml/*.yml files whose base name matches file_pattern, sorted
+// in natural numeric order by base name (spec.WorkflowFileLess: 2.yaml before
+// 10.yaml) so workflow IDs are assigned deterministically and in the order an
+// operator numbered the files. The env.yaml file itself is always excluded,
+// regardless of dir/pattern.
 package scan
 
 import (
@@ -10,12 +12,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
 // Result is the outcome of scanning the workflows folder.
 type Result struct {
 	Dir           string
-	WorkflowFiles []string // full paths, sorted by base name
+	WorkflowFiles []string // full paths, sorted in natural order by base name
 }
 
 // Scan reads dir (non-recursive) and returns its *.yaml/*.yml files whose base
@@ -41,7 +45,7 @@ func Scan(dir, filePattern, envAbsPath string) (*Result, error) {
 		}
 	}
 	sort.Slice(res.WorkflowFiles, func(i, j int) bool {
-		return filepath.Base(res.WorkflowFiles[i]) < filepath.Base(res.WorkflowFiles[j])
+		return spec.WorkflowFileLess(filepath.Base(res.WorkflowFiles[i]), filepath.Base(res.WorkflowFiles[j]))
 	})
 	return res, nil
 }

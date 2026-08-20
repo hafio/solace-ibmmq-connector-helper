@@ -1,4 +1,4 @@
-// Package runner executes the deploy/delete actions for each target by shelling
+// Package runner executes the deploy/remove actions for each target by shelling
 // out to the configured CLI (kubectl/oc, docker, podman/systemctl) through an
 // argv slice -- never a shell string, so no token is ever re-interpreted by a
 // shell. Command strings from env.yaml are tokenised and every token is checked
@@ -6,7 +6,7 @@
 // Beyond the charset, ParseCommand enforces validate.CheckDeployCommand's
 // per-platform binary allowlist and flag-shape rules, Preflight runs a
 // read-only login/daemon probe before any mutating call, and the real Runner
-// resolves argv[0] via exec.LookPath and echoes the resolved path to stderr.
+// resolves argv[0] via exec.LookPath, refusing a current-directory resolution.
 //
 // The package is deliberately thin: rendering lives in gen/deploy/dockergen/
 // podmangen, and the CLI owns path resolution. runner only parses commands,
@@ -35,10 +35,14 @@ var preflightHints = map[string]string{
 	validate.PlatformPodman:     "podman is unreachable; check the podman machine or socket, then re-run",
 }
 
-// Deploy actions shared by every target.
+// Deploy actions shared by every target. These are the CLI verbs, and they reach
+// the operator verbatim (report's "ok: remove kubernetes", runAction's flag-error
+// prefix), so they stay spelled as the verbs are. The platform subcommands they
+// map to are separate literals -- kubeVerb returns kubectl's own "delete",
+// canIVerb the can-i permission of the same name, Docker compose's "down".
 const (
 	ActionDeploy = "deploy"
-	ActionDelete = "delete"
+	ActionRemove = "remove"
 )
 
 // Cmd is one process invocation. Argv[0] is the program and Argv[1:] its
@@ -65,10 +69,13 @@ type OS struct{}
 
 // Run resolves Argv[0] via exec.LookPath (refusing an exec.ErrDot resolution --
 // a binary found only relative to the current directory, e.g. an unzipped
-// generator-page folder placed ahead of PATH on Windows), echoes the resolved
-// path and remaining args to stderr, starts it with Argv[1:], feeds Stdin when
-// non-empty, and returns the combined output. It never passes the string
-// through a shell.
+// generator-page folder placed ahead of PATH on Windows), starts it with
+// Argv[1:], feeds Stdin when non-empty, and returns the combined output. It
+// never passes the string through a shell.
+//
+// It prints nothing of its own: the process's combined output is returned to
+// the caller, which is the only thing an operator needs on the happy path and
+// is reported in full alongside the error on a failure.
 func (OS) Run(c Cmd) (string, error) {
 	if len(c.Argv) == 0 {
 		return "", fmt.Errorf("empty command")
@@ -80,11 +87,6 @@ func (OS) Run(c Cmd) (string, error) {
 		// exec.ErrDot); both cases are rejected here rather than silently exec'd.
 		return "", fmt.Errorf("resolving %q: %w", c.Argv[0], err)
 	}
-	line := "exec: " + resolved
-	if len(c.Argv) > 1 {
-		line += " " + strings.Join(c.Argv[1:], " ")
-	}
-	fmt.Fprintln(os.Stderr, line)
 	cmd := exec.Command(resolved, c.Argv[1:]...) //nolint:gosec // argv tokens are SafeToken-validated upstream; no shell is involved
 	if c.Stdin != "" {
 		cmd.Stdin = strings.NewReader(c.Stdin)
@@ -138,7 +140,7 @@ func WriteFile(path, content string, mode os.FileMode) error {
 	return nil
 }
 
-// Kubernetes applies (deploy) or deletes (delete) the manifest by running
+// Kubernetes applies (deploy) or deletes (remove) the manifest by running
 // `<command> apply -f -` / `<command> delete -f -` with the manifest on stdin,
 // so the manifest bytes never appear on a command line.
 func Kubernetes(r Runner, command, action, manifest string, extraAllowed []string) (string, error) {
@@ -158,15 +160,15 @@ func kubeVerb(action string) (string, error) {
 	switch action {
 	case ActionDeploy:
 		return "apply", nil
-	case ActionDelete:
+	case ActionRemove:
 		return "delete", nil
 	default:
-		return "", fmt.Errorf("unknown action %q (want %q or %q)", action, ActionDeploy, ActionDelete)
+		return "", fmt.Errorf("unknown action %q (want %q or %q)", action, ActionDeploy, ActionRemove)
 	}
 }
 
 // Docker runs `<command> compose -f <composeFile> up -d` (deploy) or
-// `<command> compose -f <composeFile> down` (delete). The compose file must
+// `<command> compose -f <composeFile> down` (remove). The compose file must
 // already be written by the caller.
 //
 // env carries the credential values the compose file's environment-provider
@@ -182,20 +184,20 @@ func Docker(r Runner, command, action, composeFile string, env []string, extraAl
 	switch action {
 	case ActionDeploy:
 		argv = append(argv, "up", "-d")
-	case ActionDelete:
+	case ActionRemove:
 		argv = append(argv, "down")
 	default:
-		return "", fmt.Errorf("unknown action %q (want %q or %q)", action, ActionDeploy, ActionDelete)
+		return "", fmt.Errorf("unknown action %q (want %q or %q)", action, ActionDeploy, ActionRemove)
 	}
 	return r.Run(Cmd{Argv: argv, Env: env})
 }
 
 // Preflight runs a cheap, read-only probe before any generated file is written
-// or any mutating command runs, so a deploy/delete that can never succeed
+// or any mutating command runs, so a deploy/remove that can never succeed
 // (not logged in, daemon down) stops before touching anything:
 //
 //   - kubernetes: `<argv> auth can-i <create|delete> deployment [--namespace <ns>]`
-//     -- create for deploy, delete for delete (can-i's own verbs, not apply/delete
+//     -- create for deploy, delete for remove (can-i's own verbs, not apply/delete
 //     used by kubeVerb for the eventual manifest command).
 //   - docker/podman: `<argv> info`.
 //
@@ -233,17 +235,17 @@ func Preflight(r Runner, platform, command, action, namespace string, extraAllow
 	return out, nil
 }
 
-// canIVerb maps a deploy/delete action to the verb `kubectl auth can-i` expects,
+// canIVerb maps a deploy/remove action to the verb `kubectl auth can-i` expects,
 // which is create/delete -- not apply/delete, the actual manifest verbs kubeVerb
 // returns -- because can-i asks about a permission, not a subcommand.
 func canIVerb(action string) (string, error) {
 	switch action {
 	case ActionDeploy:
 		return "create", nil
-	case ActionDelete:
+	case ActionRemove:
 		return "delete", nil
 	default:
-		return "", fmt.Errorf("unknown action %q (want %q or %q)", action, ActionDeploy, ActionDelete)
+		return "", fmt.Errorf("unknown action %q (want %q or %q)", action, ActionDeploy, ActionRemove)
 	}
 }
 
@@ -365,14 +367,14 @@ func PodmanDeploy(r Runner, sc QuadletScope, services []string) (string, error) 
 	return out.String(), nil
 }
 
-// PodmanDelete stops each service, removes its unit file from sc.Dir, and
+// PodmanRemove stops each service, removes its unit file from sc.Dir, and
 // reloads the generator. units are the .container filenames to remove; services
 // are the matching systemd unit names to stop.
 //
 // units are generator-built, pre-validated basenames (a DNS-1123 label plus
 // ".container"), so no path-traversal containment guard is applied here -- see
 // TestCheckContainerNameRejected in internal/validate/validate_extra_test.go.
-func PodmanDelete(r Runner, sc QuadletScope, services, units []string) (string, error) {
+func PodmanRemove(r Runner, sc QuadletScope, services, units []string) (string, error) {
 	var out strings.Builder
 	for _, s := range services {
 		o, err := r.Run(Cmd{Argv: sc.systemctlArgs("stop", s)})
@@ -426,6 +428,35 @@ func KubernetesPodNames(r Runner, cmd []string, namespace, selector string) ([]s
 		names = append(names, strings.TrimPrefix(line, "pod/"))
 	}
 	return names, nil
+}
+
+// ComposeProjectLabel is the label docker compose stamps on every container it
+// creates, naming the project -- the group a set of containers is brought up
+// and down together as.
+const ComposeProjectLabel = "com.docker.compose.project"
+
+// DockerComposeProject returns the compose project a container belongs to, read
+// back from its own label rather than derived from the compose file's directory,
+// so a container brought up under a different project name still reports the one
+// it is actually in.
+//
+// It is read-only and best-effort: the project only labels a target in status
+// output, so an inspect that fails, a container compose did not create, or an
+// engine that renders a missing label as Go's "<no value>" all yield "" and the
+// caller drops that segment instead of failing the report.
+//
+// container is operator-supplied and must already be validated by the caller.
+func DockerComposeProject(r Runner, cmd []string, container string) string {
+	argv := append(append([]string(nil), cmd...), "inspect", "--format",
+		`{{index .Config.Labels "`+ComposeProjectLabel+`"}}`, container)
+	out, err := r.Run(Cmd{Argv: argv})
+	if err != nil {
+		return ""
+	}
+	if p := strings.TrimSpace(out); p != "<no value>" {
+		return p
+	}
+	return ""
 }
 
 // execArgv builds the `<cmd> exec` argv prefix shared by ScriptInstalled,

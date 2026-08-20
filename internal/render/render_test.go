@@ -24,6 +24,12 @@ func wf(t *testing.T, name, y string) spec.Workflow {
 // defaults blocks (management/security/logging/solace-defaults). Used by both
 // TestApplicationRich (Contains spot-checks) and TestApplicationRichExact (full
 // output comparison) so the fixture is defined once.
+//
+// richDefsYAML's management.exposure: health,info is a removed key by this
+// point in the change (see internal/spec): ParseDefaults still parses it, but
+// consolidate.applyStatusAccess ignores the value entirely and always renders
+// the fixed five-entry list. It is left in deliberately, differing from that
+// fixed list, to prove the operator value has no effect.
 const richSrcYAML = `
 source:
   mq:
@@ -111,7 +117,7 @@ func TestApplicationRich(t *testing.T) {
 		"retry:", "backoffs:", "- 1", "items:", "name: a", "name: b", `note: "q:v"`,
 		"destination-type: queue",
 		"connector:", "workflows:", "enabled: true", "security:", "- name: hc",
-		"management:", "server:", "port: 8090", "include: health,info", "show-details: always",
+		"management:", "server:", "port: 8090", "include: health,info,metrics,leaderelection,workflows", "show-details: always",
 		"logging:", "level:", "root: INFO",
 	} {
 		if !strings.Contains(out, w) {
@@ -226,7 +232,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,leaderelection,workflows
+        include: health,info,metrics,leaderelection,workflows
   endpoint:
     health:
       show-details: always
@@ -298,7 +304,7 @@ target:
 		}
 	}
 	for _, want := range []string{
-		"management:", "include: health,leaderelection,workflows",
+		"management:", "include: health,info,metrics,leaderelection,workflows",
 		"security:", "enabled: true", "- name: solmq-status", "password: status-literal-pw",
 	} {
 		if !strings.Contains(out, want) {
@@ -532,6 +538,52 @@ target:
 	}
 	if !found {
 		t.Errorf("want a warning that no bundle was emitted, got %v", warns)
+	}
+}
+
+// TestApplicationSecurityUserRoles pins how roles render: a roles-bearing user
+// emits a block-style sequence under its password, and a user without roles
+// emits no roles key at all. The omission matters beyond tidiness -- an empty
+// list is the connector's read-only default, and it is what keeps the reserved
+// solmq-status account read-only and keeps role-less output byte-identical to
+// what shipped before roles existed (so the golden fixtures do not move).
+func TestApplicationSecurityUserRoles(t *testing.T) {
+	src := `
+source:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: v
+    queue: IN
+target:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: v
+    queue: OUT
+`
+	d := &spec.Defaults{Security: spec.Security{Users: []spec.User{
+		{Name: "ops", Password: "ops-pass", Roles: []string{"admin", "auditor"}},
+		{Name: "probe", Password: "probe-pass"},
+	}}}
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d,
+		consolidate.Opts{MountStores: true, StatusPassword: "status-literal-pw"})
+	out := Application(m)
+
+	want := "        - name: ops\n" +
+		"          password: ${SECURITY_USER_OPS_PASSWORD}\n" +
+		"          roles:\n" +
+		"            - admin\n" +
+		"            - auditor\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("want the ops user rendered as\n%s---\ngot\n%s", want, out)
+	}
+
+	// probe and the reserved account both carry no roles, so neither may emit
+	// the key. With the ops block asserted above, a total count of exactly one
+	// is what proves the other two render none -- including the reserved
+	// account, whose empty list is what keeps it read-only.
+	if n := strings.Count(out, "roles:"); n != 1 {
+		t.Errorf("roles: appears %d times, want exactly 1 -- only the user that declared roles may emit it (reserved account: %s)\n%s",
+			n, spec.StatusUserName, out)
 	}
 }
 

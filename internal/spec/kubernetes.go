@@ -29,10 +29,13 @@ type Deployment struct {
 	Timezone  string    `yaml:"timezone"`
 }
 
-// Service mirrors the kubernetes.service section of env.yaml.
+// Service mirrors the kubernetes.service section of env.yaml. Port.Host is
+// the Service's own port; Port.Container is the container targetPort it
+// forwards to -- the same scalar / "host:container" shape docker and podman
+// ports accept, via Port.UnmarshalYAML.
 type Service struct {
 	Enabled bool `yaml:"enabled"`
-	Port    int  `yaml:"port"`
+	Port    Port `yaml:"port"`
 }
 
 // CredCreate builds the credentials Secret. Its contents are no longer declared
@@ -151,24 +154,32 @@ type Kubernetes struct {
 }
 
 // ParseKubernetes decodes a standalone kubernetes document (env.yaml reuses
-// applyKubeDefaults via ParseEnv). Replicas defaults to 1 when unset.
+// applyKubeDefaults via ParseEnv). Replicas defaults to 1 when unset; there is
+// no defaults.Management in this standalone path, so the service port falls
+// back to DefaultMgmtPort.
 func ParseKubernetes(data []byte) (*Kubernetes, error) {
 	var k Kubernetes
 	if err := yaml.Unmarshal(data, &k); err != nil {
 		return nil, fmt.Errorf("env.yaml: %v", err)
 	}
-	applyKubeDefaults(&k)
+	applyKubeDefaults(&k, DefaultMgmtPort)
 	return &k, nil
 }
 
-// applyKubeDefaults fills in the defaults the connector runtime expects: command
-// kubectl, replicas 1, udp syslog, 1Gi libs storage, busybox download image.
-func applyKubeDefaults(k *Kubernetes) {
+// applyKubeDefaults fills in the defaults the connector runtime expects:
+// command kubectl, replicas 1, udp syslog, 1Gi libs storage, busybox download
+// image. mgmtPort is the effective management.port (see
+// EffectiveManagementPort): an unset service.port defaults to publishing that
+// port to itself, since that is the only port the pod actually listens on.
+func applyKubeDefaults(k *Kubernetes, mgmtPort int) {
 	if k.Command == "" {
 		k.Command = DefaultKubeCommand
 	}
 	if k.Deployment.Replicas == 0 {
 		k.Deployment.Replicas = 1
+	}
+	if k.Service.Port == (Port{}) {
+		k.Service.Port = Port{Host: mgmtPort, Container: mgmtPort}
 	}
 	if l := k.Logging; l != nil && l.Syslog != nil && l.Syslog.Protocol == "" {
 		l.Syslog.Protocol = SyslogUDP

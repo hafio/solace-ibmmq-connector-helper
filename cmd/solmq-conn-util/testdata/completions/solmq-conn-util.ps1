@@ -1,16 +1,16 @@
 # solmq-conn-util PowerShell completion -- GENERATED, do not edit by hand.
 #
 # Rendered from the command model in cmd/solmq-conn-util/commands.go by
-# `solmq-conn-util completion PowerShell`, so it matches the binary that printed it.
+# `solmq-conn-util auto-complete PowerShell`, so it matches the binary that printed it.
 # Re-run that command after upgrading solmq-conn-util.
 #
 # Install:
 #   Register-ArgumentCompleter below is per-session, so appending to the
 #   profile is what makes it stick:
-#   solmq-conn-util completion powershell >> $PROFILE
+#   solmq-conn-util auto-complete powershell >> $PROFILE
 #   
 #   This session only, without touching the profile:
-#   solmq-conn-util completion powershell | Out-String | Invoke-Expression
+#   solmq-conn-util auto-complete powershell | Out-String | Invoke-Expression
 #
 # Windows PowerShell 5.1 compatible: no &&/||, no ternary, no null-coalescing.
 # Both command names are registered because the Windows binary is solmq-conn-util.exe.
@@ -45,29 +45,42 @@ Register-ArgumentCompleter -Native -CommandName @('solmq-conn-util', 'solmq-conn
     $flagArg['-command'] = 'name'
     $flagArg['--command'] = 'name'
 
+    # Aliases are deliberately absent from $verbs -- the TAB menu for word 1
+    # keeps showing only canonical verbs.
     $verbs = @(
         @{ Name = 'generate'; Desc = 'Render application.yml, or the artifacts for the resolved platform, to stdout or a file' }
         @{ Name = 'deploy'; Desc = 'Generate for a platform, then apply it' }
-        @{ Name = 'delete'; Desc = 'Tear down what deploy created for a platform' }
-        @{ Name = 'status'; Desc = 'Ensure and run the status script, printing per-target leader-election and workflow state' }
+        @{ Name = 'remove'; Desc = 'Tear down what deploy created for a platform' }
+        @{ Name = 'status'; Desc = 'Ensure and run the status script, printing per-instance leader-election and workflow state' }
         @{ Name = 'version'; Desc = 'Print the utility name, version, Go version and OS/arch' }
         @{ Name = 'validate'; Desc = 'Lint the whole env.yaml + workflows' }
         @{ Name = 'examples'; Desc = 'Write a starter env.yaml + workflows' }
-        @{ Name = 'completion'; Desc = 'Print a shell completion script' }
+        @{ Name = 'auto-complete'; Desc = 'Print a shell completion script' }
         @{ Name = 'help'; Desc = 'Print the usage summary (also -h, --help)' }
         @{ Name = '-h'; Desc = 'Print the usage summary' }
         @{ Name = '--help'; Desc = 'Print the usage summary' }
     )
 
+    # Every alias resolves to its canonical verb below, once, so $targets/
+    # $flags/$posArg stay keyed by canonical verb names only.
+    $verbAlias = @{}
+    $verbAlias['gen'] = 'generate'
+    $verbAlias['dep'] = 'deploy'
+    $verbAlias['rm'] = 'remove'
+    $verbAlias['sts'] = 'status'
+    $verbAlias['ver'] = 'version'
+    $verbAlias['vld'] = 'validate'
+    $verbAlias['eg'] = 'examples'
+
     $targets = @{}
     $targets['generate'] = @(@{ Name = 'config'; Desc = 'Emit application.yml' })
-    $targets['completion'] = @(@{ Name = 'bash'; Desc = 'Print the bash completion script' }, @{ Name = 'zsh'; Desc = 'Print the zsh completion script' }, @{ Name = 'fish'; Desc = 'Print the fish completion script' }, @{ Name = 'powershell'; Desc = 'Print the PowerShell completion script' })
+    $targets['auto-complete'] = @(@{ Name = 'bash'; Desc = 'Print the bash completion script' }, @{ Name = 'zsh'; Desc = 'Print the zsh completion script' }, @{ Name = 'fish'; Desc = 'Print the fish completion script' }, @{ Name = 'powershell'; Desc = 'Print the PowerShell completion script' })
 
     $flags = @{}
-    $flags['generate'] = @(@{ Name = '--platform'; Desc = 'the platform: kubernetes, docker, or podman (default: resolved from env.yaml, or an interactive menu -- see Command details)' }, @{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '-o'; Desc = 'write output to a file (default: stdout)' }, @{ Name = '--out'; Desc = 'write output to a file (default: stdout)' })
-    $flags['deploy'] = @(@{ Name = '--platform'; Desc = 'the platform: kubernetes, docker, or podman (default: resolved from env.yaml, or an interactive menu -- see Command details)' }, @{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--allow-command'; Desc = 'approve an extra command binary beyond the command: allowlist; repeatable' })
-    $flags['delete'] = @(@{ Name = '--platform'; Desc = 'the platform: kubernetes, docker, or podman (default: resolved from env.yaml, or an interactive menu -- see Command details)' }, @{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--allow-command'; Desc = 'approve an extra command binary beyond the command: allowlist; repeatable' })
-    $flags['status'] = @(@{ Name = '--install'; Desc = 'install the status script on every target without prompting' }, @{ Name = '--platform'; Desc = 'the platform: kubernetes, docker, or podman (default: resolved from env.yaml, or an interactive menu -- see Command details)' }, @{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--pod'; Desc = 'limit checks to this kubernetes pod name; repeatable (default: every running pod); no effect on docker/podman' }, @{ Name = '--container'; Desc = 'limit checks to this docker/podman container name; repeatable (default: every running container); no effect on kubernetes' }, @{ Name = '--namespace'; Desc = 'kubernetes namespace to query (default: the namespace of the deployment in env.yaml); no effect on docker/podman' }, @{ Name = '--management-port'; Desc = 'actuator management port to reach inside each target (default: the management port configured for the target)' }, @{ Name = '--user'; Desc = 'actuator account the status script authenticates as (default solmq-status)' }, @{ Name = '--command'; Desc = 'override the platform CLI binary (kubectl/oc, docker, or podman) used to reach each target, instead of the command: in that section' }, @{ Name = '--allow-command'; Desc = 'approve an extra command binary beyond the command: allowlist; repeatable' })
+    $flags['generate'] = @(@{ Name = '--platform'; Desc = 'the platform: kubernetes, docker, or podman (short: kube, dk, pm; default: resolved from env.yaml, or an interactive menu -- see Platform resolution)' }, @{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '-o'; Desc = 'write output to a file (default: stdout)' }, @{ Name = '--out'; Desc = 'write output to a file (default: stdout)' })
+    $flags['deploy'] = @(@{ Name = '--platform'; Desc = 'the platform: kubernetes, docker, or podman (short: kube, dk, pm; default: resolved from env.yaml, or an interactive menu -- see Platform resolution)' }, @{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--allow-command'; Desc = 'approve an extra command binary beyond the command: allowlist; repeatable' })
+    $flags['remove'] = @(@{ Name = '--platform'; Desc = 'the platform: kubernetes, docker, or podman (short: kube, dk, pm; default: resolved from env.yaml, or an interactive menu -- see Platform resolution)' }, @{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--allow-command'; Desc = 'approve an extra command binary beyond the command: allowlist; repeatable' })
+    $flags['status'] = @(@{ Name = '--install'; Desc = 'install the status script on every instance without prompting' }, @{ Name = '--platform'; Desc = 'the platform: kubernetes, docker, or podman (short: kube, dk, pm; default: resolved from env.yaml, or an interactive menu -- see Platform resolution)' }, @{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--pod'; Desc = 'limit checks to this kubernetes pod name; repeatable (default: every running pod); no effect on docker/podman' }, @{ Name = '--container'; Desc = 'limit checks to this docker/podman container name; repeatable (default: every running container); no effect on kubernetes' }, @{ Name = '--namespace'; Desc = 'kubernetes namespace to query (default: the namespace of the deployment in env.yaml); no effect on docker/podman' }, @{ Name = '--management-port'; Desc = 'actuator management port to reach inside each instance (default: the configured management port)' }, @{ Name = '--user'; Desc = 'actuator account the status script authenticates as (default solmq-status)' }, @{ Name = '--command'; Desc = 'override the platform CLI binary (kubectl/oc, docker, or podman) used to reach each instance, instead of the command: in that section' }, @{ Name = '--allow-command'; Desc = 'approve an extra command binary beyond the command: allowlist; repeatable' })
     $flags['validate'] = @(@{ Name = '-e'; Desc = 'config file, relative or absolute path (default: env.yaml)' }, @{ Name = '--env'; Desc = 'config file, relative or absolute path (default: env.yaml)' })
     $flags['examples'] = @(@{ Name = '-f'; Desc = 'overwrite existing files' }, @{ Name = '--force'; Desc = 'overwrite existing files' })
 
@@ -146,6 +159,8 @@ Register-ArgumentCompleter -Native -CommandName @('solmq-conn-util', 'solmq-conn
         }
         $i++
     }
+
+    if ($verbAlias.ContainsKey($verb)) { $verb = $verbAlias[$verb] }
 
     if ($verb -eq '') {
         & $emit $verbs $wordToComplete

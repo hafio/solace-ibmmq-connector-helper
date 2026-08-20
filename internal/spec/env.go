@@ -49,8 +49,12 @@ func ParseEnv(data []byte) (*Env, error) {
 		Defaults:  *defaultsFromRaw(raw.rawDefaults),
 		Workflows: workflowsFromRaw(raw.Workflows),
 	}
+	// The effective management port drives the kubernetes service default, so an
+	// unset service.port targets the port the connector actually listens on
+	// rather than a bare constant. docker/podman publish nothing unless the
+	// operator lists ports, so neither needs it.
 	if raw.Kubernetes != nil {
-		applyKubeDefaults(raw.Kubernetes)
+		applyKubeDefaults(raw.Kubernetes, e.EffectiveManagementPort())
 		e.Kubernetes = raw.Kubernetes
 	}
 	if raw.Docker != nil {

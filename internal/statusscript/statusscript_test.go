@@ -193,7 +193,9 @@ func TestRenderSendsStatusToStdoutAndProblemsToStderr(t *testing.T) {
 	for _, want := range []string{
 		`echo "leader-election mode: ${MODE:-unknown}"` + "\n",
 		`echo "leader-election state: ${STATE:-unknown}"` + "\n",
-		`echo "workflow $id: ${st:-unknown}"` + "\n",
+		`echo "workflows:"` + "\n",
+		`echo "  $wf_id: $wf_state"` + "\n",
+		`echo "health: UP"` + "\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing unredirected stdout report line %q in:\n%s", want, out)
@@ -263,6 +265,71 @@ func TestRenderVerifiesExposure(t *testing.T) {
 	}
 }
 
+// TestRenderAlignsWorkflowColumn pins the layout of the workflows block: a
+// bare header, then one indented row per workflow with the ids right-aligned so
+// every colon sits in the same column. Left-aligning them steps 10 one place
+// right of 0, which is exactly what makes a twenty-workflow report hard to scan.
+//
+// The width is measured from the ids actually present rather than assumed from
+// the connector's twenty-slot cap, so a report of single-digit ids is not padded
+// for a two-digit id that is not there.
+func TestRenderAlignsWorkflowColumn(t *testing.T) {
+	out := Render(8090, "solmq-status")
+	for _, want := range []string{
+		`echo "workflows:"`,
+		`WF_WIDTH=1`,
+		`if [ ${#wf_id} -gt "$WF_WIDTH" ]; then`,
+		`while [ ${#wf_id} -lt "$WF_WIDTH" ]; do`,
+		`echo "  $wf_id: $wf_state"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderReportsHealthUptimeAndVersion covers the three enrichment lines.
+// All three endpoints are in the fixed exposure list this tool writes, so they
+// need no extra configuration -- but each is read defensively, because a
+// hand-written config or a future image may not answer.
+//
+// Each line is dropped when its endpoint says nothing, rather than reported as
+// missing: none of them tells you whether the instance is doing its job, so a
+// blank or a warning would be noise next to the leader-election and workflow
+// lines that do.
+func TestRenderReportsHealthUptimeAndVersion(t *testing.T) {
+	out := Render(8090, "solmq-status")
+	for _, want := range []string{
+		`HEALTH=$(get "$BASE/health")`,
+		`echo "health: UP"`,
+		`echo "health-detail: $HEALTH"`,
+		`get "$BASE/metrics/$1"`,
+		`UPTIME=$(metric process.uptime)`,
+		`INFO=$(get "$BASE/info")`,
+		`echo "version: $VERSION"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	// Each enrichment line sits behind a non-empty guard, so an endpoint that
+	// answers nothing drops its line instead of printing an empty value.
+	for _, guard := range []string{
+		`if [ -n "$HEALTH" ]; then`,
+		`if [ -n "$UPTIME" ]; then`,
+		`if [ -n "$VERSION" ]; then`,
+	} {
+		if !strings.Contains(out, guard) {
+			t.Errorf("enrichment line is not guarded (%q missing):\n%s", guard, out)
+		}
+	}
+	// The instance's own health is the first status in the document; matching the
+	// last would report a component's status as the whole instance's.
+	if !strings.Contains(out, `s/^[^{]*{`) {
+		t.Errorf("health status match is not anchored at the opening brace:\n%s", out)
+	}
+}
+
 // TestRenderEscapesUserForSedAddress covers the sanitize-at-use half of the
 // account-name gate: the name is spliced into a sed address, so it is emitted
 // regex-escaped there while the Authorization header still gets the raw name.
@@ -313,5 +380,94 @@ func TestFilenameAndPathConstants(t *testing.T) {
 	}
 	if ConfigPath != "/app/external/spring/config/application.yml" {
 		t.Errorf("ConfigPath = %q, want %q", ConfigPath, "/app/external/spring/config/application.yml")
+	}
+}
+
+// TestRenderReportsEveryWorkflowInNumericOrder pins the two things that decide
+// whether the workflow half of the report is trustworthy at all.
+//
+// Order: the actuator hands the workflows back in its own map order, which
+// lists 10 before 2, so the loop tags each line with the id as a leading
+// tab-separated sort key, sorts numerically, and cuts the key back off.
+//
+// Completeness: the response is fed in with a terminating newline. read
+// returns non-zero on a final line that carries no newline and the loop body
+// is skipped for it, so a bare printf of the response dropped the last
+// workflow from every report -- the failure mode that silently under-reports
+// rather than looking wrong.
+func TestRenderReportsEveryWorkflowInNumericOrder(t *testing.T) {
+	out := Render(8090, "solmq-status")
+	for _, want := range []string{
+		`printf '%s\n' "$WF" | tr '{'`,
+		`done | sort -n)`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	// A bare printf of the response would reintroduce the dropped-last-workflow
+	// bug, so the unterminated form must not come back.
+	if strings.Contains(out, `printf %s "$WF"`) {
+		t.Errorf("workflows response fed in without a terminating newline:\n%s", out)
+	}
+}
+
+// TestRenderReportsOnlyConfiguredWorkflows pins the noise filter. Two things
+// get dropped:
+//
+//   - a chunk with no state at all. Splitting the response on '{' also hands
+//     the loop whatever nested objects an element contains, and such a fragment
+//     can carry an id of its own.
+//   - a state of N/A, case-insensitively. The connector reports its full set of
+//     workflow slots and marks every unconfigured one N/A, which is how one real
+//     workflow produced twenty lines of report.
+//
+// What is deliberately NOT filtered is an allowlist of the real states:
+// running/stopped/paused/error are not a closed set, so only the placeholder
+// goes, and a state this script has never seen still reaches the operator.
+//
+// Filtering every entry away is the systemic case, not the per-entry one, so it
+// is reported on stderr rather than leaving the workflow half of the report
+// silently blank (S4a fail-loud vs skip).
+func TestRenderReportsOnlyConfiguredWorkflows(t *testing.T) {
+	out := Render(8090, "solmq-status")
+	for _, want := range []string{
+		`[ -n "$st" ] || continue`,
+		`case "$st" in [Nn]/[Aa]) continue ;; esac`,
+		`if [ -n "$WF_ROWS" ]; then`,
+		`echo "status: $BASE/workflows reported no workflow on this active instance`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	// The unknown-state placeholder is what the id/state guard replaced; leaving
+	// it in would put back exactly the lines this is meant to drop.
+	if strings.Contains(out, `${st:-unknown}`) {
+		t.Errorf("stateless workflows are still padded with an unknown line:\n%s", out)
+	}
+}
+
+// TestRenderWarnsOnEmptyWorkflowsOnlyWhenActive pins the standby case. An
+// active_standby deployment with replicas > 1 always has a standby, and a
+// standby runs no workflow -- so an empty workflow list there is the normal
+// shape, not a fault. Warning on it unconditionally made every standby pod read
+// as broken, which at replicas: 2 is half of every report.
+//
+// The gate is the leader-election state the script has already resolved, so
+// standalone and active_active (both of which report active) keep the warning,
+// and an unset or unrecognized state falls through silently -- the script flags
+// that separately at the end.
+func TestRenderWarnsOnEmptyWorkflowsOnlyWhenActive(t *testing.T) {
+	out := Render(8090, "solmq-status")
+	want := `elif [ "$STATE" = "active" ]; then`
+	if !strings.Contains(out, want) {
+		t.Errorf("empty-workflow warning is not gated on the active state (%q missing):\n%s", want, out)
+	}
+	// The ungated form is the regression: a bare else here warns on every
+	// standby. $STATE is resolved well above this block, so there is no ordering
+	// reason to fall back to one.
+	if strings.Contains(out, "  else\n"+`    echo "status: $BASE/workflows`) {
+		t.Errorf("empty-workflow warning is still ungated:\n%s", out)
 	}
 }

@@ -56,20 +56,19 @@ func envWithKube(t *testing.T, kubeBlock string) []byte {
 	return append(base, kubeBlock...)
 }
 
-// setGoldenCredEnv sets the seven host environment variables the golden
-// spec's -env credential positions name, plus spec.StatusUserPasswordEnvVar
-// so the reserved status account's password is the fixed goldenStatusPassword
-// rather than a freshly generated one. validate checks every -env reference
-// resolves to a set variable regardless of target (S4a: catch a
-// missing/misspelled name while linting rather than only at deploy time), so
-// even TestGoldenConfig -- which never reads the values -- needs them set.
+// setGoldenCredEnv sets the six host environment variables the golden spec's
+// -env credential positions name, plus spec.StatusUserPasswordEnvVar so the
+// reserved status account's password is the fixed goldenStatusPassword rather
+// than a freshly generated one. validate checks every -env reference resolves
+// to a set variable regardless of target (S4a: catch a missing/misspelled
+// name while linting rather than only at deploy time), so even
+// TestGoldenConfig -- which never reads the values -- needs them set.
 func setGoldenCredEnv(t *testing.T) {
 	t.Helper()
 	for k, v := range map[string]string{
 		"SOL_PASSWORD": "sol-pw", "MQ_CORE_PASSWORD": "mqcore-pw",
 		"MQ_ARCHIVE_PASSWORD": "mqarchive-pw", "EDGE_SOL_PASSWORD": "edge-pw",
 		"TRUSTSTORE_PASSWORD": "ts-pw", "KEYSTORE_PASSWORD": "ks-pw",
-		"HEALTHCHECK_PASSWORD":        "hc-pw",
 		spec.StatusUserPasswordEnvVar: goldenStatusPassword,
 	} {
 		t.Setenv(k, v)
@@ -113,7 +112,7 @@ func TestGoldenConfig(t *testing.T) {
 }
 
 func TestGoldenKubernetesCreate(t *testing.T) {
-	// source: env -- provide the seven -env credential values (the literal
+	// source: env -- provide the six -env credential values (the literal
 	// positions -- usernames -- need no environment at all).
 	setGoldenCredEnv(t)
 	req := loadSpecs(t)
@@ -219,11 +218,14 @@ func configMapDoc(appYAML string, logback bool) string {
 // credDoc lists every credential the golden spec's config references, in
 // first-use order: the two mq-conn-1 positions, the two shared store
 // passwords (referenced first by the mq-conn-1 bundle), prod-solace,
-// mq-archive, sol-conn-1, the leader-election session (a distinct secret
-// from prod-solace even though it carries the same underlying value), and
-// finally the healthcheck management user. Usernames are literal in the
-// spec, so their values are the literal text; passwords are -env, so their
-// values are the seven t.Setenv values set by setGoldenCredEnv.
+// mq-archive, sol-conn-1, and the leader-election session (a distinct secret
+// from prod-solace even though it carries the same underlying value). The
+// golden spec configures no operator security.users, so the reserved
+// solmq-status account (goldenStatusPassword, a literal rather than a
+// secretRef) is the only management user and never appears here. Usernames
+// are literal in the spec, so their values are the literal text; passwords
+// are -env, so their values are the six t.Setenv values set by
+// setGoldenCredEnv.
 const credDoc = `apiVersion: v1
 kind: Secret
 metadata:
@@ -243,7 +245,6 @@ stringData:
   SOL_CONN_1_CLIENT_PASSWORD: "edge-pw"
   LEADER_ELECTION_CLIENT_USERNAME: "connector"
   LEADER_ELECTION_CLIENT_PASSWORD: "sol-pw"
-  SECURITY_USER_HEALTHCHECK_PASSWORD: "hc-pw"
 `
 
 const storesDoc = `apiVersion: v1

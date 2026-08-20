@@ -2,8 +2,8 @@
 // connector container. It is a pure renderer: no os/exec, no filesystem, no
 // network, no globals -- it only builds and returns a string. The script it
 // produces targets the connector image's busybox userland (Alpine's sh, sed,
-// wget, tr, base64, head, cat -- no curl, no jq, no bash), so every construct
-// below is deliberately POSIX/busybox-safe rather than bash- or
+// wget, tr, base64, head, cat, sort, cut -- no curl, no jq, no bash), so every
+// construct below is deliberately POSIX/busybox-safe rather than bash- or
 // GNU-coreutils-flavored.
 package statusscript
 
@@ -202,6 +202,58 @@ STATE=$(printf %s "$LE" | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([^"]*\)
 echo "leader-election mode: ${MODE:-unknown}"
 echo "leader-election state: ${STATE:-unknown}"
 
+# health, uptime and version are enrichment. Each line is dropped when its
+# endpoint answers nothing rather than reported as missing: none of them says
+# whether this instance is doing its job, which is what the leader-election
+# lines above and the workflow lines below are for.
+HEALTH=$(get "$BASE/health") || HEALTH=""
+if [ -n "$HEALTH" ]; then
+  # The instance's own status is the first one in the document, so the match is
+  # anchored at the opening brace -- [^{]* cannot cross a '{', which stops a
+  # component's status from being read as the whole instance's.
+  H=$(printf %s "$HEALTH" | sed -n 's/^[^{]*{[[:space:]]*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+  if [ "$H" = "UP" ]; then
+    echo "health: UP"
+  else
+    # Not-UP is the case the detail is for, and show-details is always on, so
+    # the document goes out whole rather than being parsed into a component
+    # list this script would then have to keep in step with the connector.
+    echo "health: ${H:-unknown}"
+    echo "health-detail: $HEALTH"
+  fi
+fi
+
+# Reads one metric's first measurement. Micrometer answers
+# {"name":"...","measurements":[{"statistic":"VALUE","value":N}],...}, and
+# splitting on commas leaves at most one "value" per fragment, so the first
+# fragment that has one carries the answer -- sed has no non-greedy match to
+# get there directly. An unknown or unexposed metric answers 404, which
+# arrives here as empty output.
+metric() {
+  get "$BASE/metrics/$1" | tr ',' '\n' | sed -n 's/.*"value"[[:space:]]*:[[:space:]]*\([0-9][0-9.eE+-]*\).*/\1/p' | head -n 1
+}
+
+UPTIME=$(metric process.uptime)
+UPTIME=${UPTIME%%.*}
+case "${UPTIME:-x}" in
+  *[!0-9]*) UPTIME="" ;;
+esac
+if [ -n "$UPTIME" ]; then
+  echo "uptime: $((UPTIME / 86400))d $((UPTIME % 86400 / 3600))h $((UPTIME % 3600 / 60))m"
+fi
+
+INFO=$(get "$BASE/info") || INFO=""
+# build.version is where Spring Boot's build-info plugin puts it; the looser
+# second pass catches an image that reports a version elsewhere. Both are
+# best-effort -- an image with no build info answers {} and the line is dropped.
+VERSION=$(printf %s "$INFO" | sed -n 's/.*"build"[^}]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+if [ -z "$VERSION" ]; then
+  VERSION=$(printf %s "$INFO" | tr ',' '\n' | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+fi
+if [ -n "$VERSION" ]; then
+  echo "version: $VERSION"
+fi
+
 WF=$(get "$BASE/workflows") || WF=""
 if [ -z "$WF" ]; then
   echo "status: no answer from $BASE/workflows -- check that workflows is in management.endpoints.web.exposure.include" >&2
@@ -210,12 +262,64 @@ else
   # workflows JSON array on '{' and pull "id"/"state" out of each resulting
   # chunk with sed. This assumes a flat id/state shape per element and would
   # need reworking if the actuator response ever nests braces inside one.
-  printf %s "$WF" | tr '{' '\n' | while IFS= read -r chunk; do
+  #
+  # A chunk is reported only when it carries an id and a real state.
+  # Splitting on '{' also yields whatever nested objects an element contains,
+  # and such a fragment can carry an id of its own, so a state is required at
+  # all. N/A is then dropped on top of that: the connector always reports its
+  # full set of workflow slots and marks every unconfigured one N/A, which is
+  # how one real workflow turns into twenty lines of report. Case-insensitive
+  # because N/A is the connector's spelling, not a value this tool defines.
+  #
+  # Only the placeholder is filtered, never an allowlist of the real states:
+  # running/stopped/paused/error are not a closed set, and hiding a state the
+  # connector adds later would be worse than showing one this script has
+  # never heard of.
+  #
+  # The response is fed in with a terminating newline rather than bare: read
+  # returns non-zero on a final line that carries no newline, which skips the
+  # loop body for it, so a bare printf %s here dropped the last workflow from
+  # every report.
+  #
+  # The actuator returns the workflows in its own map order, which lists 10
+  # before 2, so each row leads with the id and goes through sort -n. An id
+  # that is not a number sorts as 0 rather than vanishing.
+  WF_ROWS=$(printf '%s\n' "$WF" | tr '{' '\n' | while IFS= read -r chunk; do
     id=$(printf %s "$chunk" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     [ -n "$id" ] || continue
     st=$(printf %s "$chunk" | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-    echo "workflow $id: ${st:-unknown}"
-  done
+    [ -n "$st" ] || continue
+    case "$st" in [Nn]/[Aa]) continue ;; esac
+    printf '%s %s\n' "$id" "$st"
+  done | sort -n)
+  if [ -n "$WF_ROWS" ]; then
+    # The widest id decides the column every colon lines up in, so 0 and 10
+    # stack under one another instead of stepping right.
+    WF_WIDTH=1
+    for wf_id in $(printf '%s\n' "$WF_ROWS" | cut -d' ' -f1); do
+      if [ ${#wf_id} -gt "$WF_WIDTH" ]; then
+        WF_WIDTH=${#wf_id}
+      fi
+    done
+    echo "workflows:"
+    printf '%s\n' "$WF_ROWS" | while read -r wf_id wf_state; do
+      while [ ${#wf_id} -lt "$WF_WIDTH" ]; do
+        wf_id=" $wf_id"
+      done
+      echo "  $wf_id: $wf_state"
+    done
+  # Skipping one malformed entry is fine; skipping every one is not -- but
+  # only on an instance that should have had something to report. A standby
+  # runs no workflow, so an empty list there is the normal shape and stays
+  # silent; warning on it would make every standby of an active_standby
+  # deployment read as broken, which with replicas: 2 is half the report.
+  # An active instance -- what standalone and active_active report too --
+  # is worth a word, since there an empty list means no workflow is
+  # configured or the response shape has changed. An unset or unrecognized
+  # state falls through silently and is flagged on its own below.
+  elif [ "$STATE" = "active" ]; then
+    echo "status: $BASE/workflows reported no workflow on this active instance -- every entry was empty or N/A, so either none is configured or the actuator response shape changed" >&2
+  fi
 fi
 
 # active and standby are both normal answers already printed above; only a

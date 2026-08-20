@@ -16,7 +16,7 @@ func baseKube() *spec.Kubernetes {
 			Resources: spec.Resources{CPU: "1", Memory: "1Gi"},
 			Timezone:  "UTC",
 		},
-		Service: spec.Service{Enabled: true, Port: 8090},
+		Service: spec.Service{Enabled: true, Port: spec.Port{Host: 8090, Container: 8090}},
 	}
 }
 
@@ -394,17 +394,20 @@ func TestRenderExistingSecrets(t *testing.T) {
 	}
 }
 
-func TestManagementPortFallback(t *testing.T) {
-	if got := ManagementPort(Input{Kube: baseKube(), Defaults: &spec.Defaults{Management: spec.Management{Present: true, Port: 9999}}}); got != 9999 {
-		t.Errorf("mgmt = %d want 9999 (defaults)", got)
+// TestManagementPort pins that ManagementPort is exactly
+// Defaults.EffectiveManagementPort: Kube.Service.Port is a targetPort mapping,
+// not a management-port fallback (spec resolves an unset service.port to the
+// management port itself, before Render/ManagementPort ever see it -- see
+// internal/spec's TestPortDefaultsFollowManagementPort).
+func TestManagementPort(t *testing.T) {
+	if got := ManagementPort(Input{Kube: baseKube(), Defaults: &spec.Defaults{Management: spec.Management{Port: 9999}}}); got != 9999 {
+		t.Errorf("mgmt = %d want 9999", got)
 	}
 	if got := ManagementPort(Input{Kube: baseKube(), Defaults: &spec.Defaults{}}); got != 8090 {
-		t.Errorf("mgmt = %d want 8090 (service port)", got)
-	}
-	k := baseKube()
-	k.Service.Port = 0
-	if got := ManagementPort(Input{Kube: k, Defaults: nil}); got != 8090 {
 		t.Errorf("mgmt = %d want 8090 (default)", got)
+	}
+	if got := ManagementPort(Input{Kube: baseKube(), Defaults: nil}); got != 8090 {
+		t.Errorf("mgmt = %d want 8090 (nil Defaults)", got)
 	}
 }
 
@@ -464,36 +467,36 @@ func TestRenderNoResources(t *testing.T) {
 	}
 }
 
-func TestServicePortDefaultsToManagementPort(t *testing.T) {
-	// `service: {enabled: true}` with no port used to render `port: 0`, which the
-	// API server rejects at apply time. It now follows the same fallback chain as
-	// the container port: defaults.management.port, else the connector default.
-	render := func(svc spec.Service, defs *spec.Defaults) string {
+// TestRenderServicePort pins that Render renders whatever spec.Port it is
+// given verbatim (port: Host, targetPort: Container), with no fallback logic
+// of its own. An unset service.port is resolved by spec.applyKubeDefaults
+// before Render ever sees it (mgmtPort:mgmtPort, including a non-default
+// management.port), so that resolution is exercised here as an
+// already-resolved Port, matching what production wiring (internal/gen builds
+// Input from spec.Env.Kubernetes/Defaults) actually passes in.
+func TestRenderServicePort(t *testing.T) {
+	render := func(port spec.Port, defs *spec.Defaults) string {
 		k := baseKube()
-		k.Service = svc
+		k.Service = spec.Service{Enabled: true, Port: port}
 		return Render(Input{Kube: k, Defaults: defs, Instance: one("solmq", "spring: {}\n", &consolidate.Model{})})
 	}
 	// The Service block is the only place both keys appear together, so matching
 	// the pair pins the service port rather than the container/probe ports.
-	svcBlock := func(port, target int) string {
-		return "      port: " + strconv.Itoa(port) + "\n      targetPort: " + strconv.Itoa(target) + "\n"
+	svcBlock := func(port spec.Port) string {
+		return "      port: " + strconv.Itoa(port.Host) + "\n      targetPort: " + strconv.Itoa(port.Container) + "\n"
 	}
 	cases := []struct {
-		name         string
-		svc          spec.Service
-		defs         *spec.Defaults
-		port, target int
+		name string
+		port spec.Port
+		defs *spec.Defaults
 	}{
-		{"unset follows the management port", spec.Service{Enabled: true}, &spec.Defaults{Management: spec.Management{Present: true, Port: 9000}}, 9000, 9000},
-		{"unset with no management port falls back to the connector default", spec.Service{Enabled: true}, &spec.Defaults{}, 8090, 8090},
-		{"explicit port is kept verbatim", spec.Service{Enabled: true, Port: 8081}, &spec.Defaults{}, 8081, 8081},
+		{"host:container distinct ports", spec.Port{Host: 8081, Container: 9000}, &spec.Defaults{}},
+		{"resolved to the default management port", spec.Port{Host: 8090, Container: 8090}, &spec.Defaults{}},
+		{"resolved to a non-default management port", spec.Port{Host: 9500, Container: 9500}, &spec.Defaults{Management: spec.Management{Port: 9500}}},
 	}
 	for _, c := range cases {
-		out := render(c.svc, c.defs)
-		if strings.Contains(out, "port: 0") {
-			t.Errorf("%s: rendered port: 0\n---\n%s", c.name, out)
-		}
-		if want := svcBlock(c.port, c.target); !strings.Contains(out, want) {
+		out := render(c.port, c.defs)
+		if want := svcBlock(c.port); !strings.Contains(out, want) {
 			t.Errorf("%s: want\n%s\ngot\n%s", c.name, want, out)
 		}
 	}

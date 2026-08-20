@@ -211,19 +211,17 @@ func TestBuildSolaceTopicSourceEmitsConsumerTopic(t *testing.T) {
 	}
 }
 
-// TestApplyStatusAccessSecurityAbsent pins the security-absent branch: absent
-// means EffectivelyEnabled (spec.Security.EffectivelyEnabled's own doc), so
-// Build synthesizes the management/security blocks from nothing and the
-// reserved account is the only user, carrying the literal status password
-// rather than a secretRef placeholder.
-func TestApplyStatusAccessSecurityAbsent(t *testing.T) {
+// TestApplyStatusAccessNoOperatorUsers pins the no-configured-users case:
+// Build synthesizes the security block from nothing and the reserved account
+// is the only user, carrying the literal status password rather than a
+// secretRef placeholder. Management security is unconditional now (no
+// enabled/disabled toggle survives to this layer), so there is nothing left
+// to branch on.
+func TestApplyStatusAccessNoOperatorUsers(t *testing.T) {
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 		Source: solaceSide("prod", "IN", spec.DestQueue, ""), Target: solaceSide("prod", "OUT", spec.DestQueue, "")}}
 	m, _ := Build(wfs, nil, Opts{MountStores: true, StatusPassword: "status-literal"})
 
-	if !m.Security.Present || !m.Security.Enabled {
-		t.Fatalf("Security = %+v, want Present and Enabled both true", m.Security)
-	}
 	if len(m.Security.Users) != 1 || m.Security.Users[0].Name != spec.StatusUserName || m.Security.Users[0].Password != "status-literal" {
 		t.Fatalf("Security.Users = %+v, want one reserved user carrying the literal password", m.Security.Users)
 	}
@@ -234,11 +232,44 @@ func TestApplyStatusAccessSecurityAbsent(t *testing.T) {
 	}
 }
 
-// TestApplyStatusAccessSecurityEnabledAppendsAfterExisting covers security
-// present+enabled with existing users: the reserved account is appended last,
-// and existing users are still rewired through secretRef exactly as before.
-func TestApplyStatusAccessSecurityEnabledAppendsAfterExisting(t *testing.T) {
-	d := &spec.Defaults{Security: spec.Security{Present: true, Enabled: true, Users: []spec.User{
+// TestApplyStatusAccessCarriesOperatorRoles pins the roles pass-through: an
+// operator's roles reach the model exactly as authored (only the password is
+// rewritten), while the reserved account is appended with none -- an empty list
+// is the connector's read-only default, which is what keeps that account
+// read-only. It also proves applyStatusAccess does not mutate the caller's
+// Defaults, which shares the roles backing array with the copy it makes.
+func TestApplyStatusAccessCarriesOperatorRoles(t *testing.T) {
+	d := &spec.Defaults{Security: spec.Security{Users: []spec.User{
+		{Name: "ops", PasswordEnv: "OPS_PASS_ENV", Roles: []string{"admin"}},
+		{Name: "probe", Password: "probe-pass"},
+	}}}
+	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
+		Source: solaceSide("prod", "IN", spec.DestQueue, ""), Target: solaceSide("prod", "OUT", spec.DestQueue, "")}}
+	m, _ := Build(wfs, d, Opts{MountStores: true, StatusPassword: "status-literal"})
+
+	if len(m.Security.Users) != 3 {
+		t.Fatalf("Security.Users = %+v, want 3 (2 operator + 1 reserved)", m.Security.Users)
+	}
+	if got := m.Security.Users[0].Roles; len(got) != 1 || got[0] != "admin" {
+		t.Errorf("ops roles = %v, want [admin] carried through verbatim", got)
+	}
+	if got := m.Security.Users[1].Roles; len(got) != 0 {
+		t.Errorf("probe roles = %v, want none (no role was authored)", got)
+	}
+	if got := m.Security.Users[2]; got.Name != spec.StatusUserName || len(got.Roles) != 0 {
+		t.Errorf("reserved account = %+v, want %s with no roles so it stays read-only", got, spec.StatusUserName)
+	}
+	// The caller's own Defaults must still describe what the operator wrote.
+	if got := d.Security.Users[0].Roles; len(got) != 1 || got[0] != "admin" {
+		t.Errorf("caller Defaults roles = %v, want [admin] unmutated", got)
+	}
+}
+
+// TestApplyStatusAccessAppendsAfterExistingUsers covers operator-configured
+// users: the reserved account is appended last, and existing users are still
+// rewired through secretRef exactly as before.
+func TestApplyStatusAccessAppendsAfterExistingUsers(t *testing.T) {
+	d := &spec.Defaults{Security: spec.Security{Users: []spec.User{
 		{Name: "alice", Password: "alice-pass"},
 		{Name: "bob", PasswordEnv: "BOB_PASS_ENV"},
 	}}}
@@ -266,74 +297,18 @@ func TestApplyStatusAccessSecurityEnabledAppendsAfterExisting(t *testing.T) {
 	}
 }
 
-// TestApplyStatusAccessSecurityDisabled covers explicit security.enabled:
-// false: no reserved user is added and Enabled stays false.
-func TestApplyStatusAccessSecurityDisabled(t *testing.T) {
-	d := &spec.Defaults{Security: spec.Security{Present: true, Enabled: false, Users: []spec.User{
-		{Name: "alice", Password: "alice-pass"},
-	}}}
+// TestApplyStatusAccessExposureIsFixed pins the fixed actuator exposure list:
+// applyStatusAccess always sets it to exactly this value and ignores whatever
+// Defaults carries (management.exposure is a removed key from here on;
+// validate rejects a non-nil value before Build ever runs, so consolidate
+// need not read it at all).
+func TestApplyStatusAccessExposureIsFixed(t *testing.T) {
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 		Source: solaceSide("prod", "IN", spec.DestQueue, ""), Target: solaceSide("prod", "OUT", spec.DestQueue, "")}}
-	m, _ := Build(wfs, d, Opts{MountStores: true, StatusPassword: "status-literal"})
-
-	if m.Security.Enabled {
-		t.Error("Security.Enabled should stay false when explicitly disabled")
-	}
-	if len(m.Security.Users) != 1 || m.Security.Users[0].Name != "alice" {
-		t.Fatalf("Security.Users = %+v, want only the existing user (no reserved account)", m.Security.Users)
-	}
-}
-
-// TestApplyStatusAccessExposure covers every exposure branch: empty defaults to
-// health+leaderelection+workflows, an already-complete list is left unchanged,
-// a partial list gets only the missing entry appended, and "*" (Spring's
-// wildcard for "everything") is left untouched.
-func TestApplyStatusAccessExposure(t *testing.T) {
-	cases := []struct {
-		name, in, want string
-	}{
-		{"empty", "", "health,leaderelection,workflows"},
-		{"already both", "health,leaderelection,workflows", "health,leaderelection,workflows"},
-		{"missing one", "health,leaderelection", "health,leaderelection,workflows"},
-		{"wildcard", "*", "*"},
-	}
-	for _, c := range cases {
-		d := &spec.Defaults{Management: spec.Management{Present: true, Exposure: c.in}}
-		wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
-			Source: solaceSide("prod", "IN", spec.DestQueue, ""), Target: solaceSide("prod", "OUT", spec.DestQueue, "")}}
-		m, _ := Build(wfs, d, Opts{MountStores: true})
-		if !m.Management.Present {
-			t.Errorf("%s: Management.Present should always be forced true", c.name)
-		}
-		if m.Management.Exposure != c.want {
-			t.Errorf("%s: Exposure = %q, want %q", c.name, m.Management.Exposure, c.want)
-		}
-	}
-}
-
-// TestHasExposureEntry pins the substring-vs-exact-match distinction: a
-// same-prefix entry like "leaderelection2" or a suffixed "leaderelectionx"
-// must never be read as "leaderelection", and spaces after a comma are
-// trimmed before comparing.
-func TestHasExposureEntry(t *testing.T) {
-	cases := []struct {
-		csv, entry string
-		want       bool
-	}{
-		{"health,leaderelection,workflows", "leaderelection", true},
-		{"health, leaderelection, workflows", "leaderelection", true},
-		{"leaderelection2", "leaderelection", false},
-		{"xleaderelection", "leaderelection", false},
-		{"leaderelectionx", "leaderelection", false},
-		{"*", "leaderelection", true},
-		{"*", "workflows", true},
-		{"health", "leaderelection", false},
-		{"", "leaderelection", false},
-	}
-	for _, c := range cases {
-		if got := hasExposureEntry(c.csv, c.entry); got != c.want {
-			t.Errorf("hasExposureEntry(%q, %q) = %v, want %v", c.csv, c.entry, got, c.want)
-		}
+	m, _ := Build(wfs, &spec.Defaults{}, Opts{MountStores: true})
+	const want = "health,info,metrics,leaderelection,workflows"
+	if m.Management.Exposure != want {
+		t.Errorf("Exposure = %q, want %q", m.Management.Exposure, want)
 	}
 }
 

@@ -218,14 +218,25 @@ func renderConnector(w *yw, m *consolidate.Model) {
 		w.Line(6, strconv.Itoa(wf.ID)+":")
 		w.Line(8, "enabled: "+strconv.FormatBool(wf.Enabled))
 	}
-	if m.Security.Present {
-		w.Line(4, "security:")
-		w.Line(6, "enabled: "+strconv.FormatBool(m.Security.Enabled))
-		if len(m.Security.Users) > 0 {
-			w.Line(6, "users:")
-			for _, u := range m.Security.Users {
-				w.Line(8, "- name: "+q(u.Name))
-				w.Line(10, "password: "+q(u.Password))
+	// Management security is always on now (see spec.StatusUserName): the
+	// block is unconditional and enabled is always true, so there is no
+	// operator toggle left to gate on.
+	w.Line(4, "security:")
+	w.Line(6, "enabled: true")
+	if len(m.Security.Users) > 0 {
+		w.Line(6, "users:")
+		for _, u := range m.Security.Users {
+			w.Line(8, "- name: "+q(u.Name))
+			w.Line(10, "password: "+q(u.Password))
+			// Omitted entirely when empty: an empty list is the connector's
+			// read-only default, so a role-less user (every user before roles
+			// were supported, and the reserved status account) renders exactly
+			// as it did before.
+			if len(u.Roles) > 0 {
+				w.Line(10, "roles:")
+				for _, r := range u.Roles {
+					w.Line(12, "- "+q(r))
+				}
 			}
 		}
 	}
@@ -266,21 +277,18 @@ func renderLeaderElection(w *yw, le *consolidate.LeaderElectionModel) {
 	}
 }
 
-func renderManagement(w *yw, mg spec.Management) {
-	if !mg.Present {
-		return
-	}
+// renderManagement always emits the management block: server.port and the
+// fixed actuator exposure list are unconditional (consolidate.applyStatusAccess
+// guarantees both are always set), endpoint.health.show-details only when the
+// operator configured one.
+func renderManagement(w *yw, mg consolidate.Management) {
 	w.Line(0, "management:")
-	if mg.Port != 0 {
-		w.Line(2, "server:")
-		w.Line(4, "port: "+strconv.Itoa(mg.Port))
-	}
-	if mg.Exposure != "" {
-		w.Line(2, "endpoints:")
-		w.Line(4, "web:")
-		w.Line(6, "exposure:")
-		w.Line(8, "include: "+q(mg.Exposure))
-	}
+	w.Line(2, "server:")
+	w.Line(4, "port: "+strconv.Itoa(mg.Port))
+	w.Line(2, "endpoints:")
+	w.Line(4, "web:")
+	w.Line(6, "exposure:")
+	w.Line(8, "include: "+mg.Exposure)
 	if mg.HealthShowDetails != "" {
 		w.Line(2, "endpoint:")
 		w.Line(4, "health:")

@@ -278,7 +278,7 @@ solace:
 | `conn-name` | String | _(required)_ | Connection name in format `hostname(port)`. Multiple: `host1(1414),host2(1414)` |
 | `user` | String | _(none)_ | Username to authenticate with MQ |
 | `password` | String | _(none)_ | Password to authenticate with MQ |
-| `ssl-bundle` | String | _(none)_ | Name of a Spring SSL Bundle for TLS (see [Section 10](#10-spring-ssl-bundles)) |
+| `ssl-bundle` | String | _(none)_ | Name of a Spring SSL Bundle for TLS (see [Section 11](#11-spring-ssl-bundles)) |
 
 ### Additional Properties (`additional-properties`)
 
@@ -293,7 +293,7 @@ Key-value pairs passed to the IBM MQ JMS connection. Keys can be the real string
 | `WMQ_CLIENT_RECONNECT_OPTIONS` | String | Client reconnect behavior (`MQCNO_RECONNECT`, `MQCNO_RECONNECT_Q_MGR`, etc.) |
 
 > [!WARNING]
-> IBM MQ uses **IBM cipher spec names** by default, but the connector's JVM uses JCE names. You **must** set the JVM property `-Dcom.ibm.mq.cfg.useIBMCipherMappings=false` to use standard JCE cipher names (like `TLS_RSA_WITH_AES_256_CBC_SHA256`). See [Section 13](#13-jvm-system-properties).
+> IBM MQ uses **IBM cipher spec names** by default, but the connector's JVM uses JCE names. You **must** set the JVM property `-Dcom.ibm.mq.cfg.useIBMCipherMappings=false` to use standard JCE cipher names (like `TLS_RSA_WITH_AES_256_CBC_SHA256`). See [Section 14](#14-jvm-system-properties).
 
 **Example (Manual):**
 

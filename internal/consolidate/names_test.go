@@ -122,7 +122,7 @@ func TestGeneratedSecretNamesStayOutOfChildEnvDanger(t *testing.T) {
 			"ld-preload": {System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM", Channel: "C",
 				User: "mq-literal-user", PasswordEnv: "MQ_PASS_ENV", TLS: true, KeyAlias: "alias1"},
 		},
-		Security: spec.Security{Present: true, Enabled: true, Users: []spec.User{
+		Security: spec.Security{Users: []spec.User{
 			{Name: "LD", Password: "sekret"},
 			{Name: "../../etc/passwd", PasswordEnv: "WEIRD_ENV"},
 		}},

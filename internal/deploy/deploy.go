@@ -269,17 +269,11 @@ func Render(in Input) string {
 	sep()
 	renderDeployment(w, in, in.Instance, ns, credRef, storeRef, hasStores, mgmtPort)
 
-	// 5. Service (when enabled). An unset service.port follows the same fallback
-	// chain as the container port, so `service: {enabled: true}` on its own
-	// publishes the management port instead of rendering `port: 0`, which the API
-	// server rejects at apply time.
+	// 5. Service (when enabled). spec already defaults an unset service.port to
+	// mgmtPort:mgmtPort (applyKubeDefaults), so there is no fallback to redo here.
 	if in.Kube.Service.Enabled {
-		svcPort := in.Kube.Service.Port
-		if svcPort == 0 {
-			svcPort = mgmtPort
-		}
 		sep()
-		renderService(w, in.Instance.Name, ns, svcPort, mgmtPort)
+		renderService(w, in.Instance.Name, ns, in.Kube.Service.Port)
 	}
 
 	return w.String()
@@ -499,7 +493,7 @@ func renderResources(w *yw, r spec.Resources) {
 	}
 }
 
-func renderService(w *yw, name, ns string, port, targetPort int) {
+func renderService(w *yw, name, ns string, port spec.Port) {
 	w.Line(0, "apiVersion: v1")
 	w.Line(0, "kind: Service")
 	w.Line(0, "metadata:")
@@ -510,18 +504,15 @@ func renderService(w *yw, name, ns string, port, targetPort int) {
 	w.Line(4, "app: "+name)
 	w.Line(2, "ports:")
 	w.Line(4, "- name: management")
-	w.Line(6, "port: "+strconv.Itoa(port))
-	w.Line(6, "targetPort: "+strconv.Itoa(targetPort))
+	w.Line(6, "port: "+strconv.Itoa(port.Host))
+	w.Line(6, "targetPort: "+strconv.Itoa(port.Container))
 }
 
-// ManagementPort prefers the configured management port, then the service port,
-// then the connector default 8090.
+// ManagementPort returns the effective management port from Defaults.
+// Kube.Service.Port plays no part: it is a spec.Port whose Container side is a
+// targetPort, not necessarily the management port, and an unset service.port
+// is already resolved to mgmtPort:mgmtPort by spec's applyKubeDefaults before
+// Input is ever built.
 func ManagementPort(in Input) int {
-	if in.Defaults != nil && in.Defaults.Management.Port != 0 {
-		return in.Defaults.Management.Port
-	}
-	if in.Kube.Service.Port != 0 {
-		return in.Kube.Service.Port
-	}
-	return 8090
+	return in.Defaults.EffectiveManagementPort()
 }
