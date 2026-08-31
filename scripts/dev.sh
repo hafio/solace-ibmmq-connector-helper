@@ -73,7 +73,34 @@ task_build() {
     go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$DIST/$BIN_NAME" ./cmd/solmq-conn-util
 }
 
-task_vet() { run vet go vet ./...; }
+# Static analysis, plus a formatting CHECK. `gofmt -l` only LISTS unformatted
+# files -- it never writes -- so drift is REPORTED here the way `test` reports
+# golden drift, never silently fixed. That is the whole reason the check lives
+# in vet while a `gofmt -w` task would have to stay out of every aggregate,
+# exactly as task_regen does: a gate that repairs what it is measuring proves
+# nothing. vet and the format check both always run and both report, so one
+# pass shows every problem instead of hiding vet errors behind a formatting
+# failure.
+task_vet() {
+  local code=0
+  run vet go vet ./... || code=$?
+  if ! command -v gofmt >/dev/null 2>&1; then
+    echo 'gofmt not found on PATH: it ships with the Go toolchain, so this is a broken install' \
+      | tee -a "$LOG_DIR/vet.log"
+    return 1
+  fi
+  local unformatted
+  unformatted=$(gofmt -l .)
+  if [ -n "$unformatted" ]; then
+    {
+      echo 'gofmt: these files are not formatted:'
+      echo "$unformatted"
+      echo "fix with: gofmt -w $(echo "$unformatted" | tr '\n' ' ' | sed 's/ *$//')"
+    } | tee -a "$LOG_DIR/vet.log"
+    if [ "$code" -eq 0 ]; then code=1; fi
+  fi
+  return "$code"
+}
 
 task_test() { run test go test -count=1 ./...; }
 

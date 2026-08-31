@@ -88,7 +88,33 @@ function Task-build {
   return $code
 }
 
-function Task-vet  { Invoke-Logged 'vet'  'go' @('vet','./...') }
+# Static analysis, plus a formatting CHECK. `gofmt -l` only LISTS unformatted
+# files -- it never writes -- so drift is REPORTED here the way `test` reports
+# golden drift, never silently fixed. That is the whole reason the check lives
+# in vet while a `gofmt -w` task would have to stay out of every aggregate,
+# exactly as Task-regen does: a gate that repairs what it is measuring proves
+# nothing. vet and the format check both always run and both report, so one
+# pass shows every problem instead of hiding vet errors behind a formatting
+# failure.
+function Task-vet {
+  $code = Invoke-Logged 'vet' 'go' @('vet','./...')
+  if (-not (Get-Command gofmt -ErrorAction SilentlyContinue)) {
+    $msg = 'gofmt not found on PATH: it ships with the Go toolchain, so this is a broken install'
+    Add-Content -Path (Get-Log 'vet') -Value $msg -Encoding utf8
+    Write-Host $msg
+    return 1
+  }
+  $unformatted = @(& gofmt -l . | Where-Object { "$_" -ne '' })
+  if ($unformatted.Count -gt 0) {
+    $msg = "gofmt: these files are not formatted:`n" + ($unformatted -join "`n") +
+           "`nfix with: gofmt -w " + ($unformatted -join ' ')
+    Add-Content -Path (Get-Log 'vet') -Value $msg -Encoding utf8
+    Write-Host $msg
+    if ($code -eq 0) { $code = 1 }
+  }
+  return $code
+}
+
 function Task-test { Invoke-Logged 'test' 'go' @('test','-count=1','./...') }
 
 function Task-cov {

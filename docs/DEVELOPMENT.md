@@ -25,7 +25,13 @@ Or use the mirrored task runner (`dev.sh` / `dev.ps1`, behaviorally identical):
 
 Tasks: `build vet test cov scan regen graphify`, plus aggregates `all` (= build vet test, run by CI
 as `all scan`) and `full` (= all + cov + scan + graphify, the pre-tag sweep). Gates
-build/vet/test/scan are fatal. `scan` is `go tool govulncheck ./...`, fatal on any finding — every
+build/vet/test/scan are fatal. `vet` is `go vet ./...` **plus a formatting check**: it fails when
+`gofmt -l .` lists anything, naming the files and the `gofmt -w` line that fixes them. The check
+only lists -- it never writes -- which is what lets it live inside an aggregate at all; a
+`gofmt -w` task would have to stay out of every aggregate for the same reason `regen` does
+(below), since a gate that repairs what it measures proves nothing. `go vet` and the format
+check both always run, so one pass reports both rather than hiding vet errors behind a
+formatting failure. `scan` is `go tool govulncheck ./...`, fatal on any finding — every
 Go vuln-DB finding is reachable-and-fixable, so there is nothing to warn-and-pass on. The scanner is
 pinned in `go.mod` as a tool dependency rather than invoked as `go run ...@latest`: that form ignores
 `go.mod` and builds the scanner on whatever toolchain its own module requires, which then cannot load
