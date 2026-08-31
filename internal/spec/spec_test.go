@@ -1,6 +1,11 @@
 package spec
 
-import "testing"
+import (
+	"slices"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
 
 func TestParseWorkflowSolaceAndMQ(t *testing.T) {
 	data := []byte(`
@@ -147,6 +152,97 @@ leader-election:
 	le := d.LeaderElection
 	if !le.Present || le.Mode != LeaderActiveStby || le.Queue != "mgmt-q" || le.ConnRef != "edge" || le.FailOver == nil {
 		t.Fatalf("leader-election: %+v", le)
+	}
+}
+
+// TestParseDefaultsLeaderSession covers the inline management session under its
+// current key. session: shares the solace block shape with a workflow side --
+// that is what makes session.* the same interface as solace.java.* -- so
+// everything a connection can carry parses here, api-properties included.
+func TestParseDefaultsLeaderSession(t *testing.T) {
+	d, err := ParseDefaults([]byte(`
+leader-election:
+  mode: active_standby
+  queue: mgmt-q
+  session:
+    host: tcps://b:55443
+    msg-vpn: prod
+    client-username: u
+    client-password-env: MGMT_PASS
+    key-alias: sc
+    api-properties:
+      REAPPLY_SUBSCRIPTIONS: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	le := d.LeaderElection
+	if le.SolaceKey {
+		t.Error("session: must not set the retired-key marker")
+	}
+	if le.Session == nil {
+		t.Fatalf("leader-election: %+v", le)
+	}
+	if le.Session.System != SystemSolace || le.Session.Host != "tcps://b:55443" || le.Session.KeyAlias != "sc" {
+		t.Fatalf("session: %+v", *le.Session)
+	}
+	if le.Session.Secret().EnvVar != "MGMT_PASS" {
+		t.Errorf("session credentials: %+v", le.Session.Secret())
+	}
+	if le.Session.APIProps == nil {
+		t.Error("session api-properties must parse; consolidate renders them")
+	}
+}
+
+// TestParseDefaultsLeaderSolaceKeyRetired pins the retired spelling. It must
+// PARSE, whatever shape it holds, so validate can answer with the rename rather
+// than the parser answering with a yaml type error that names neither key.
+func TestParseDefaultsLeaderSolaceKeyRetired(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		body string
+	}{
+		{"mapping", "  solace:\n    host: tcps://b:55443\n    msg-vpn: prod\n"},
+		{"scalar", "  solace: 5\n"},
+		{"list", "  solace:\n    - a\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d, err := ParseDefaults([]byte("leader-election:\n  mode: active_standby\n  queue: mgmt-q\n" + c.body))
+			if err != nil {
+				t.Fatalf("the retired key must parse so validate can name it: %v", err)
+			}
+			if !d.LeaderElection.SolaceKey {
+				t.Error("SolaceKey = false, want the retired-key marker set")
+			}
+			if d.LeaderElection.Session != nil {
+				t.Errorf("the retired key must not populate Session, got %+v", *d.LeaderElection.Session)
+			}
+		})
+	}
+}
+
+// TestSideBindingFields pins the predicate validate uses to reject binding keys
+// inside a management session. It is the complement of SetsConnFields, which
+// deliberately ignores every key here.
+func TestSideBindingFields(t *testing.T) {
+	node := &yaml.Node{Kind: yaml.MappingNode}
+	for _, c := range []struct {
+		name string
+		side Side
+		want []string
+	}{
+		{"bare tuple", Side{System: SystemSolace, Host: "tcps://b", MsgVPN: "v"}, nil},
+		{"queue", Side{DestKind: DestQueue, Dest: "Q"}, []string{DestQueue}},
+		{"topic", Side{DestKind: DestTopic, Dest: "T"}, []string{DestTopic}},
+		{"consumer", Side{Consumer: node}, []string{"consumer"}},
+		{"producer", Side{Producer: node}, []string{"producer"}},
+		{"consumer and producer", Side{Consumer: node, Producer: node}, []string{"consumer", "producer"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.side.BindingFields(); !slices.Equal(got, c.want) {
+				t.Errorf("BindingFields() = %q, want %q", got, c.want)
+			}
+		})
 	}
 }
 

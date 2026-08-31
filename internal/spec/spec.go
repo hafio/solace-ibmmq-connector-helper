@@ -298,6 +298,29 @@ func (s Side) SetsConnFields() bool {
 		!s.Username().Empty() || !s.Secret().Empty()
 }
 
+// BindingFields names the binding-level keys the side declared -- its
+// destination, and its per-binding tuning -- in schema order, or nil when it
+// declared none.
+//
+// It is the mirror image of SetsConnFields, and covers exactly the keys that one
+// deliberately ignores: these bind one flow rather than describe a connection, so
+// a block that is a connection only -- the leader-election management session --
+// must carry none of them. It returns the names rather than a bool because the
+// caller names the offending key in its message.
+func (s Side) BindingFields() []string {
+	var out []string
+	if s.DestKind != "" {
+		out = append(out, s.DestKind) // DestQueue | DestTopic; applyDest sets Dest with it
+	}
+	if s.Consumer != nil {
+		out = append(out, "consumer")
+	}
+	if s.Producer != nil {
+		out = append(out, "producer")
+	}
+	return out
+}
+
 // Cred is one credential position: either a literal value or the name of a host
 // environment variable holding it, never both. Both forms resolve to the same
 // stable secret name, so the generated config never carries either one.

@@ -172,6 +172,24 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
   which reports it. Credential
   env-files are written `0600` and never logged. Kubernetes manifests are piped on
   **stdin** (`apply -f -`), not argv.
+- **Streaming seam.** `runner.Runner` is one method (`Run`) and fully buffered: it returns
+  only once the process has exited, with stdout and stderr merged into one string for error
+  context. `runner.Streamer` is the optional second capability for the case that cannot
+  express -- `logs --follow`, where output has to arrive while the process is still running.
+  It is a **separate interface, asked for by type assertion**, not a second method on
+  `Runner`: most Runners are fakes that only record argv and have no business growing a
+  streaming implementation, and `var _ Streamer = OS{}` makes the production assertion a
+  compile-time fact. Its two writers are separate on purpose, so a redirected `logs > app.log`
+  captures the log and leaves the platform CLI's diagnostics on the terminal. A cancelled
+  context is reported as success -- a follow the operator ended with Ctrl-C did not fail --
+  and `cmd.Cancel` interrupts, falling back to `Kill` where a signal cannot be delivered
+  (Windows), with `WaitDelay` as the backstop for a child that ignores it.
+- **Shared instance resolution.** `cmd/solmq-conn-util/instances.go` holds what every verb
+  that reaches into running instances needs: platform resolution, namespace resolution, the
+  `SafeToken` checks on every operator-supplied name, `ParseCommand`, and the pod/container
+  discovery branches. `status` and `logs` both call it rather than each carrying a copy --
+  a debugging pair that disagreed about which instances it meant would be worse than either
+  verb alone.
 - **Durable names** use UUIDv5 (namespace `6ba7f4e2-9c1d-5a3b-8e47-2f9a0c7d13e5`, key =
   `conn-name ‖ queue-manager ‖ topic ‖ file-basename` joined by `0x1F`). Renaming a workflow
   file changes its durable name and orphans the old subscription — rename deliberately.

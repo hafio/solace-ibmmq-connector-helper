@@ -22,7 +22,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 584 test functions, 851 case rows across 17 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 641 test functions, 919 case rows across 17 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/spec
 
@@ -40,6 +40,11 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestWorkflowFileLess | 7 vs 007 / x vs x | equal value with different zero padding is ordered by the raw text, and no name is less than itself -- the strict order sort.Slice requires |
 | TestConnRefSideMayTuneBinding | - | consumer block parses on a conn-ref side, SetsConnFields ignores it, and Resolve keeps it alongside the referenced tuple and destination |
 | TestParseDefaultsConnectionsAndLeaderElection | - | parses 2 named connections and leader-election active_standby with fail-over |
+| TestParseDefaultsLeaderSession | - | an inline `session:` block parses the full solace tuple, api-properties included, and leaves the retired-key marker unset |
+| TestParseDefaultsLeaderSolaceKeyRetired | mapping / scalar / list | the retired `solace:` key parses whatever shape it holds, sets SolaceKey and never populates Session, so validate answers with the rename |
+| TestSideBindingFields | bare tuple | no destination and no tuning means no binding fields |
+| TestSideBindingFields | queue / topic | the destination kind is reported |
+| TestSideBindingFields | consumer / producer / both | per-binding tuning is reported, in schema order |
 | TestResolveConnRef | known ref edge | resolves host/msg-vpn/key-alias from connections map, keeps dest |
 | TestResolveConnRef | unknown ref nope | returned unchanged with ConnRef nope and empty Host |
 | TestParseWorkflowEnabledDefaultsTrue | - | enabled defaults true and target stays unset when absent |
@@ -133,6 +138,14 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestLeaderElectionActiveMissingQueueAndSession | - | active_active mode missing queue/conn-ref errors requires a 'queue' and requires a solace session |
 | TestLeaderElectionConnRefMustBeSolace | - | leader-election conn-ref pointing to mq connection errors must be a solace connection |
 | TestLeaderElectionInvalidMode | - | unknown leader-election mode 'bogus' errors is invalid |
+| TestLeaderElectionSolaceKeyRenamed | active_standby / standalone | the retired `leader-election.solace` key errors with the rename message in every mode, not only the active ones |
+| TestLeaderElectionConnRefAndInlineSession | - | conn-ref set alongside an inline session errors sets both conn-ref |
+| TestLeaderElectionSessionRejectsBindingFields | queue / topic / consumer / producer | each binding key inside `session:` errors may not set queue/topic/consumer/producer |
+| TestLeaderElectionInlineSessionValid | - | a bare solace tuple under `session:` passes clean |
+| TestLeaderSessionPasswordConflict | inline session disagrees | a session sharing a binder tuple with a different password errors reaches the same broker tuple with a different password |
+| TestLeaderSessionPasswordConflict | conn-ref session disagrees | same conflict through the conn-ref form |
+| TestLeaderSessionPasswordConflict | session agrees | one password across both passes |
+| TestLeaderSessionPasswordConflict | session is a different broker | a distinct tuple is a distinct binder, so the passwords may differ |
 | TestMQCipherRequiresTLS | - | mq cipher set with tls false errors require 'tls: true' |
 | TestDeployKubeChecks | - | a bad deployment name errors with not a valid DNS-1123 label |
 | TestCredentialsEnvChecks | - | unset env var for credentials errors variable MISSING_VAR is not set |
@@ -268,7 +281,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestPasswordConflictOnSameBinder | identical passwords | same tuple sharing one password passes |
 | TestPasswordConflictOnSameBinder | distinct tuples | different queue-manager means different binders, so passwords may differ |
 | TestPasswordConflictSolaceSide | - | the solace branch keys on client-password and errors on a conflict |
-| TestRemovedDefaultsKeysRejected | - | a security.enabled value (true or false) errors security.enabled is no longer configurable, a management.exposure value errors management.exposure is no longer configurable, and neither key set validates clean |
+| TestRemovedDefaultsKeysRejected | - | a security.enabled value (true or false) errors security.enabled is no longer configurable, a management.exposure value errors management.exposure is no longer configurable, and neither key set validates clean (the third retired key, leader-election.solace, is covered by TestLeaderElectionSolaceKeyRenamed) |
 | TestStatusUserReservedName | - | a security.users entry named spec.StatusUserName errors reserved, naming security.users[1].name; a differently-named user does not collide |
 | TestSecurityUserRoles | admin / unknown-but-well-formed / several / empty / whitespace-only / shell metacharacter / embedded space / no roles | roles are checked for usability, not against an allowlist: a well-formed unrecognized role passes, an empty or whitespace-only entry errors naming both indices, an unsafe-charset entry errors, and omitting roles entirely stays clean. Also pins both error texts verbatim, since the generator page's JS validator mirrors them word for word |
 | TestStatusUserPasswordEnvCharset | nil Env / unset / empty / valid value | none trip the SECURITY_USER_SOLMQ_STATUS_PASSWORD charset error |
@@ -303,7 +316,7 @@ Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [cons
 | TestMergeProp | append new key b | list grows to 2 entries, no warnings |
 | TestMergeProp | overwrite existing key a with new value | value updated to 9, one warning emitted |
 | TestMergeProp | overwrite key a with same value again | no additional warning |
-| TestAppendPassthroughCollision | passthrough T collides with existing T | output has 2 props and 1 collision warning |
+| TestAppendPassthroughCollision | passthrough T collides with existing T | output has 2 props and 1 collision warning reading `binder "bndr": passthrough overrides tool-managed key "T"; tool value kept` byte for byte, since the owner label is caller-supplied now |
 | TestNodeToProps | mapping with scalar and nested keys | 2 props, first key k1/val v1, second has Sub set |
 | TestNodeToProps | nil node | nodeToProps returns nil |
 | TestBuildMQmTLSBundle | mq TLS side with cipher and keyAlias plus solace target | MQTLS true, 1 bundle, HasKeystore true, KeyAlias mc, KeystoreTyp PKCS12, TruststoreTyp JKS |
@@ -313,9 +326,13 @@ Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [cons
 | TestBuildStorePathsRawVsMount | mount=false (config) | TruststoreLoc reflects env.yaml path verbatim ./certs/t.jks |
 | TestBuildStorePathsRawVsMount | mount=true (deploy) | TruststoreLoc rewritten to /app/external/classpath/truststores/t.jks |
 | TestBuildLeaderElection | dangling conn-ref missing | le non-nil with Mode/Queue set but Session nil, no guard warning |
-| TestBuildLeaderElection | conn-ref happy path tcps host | Session host/vpn set and APIProps has SSL_TRUST_STORE, SSL_KEY_STORE, SSL_PRIVATE_KEY_ALIAS mounted paths and alias sc |
-| TestBuildLeaderElection | inline session non-tcps host | Session set from inline fields with zero TLS APIProps |
+| TestBuildLeaderElection | conn-ref happy path tcps host | Session host/vpn set and APIProps has SSL_TRUST_STORE, SSL_KEY_STORE, SSL_PRIVATE_KEY_ALIAS mounted paths and alias sc; Extras carry solace-defaults in authored order and the connection api-properties land last, after the tool TLS keys |
+| TestBuildLeaderElection | inline session non-tcps host | Session set from inline fields with no TLS APIProps, but the inline api-properties and solace-defaults still come through |
 | TestBuildLeaderElection | mount rewrite raw vs mnt for leader election truststore | raw keeps ./certs/truststore.jks verbatim, mnt rewrites to /app/external/classpath/truststores/truststore.jks |
+| TestBuildLeaderElectionSessionPassthroughCollision | - | a session passthrough key colliding with a tool TLS key keeps the tool value and warns as `leader-election session`, never as a binder |
+| TestBuildLeaderElectionWarningsReachBuild | - | the session collision warning escapes Build, proving the warns slice is threaded into buildLeaderElection |
+| TestBuildLeaderElectionSharesBinderSecretNames | shared connection | a session resolving to a workflow binder carries that binder CLIENT_USERNAME/PASSWORD and mounts no second secret |
+| TestBuildLeaderElectionSharesBinderSecretNames | management-only broker | a session no workflow binds falls back to the fixed LEADER_ELECTION_* pair |
 | TestApplyStatusAccessNoOperatorUsers | - | with no configured security.users, Build synthesizes the reserved account as the only user, carrying the literal status password, never entering Model.Secrets |
 | TestApplyStatusAccessAppendsAfterExistingUsers | - | operator-configured users get the reserved account appended last; existing users still resolve to secretRef placeholders |
 | TestApplyStatusAccessCarriesOperatorRoles | - | an operator's roles reach the model verbatim (only the password is rewritten), the reserved account is appended with none so it stays read-only, and the caller's own Defaults are left unmutated despite sharing the roles backing array |
@@ -382,6 +399,14 @@ Tests: [statusscript_test.go](../internal/statusscript/statusscript_test.go)
 | TestRenderReportsHealthComponents | - | the per-component health breakdown: a newline before every `{"status"` puts each component's status at the start of a line and its name at the end of the line above, so the name is carried forward in $pending (guarded with `${pending:-}` for set -u); the block prints only when something parsed |
 | TestRenderReportsJavaConfigAndHeap | - | the three details-level lines from outside the report endpoints: `java -version` (stderr redirected, folded to "openjdk 17.0.9" or passed through raw), the config the report was read from, and heap used/max tagged `area:heap`; each guarded so an absent source drops its line, a negative maximum is left out, and the byte arithmetic is deliberately NOT done here (busybox would read Jackson's 4.32013312E8 as 4) |
 | TestRenderHeaderNamesEveryReportedFact | - | the script's own header names what it reports, since it is the first thing someone running the script by hand reads |
+
+| TestOSStreamDeliversOutputBeforeExitAndCancelIsCleanEnd | - | the child prints one line then blocks far longer than the test waits, so seeing that line proves output is not buffered until exit; cancelling then ends the run and reports nil, because a follow the operator stopped did not fail |
+| TestOSStreamKeepsStdoutAndStderrApart | - | Stream's two writers stay separate where Run merges into one, so `logs > app.log` captures the log and leaves the platform's diagnostics on the terminal |
+| TestOSStreamReportsAFailureThatWasNotCancelled | - | an uncancelled non-zero exit is still an error, and output written before it still reaches the writer |
+| TestOSStreamRejectsEmptyAndUnresolvableArgv | - | Stream refuses exactly what Run refuses (both go through resolveArgv0), naming the binary it could not resolve |
+| TestLogsArgvPerPlatform | kubernetes bare / kubernetes without a namespace or container / kubernetes with every option / docker bare / docker with every option it has / podman reads the container, never the journal / tail zero is not tail all | kubectl takes the pod positionally with the namespace and container as flags; docker and podman take options first and the container name last; TailAll adds no flag while an explicit 0 does |
+| TestLogsArgvRefusesPreviousOffKubernetes | docker / podman | --previous is refused by name rather than dropped, so a caller asking for the previous log is never handed the current one |
+| TestLogsArgvUnknownPlatform | - | an unrecognised platform names all three that exist rather than producing a half-built argv |
 
 ## internal/statusreport
 
@@ -467,7 +492,9 @@ Tests: [render_test.go](../internal/render/render_test.go)
 | TestApplicationMinimalNoOptionalBlocks | ssl: / logging: | ssl: and logging: blocks stay absent when defaults are empty |
 | TestApplicationMinimalNoOptionalBlocks | management: / security: | management: and security: are unconditional now: the fixed exposure list and the reserved solmq-status account render even with empty defaults |
 | TestApplicationMinimalNoOptionalBlocks | type: undefined | undefined binder is always emitted even with minimal config |
-| TestApplicationLeaderElection | - | output contains leader-election, fail-over, management, session and TLS fields for active_standby mode |
+| TestApplicationLeaderElection | - | leader-election, fail-over, queue and management render for active_standby, and the whole session block matches exactly: binder-shared credential names, solace-defaults between the credentials and api-properties, verbatim passthrough last |
+| TestApplicationLeaderElectionSessionMatchesBinderKeySet | - | rendered from one connection, the session key sequence equals the binder solace.java key sequence -- the guard against the two renderers drifting apart again |
+| TestApplicationLeaderElectionSessionPlaintext | - | a non-tcps session emits no SSL_ keys but still carries solace-defaults and its own api-properties, and falls back to the LEADER_ELECTION_* names |
 | TestApplicationOmitsEmptyCredentials | conn-name: h(1414) | binder identity fields still rendered when credentials absent |
 | TestApplicationOmitsEmptyCredentials | queue-manager: QM1 | binder identity fields still rendered when credentials absent |
 | TestApplicationOmitsEmptyCredentials | host: tcp://b:55555 | binder identity fields still rendered when credentials absent |
@@ -645,13 +672,13 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 
 ## internal/runner
 
-The os/exec seam -- ParseCommand safe-tokenizing, kubectl/docker/podman deploy and remove argv, the status verb's read-only queries, quadlet scope resolution, and WriteFile modes.
+The os/exec seam -- ParseCommand safe-tokenizing, kubectl/docker/podman deploy and remove argv, the status verb's read-only queries, the logs verb's streaming seam and per-platform argv, quadlet scope resolution, and WriteFile modes.
 
 Tests: [runner_test.go](../internal/runner/runner_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
-| TestHelperProcess | - | helper child-process entry point guarded by GO_WANT_HELPER_PROCESS; dispatches stdin/both/fail/unknown modes |
+| TestHelperProcess | - | helper child-process entry point guarded by GO_WANT_HELPER_PROCESS; dispatches stdin/both/fail/drip/unknown modes |
 | TestOSRunWiresStdinToChild | - | OS.Run passes stdin through to child, output equals hello-stdin |
 | TestOSRunCombinesStdoutAndStderr | - | combined output contains both stdout-line and stderr-line |
 | TestOSRunNonZeroExitReturnsErrorWithOutput | - | non-zero exit returns non-nil error and output still contains before-exit |
@@ -887,7 +914,7 @@ Tests: [libs_test.go](../internal/libs/libs_test.go), [maven_test.go](../interna
 
 ## cmd/solmq-conn-util
 
-The CLI shell -- flag parsing, the exit-code contract, the generate/validate/examples/auto-complete commands, verb aliases, and the deploy/remove seams for all three engines. The completion tests also gate the four generated shell scripts against the command model, and the doc tests gate the two generated markdown references against it.
+The CLI shell -- flag parsing, the exit-code contract, the generate/validate/examples/auto-complete commands, verb aliases, and the deploy/remove/status/logs seams for all three engines. The completion tests also gate the four generated shell scripts against the command model, and the doc tests gate the two generated markdown references against it.
 
 Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.go](../cmd/solmq-conn-util/commands_doc_test.go), [abbreviation_doc_test.go](../cmd/solmq-conn-util/abbreviation_doc_test.go), [completion_test.go](../cmd/solmq-conn-util/completion_test.go)
 
@@ -1030,3 +1057,37 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestShellQuoting | plain / empty / apostrophe / backslash / dollar and backtick / double quote / semicolon and pipe | bashQuote, fishQuote and psQuote each neutralize their shell's escape rules |
 | TestZshEntry | plain / colon in the value escaped / colon in the description left alone / apostrophe quoted / empty description | _describe entries split on the intended colon only |
 | TestFlagAliasesAndOffered | short and long pair / long only | flagOffered suggests the documented spellings, flagAliases lists all four dash forms, fishFlagSpec renders -s/-l correctly |
+
+### logs
+
+The `logs` verb shares status's platform resolution and instance discovery (instances.go), so these cases concentrate on what is its own: the per-platform argv, the combinations it refuses, and the fact that every operator-supplied name is rejected before a process starts. Like the status cases they pin argv AND call count, since discovery is one query for every instance.
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestLogsKubernetesArgvShape | - | one `get pods` answers discovery for every named pod, then each pod's log is read with the namespace and the connector container named from the pod document rather than from a guess; several instances each get a `==> name <==` heading |
+| TestLogsDockerArgvShape | - | docker takes its options first and the container name last, and --since reaches the argv in the canonical duration form (10m -> 10m0s) rather than as typed; a single instance prints no heading so the output pipes cleanly |
+| TestLogsPodmanReadsTheContainerNotTheJournal | - | the quadlet path needs no new binary: `podman logs` reads the container, and neither journalctl nor systemctl appears in any argv |
+| TestLogsTailAllAndZero | default / all / zero | --tail all is the default and adds no flag, while an explicit 0 is a real request and does |
+| TestLogsRejectsImpossibleFlagCombinations | follow with previous / follow with all / all with pod / all with container | each refusal exits 2, names both flags, and runs nothing |
+| TestLogsPreviousIsKubernetesOnly | docker / podman | the one refusal that needs the resolved platform: --previous is refused by name, before the preflight probe, so a flag that cannot work does not first make the operator wait on a daemon |
+| TestLogsPreviousReachesTheKubernetesArgv | - | where the concept exists, --previous arrives as kubectl's own -p |
+| TestLogsFollowRefusesSeveralInstances | - | --follow's single-instance rule is decided by discovery, so the refusal names the instances found and points at --pod, and no log is read |
+| TestLogsFollowReadsTheOneInstance | - | the accepted case: -f reaches the argv and a clean end is exit 0 |
+| TestLogsRejectsUnsafeNamesBeforeAnyCall | pod / container / namespace | an unsafe name exits 1 saying why, with zero calls -- the preflight probe included, so a rejected name is never even observed by the platform |
+| TestLogsSinceAndTailAreValidatedAtParse | since not a duration / since not positive / since with a metacharacter / tail not a number / tail above the ceiling / tail negative | the two flags carrying a value into an argv are validated at parse, exit 2, nothing runs |
+| TestLogsOneFailedInstanceStillPrintsTheRest | - | record-and-continue: the readable instance is still printed, the failure names the instance and the cause on stderr, both are attempted, and the run exits 1 |
+| TestLogsAllSearchesByImage | - | --all ignores env.yaml's names and reads every container running a matching image, skipping one that does not |
+| TestLogsUnexpectedPositionalArgument | - | logs has no target word, so a bare word exits 2 naming --pod/--container rather than being guessed at |
+| TestLogsPlatformMenuWhenSeveralSectionsArePresent | - | an env.yaml with two platform sections cannot resolve itself, so the menu decides; the answer picks the binary and the deployment selector/namespace discovery uses |
+| TestLogsPlatformFlagSkipsTheMenu | - | --platform is the first step of the resolution order, so it wins before promptLine is consulted, and the instance still comes from that section |
+| TestLogsWithoutEnvFileNeedsAnExplicitPlatform | - | the explicit-target exception: instance plus --platform needs no env.yaml, while without --platform the missing file is reported by name and nothing runs |
+| TestLogsNoInstancesFoundNamesTheFix | - | an empty discovery result carries the selector and namespace it used, plus --pod, since those are what the operator would change |
+| TestLogsNeedsAStreamingRunner | - | logs reads through runner.Streamer and a Runner without it fails loudly, rather than silently falling back to a buffered read that would merge diagnostics into the log |
+| TestLogsFollowRefusalNamesThePlatformsOwnFlag | - | on docker the single-instance refusal points at --container and never at --pod, which does nothing there |
+| TestLogsWithoutASectionToDiscoverFrom | kubernetes / docker / podman | the discovery branch with nothing to work from, reached by naming an instance with the other platform's flag (--container on kubernetes, --pod on docker/podman): enough to make the run explicit, but leaving no name and no section, so the error names the missing section and both ways forward (name it properly, or --all) and reads nothing |
+| TestLogsPlatformWithNoSectionAtAllIsLoud | - | an env.yaml that parses but describes no platform cannot answer --platform either, and says so naming all three sections before discovery is attempted |
+| TestLogsAllSkipsAnUnsafeNameOutLoud | - | a container name coming back from the engine that could not go into an argv is skipped with a note naming it and why, never reaches any argv, and the instances around it are still read |
+| TestLogsAllWithNoMatchIsActionable | docker / kubernetes | --all finding nothing names the image it searched for; the kubernetes search covers every namespace |
+| TestLogsNamedPodThatDoesNotExistNamesTheNamespace | - | the third empty-result branch: with pods named directly there is no selector to quote back, so the namespace searched is what the message carries |
+| TestLogsUsesTheSectionCommandOverride | - | logs reaches for the binary env.yaml names (oc, not kubectl) on every call, through the shared instanceCommand resolution |
+| TestLogsCommandFlagOverridesTheSection | - | --command wins over the section, and a binary outside the per-platform allowlist is refused by name before anything runs |

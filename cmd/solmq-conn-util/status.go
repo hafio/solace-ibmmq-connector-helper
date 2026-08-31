@@ -267,32 +267,20 @@ func checkStatusFlags(o statusOpts, output string) int {
 // env.yaml, an unsafe name, a platform that cannot be resolved, a failed
 // preflight -- fails here, before any instance is queried.
 func actStatus(o statusOpts, r runner.Runner) int {
-	explicitTargets := len(o.pods) > 0 || len(o.conts) > 0 || o.all
-
-	e, lerr := loadStatusEnv(o.envPath, explicitTargets && o.platform != "")
-	if lerr != nil {
-		return errExit(lerr)
+	sess, serr := resolveInstanceSession(instanceRequest{
+		envPath:  o.envPath,
+		platform: o.platform,
+		ns:       o.ns,
+		command:  o.command,
+		pods:     o.pods,
+		conts:    o.conts,
+		allow:    o.allow,
+		all:      o.all,
+	})
+	if serr != nil {
+		return errExit(serr)
 	}
-
-	platform, perr := resolvePlatform(o.platform, presentPlatforms(e), !explicitTargets)
-	if perr != nil {
-		return errExit(perr)
-	}
-
-	o.ns = statusNamespace(platform, o.ns, e)
-	if o.ns != "" && !validate.SafeToken(o.ns) {
-		return errExit(fmt.Errorf("--namespace %q contains an unsafe character (%s)", o.ns, validate.UnsafeTokenReason))
-	}
-	for _, p := range o.pods {
-		if !validate.SafeToken(p) {
-			return errExit(fmt.Errorf("--pod %q contains an unsafe character (%s)", p, validate.UnsafeTokenReason))
-		}
-	}
-	for _, c := range o.conts {
-		if !validate.SafeToken(c) {
-			return errExit(fmt.Errorf("--container %q contains an unsafe character (%s)", c, validate.UnsafeTokenReason))
-		}
-	}
+	o.ns = sess.ns
 
 	if o.user == "" {
 		o.user = spec.StatusUserName
@@ -305,94 +293,25 @@ func actStatus(o statusOpts, r runner.Runner) int {
 	}
 
 	if o.port == 0 {
-		o.port = e.Defaults.EffectiveManagementPort()
+		o.port = sess.env.Defaults.EffectiveManagementPort()
 	}
 	if o.port < 1 || o.port > 65535 {
 		return errExit(fmt.Errorf("--management-port %d must be 1-65535", o.port))
-	}
-
-	command := statusCommand(platform, o.command, e)
-	cmdArgv, cerr := runner.ParseCommand(platform, command, o.allow)
-	if cerr != nil {
-		return errExit(cerr)
 	}
 
 	// Reuse the read-only preflight probe before touching anything, same as
 	// deploy/remove. The action argument only steers kubernetes' can-i verb
 	// (docker/podman ignore it); status never creates or deletes a deployment,
 	// so deploy's "create" is used as the closer of the two existing checks.
-	if code, ok := preflight(r, runner.ActionDeploy, platform, command, o.ns, o.allow); !ok {
+	if code, ok := preflight(r, runner.ActionDeploy, sess.platform, sess.command, sess.ns, o.allow); !ok {
 		return code
 	}
 
-	c := &statusCollector{opts: o, platform: platform, cmdArgv: cmdArgv, env: e, r: r}
+	c := &statusCollector{opts: o, platform: sess.platform, cmdArgv: sess.cmdArgv, env: sess.env, r: r}
 	if o.watch.on {
 		return watchStatus(o, c)
 	}
 	return c.renderOnce(os.Stdout)
-}
-
-// loadStatusEnv reads env.yaml the same way loadEnvFile does, except when the
-// operator has named explicit targets (--pod/--container, or --all) and an
-// explicit --platform: status then needs nothing from the file at all (see
-// platformResolutionDetail's status exception), so a missing file is not an
-// error and status proceeds against a zero Env (built-in command/port/user
-// defaults). A file that does exist but fails to parse is still reported --
-// its presence means the operator expects it to be read.
-func loadStatusEnv(envPath string, skipIfMissing bool) (*spec.Env, error) {
-	data, err := os.ReadFile(envPath)
-	if err != nil {
-		if skipIfMissing {
-			return &spec.Env{}, nil
-		}
-		return nil, fmt.Errorf("reading %s: %w", envPath, err)
-	}
-	return spec.ParseEnv(data)
-}
-
-// statusCommand resolves the CLI binary status execs through: the --command
-// override if given, else the platform's section command: in env.yaml when
-// the section is present, else the platform's own default -- the same
-// defaults applyKubeDefaults/applyDockerDefaults/applyPodmanDefaults fill in
-// at parse time, needed again here because status can run with no section at
-// all (explicit targets, or --all).
-func statusCommand(platform, override string, e *spec.Env) string {
-	if override != "" {
-		return override
-	}
-	switch platform {
-	case validate.PlatformKubernetes:
-		if e != nil && e.Kubernetes != nil && e.Kubernetes.Command != "" {
-			return e.Kubernetes.Command
-		}
-		return spec.DefaultKubeCommand
-	case validate.PlatformDocker:
-		if e != nil && e.Docker != nil && e.Docker.Command != "" {
-			return e.Docker.Command
-		}
-		return spec.DefaultDockerCommand
-	case validate.PlatformPodman:
-		if e != nil && e.Podman != nil && e.Podman.Command != "" {
-			return e.Podman.Command
-		}
-		return spec.DefaultPodmanCommand
-	default:
-		return ""
-	}
-}
-
-// statusNamespace resolves the kubernetes namespace status queries: the
-// --namespace override if given, else the kubernetes section's
-// deployment.namespace when present, else "" (the CLI's current-context
-// default). No effect on docker/podman.
-func statusNamespace(platform, override string, e *spec.Env) string {
-	if override != "" {
-		return override
-	}
-	if platform == validate.PlatformKubernetes && e != nil && e.Kubernetes != nil {
-		return e.Kubernetes.Deployment.Namespace
-	}
-	return ""
 }
 
 // ---- collection --------------------------------------------------------------
@@ -420,6 +339,12 @@ type statusCollector struct {
 // are collected only when something is going to render them.
 func (c *statusCollector) wantsContainerFacts() bool {
 	return c.opts.view != statusreport.ViewApplication
+}
+
+// session re-presents what actStatus already resolved in the shape the shared
+// discovery helpers take, so status and logs ask them the same question.
+func (c *statusCollector) session() instanceSession {
+	return instanceSession{env: c.env, platform: c.platform, cmdArgv: c.cmdArgv, ns: c.opts.ns}
 }
 
 // collect gathers the whole report. It returns the report plus whether any
@@ -455,21 +380,11 @@ func (c *statusCollector) collect() (statusreport.Report, bool, error) {
 // whole container view together.
 func (c *statusCollector) collectKubernetes(rep *statusreport.Report) error {
 	o := c.opts
-	selector := ""
-	match := ""
-	switch {
-	case o.all:
-		// Cluster-wide, filtered by image: the operator named nothing, so the
-		// image reference is the only thing that identifies an instance.
-		match = statusreport.ImageMatch
-	case len(o.pods) > 0:
-	default:
-		if c.env == nil || c.env.Kubernetes == nil {
-			return fmt.Errorf("no kubernetes: section in env.yaml to discover pods from; pass --pod explicitly, or --all to search by image")
-		}
-		selector = "app=" + c.env.Kubernetes.Deployment.Name
-		rep.Group = c.env.Kubernetes.Deployment.Name
+	selector, match, group, derr := kubeDiscovery(c.session(), o.pods, o.all)
+	if derr != nil {
+		return derr
 	}
+	rep.Group = group
 
 	doc, err := runner.KubernetesPodsJSON(c.r, c.cmdArgv, o.ns, selector, o.pods, o.all)
 	if err != nil {
@@ -480,14 +395,7 @@ func (c *statusCollector) collectKubernetes(rep *statusreport.Report) error {
 		return fmt.Errorf("reading the pod list: %w", perr)
 	}
 	if len(insts) == 0 {
-		switch {
-		case o.all:
-			return fmt.Errorf("no pod anywhere in the cluster is running an image matching %q", statusreport.ImageMatch)
-		case selector != "":
-			return fmt.Errorf("no pods found for selector %q in namespace %q; pass --pod explicitly", selector, o.ns)
-		default:
-			return fmt.Errorf("none of the named pods exist in namespace %q", o.ns)
-		}
+		return noPodsFound(selector, o.ns, o.all)
 	}
 	rep.Instances = insts
 
@@ -568,35 +476,14 @@ func (c *statusCollector) checkComponents(rep *statusreport.Report) {
 // digest and (on podman) the systemd restart count.
 func (c *statusCollector) collectEngine(rep *statusreport.Report) error {
 	o := c.opts
-	var names []string
 	match := ""
-	switch {
-	case o.all:
+	if o.all {
 		match = statusreport.ImageMatch
-		out, err := runner.EngineList(c.r, c.cmdArgv)
-		if err != nil {
-			return err
-		}
-		for _, n := range statusreport.EngineNamesByImage(out, match) {
-			// Names come back from the engine here, not from the operator, so
-			// they are re-checked before they reach the inspect argv.
-			if validate.SafeToken(n) {
-				names = append(names, n)
-			} else {
-				rep.Notes = append(rep.Notes, fmt.Sprintf("skipping container %q: its name contains an unsafe character (%s)", n, validate.UnsafeTokenReason))
-			}
-		}
-		if len(names) == 0 {
-			return fmt.Errorf("no container on this host is running an image matching %q", match)
-		}
-	case len(o.conts) > 0:
-		names = o.conts
-	default:
-		name, err := c.configuredInstanceName()
-		if err != nil {
-			return err
-		}
-		names = []string{name}
+	}
+	names, notes, nerr := engineNames(c.r, c.session(), o.conts, o.all)
+	rep.Notes = append(rep.Notes, notes...)
+	if nerr != nil {
+		return nerr
 	}
 
 	doc, err := runner.EngineInspectJSON(c.r, c.cmdArgv, names)
@@ -633,22 +520,6 @@ func (c *statusCollector) collectEngine(rep *statusreport.Report) error {
 		statusreport.ApplyStats(rep.Instances, out)
 	}
 	return nil
-}
-
-// configuredInstanceName is the single container name the docker/podman section
-// of env.yaml describes -- what status reports when the operator names no
-// target.
-func (c *statusCollector) configuredInstanceName() (string, error) {
-	if c.platform == validate.PlatformDocker {
-		if c.env == nil || c.env.Docker == nil {
-			return "", fmt.Errorf("no docker: section in env.yaml to discover the container name from; pass --container explicitly, or --all to search by image")
-		}
-		return c.env.Docker.Name, nil
-	}
-	if c.env == nil || c.env.Podman == nil {
-		return "", fmt.Errorf("no podman: section in env.yaml to discover the container name from; pass --container explicitly, or --all to search by image")
-	}
-	return c.env.Podman.Name, nil
 }
 
 // applyPodmanRestarts replaces the container's own restart counter with the one

@@ -16,12 +16,15 @@ package runner
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
@@ -65,6 +68,31 @@ type Runner interface {
 	Run(cmd Cmd) (string, error)
 }
 
+// Streamer is the optional second capability a Runner may have: run one process
+// and copy its output onward as it arrives, until the process exits or ctx is
+// cancelled.
+//
+// It is a separate interface rather than a second method on Runner because Run
+// answers a different question -- it returns only once the process has exited,
+// which is exactly what a followed log cannot do -- and because most Runners
+// (every fake that only ever needs to record argv) have no business growing a
+// streaming implementation. A caller that needs to follow asks for this seam by
+// type assertion and fails loudly when the Runner it was handed does not have
+// it; OS does, pinned below.
+//
+// stdout and stderr are separate on purpose. Run merges them because its
+// callers want one blob of error context, but a followed log is a stream an
+// operator redirects to a file, and the CLI's own diagnostics must not land in
+// the middle of it.
+type Streamer interface {
+	Stream(ctx context.Context, cmd Cmd, stdout, stderr io.Writer) error
+}
+
+// The production Runner is also the production Streamer. Asserting it here
+// makes a follow-mode caller's type assertion unreachable in production a
+// compile-time fact rather than a hope.
+var _ Streamer = OS{}
+
 // OS is the production Runner: it runs argv via os/exec with no shell.
 type OS struct{}
 
@@ -78,6 +106,68 @@ type OS struct{}
 // the caller, which is the only thing an operator needs on the happy path and
 // is reported in full alongside the error on a failure.
 func (OS) Run(c Cmd) (string, error) {
+	resolved, err := resolveArgv0(c)
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(resolved, c.Argv[1:]...) //nolint:gosec // argv tokens are SafeToken-validated upstream; no shell is involved
+	applyCmdInput(cmd, c)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	runErr := cmd.Run()
+	return buf.String(), runErr
+}
+
+// streamWaitDelay bounds how long a cancelled Stream waits for the child to
+// exit on its own before the process is killed outright. A followed log ends
+// with the operator pressing Ctrl-C, and a CLI that appears to hang after that
+// reads as a broken tool, so the child gets a moment to shut down cleanly and
+// then does not get to argue.
+const streamWaitDelay = 2 * time.Second
+
+// Stream runs argv the way Run does -- same PATH resolution, same refusal of a
+// current-directory hit, no shell -- but copies the process's output onward as
+// it is produced instead of buffering it, and returns when the process exits or
+// ctx is cancelled.
+//
+// A cancelled ctx is the normal end of a follow, not a failure: the returned
+// error is nil in that case, so the caller does not have to unpick "the
+// operator pressed Ctrl-C" from "the engine went away".
+func (OS) Stream(ctx context.Context, c Cmd, stdout, stderr io.Writer) error {
+	resolved, err := resolveArgv0(c)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, resolved, c.Argv[1:]...) //nolint:gosec // argv tokens are SafeToken-validated upstream; no shell is involved
+	applyCmdInput(cmd, c)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	// Interrupt rather than Kill so the child can flush and close its own
+	// connection. Windows cannot deliver os.Interrupt to another process at all,
+	// so a refused signal falls straight through to Kill rather than leaving the
+	// child running; WaitDelay is the backstop for a child that accepts the
+	// signal and then ignores it.
+	cmd.Cancel = func() error {
+		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = streamWaitDelay
+	runErr := cmd.Run()
+	if ctx.Err() != nil {
+		// The process was ended on purpose. Whatever exit status that produced
+		// (a signal, or the WaitDelay kill) describes how it was stopped, not
+		// whether it worked.
+		return nil
+	}
+	return runErr
+}
+
+// resolveArgv0 resolves Argv[0] via exec.LookPath for both Run and Stream, so
+// the refusal rules cannot drift apart between them.
+func resolveArgv0(c Cmd) (string, error) {
 	if len(c.Argv) == 0 {
 		return "", fmt.Errorf("empty command")
 	}
@@ -88,7 +178,12 @@ func (OS) Run(c Cmd) (string, error) {
 		// exec.ErrDot); both cases are rejected here rather than silently exec'd.
 		return "", fmt.Errorf("resolving %q: %w", c.Argv[0], err)
 	}
-	cmd := exec.Command(resolved, c.Argv[1:]...) //nolint:gosec // argv tokens are SafeToken-validated upstream; no shell is involved
+	return resolved, nil
+}
+
+// applyCmdInput wires Stdin and Env onto an exec.Cmd, shared by Run and Stream
+// so the credential channel behaves identically in both.
+func applyCmdInput(cmd *exec.Cmd, c Cmd) {
 	if c.Stdin != "" {
 		cmd.Stdin = strings.NewReader(c.Stdin)
 	}
@@ -97,11 +192,6 @@ func (OS) Run(c Cmd) (string, error) {
 		// an ambient one of the same name.
 		cmd.Env = append(os.Environ(), c.Env...)
 	}
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	runErr := cmd.Run()
-	return buf.String(), runErr
 }
 
 // ParseCommand splits a command string into an argv slice on whitespace (the
@@ -623,6 +713,92 @@ func execArgv(cmd []string, platform, target, namespace string, interactive bool
 		return nil, fmt.Errorf("unknown platform %q (want %q, %q, or %q)", platform, validate.PlatformKubernetes, validate.PlatformDocker, validate.PlatformPodman)
 	}
 	return argv, nil
+}
+
+// TailAll is the Tail value meaning "the whole log", spelled as a constant
+// because 0 is a legitimate request (the flags only, no history) and so cannot
+// double as the unset marker.
+const TailAll = -1
+
+// LogsOpts is how much of a log to read and how to render it, kept as an
+// options struct so the per-platform shape below can grow a flag without every
+// caller's signature changing.
+//
+// Since is already a canonical time.Duration string when it reaches here: the
+// CLI parses the operator's spelling and passes the parsed form on, so no raw
+// operator text is in this struct. Container and the target are operator- or
+// engine-supplied and must already be validated by the caller.
+type LogsOpts struct {
+	Follow, Previous, Timestamps bool
+	Tail                         int
+	Since                        string
+	// Container names which container in a multi-container pod to read. Empty
+	// leaves the choice to the platform, which is correct for docker/podman
+	// (one container per target) and for a single-container pod.
+	Container string
+}
+
+// LogsArgv builds the argv that reads one instance's log, keeping the
+// per-platform shape in one place the way execArgv does for exec.
+//
+// The two shapes differ in more than spelling: kubectl takes the pod as a
+// positional with the namespace and container as flags, while docker and podman
+// take their options first and the container name last. Previous has no
+// docker/podman equivalent at all -- neither engine keeps a prior run's log
+// under the same name -- and is refused by the caller before it gets here
+// rather than being silently dropped.
+//
+// target, namespace and o.Container are operator- or engine-supplied and must
+// already be validated by the caller. Everything else this function appends is
+// a tool-authored constant or a number.
+func LogsArgv(cmd []string, platform, target, namespace string, o LogsOpts) ([]string, error) {
+	argv := append(append([]string(nil), cmd...), "logs")
+	switch platform {
+	case validate.PlatformKubernetes:
+		argv = append(argv, target)
+		if namespace != "" {
+			argv = append(argv, "-n", namespace)
+		}
+		if o.Container != "" {
+			argv = append(argv, "-c", o.Container)
+		}
+		if o.Previous {
+			argv = append(argv, "-p")
+		}
+		argv = append(argv, logsCommonFlags(o)...)
+	case validate.PlatformDocker, validate.PlatformPodman:
+		if o.Previous {
+			// Unreachable via the CLI, which refuses the combination with a
+			// message naming the platform. Guarded anyway so a future caller
+			// cannot quietly get a log that ignores what it asked for.
+			return nil, fmt.Errorf("--previous is a kubernetes concept; %s has no prior-run log to read", platform)
+		}
+		argv = append(argv, logsCommonFlags(o)...)
+		argv = append(argv, target)
+	default:
+		return nil, fmt.Errorf("unknown platform %q (want %q, %q, or %q)", platform, validate.PlatformKubernetes, validate.PlatformDocker, validate.PlatformPodman)
+	}
+	return argv, nil
+}
+
+// logsCommonFlags are the options every platform spells identically. They are
+// appended in a fixed order so the argv a test asserts is the argv every run
+// produces.
+func logsCommonFlags(o LogsOpts) []string {
+	var argv []string
+	if o.Follow {
+		argv = append(argv, "-f")
+	}
+	if o.Timestamps {
+		argv = append(argv, "--timestamps")
+	}
+	if o.Tail != TailAll {
+		argv = append(argv, "--tail", strconv.Itoa(o.Tail))
+	}
+	if o.Since != "" {
+		argv = append(argv, "--since", o.Since)
+	}
+	return argv
 }
 
 // Markers the presence probe echoes, distinctive enough that engine chatter on

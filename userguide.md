@@ -63,7 +63,8 @@ documentation index; this guide is the complete reference.
 10. [Status: the container, the connector, or both](#10-status-the-container-the-connector-or-both)
 11. [examples](#11-examples)
 12. [download jar](#12-download-jar)
-13. [Notes and gotchas](#13-notes-and-gotchas)
+13. [Logs: the lines behind the state](#13-logs-the-lines-behind-the-state)
+14. [Notes and gotchas](#14-notes-and-gotchas)
 
 ---
 
@@ -194,8 +195,8 @@ says so (section 4.1).
 
 The first argument is a **verb**. `generate` takes an optional second argument,
 `config` (short `cfg`), which emits `application.yml`; the platform for
-`generate`/`deploy`/`remove`/`status` comes from `--platform` (or the resolution
-order in the note above), never from a positional argument.
+`generate`/`deploy`/`remove`/`status`/`logs` comes from `--platform` (or the
+resolution order in the note above), never from a positional argument.
 
 ```text
 solmq-conn-util generate (gen) [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
@@ -206,6 +207,8 @@ solmq-conn-util remove (rm)    [--platform kubernetes|docker|podman] [-e env.yam
                                                                    Tear down what deploy created for the resolved platform
 solmq-conn-util status (sts)   <container|application|all> [-d] [-w] [--all] [--output table|json] [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
                                                                    Report each instance: the engine's view (container), the connector's own (application), or both (all)
+solmq-conn-util logs (lg)      [--follow] [--previous] [--tail N] [--since d] [--timestamps] [--all] [--platform kubernetes|docker|podman] [-e env.yaml]
+                                                                   Print each instance log -- the lines behind what status reports (section 13)
 solmq-conn-util version (ver)                                     Print the utility name, version, Go version and OS/arch
 solmq-conn-util validate (vld)      [-e env.yaml]                 Lint the whole env.yaml + workflows
 solmq-conn-util examples (eg) [dir] [-f]                          Write a starter env.yaml + workflows
@@ -239,6 +242,7 @@ Every verb has exactly one short alias, except `auto-complete` and `help`:
 | `deploy` | `dp` |
 | `remove` | `rm` |
 | `status` | `sts` |
+| `logs` | `lg` |
 | `version` | `ver` |
 | `validate` | `vld` |
 | `examples` | `eg` |
@@ -485,7 +489,7 @@ permitted (two Solace patterns emit an advisory **warning**, see section 5.5). Y
 | `key-alias` | no | selects a client key from the shared keystore ⇒ **mTLS**; requires a `tcps://` host and a keystore in `env.yaml` |
 | `queue` | one of | consume from / produce to a Solace queue |
 | `topic` | one of | Solace topic; also allowed as a `source`, but a topic source warns (section 5.5) |
-| `api-properties` | no | verbatim map → `solace.java.api-properties` |
+| `api-properties` | no | verbatim map → `solace.java.api-properties`, and → the leader-election `session.api-properties` when this connection is the management session |
 | `consumer` / `producer` | no | verbatim per-binding tuning |
 
 ### 5.3 `mq:` options
@@ -603,6 +607,23 @@ sections (section 7) sit in the same file, alongside these keys.
 > docker and podman publish only the ports you list -- omitting `ports:`
 > publishes none. `security.users` also stays -- see below.
 
+> **Breaking change: `leader-election.solace:` is now `leader-election.session:`.**
+> The block renders to `solace.connector.management.session`, so it is now named
+> for what it produces rather than for the system it talks to. An `env.yaml` still
+> carrying `leader-election.solace:` is **rejected** by `validate`/`generate` with
+> an error naming the new key. Two shapes that used to be accepted and then
+> silently discarded are rejected too: `queue:`/`topic:`/`consumer:`/`producer:`
+> *inside* the session block (a management session is a connection, not a binding
+> -- the management queue is `leader-election.queue`, one level up), and setting
+> `conn-ref:` and `session:` together (they are alternatives; `conn-ref` used to
+> win silently while the discarded block was still credential-checked).
+>
+> The session block also renders more than it used to. It is a full Solace
+> connection, not a stripped one: `solace-defaults` is merged into it exactly as
+> into a binder, and its own `api-properties` follow the tool-managed TLS keys. If
+> you run `active_*` with a `solace-defaults` block, your next `generate` produces
+> a different `application.yml` and your next `deploy` rolls the pods.
+
 ```yaml
 connections:                     # reusable connections, referenced by conn-ref (section 5.6)
   prod-solace:
@@ -648,7 +669,7 @@ security:                        # optional; the tool's own read-only account is
 leader-election:                 # standalone | active_active | active_standby
   mode: active_standby
   queue: solmq-connector-mgmt    # exclusive management queue (active_* only)
-  conn-ref: prod-solace          # solace management session (or inline `solace: {...}`)
+  conn-ref: prod-solace          # solace management session (or inline `session: {...}`)
   fail-over:                     # optional; emitted verbatim
     max-attempts: 5
     back-off-initial-interval: 1000
@@ -671,14 +692,20 @@ solace-defaults:
 | `security` | `users[].roles` | optional list of connector authority names, passed through verbatim. **Omit it for a read-only (GET-only) account** -- an empty list is the connector's own default; add `admin` for read/write. Not an allowlist: an unrecognized but well-formed name is accepted, since the connector owns the vocabulary. An empty entry, or one containing whitespace or shell metacharacters, is rejected. The tool never adds a role itself, which is exactly what keeps the reserved `solmq-status` account read-only |
 | `leader-election` | `mode` | `standalone` (default; omitted from output), `active_active`, or `active_standby` |
 | `leader-election` | `queue` | management queue; **required** for `active_*` |
-| `leader-election` | `conn-ref` / `solace` | the Solace management **session** (`conn-ref` to a solace connection, or inline `solace:`); required for `active_*` |
+| `leader-election` | `conn-ref` / `session` | the Solace management **session** (`conn-ref` to a solace connection, or inline `session:`); required for `active_*`. Set exactly one -- both together is an error. The block is a connection only: `queue:`, `topic:`, `consumer:` and `producer:` inside it are rejected (the management queue is `leader-election.queue`, one level up). The retired spelling `solace:` is rejected with a message naming `session:` |
 | `leader-election` | `fail-over` | optional map, emitted verbatim under `leader-election.fail-over` |
-| `solace-defaults` | `<key>: <value>` | merged verbatim into every Solace binder's `solace.java.*` (e.g. connect/reconnect retries) |
+| `solace-defaults` | `<key>: <value>` | merged verbatim into every Solace binder's `solace.java.*` **and into the leader-election `session`** (e.g. connect/reconnect retries) |
 
 `active_active` and `active_standby` render a `solace.connector.management.leader-election`
-block with the `queue` and a Solace `session` (TLS wired from the shared stores);
-`standalone` (or an absent block) emits nothing. `standalone` requires `replicas: 1`;
-`active_*` allow more.
+block with the `queue` and a Solace `session`; `standalone` (or an absent block) emits
+nothing. `standalone` requires `replicas: 1`; `active_*` allow more.
+
+The session is a full Solace connection block, not a stripped one -- the connector
+documents `session.*` as the same interface as `solace.java.*`. TLS is wired from the
+shared stores, `solace-defaults` is merged into it exactly as into a binder, and its own
+`api-properties` follow the tool-managed TLS keys. When its broker tuple is one the
+workflows already bind, it shares that binder's credential secrets rather than mounting a
+second copy (section 8.2).
 
 **TLS is shared:** there is exactly one truststore and one keystore, referenced by
 every TLS connection (Solace via api-properties, MQ via an ssl-bundle). Different
@@ -1059,6 +1086,14 @@ so the same `application.yml` runs anywhere: `<BINDER>_CLIENT_USERNAME`,
 `LEADER_ELECTION_CLIENT_USERNAME` / `_CLIENT_PASSWORD`. The rendered config
 references `${PROD_SOLACE_CLIENT_PASSWORD}`; `SOL_PASSWORD` is only ever a
 deploy-time input on your host.
+
+The `LEADER_ELECTION_*` pair is a **fallback**, used only when the leader-election
+management session points at a broker no workflow binds. When it reuses a connection the
+workflows already use -- the normal case, and what `conn-ref` does -- the session shares
+that binder's `<BINDER>_CLIENT_USERNAME` / `<BINDER>_CLIENT_PASSWORD` instead, so one
+credential is mounted once rather than twice under two names. A session whose tuple
+matches a binder but whose password disagrees is rejected: they collapse onto one binder
+and one mounted credential, so only one of the two passwords could ever be used.
 
 Every generated `application.yml` therefore begins with:
 
@@ -1973,7 +2008,128 @@ point `--url` at your own mirror you have already verified out of band.
 
 ---
 
-## 13. Notes and gotchas
+## 13. Logs: the lines behind the state
+
+`solmq-conn-util logs` prints what each connector instance has written.
+
+It is the answer to the question section 10 leaves open. `status container`
+reports that a pod is `restarting` with 7 restarts and exit code 137; it cannot
+report *why*. `logs` is the same instance, the same platform resolution, the same
+discovery -- and the connector's own output instead of a rendered table.
+
+```sh
+solmq-conn-util logs                       # every instance env.yaml describes
+solmq-conn-util logs --tail 100            # the last 100 lines of each
+solmq-conn-util logs --previous            # what the last container printed before it died
+solmq-conn-util logs --follow --pod pod-a  # keep one open until Ctrl-C
+```
+
+The platform resolves exactly as it does for `generate`/`deploy`/`remove`/
+`status` (section 3): `--platform` if given, otherwise the single section in
+`env.yaml`, otherwise an interactive menu. An `env.yaml` describing more than one
+platform is the case `--platform` exists for -- without it you are asked, and on
+a non-TTY the run fails and names the flag rather than hanging.
+
+Instances are discovered exactly as `status` discovers them, which is deliberate:
+a debugging pair that disagreed about which pods it meant would be worse than
+either verb alone. Every pod matching the deployment's `app=<name>` selector on
+kubernetes, or the configured container name on docker/podman, unless you narrow
+it with repeatable `--pod` / `--container` or widen it with `--all`.
+
+### 13.1 `--previous` -- why a restarting instance died
+
+A crash loop is the case where the log you want no longer belongs to the
+container that is running. `--previous` reads the one before it:
+
+```sh
+solmq-conn-util status container      # pod-b   restarting (CrashLoopBackOff)   7
+solmq-conn-util logs --pod pod-b --previous
+```
+
+This is **kubernetes only**, and refused by name elsewhere rather than quietly
+ignored: kubernetes keeps the terminated container's log, and neither docker nor
+podman keeps a prior run under the same name. On those platforms the running
+container's log already carries its earlier lines.
+
+### 13.2 `--follow` -- keeping one open
+
+`--follow` keeps the log open and prints new lines as they arrive, until you
+interrupt it with Ctrl-C. That is a clean end, not a failure: the exit code is 0.
+
+It reads **one** instance. If discovery finds several, the run stops and names
+them rather than guessing or interleaving:
+
+```text
+error: --follow reads one instance, and 2 match (pod-a, pod-b); name one with --pod
+```
+
+For the same reason it cannot be combined with `--all`, which is a fan-out, or
+with `--previous`, which reads a log that has already ended.
+
+### 13.3 How much to read
+
+| Flag | Effect |
+|------|--------|
+| `--tail N` | Only the last N lines. `--tail all` is the default. `--tail 0` is a real request: the flags only, no history. |
+| `--since d` | Only lines newer than a Go duration -- `30s`, `10m`, `2h`. Not a date, and not `1d`. |
+| `--timestamps` | Prefix every line with the time the platform recorded for it. |
+
+`--since` is parsed before it is used and only the canonical form is passed on,
+so what reaches the platform is a duration this tool produced rather than the
+string you typed.
+
+### 13.4 Output shape and exit code
+
+One instance prints its log and nothing else, so the common case pipes and
+redirects cleanly:
+
+```sh
+solmq-conn-util logs --pod pod-a > app.log
+```
+
+Log lines go to stdout and the platform CLI's own diagnostics go to stderr, so a
+redirect like that captures the log and leaves the noise on your terminal.
+
+Several instances are separated by a heading each:
+
+```text
+==> pod-a <==
+2026-08-18 04:12:07 INFO  started workflow 0
+==> pod-b <==
+2026-08-18 04:11:05 ERROR could not connect to mqhost(1414)
+```
+
+An instance that cannot be read is reported against itself and the rest are still
+printed -- one unreachable instance must not hide the others -- and the run then
+exits 1. Exit codes otherwise follow section 3: 0 on success, 1 for a failure, 2
+for a usage error.
+
+### 13.5 `--all` -- instances this tool did not deploy
+
+`--all` ignores the names in `env.yaml` and reads every connector instance it can
+find by image name, across every namespace on kubernetes and every container on
+docker/podman -- the same search `status --all` does (section 10.9). It cannot be
+combined with `--pod` / `--container`, which name instances directly, nor with
+`--follow`, which reads one.
+
+### 13.6 The manual alternative
+
+`logs` does nothing you could not do by hand; it just already knows the
+namespace, the pod names, and which container inside them is the connector:
+
+```sh
+kubectl logs <pod> -n <namespace> -c connector --tail 100
+docker logs --tail 100 <container>
+podman logs --tail 100 <container>
+```
+
+Under podman quadlet that last one is still the right command -- a quadlet unit
+manages an ordinary podman container, so `podman logs` reads it and no
+`journalctl` is involved.
+
+---
+
+## 14. Notes and gotchas
 
 - **Deterministic, byte-for-byte output.** Regenerating from unchanged inputs
   produces identical bytes (an ordered emitter, not generic YAML marshaling), so

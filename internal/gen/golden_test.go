@@ -218,8 +218,9 @@ func configMapDoc(appYAML string, logback bool) string {
 // credDoc lists every credential the golden spec's config references, in
 // first-use order: the two mq-conn-1 positions, the two shared store
 // passwords (referenced first by the mq-conn-1 bundle), prod-solace,
-// mq-archive, sol-conn-1, and the leader-election session (a distinct secret
-// from prod-solace even though it carries the same underlying value). The
+// mq-archive and sol-conn-1. The leader-election session adds nothing: it
+// conn-refs prod-solace, so it reuses that binder's two names rather than
+// mounting the same value a second time. The
 // golden spec configures no operator security.users, so the reserved
 // solmq-status account (goldenStatusPassword, a literal rather than a
 // secretRef) is the only management user and never appears here. Usernames
@@ -243,8 +244,6 @@ stringData:
   MQ_ARCHIVE_PASSWORD: "mqarchive-pw"
   SOL_CONN_1_CLIENT_USERNAME: "bridge"
   SOL_CONN_1_CLIENT_PASSWORD: "edge-pw"
-  LEADER_ELECTION_CLIENT_USERNAME: "connector"
-  LEADER_ELECTION_CLIENT_PASSWORD: "sol-pw"
 `
 
 const storesDoc = `apiVersion: v1

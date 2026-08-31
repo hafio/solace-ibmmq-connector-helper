@@ -131,6 +131,9 @@ solmq-conn-util remove  [--platform kubernetes|docker|podman] [-e env.yaml]  Tea
 solmq-conn-util status  <container|application|all> [-d] [-w] [--all] [--output table|json]
                         [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
                                                                    Report each instance: the engine's view, the connector's own, or both
+solmq-conn-util logs    [--follow] [--previous] [--tail N] [--since d] [--timestamps] [--all]
+                        [--platform kubernetes|docker|podman] [-e env.yaml]
+                                                                   Print each instance log -- what status says happened, and why
 solmq-conn-util version                                           Print the utility name, version, Go version and OS/arch
 solmq-conn-util validate            [-e env.yaml]                 Lint the whole env.yaml + workflows
 solmq-conn-util examples [dir] [-f]                               Write a starter env.yaml + workflows
@@ -150,16 +153,21 @@ solmq-conn-util download jar mq|syslog [dir] [-e env.yaml] [--version v] [--omit
 --omit-lib-file  download jar: jar list that REPLACES the embedded default (default: embedded list)
 --include-provided  download jar: download the whole closure even where the image already provides it
 --url         download jar: repeatable; exact URLs to fetch, skipping Maven resolution and image-aware omission
+--follow      logs: keep the log open and print new lines until interrupted (one instance)
+--previous    logs: read the previous container's log -- why a restarting pod died (kubernetes only)
+--tail        logs: read only the last N lines, or all (default: all)
+--since       logs: read only lines newer than this duration, e.g. 10m
+--timestamps  logs: prefix every line with the time the platform recorded
 ```
 
 Every verb above except `auto-complete` and `help` also has a short alias
-(`gen`, `dp`, `rm`, `sts`, `ver`, `vld`, `eg`, `dl`), and `--platform` accepts
+(`gen`, `dp`, `rm`, `sts`, `lg`, `ver`, `vld`, `eg`, `dl`), and `--platform` accepts
 `kube`, `dk` and `pm` -- see [userguide.md](userguide.md) section 3 for both
 tables.
 
 `generate` fails fast (stops at the first error, writes nothing); `validate`
 reports every finding; generate output is buffered and only written on full
-success -- never a half-written `-o`. `deploy`/`remove`/`status` run the CLI
+success -- never a half-written `-o`. `deploy`/`remove`/`status`/`logs` run the CLI
 named by each section's `command:` through an argv slice -- never a shell --
 with every token checked against a safe charset, argv[0] checked against a
 per-platform binary allowlist (escape hatch: `--allow-command`), and a
@@ -179,8 +187,8 @@ never drifts from the commands that binary accepts
   5), the `env.yaml` connector defaults (section 6), the deploy targets --
   kubernetes/docker/podman (section 7), the secrets model (section 8), what gets
   generated (section 9), determining which instance is active (section 10), the
-  sample set (section 11), fetching the IBM MQ and syslog jars (section 12), and
-  gotchas (section 13).
+  sample set (section 11), fetching the IBM MQ and syslog jars (section 12),
+  reading instance logs (section 13), and gotchas (section 14).
 - [docs/commands.md](docs/commands.md) -- the full command tree / reference,
   generated from the command model and gated against drift.
 - [docs/abbreviation.md](docs/abbreviation.md) -- every short spelling the CLI

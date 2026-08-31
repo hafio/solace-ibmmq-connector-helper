@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -8,7 +9,9 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
@@ -92,6 +95,12 @@ func TestHelperProcess(t *testing.T) {
 	case "fail":
 		fmt.Fprintln(os.Stdout, "before-exit")
 		os.Exit(3)
+	case "drip":
+		// Print immediately, then outlive any reasonable test: a reader that
+		// sees the line has seen it while the process was still running, which
+		// is what separates Stream from Run.
+		fmt.Fprintln(os.Stdout, "drip-line")
+		time.Sleep(10 * time.Minute)
 	case "env":
 		fmt.Fprintf(os.Stdout, "AMBIENT_ONLY=%s OVERRIDE=%s EXTRA_ONLY=%s\n",
 			os.Getenv("RUNNER_TEST_AMBIENT_ONLY"),
@@ -1365,5 +1374,201 @@ func TestRunStatusScriptUnknownPlatform(t *testing.T) {
 	}
 	if len(f.calls) != 0 {
 		t.Fatal("nothing must run for an unknown platform")
+	}
+}
+
+// ---- OS.Stream (the real streaming boundary) --------------------------------
+
+// writerFunc adapts a function to io.Writer, so a test can observe output at the
+// moment it is written rather than after the process has exited -- which is the
+// whole distinction between Stream and Run.
+type writerFunc func(p []byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// TestOSStreamDeliversOutputBeforeExitAndCancelIsCleanEnd is the test that
+// justifies the Streamer seam existing at all: the child prints one line and
+// then blocks for far longer than this test will wait, so seeing that line
+// proves the output was not buffered until exit. Cancelling then ends the run,
+// and reports success -- a follow that the operator stopped did not fail.
+func TestOSStreamDeliversOutputBeforeExitAndCancelIsCleanEnd(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var once sync.Once
+	arrived := make(chan struct{})
+	var mu sync.Mutex
+	var got strings.Builder
+	w := writerFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		got.Write(p)
+		seen := strings.Contains(got.String(), "drip-line")
+		mu.Unlock()
+		if seen {
+			once.Do(func() { close(arrived) })
+		}
+		return len(p), nil
+	})
+
+	errc := make(chan error, 1)
+	go func() {
+		errc <- (OS{}).Stream(ctx, Cmd{Argv: helperProcessArgv(os.Args[0], "drip")}, w, io.Discard)
+	}()
+
+	select {
+	case <-arrived:
+	case err := <-errc:
+		t.Fatalf("the child exited before its first line was seen (err=%v); Stream is buffering", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("no output arrived while the child was still running; Stream is buffering")
+	}
+
+	cancel()
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Errorf("a cancelled stream is a clean end, got %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Stream did not return after the context was cancelled")
+	}
+}
+
+// TestOSStreamKeepsStdoutAndStderrApart pins the reason Stream takes two
+// writers where Run merges into one: `logs > app.log` must land log lines in the
+// file and leave the platform's own diagnostics on the terminal.
+func TestOSStreamKeepsStdoutAndStderrApart(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	var out, errOut strings.Builder
+	if err := (OS{}).Stream(context.Background(), Cmd{Argv: helperProcessArgv(os.Args[0], "both")}, &out, &errOut); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if !strings.Contains(out.String(), "stdout-line") || strings.Contains(out.String(), "stderr-line") {
+		t.Errorf("stdout writer should carry only stdout, got %q", out.String())
+	}
+	if !strings.Contains(errOut.String(), "stderr-line") || strings.Contains(errOut.String(), "stdout-line") {
+		t.Errorf("stderr writer should carry only stderr, got %q", errOut.String())
+	}
+}
+
+// TestOSStreamReportsAFailureThatWasNotCancelled is the other half of the
+// cancellation rule: an uncancelled non-zero exit is a real failure and must
+// still be reported.
+func TestOSStreamReportsAFailureThatWasNotCancelled(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	var out strings.Builder
+	err := (OS{}).Stream(context.Background(), Cmd{Argv: helperProcessArgv(os.Args[0], "fail")}, &out, io.Discard)
+	if err == nil {
+		t.Fatal("a non-zero exit with no cancellation must be an error")
+	}
+	if !strings.Contains(out.String(), "before-exit") {
+		t.Errorf("output written before the failure should still reach the writer, got %q", out.String())
+	}
+}
+
+// TestOSStreamRejectsEmptyAndUnresolvableArgv pins that Stream refuses exactly
+// what Run refuses -- both go through resolveArgv0, so the two cannot drift.
+func TestOSStreamRejectsEmptyAndUnresolvableArgv(t *testing.T) {
+	if err := (OS{}).Stream(context.Background(), Cmd{}, io.Discard, io.Discard); err == nil {
+		t.Error("an empty argv must be refused")
+	}
+	err := (OS{}).Stream(context.Background(), Cmd{Argv: []string{"solmq-no-such-binary-anywhere"}}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "resolving") {
+		t.Errorf("an unresolvable binary must be refused by name, got %v", err)
+	}
+}
+
+// ---- LogsArgv ---------------------------------------------------------------
+
+// TestLogsArgvPerPlatform pins the two shapes, which differ in more than
+// spelling: kubectl takes the pod as a positional with the namespace and
+// container as flags, docker and podman take their options first and the
+// container name last.
+func TestLogsArgvPerPlatform(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		platform  string
+		namespace string
+		opts      LogsOpts
+		want      []string
+	}{
+		{
+			name: "kubernetes bare", platform: validate.PlatformKubernetes, namespace: "prod",
+			opts: LogsOpts{Tail: TailAll, Container: "connector"},
+			want: []string{"cli", "logs", "pod-a", "-n", "prod", "-c", "connector"},
+		},
+		{
+			name: "kubernetes without a namespace or container", platform: validate.PlatformKubernetes,
+			opts: LogsOpts{Tail: TailAll},
+			want: []string{"cli", "logs", "pod-a"},
+		},
+		{
+			name: "kubernetes with every option", platform: validate.PlatformKubernetes, namespace: "prod",
+			opts: LogsOpts{Follow: true, Previous: true, Timestamps: true, Tail: 50, Since: "10m0s", Container: "connector"},
+			want: []string{"cli", "logs", "pod-a", "-n", "prod", "-c", "connector", "-p", "-f", "--timestamps", "--tail", "50", "--since", "10m0s"},
+		},
+		{
+			name: "docker bare", platform: validate.PlatformDocker,
+			opts: LogsOpts{Tail: TailAll},
+			want: []string{"cli", "logs", "pod-a"},
+		},
+		{
+			name: "docker with every option it has", platform: validate.PlatformDocker,
+			opts: LogsOpts{Follow: true, Timestamps: true, Tail: 50, Since: "10m0s"},
+			want: []string{"cli", "logs", "-f", "--timestamps", "--tail", "50", "--since", "10m0s", "pod-a"},
+		},
+		{
+			name: "podman reads the container, never the journal", platform: validate.PlatformPodman,
+			opts: LogsOpts{Tail: TailAll},
+			want: []string{"cli", "logs", "pod-a"},
+		},
+		{
+			// 0 is a real request -- the options only, no history -- so it cannot
+			// double as the "unset" marker TailAll is.
+			name: "tail zero is not tail all", platform: validate.PlatformDocker,
+			opts: LogsOpts{Tail: 0},
+			want: []string{"cli", "logs", "--tail", "0", "pod-a"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := LogsArgv([]string{"cli"}, c.platform, "pod-a", c.namespace, c.opts)
+			if err != nil {
+				t.Fatalf("LogsArgv: %v", err)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("argv = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestLogsArgvRefusesPreviousOffKubernetes pins the guard behind the CLI's own
+// refusal: neither engine keeps a prior run's log under the same name, so the
+// option is refused rather than dropped -- a caller that asked for the previous
+// log must never be handed the current one instead.
+func TestLogsArgvRefusesPreviousOffKubernetes(t *testing.T) {
+	for _, platform := range []string{validate.PlatformDocker, validate.PlatformPodman} {
+		_, err := LogsArgv([]string{"docker"}, platform, "c", "", LogsOpts{Previous: true, Tail: TailAll})
+		if err == nil {
+			t.Fatalf("%s: --previous must be refused", platform)
+		}
+		if !strings.Contains(err.Error(), platform) {
+			t.Errorf("%s: the error should name the platform, got %v", platform, err)
+		}
+	}
+}
+
+// TestLogsArgvUnknownPlatform mirrors execArgv's refusal: an unrecognised
+// platform names the three that exist rather than producing a half-built argv.
+func TestLogsArgvUnknownPlatform(t *testing.T) {
+	_, err := LogsArgv([]string{"kubectl"}, "nomad", "c", "", LogsOpts{Tail: TailAll})
+	if err == nil {
+		t.Fatal("an unknown platform must be refused")
+	}
+	for _, want := range []string{validate.PlatformKubernetes, validate.PlatformDocker, validate.PlatformPodman} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error should name %q, got %v", want, err)
+		}
 	}
 }

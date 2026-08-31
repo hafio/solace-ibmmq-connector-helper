@@ -214,7 +214,7 @@ details[open]>summary::before{content:"- "}
       <div class="f"><label>Management Queue</label><input id="i-le-queue" placeholder="solmq-connector-mgmt"><div class="h">Exclusive coordination queue for this connector instance.</div></div>
       <div class="f"><label>Management Session</label><select id="i-le-src" onchange="syncLE()">
         <option value="ref">conn-ref to a solace connection</option>
-        <option value="inline">inline solace session</option>
+        <option value="inline">inline session block</option>
       </select></div>
       <div class="f" id="le-ref-f"><label>conn-ref</label><select id="i-le-ref"></select></div>
       <div class="opt-fields" id="le-inline-f">
@@ -227,6 +227,7 @@ details[open]>summary::before{content:"- "}
           <div class="f"><label>Client Password</label><input id="i-le-pass" placeholder="SOL_PASSWORD"><label class="h" style="display:flex;align-items:center;gap:.3rem;font-style:normal;cursor:pointer"><input type="checkbox" id="i-le-pass-env" checked> env var (uncheck for a literal value)</label></div>
         </div>
         <div class="f"><label>Key Alias (mTLS)</label><input id="i-le-alias" placeholder="solace-client"></div>
+        <div class="f"><label>api-properties</label><textarea id="i-le-props" rows="2" placeholder="REAPPLY_SUBSCRIPTIONS: true"></textarea><div class="h">Emitted verbatim after the tool-managed TLS keys. One "key: value" per line.</div></div>
       </div>
       <div class="f"><label>fail-over</label><textarea id="i-le-fo" rows="3" placeholder="max-attempts: 5"></textarea><div class="h">Emitted verbatim. One "key: value" per line.</div></div>
     </div>
@@ -234,7 +235,7 @@ details[open]>summary::before{content:"- "}
 
   <!-- Solace defaults -->
   <div class="sec" id="s-soldef"><h3>Solace Defaults</h3>
-    <div class="f"><label>solace-defaults</label><textarea id="i-soldef" rows="3" placeholder="connect-retries: -1"></textarea><div class="h">Merged into every Solace binder's solace.java.* block.</div></div>
+    <div class="f"><label>solace-defaults</label><textarea id="i-soldef" rows="3" placeholder="connect-retries: -1"></textarea><div class="h">Merged into every Solace binder's solace.java.* block and into the leader-election session.</div></div>
   </div>
 
   <!-- Image + timezone (shared by every platform) -->
@@ -300,7 +301,7 @@ details[open]>summary::before{content:"- "}
         </div>
       </div>
       <div class="opt-fields" id="k8s-libs-dl">
-        <div class="f"><label>URLs</label><textarea id="i-k8s-libs-urls" rows="2" placeholder="https://repo.example/mq/com.ibm.mq.allclient.jar"></textarea><div class="h">One http(s) URL per line.</div></div>
+        <div class="f"><label>URLs</label><textarea id="i-k8s-libs-urls" rows="2" placeholder="https://repo.example/mq/com.ibm.mq.jakarta.client-9.4.4.0.jar"></textarea><div class="h">One http(s) URL per line.</div></div>
         <div class="fr">
           <div class="f"><label>Image</label><input id="i-k8s-libs-img" placeholder="busybox:1.37"></div>
           <div class="f"><label>Cache PVC</label><input id="i-k8s-libs-dlpvc" placeholder="(blank = emptyDir)"></div>
@@ -562,8 +563,10 @@ solace:
       session:
         host: tcps://broker.internal:55443
         msg-vpn: prod
-        client-username: ${LEADER_ELECTION_CLIENT_USERNAME}
-        client-password: ${LEADER_ELECTION_CLIENT_PASSWORD}
+        client-username: ${PROD_SOLACE_CLIENT_USERNAME}
+        client-password: ${PROD_SOLACE_CLIENT_PASSWORD}
+        connect-retries: -1
+        reconnect-retries: -1
         api-properties:
           SSL_VALIDATE_CERTIFICATE: true
           SSL_TRUST_STORE: ./certs/truststore.jks
@@ -573,6 +576,7 @@ solace:
           SSL_KEY_STORE_PASSWORD: ${KEYSTORE_PASSWORD}
           SSL_KEY_STORE_FORMAT: JKS
           SSL_PRIVATE_KEY_ALIAS: solace-client
+          REAPPLY_SUBSCRIPTIONS: true
 management:
   server:
     port: 8090
@@ -1022,7 +1026,7 @@ function readModel(){
         system: 'solace', connRef: '', host: V('i-le-host'), msgVpn: V('i-le-vpn'),
         clientUser: readCredById('i-le-user', 'i-le-user-env'), clientPass: readCredById('i-le-pass', 'i-le-pass-env'), keyAlias: V('i-le-alias'),
         connName: '', queueManager: '', channel: '', user: emptyCred(), password: emptyCred(), tls: false, cipher: '',
-        destKind: '', dest: '', props: [], tune: []
+        destKind: '', dest: '', props: parseProps(V('i-le-props')), tune: []
       };
     }
   }
@@ -1166,7 +1170,7 @@ function emitEnv(m){
   if(m.leader.present){
     y += '\nleader-election:\n' + kv('mode', m.leader.mode, '  ') + kv('queue', m.leader.queue, '  ');
     if(m.leader.connRef) y += kv('conn-ref', m.leader.connRef, '  ');
-    else if(m.leader.session) y += '  solace:\n' + sideBody(m.leader.session, '    ', false);
+    else if(m.leader.session) y += '  session:\n' + sideBody(m.leader.session, '    ', false);
     if(m.leader.failOver.length) y += '  fail-over:\n' + emitProps(m.leader.failOver, '    ');
   }
 
@@ -1633,8 +1637,14 @@ function checkLeaderElection(add, warn, m, haveKeystore){
   } else if(le.session){
     checkTuple(add, ENV_FILE, 'leader-election session', le.session, haveKeystore);
   } else {
-    add(ENV_FILE, `leader-election mode "${le.mode}" requires a solace session (conn-ref or inline solace:)`);
+    add(ENV_FILE, `leader-election mode "${le.mode}" requires a solace session (conn-ref or inline session:)`);
   }
+  // Three of validate.go's leader-election errors are deliberately absent here,
+  // for the same reason the invalid-mode and non-solace-session branches are:
+  // the form cannot produce them. There is no YAML input, so the retired
+  // `leader-election.solace` key is unreachable; the Management Session select
+  // is exclusive, so conn-ref and an inline session cannot both be set; and the
+  // inline session has no destination or consumer/producer fields to reject.
 }
 
 // checkKube validates the kubernetes section: deployment identity/image,
@@ -1927,12 +1937,21 @@ function mergeProp(list, p, warns, binder){
   }
   return list.concat([p]);
 }
-function appendPassthrough(tool, pass, warns, binder){
+// binderOwner labels a warning that belongs to one binder; LEADER_SESSION_OWNER
+// one that belongs to the leader-election management session, which is neither a
+// binder nor named like one. Mirrors consolidate.go's binderOwner /
+// leaderSessionOwner.
+function binderOwner(name){ return `binder "${name}"`; }
+const LEADER_SESSION_OWNER = 'leader-election session';
+// appendPassthrough appends verbatim props after the tool-managed props, dropping
+// (with a warning) any passthrough key that collides with a tool-managed key.
+// owner is the ready-made label the warning opens with.
+function appendPassthrough(tool, pass, warns, owner){
   const keys = {};
   tool.forEach(p => { keys[p.key] = true; });
   pass.forEach(p => {
     if(keys[p.key]){
-      warns.push(`binder "${binder}": passthrough overrides tool-managed key "${p.key}"; tool value kept`);
+      warns.push(`${owner}: passthrough overrides tool-managed key "${p.key}"; tool value kept`);
       return;
     }
     tool.push(p);
@@ -2188,7 +2207,7 @@ function consolidateBuild(wfs, m, statusPassword){
                    extras: (m.solaceDefaults || []).slice(), apiProps: [] };
       let props = [];
       if(a.tls) props = solaceProps(m, a.keyAlias, secretRef);
-      sb.apiProps = appendPassthrough(props, a.pass2, warns, a.name);
+      sb.apiProps = appendPassthrough(props, a.pass2, warns, binderOwner(a.name));
       a.binder = { name: a.name, kind: 'solace', solace: sb };
     } else {
       const mb = { queueManager: a.qm, channel: a.ch, connName: a.conn,
@@ -2208,7 +2227,7 @@ function consolidateBuild(wfs, m, statusPassword){
         }
       }
       const props = a.cipher ? [{ key: 'WMQ_SSL_CIPHER_SUITE', val: a.cipher }] : [];
-      mb.addlProps = appendPassthrough(props, a.pass2, warns, a.name);
+      mb.addlProps = appendPassthrough(props, a.pass2, warns, binderOwner(a.name));
       a.binder = { name: a.name, kind: 'mq', mq: mb };
     }
     model.binders.push(a.binder);
@@ -2229,7 +2248,19 @@ function consolidateBuild(wfs, m, statusPassword){
     }
   });
 
-  model.leader = buildLeaderElection(m, secretRef);
+  // A management session that resolves to a connection a workflow already uses
+  // is the same credential, so it reuses that binder's stable names: one secret,
+  // mounted once. dedupKey omits the destination, so a bare connection and the
+  // workflow side built from it land on the same accumulator. Mirrors Build's
+  // leaderNames closure.
+  const leaderNames = sess => {
+    const a = byKey[dedupKey(sess)];
+    if(a && a.binder && a.kind === 'solace'){
+      return [stableName(a.name, 'CLIENT_USERNAME'), stableName(a.name, 'CLIENT_PASSWORD')];
+    }
+    return [LEADER_USERNAME_NAME, LEADER_PASSWORD_NAME];
+  };
+  model.leader = buildLeaderElection(m, secretRef, leaderNames, warns);
 
   // The status script needs actuator access in every deployment, so the
   // exposure list and the reserved read-only status account are forced onto
@@ -2299,10 +2330,12 @@ function emitBindingOptions(model, name, s, isInput, file){
 }
 
 // buildLeaderElection assembles the leader-election model for active_active /
-// active_standby (null for standalone/absent). The management session's TLS
-// api-properties reuse the shared truststore/keystore wiring. Mirrors
-// consolidate.go's buildLeaderElection.
-function buildLeaderElection(m, secretRef){
+// active_standby (null for standalone/absent). The management session carries the
+// same key set as a Solace binder -- session.* has the same interface as
+// solace.java.* -- so solace-defaults and the connection's own verbatim
+// api-properties land here too, on top of the shared truststore/keystore TLS
+// wiring. Mirrors consolidate.go's buildLeaderElection.
+function buildLeaderElection(m, secretRef, leaderNames, warns){
   const le = m.leader;
   if(!le.present || !le.mode || le.mode === 'standalone') return null;
   const out = { mode: le.mode, queue: le.queue, failOver: le.failOver, session: null };
@@ -2314,13 +2347,18 @@ function buildLeaderElection(m, secretRef){
     sess = le.session;
   }
   if(sess){
+    const names = leaderNames(sess);
     const s = {
       host: sess.host, msgVpn: sess.msgVpn,
-      clientUser: secretRef(LEADER_USERNAME_NAME, sideUsername(sess)),
-      clientPass: secretRef(LEADER_PASSWORD_NAME, sideSecret(sess)),
-      apiProps: []
+      clientUser: secretRef(names[0], sideUsername(sess)),
+      clientPass: secretRef(names[1], sideSecret(sess)),
+      extras: (m.solaceDefaults || []).slice(), apiProps: []
     };
-    if(isTCPS(sess.host)) s.apiProps = solaceProps(m, sess.keyAlias, secretRef);
+    const props = isTCPS(sess.host) ? solaceProps(m, sess.keyAlias, secretRef) : [];
+    // One session resolves to exactly one connection, so unlike a binder -- which
+    // accumulates passthrough from every side that dedups onto it -- there is
+    // nothing to mergeProp across: the mapping goes straight through.
+    s.apiProps = appendPassthrough(props, sess.props || [], warns, LEADER_SESSION_OWNER);
     out.session = s;
   }
   return out;
@@ -2471,6 +2509,7 @@ function renderLeaderElection(line, le){
     line(8, 'msg-vpn: ' + yq(s.msgVpn));
     if(s.clientUser) line(8, 'client-username: ' + yq(s.clientUser));
     if(s.clientPass) line(8, 'client-password: ' + yq(s.clientPass));
+    s.extras.forEach(p => renderProp(line, 8, p));
     if(s.apiProps.length){
       line(8, 'api-properties:');
       s.apiProps.forEach(p => renderProp(line, 10, p));
@@ -2930,7 +2969,7 @@ function clearForm(){
    'i-k8s-sl-on', 'i-k8s-svc', 'i-dk-stores', 'i-pd-stores', 'i-dk-libs-on', 'i-pd-libs-on'].forEach(id => setC(id, false));
   ['i-ts-pass-env', 'i-ks-pass-env', 'i-le-user-env', 'i-le-pass-env',
    'i-img-user-env', 'i-img-pass-env'].forEach(id => setC(id, true));
-  ['i-log', 'i-soldef', 'i-le-queue', 'i-le-fo', 'i-k8s-name', 'i-k8s-ns',
+  ['i-log', 'i-soldef', 'i-le-queue', 'i-le-fo', 'i-le-props', 'i-k8s-name', 'i-k8s-ns',
    'i-k8s-cpu', 'i-k8s-mem', 'i-k8s-ipull-name',
    'i-img-repo', 'i-img-name', 'i-img-tag', 'i-img-user', 'i-img-pass', 'i-tz',
    'i-ts-file', 'i-ts-pass', 'i-ks-file', 'i-ks-pass'].forEach(id => setV(id, ''));

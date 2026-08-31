@@ -268,6 +268,9 @@ func renderLeaderElection(w *yw, le *consolidate.LeaderElectionModel) {
 		if s.ClientPass != "" {
 			w.Line(8, "client-password: "+q(s.ClientPass))
 		}
+		for _, p := range s.Extras {
+			renderProp(w, 8, p)
+		}
 		if len(s.APIProps) > 0 {
 			w.Line(8, "api-properties:")
 			for _, p := range s.APIProps {

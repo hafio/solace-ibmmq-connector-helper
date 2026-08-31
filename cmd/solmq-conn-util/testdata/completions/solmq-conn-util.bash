@@ -33,6 +33,8 @@ _solmq_conn_util_flag_arg() {
     -management-port|--management-port) printf 'name' ;;
     -user|--user) printf 'name' ;;
     -command|--command) printf 'name' ;;
+    -tail|--tail) printf 'name' ;;
+    -since|--since) printf 'name' ;;
     *) printf '' ;;
   esac
 }
@@ -69,6 +71,7 @@ _solmq_conn_util_flags() {
     deploy) printf '--platform -e --env --allow-command' ;;
     remove) printf '--platform -e --env --allow-command' ;;
     status) printf '-d --details -w --watch --all --output --install --platform -e --env --pod --container --namespace --management-port --user --command --allow-command' ;;
+    logs) printf '--follow --previous --tail --since --timestamps --all --platform -e --env --pod --container --namespace --command --allow-command' ;;
     validate) printf '-e --env' ;;
     examples) printf '-f --force' ;;
     download) printf '-e --env --url --version --omit-lib-file --include-provided -f --force' ;;
@@ -149,6 +152,7 @@ _solmq_conn_util() {
     dp) verb="deploy" ;;
     rm) verb="remove" ;;
     sts) verb="status" ;;
+    lg) verb="logs" ;;
     ver) verb="version" ;;
     vld) verb="validate" ;;
     eg) verb="examples" ;;
@@ -158,7 +162,7 @@ _solmq_conn_util() {
   # Aliases are deliberately absent from this word list -- the TAB menu for
   # word 1 keeps showing only canonical verbs.
   if [ -z "$verb" ]; then
-    COMPREPLY=( $(compgen -W 'generate deploy remove status version validate examples download auto-complete help -h --help' -- "$cur") )
+    COMPREPLY=( $(compgen -W 'generate deploy remove status logs version validate examples download auto-complete help -h --help' -- "$cur") )
     return
   fi
 

@@ -110,6 +110,14 @@ type Instance struct {
 	Namespace string `json:"namespace,omitempty"`
 	Group     string `json:"group,omitempty"`
 
+	// ContainerName is the container inside a kubernetes pod this report is
+	// about, as connectorIndex picked it. Empty on docker/podman, where the
+	// target is the container, and empty for a multi-container pod in which
+	// none is the connector -- the case connectorIndex deliberately refuses to
+	// guess at. A caller addressing the container by name (kubectl -c) reads it
+	// here rather than deciding again.
+	ContainerName string `json:"containerName,omitempty"`
+
 	Container   *Container   `json:"container,omitempty"`
 	Application *Application `json:"application,omitempty"`
 

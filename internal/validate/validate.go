@@ -118,9 +118,10 @@ func Run(ctx Context) (errs, warns []Issue) {
 		resolved[i].Target = d.Resolve(wf.Target)
 	}
 
-	// Removed keys: still parsed (spec.Security.Enabled / spec.Management.Exposure),
-	// always rejected, so an old env.yaml fails loudly instead of silently keeping
-	// a toggle that no longer has any effect (mirrors docker/podman .secrets).
+	// Retired keys: still parsed (spec.Security.Enabled, spec.Management.Exposure,
+	// spec.LeaderElection.SolaceKey), always rejected, so an old env.yaml fails
+	// loudly instead of silently keeping a toggle that no longer has any effect, or
+	// a block under a name nothing reads (mirrors docker/podman .secrets).
 	checkRemovedDefaultsKeys(add, d)
 
 	checkWorkflowCount(add, len(ctx.Workflows))
@@ -137,6 +138,7 @@ func Run(ctx Context) (errs, warns []Issue) {
 
 	// Leader-election (standalone | active_active | active_standby).
 	checkLeaderElection(add, d, haveKeystore)
+	checkLeaderSessionPassword(add, d, resolved)
 
 	// Reserved status-account name, and its password override charset.
 	checkStatusUser(add, ctx.Env, d)
@@ -161,18 +163,23 @@ func checkWorkflowCount(add func(string, string, ...any), n int) {
 		n, MaxWorkflows, MaxWorkflows-1)
 }
 
-// checkRemovedDefaultsKeys rejects the two connector-defaults keys the tool
-// retired now that management is unconditionally locked down: security.enabled
-// (management security can no longer be turned off) and management.exposure
-// (the actuator exposure list is no longer configurable). Both fields still
-// parse a value through from env.yaml purely so a stale key is caught here
-// instead of silently doing nothing.
+// checkRemovedDefaultsKeys rejects the connector-defaults keys the tool retired:
+// security.enabled (management security can no longer be turned off) and
+// management.exposure (the actuator exposure list is no longer configurable),
+// now that management is unconditionally locked down, plus the old
+// leader-election.solace spelling of the management session. Every one of them
+// still parses a value through from env.yaml purely so a stale key is caught
+// here instead of silently doing nothing. This runs whatever the leader-election
+// mode is, so the rename is reported even under standalone.
 func checkRemovedDefaultsKeys(add func(string, string, ...any), d *spec.Defaults) {
 	if d.Security.Enabled != nil {
 		add(fileEnv, "security.enabled is no longer configurable: the tool always injects a read-only actuator account (%s) so a running instance can always be queried for its leader-election state, and disabling auth would also leave the write-capable /actuator/workflows endpoint open. Remove the key", spec.StatusUserName)
 	}
 	if d.Management.Exposure != nil {
 		add(fileEnv, "management.exposure is no longer configurable: the tool always exposes exactly health,info,metrics,leaderelection,workflows. Remove the key")
+	}
+	if d.LeaderElection.SolaceKey {
+		add(fileEnv, "leader-election.solace has been renamed to leader-election.session, which is what it renders to (solace.connector.management.session). Rename the key")
 	}
 }
 
@@ -407,7 +414,7 @@ func checkConnections(add, warn func(string, string, ...any), env func(string) (
 }
 
 // checkLeaderElection validates leader-election mode + (for active_*) queue and
-// a Solace management session (conn-ref to a solace connection, or inline solace).
+// a Solace management session (conn-ref to a solace connection, or inline session).
 func checkLeaderElection(add func(string, string, ...any), d *spec.Defaults, haveKeystore bool) {
 	le := d.LeaderElection
 	if !le.Present || le.Mode == "" || le.Mode == spec.LeaderStandalone {
@@ -419,6 +426,12 @@ func checkLeaderElection(add func(string, string, ...any), d *spec.Defaults, hav
 	}
 	if le.Queue == "" {
 		add(fileEnv, "leader-election mode %q requires a 'queue'", le.Mode)
+	}
+	// conn-ref wins in consolidate, so an inline block alongside one is dead
+	// config -- and dead config that is still credential-checked, which produces
+	// errors about a session nothing renders.
+	if le.ConnRef != "" && le.Session != nil {
+		add(fileEnv, "leader-election sets both conn-ref %q and an inline session: block; keep one", le.ConnRef)
 	}
 	switch {
 	case le.ConnRef != "":
@@ -434,7 +447,57 @@ func checkLeaderElection(add func(string, string, ...any), d *spec.Defaults, hav
 			checkTuple(add, fileEnv, "leader-election session", *le.Session, haveKeystore)
 		}
 	default:
-		add(fileEnv, "leader-election mode %q requires a solace session (conn-ref or inline solace:)", le.Mode)
+		add(fileEnv, "leader-election mode %q requires a solace session (conn-ref or inline session:)", le.Mode)
+	}
+	// A management session coordinates leadership; it has no binding, so a
+	// destination or consumer/producer tuning written here renders nothing. The
+	// management queue is leader-election.queue, one level up -- which is the
+	// mistake this catches.
+	if le.Session != nil {
+		if got := le.Session.BindingFields(); len(got) > 0 {
+			add(fileEnv, "leader-election.session may not set queue/topic/consumer/producer: a management session is a connection, not a binding (it sets %s here), and the management queue is leader-election.queue, one level up", strings.Join(got, ", "))
+		}
+	}
+}
+
+// checkLeaderSessionPassword flags a management session whose broker tuple is
+// one the workflows already bind but whose password disagrees with it. The dedup
+// tuple omits the password, so the two are one binder and one mounted credential
+// -- consolidate shares the stable secret name on purpose, so the credential is
+// mounted once -- and the binder's password, recorded first, is the one the
+// session would silently authenticate with. Fatal for the same reason
+// checkPasswordConflicts is.
+func checkLeaderSessionPassword(add func(string, string, ...any), d *spec.Defaults, wfs []spec.Workflow) {
+	le := d.LeaderElection
+	if !le.Present || le.Mode == "" || le.Mode == spec.LeaderStandalone {
+		return
+	}
+	sess := le.Session
+	if le.ConnRef != "" {
+		c, ok := d.Connections[le.ConnRef]
+		if !ok {
+			return // the dangling ref is already reported by checkLeaderElection
+		}
+		sess = &c
+	}
+	if sess == nil || sess.System != spec.SystemSolace {
+		return
+	}
+	cred := sess.Secret()
+	if cred.Empty() {
+		return
+	}
+	key := sess.DedupKey()
+	for _, wf := range wfs {
+		for _, s := range []spec.Side{wf.Source, wf.Target} {
+			if s.System != spec.SystemSolace || s.DedupKey() != key {
+				continue
+			}
+			if b := s.Secret(); !b.Empty() && b.Key() != cred.Key() {
+				add(fileEnv, "the leader-election session uses %s, but %s reaches the same broker tuple with a different password: they collapse onto one binder and one mounted credential, so give them a single password or make the tuples distinct", cred.Describe(), wf.File)
+				return
+			}
+		}
 	}
 }
 

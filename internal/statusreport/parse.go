@@ -198,6 +198,17 @@ func instanceFromPod(p kubePod, now time.Time) Instance {
 	si := connectorIndex(specNames)
 	ci := connectorIndex(statusNames)
 
+	// Record which container connectorIndex settled on, so a caller that needs
+	// to address it by name (kubectl's -c) reuses this decision instead of
+	// making its own and risking a different answer. The spec list is preferred
+	// because it exists before any container status does.
+	switch {
+	case si >= 0:
+		inst.ContainerName = specNames[si]
+	case ci >= 0:
+		inst.ContainerName = statusNames[ci]
+	}
+
 	// Pod phase is the fallback for a pod with no container status yet
 	// (Pending, unschedulable): there is a real state to report even before a
 	// container exists.

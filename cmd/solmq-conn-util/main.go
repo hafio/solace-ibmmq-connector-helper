@@ -1,13 +1,15 @@
 // Command solmq-conn-util generates and deploys the Solace PubSub+ Connector for IBM
 // MQ from a single env.yaml: it consolidates a folder of per-workflow YAML files
 // into an application.yml and, per platform, into Kubernetes manifests, a docker
-// compose file, or podman run/quadlet units -- and can apply, tear down, or check
-// the status of those by shelling out to kubectl/oc, docker, or podman/systemctl.
+// compose file, or podman run/quadlet units -- and can apply, tear down, check the
+// status of, or read the logs of those by shelling out to kubectl/oc, docker, or
+// podman/systemctl.
 //
 //	solmq-conn-util generate [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
 //	solmq-conn-util deploy   [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util remove   [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util status   <container|application|all> [-d] [-w] [--all] [--output table|json] [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
+//	solmq-conn-util logs     [--follow] [--previous] [--tail N] [--since d] [--timestamps] [--all] [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util version
 //	solmq-conn-util validate [-e env.yaml]
 //	solmq-conn-util examples [dir] [-f]
@@ -127,6 +129,7 @@ var verbHandlers = map[string]func(args []string, r runner.Runner) int{
 	"deploy":        func(args []string, r runner.Runner) int { return runAction(runner.ActionDeploy, args, r) },
 	"remove":        func(args []string, r runner.Runner) int { return runAction(runner.ActionRemove, args, r) },
 	"status":        func(args []string, r runner.Runner) int { return runStatus(args, r) },
+	"logs":          func(args []string, r runner.Runner) int { return runLogs(args, r) },
 	"version":       func(args []string, r runner.Runner) int { return actVersion() },
 	"validate":      func(args []string, r runner.Runner) int { return runValidate(args) },
 	"examples":      func(args []string, r runner.Runner) int { return runExamples(args) },

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
@@ -168,7 +170,7 @@ func leWorkflows() []spec.Workflow {
 
 func TestLeaderElectionActiveStandbyValid(t *testing.T) {
 	d := defsWithStores()
-	d.Connections = map[string]spec.Side{"mgmt": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUser: "u", ClientPassEnv: "MGMT_CLIENT_PASSWORD"}}
+	d.Connections = map[string]spec.Side{"mgmt": mgmtSide()}
 	d.LeaderElection = spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q", ConnRef: "mgmt"}
 	if errs, _ := Run(Context{Workflows: leWorkflows(), Defaults: d}); len(errs) != 0 {
 		t.Fatalf("valid active_standby should pass, got %v", errs)
@@ -198,6 +200,141 @@ func TestLeaderElectionInvalidMode(t *testing.T) {
 	d.LeaderElection = spec.LeaderElection{Present: true, Mode: "bogus"}
 	if errs, _ := Run(Context{Workflows: leWorkflows(), Defaults: d}); !hasErr(errs, "is invalid") {
 		t.Fatalf("want invalid-mode error, got %v", errs)
+	}
+}
+
+// mgmtSide is a well-formed inline management session: a solace tuple with no
+// destination, which is all a session may carry. Its broker is deliberately not
+// leWorkflows' broker -- a session that shares a workflow's tuple shares its
+// mounted credential too, which is TestLeaderSessionPasswordConflict's subject,
+// not these tests'.
+func mgmtSide() spec.Side {
+	return spec.Side{System: spec.SystemSolace, Host: "tcps://mgmt:55443", MsgVPN: "mgmt", ClientUser: "u", ClientPassEnv: "MGMT_CLIENT_PASSWORD"}
+}
+
+// TestLeaderElectionSolaceKeyRenamed pins the retired spelling. It rides in
+// checkRemovedDefaultsKeys rather than checkLeaderElection so it is reported
+// whatever the mode is -- including standalone, where checkLeaderElection
+// returns before it could look.
+func TestLeaderElectionSolaceKeyRenamed(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		mode string
+	}{
+		{"active_standby", spec.LeaderActiveStby},
+		{"standalone", spec.LeaderStandalone},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := defsWithStores()
+			sess := mgmtSide()
+			d.LeaderElection = spec.LeaderElection{Present: true, Mode: c.mode, Queue: "mgmt-q", Session: &sess, SolaceKey: true}
+			errs, _ := Run(Context{Workflows: leWorkflows(), Defaults: d})
+			if !hasErr(errs, "leader-election.solace has been renamed to leader-election.session") {
+				t.Fatalf("want the rename error, got %v", errs)
+			}
+		})
+	}
+}
+
+// TestLeaderElectionConnRefAndInlineSession rejects the combination that used to
+// resolve silently: consolidate prefers conn-ref, so the inline block is dead
+// config -- yet credential checking still ran over it, reporting errors about a
+// session nothing renders.
+func TestLeaderElectionConnRefAndInlineSession(t *testing.T) {
+	d := defsWithStores()
+	sess := mgmtSide()
+	d.Connections = map[string]spec.Side{"mgmt": mgmtSide()}
+	d.LeaderElection = spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q", ConnRef: "mgmt", Session: &sess}
+	if errs, _ := Run(Context{Workflows: leWorkflows(), Defaults: d}); !hasErr(errs, "sets both conn-ref") {
+		t.Fatalf("want the conn-ref/session conflict error, got %v", errs)
+	}
+}
+
+// TestLeaderElectionSessionRejectsBindingFields covers the four keys a session
+// parses and then discards. leader-election.session.queue in particular is the
+// near miss for leader-election.queue, so silence there costs an operator the
+// management queue itself.
+func TestLeaderElectionSessionRejectsBindingFields(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		apply func(*spec.Side)
+	}{
+		{"queue", func(s *spec.Side) { s.DestKind, s.Dest = spec.DestQueue, "oops" }},
+		{"topic", func(s *spec.Side) { s.DestKind, s.Dest = spec.DestTopic, "oops" }},
+		{"consumer", func(s *spec.Side) { s.Consumer = &yaml.Node{Kind: yaml.MappingNode} }},
+		{"producer", func(s *spec.Side) { s.Producer = &yaml.Node{Kind: yaml.MappingNode} }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := defsWithStores()
+			sess := mgmtSide()
+			c.apply(&sess)
+			d.LeaderElection = spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q", Session: &sess}
+			errs, _ := Run(Context{Workflows: leWorkflows(), Defaults: d})
+			if !hasErr(errs, "leader-election.session may not set queue/topic/consumer/producer") {
+				t.Fatalf("want the binding-field error, got %v", errs)
+			}
+		})
+	}
+}
+
+// TestLeaderElectionInlineSessionValid is the negative control for the two tests
+// above: a bare solace tuple under session: is exactly what a management session
+// is, and must pass clean.
+func TestLeaderElectionInlineSessionValid(t *testing.T) {
+	d := defsWithStores()
+	sess := mgmtSide()
+	d.LeaderElection = spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q", Session: &sess}
+	if errs, _ := Run(Context{Workflows: leWorkflows(), Defaults: d}); len(errs) != 0 {
+		t.Fatalf("a bare inline session should pass, got %v", errs)
+	}
+}
+
+// TestLeaderSessionPasswordConflict guards the hazard the shared credential name
+// creates. The dedup tuple omits the password, so a session that reaches the same
+// broker as a workflow binder now mounts ONE credential -- the binder's, recorded
+// first -- and a session that meant to use a different password would silently
+// authenticate with the wrong one.
+func TestLeaderSessionPasswordConflict(t *testing.T) {
+	// vSolace's tuple: tcps://b:55443 / prod / u, password-env SOLACE_CLIENT_PASSWORD.
+	same := func() spec.Side {
+		return spec.Side{System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUser: "u", ClientPassEnv: "SOLACE_CLIENT_PASSWORD"}
+	}
+	differ := func() spec.Side {
+		s := same()
+		s.ClientPassEnv = "OTHER_PASSWORD"
+		return s
+	}
+	elsewhere := func() spec.Side {
+		s := differ()
+		s.Host = "tcps://other:55443"
+		return s
+	}
+	for _, c := range []struct {
+		name    string
+		inline  func() spec.Side
+		connRef bool
+		want    bool
+	}{
+		{"inline session disagrees", differ, false, true},
+		{"conn-ref session disagrees", differ, true, true},
+		{"session agrees", same, false, false},
+		{"session is a different broker", elsewhere, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := defsWithStores()
+			sess := c.inline()
+			d.LeaderElection = spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q"}
+			if c.connRef {
+				d.Connections = map[string]spec.Side{"mgmt": sess}
+				d.LeaderElection.ConnRef = "mgmt"
+			} else {
+				d.LeaderElection.Session = &sess
+			}
+			errs, _ := Run(Context{Workflows: leWorkflows(), Defaults: d})
+			if got := hasErr(errs, "reaches the same broker tuple with a different password"); got != c.want {
+				t.Fatalf("conflict reported = %v, want %v (errs %v)", got, c.want, errs)
+			}
+		})
 	}
 }
 

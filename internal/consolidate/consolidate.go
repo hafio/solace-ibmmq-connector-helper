@@ -180,7 +180,7 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 					props = append(props, Prop{Key: kv.Key, Val: kv.Val})
 				}
 			}
-			props = appendPassthrough(props, a.pass2, &warns, a.name)
+			props = appendPassthrough(props, a.pass2, &warns, binderOwner(a.name))
 			sb.APIProps = props
 			a.binder = &Binder{Name: a.name, Kind: spec.SystemSolace, Solace: sb}
 		case spec.SystemMQ:
@@ -207,7 +207,7 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 			if a.cipher != "" {
 				props = append(props, Prop{Key: "WMQ_SSL_CIPHER_SUITE", Val: a.cipher})
 			}
-			props = appendPassthrough(props, a.pass2, &warns, a.name)
+			props = appendPassthrough(props, a.pass2, &warns, binderOwner(a.name))
 			mb.AddlProps = props
 			a.binder = &Binder{Name: a.name, Kind: spec.SystemMQ, MQ: mb}
 		}
@@ -235,8 +235,21 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 		}
 	}
 
+	// A management session that resolves to a connection a workflow already uses
+	// is the same credential, so it reuses that binder's stable names: one
+	// secret, mounted once, rather than two files holding the same value under
+	// two spellings. DedupKey excludes the destination, so a bare connection and
+	// the workflow side built from it land on the same accumulator -- which is
+	// what makes this work for the inline session as well as for conn-ref.
+	leaderNames := func(sess spec.Side) (string, string) {
+		if a := byKey[sess.DedupKey()]; a != nil && a.binder != nil && a.kind == spec.SystemSolace {
+			return stableName(a.name, "CLIENT_USERNAME"), stableName(a.name, "CLIENT_PASSWORD")
+		}
+		return LeaderUsernameName, LeaderPasswordName
+	}
+
 	// leader-election block (active_active / active_standby); standalone/absent ⇒ nil.
-	m.LeaderElection = buildLeaderElection(d, mountStores, secretRef)
+	m.LeaderElection = buildLeaderElection(d, mountStores, secretRef, leaderNames, &warns)
 
 	// The status script needs actuator access in every deployment, so the
 	// exposure list and the reserved status account are forced onto the model
@@ -299,6 +312,15 @@ func displayName(a *acc) string {
 	}
 }
 
+// binderOwner labels a binder in a passthrough warning. The label is the
+// caller's business because the leader-election management session runs the
+// same passthrough rules without being a binder -- see leaderSessionOwner.
+func binderOwner(name string) string { return fmt.Sprintf("binder %q", name) }
+
+// leaderSessionOwner is the passthrough-warning label for the leader-election
+// management session, which has no binder name to quote.
+const leaderSessionOwner = "leader-election session"
+
 func isTCPS(host string) bool { return strings.HasPrefix(host, "tcps://") }
 
 // sanitize keeps [A-Za-z0-9-] and replaces every other rune with '-'.
@@ -342,10 +364,12 @@ func buildBundle(a *acc, d *spec.Defaults, mount bool, secretRef secretFn) *Bund
 }
 
 // buildLeaderElection assembles the leader-election model for active_active /
-// active_standby (nil for standalone/absent). The management session's TLS
-// api-properties reuse the shared truststore/keystore wiring (config vs deploy
-// path via mount).
-func buildLeaderElection(d *spec.Defaults, mount bool, secretRef secretFn) *LeaderElectionModel {
+// active_standby (nil for standalone/absent). The management session carries the
+// same key set as a Solace binder -- the connector documents session.* as the
+// same interface as solace.java.* -- so solace-defaults and the connection's own
+// verbatim api-properties land here too, on top of the shared
+// truststore/keystore wiring (config vs deploy path via mount).
+func buildLeaderElection(d *spec.Defaults, mount bool, secretRef secretFn, names leaderNameFn, warns *[]string) *LeaderElectionModel {
 	le := d.LeaderElection
 	if !le.Present || le.Mode == "" || le.Mode == spec.LeaderStandalone {
 		return nil
@@ -360,17 +384,24 @@ func buildLeaderElection(d *spec.Defaults, mount bool, secretRef secretFn) *Lead
 		sess = le.Session
 	}
 	if sess != nil {
+		userName, passName := names(*sess)
 		s := &Session{
 			Host:       sess.Host,
 			MsgVPN:     sess.MsgVPN,
-			ClientUser: secretRef(LeaderUsernameName, sess.Username()),
-			ClientPass: secretRef(LeaderPasswordName, sess.Secret()),
+			ClientUser: secretRef(userName, sess.Username()),
+			ClientPass: secretRef(passName, sess.Secret()),
+			Extras:     nodeToProps(d.SolaceDefaults),
 		}
+		var props []Prop
 		if isTCPS(sess.Host) {
 			for _, kv := range tls.SolaceProps(d, sess.KeyAlias, mount, storeSecret(secretRef)) {
-				s.APIProps = append(s.APIProps, Prop{Key: kv.Key, Val: kv.Val})
+				props = append(props, Prop{Key: kv.Key, Val: kv.Val})
 			}
 		}
+		// One session resolves to exactly one connection, so unlike a binder --
+		// which accumulates passthrough from every side that dedups onto it --
+		// there is nothing to mergeProp across: the mapping goes straight through.
+		s.APIProps = appendPassthrough(props, nodeToProps(sess.APIProps), warns, leaderSessionOwner)
 		m.Session = s
 	}
 	return m
@@ -524,14 +555,16 @@ func mergeProp(list []Prop, p Prop, warns *[]string, binder string) []Prop {
 
 // appendPassthrough appends verbatim props after the tool-managed props, dropping
 // (with a warning) any passthrough key that collides with a tool-managed key.
-func appendPassthrough(tool []Prop, pass []Prop, warns *[]string, binder string) []Prop {
+// owner is the already-formatted label the warning names: binderOwner(...) for a
+// binder, leaderSessionOwner for the management session.
+func appendPassthrough(tool []Prop, pass []Prop, warns *[]string, owner string) []Prop {
 	toolKeys := map[string]bool{}
 	for _, p := range tool {
 		toolKeys[p.Key] = true
 	}
 	for _, p := range pass {
 		if toolKeys[p.Key] {
-			*warns = append(*warns, fmt.Sprintf("binder %q: passthrough overrides tool-managed key %q; tool value kept", binder, p.Key))
+			*warns = append(*warns, fmt.Sprintf("%s: passthrough overrides tool-managed key %q; tool value kept", owner, p.Key))
 			continue
 		}
 		tool = append(tool, p)

@@ -23,6 +23,7 @@ command model in
 | `dp` | `deploy` | Generate for a platform, then apply it |
 | `eg` | `examples` | Write a starter env.yaml + workflows |
 | `gen` | `generate` | Render application.yml, or the deploy artifacts for the resolved platform |
+| `lg` | `logs` | Print each instance log, where status says what but not why |
 | `rm` | `remove` | Tear down what deploy created for a platform |
 | `sts` | `status` | Report each instance: container (engine), application (connector), or all |
 | `ver` | `version` | Print the utility name, version, Go version and OS/arch |
@@ -40,7 +41,7 @@ The second (or third) word of a command, after the verb.
 
 ## Platform abbreviations
 
-Accepted as a `--platform` value by `generate`/`deploy`/`remove`/`status`, alongside the
+Accepted as a `--platform` value by `generate`/`deploy`/`remove`/`status`/`logs`, alongside the
 canonical names.
 
 | Short | Stands for |

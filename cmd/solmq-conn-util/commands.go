@@ -20,17 +20,18 @@ import (
 
 const bt = "`" // backtick, for building markdown code spans without raw-string clashes
 
-// allowCommandFlagName is the repeatable deploy/remove/status flag's plain name
-// (no backticks): the cliFlag key used in cliVerb.Flags, and the literal
+// allowCommandFlagName is the repeatable deploy/remove/status/logs flag's plain
+// name (no backticks): the cliFlag key used in cliVerb.Flags, and the literal
 // usageText() must contain.
 const allowCommandFlagName = "--allow-command"
 
 // allowCommandSpan and cmdFieldSpan are the markdown code spans for
-// --allow-command and command:, reused across the deploy/remove/status Detail text.
+// --allow-command and command:, reused across the deploy/remove/status/logs
+// Detail text.
 const allowCommandSpan = bt + allowCommandFlagName + bt
 const cmdFieldSpan = bt + "command:" + bt
 
-// platformFlagName is generate/deploy/remove/status's platform selector (no
+// platformFlagName is generate/deploy/remove/status/logs's platform selector (no
 // short alias): the cliFlag key, and the literal usageText() must contain.
 const platformFlagName = "--platform"
 
@@ -40,7 +41,7 @@ const platformFlagName = "--platform"
 const platformArgBracket = "[" + platformFlagName + " kubernetes|docker|podman]"
 
 // platformSpan is the markdown code span for --platform, reused across the
-// generate/deploy/remove/status Detail text.
+// generate/deploy/remove/status/logs Detail text.
 const platformSpan = bt + platformFlagName + bt
 
 // installFlagName is status's --install flag (no short alias).
@@ -89,6 +90,25 @@ const (
 	commandFlagName        = "--command"
 )
 
+// logs's own flags (no short aliases). followFlagName deliberately has no -f:
+// cliFlags is keyed by Short across every verb, and -f is already --force.
+const (
+	followFlagName     = "--follow"
+	previousFlagName   = "--previous"
+	timestampsFlagName = "--timestamps"
+	tailFlagName       = "--tail"
+	sinceFlagName      = "--since"
+)
+
+// Flag spans for the logs Detail text, mirroring allowCommandSpan's shape.
+var (
+	followSpan     = bt + followFlagName + bt
+	previousSpan   = bt + previousFlagName + bt
+	timestampsSpan = bt + timestampsFlagName + bt
+	tailSpan       = bt + tailFlagName + bt
+	sinceSpan      = bt + sinceFlagName + bt
+)
+
 // statusTargetArgBracket is how status's required target word is written in
 // every usage line and doc: the words themselves, since one of them must be
 // typed. Short spellings are documented in the verb Detail rather than here, so
@@ -109,19 +129,21 @@ var (
 	outputSpan  = bt + outputFlagName + bt
 )
 
-// platformResolutionDetail explains how generate/deploy/remove/status pick a
-// platform when --platform is not given. Rendered once as the doc's "Platform
-// resolution" section; the four verbs' Detail text carries
+// platformResolutionDetail explains how generate/deploy/remove/status/logs pick
+// a platform when --platform is not given. Rendered once as the doc's "Platform
+// resolution" section; the five verbs' Detail text carries
 // platformResolutionPointer instead of restating it, so the resolution order is
 // described in exactly one place.
 const platformResolutionDetail = "The platform is resolved in order: " + platformSpan + " (which accepts the short spellings " + bt + "kube" + bt + ", " + bt + "dk" + bt + " and " + bt + "pm" + bt + "), if given; otherwise the single " +
 	bt + "kubernetes:" + bt + "/" + bt + "docker:" + bt + "/" + bt + "podman:" + bt +
 	" section in env.yaml, when exactly one is present; otherwise an interactive menu, when more than one is present. A " +
-	platformSpan + " value with no matching section in env.yaml is a loud error, and so are zero sections. The menu -- and, under " +
+	platformSpan + " value with no matching section in env.yaml is a loud error, and so are zero sections. " +
+	bt + "status" + bt + " and " + bt + "logs" + bt + " are the exception, and only when the operator has already named the instances themselves (" + bt + podFlagName + bt + "/" + bt + containerFlagName + bt + ", or " + bt + allFlagName + bt + ") alongside an explicit " + platformSpan +
+	": there is then nothing left to read from env.yaml, so a missing file and a section-less platform are both fine -- which is how an instance this tool never deployed is reached. The menu -- and, under " +
 	bt + "status" + bt + ", the install confirmation prompt -- never block when stdin is not a TTY; both fail with the same guidance instead of hanging."
 
 // platformResolutionPointer is the one-line cross-reference each platform verb's
-// Detail ends with instead of restating platformResolutionDetail four times.
+// Detail ends with instead of restating platformResolutionDetail five times.
 const platformResolutionPointer = "For how the platform is picked, see [Platform resolution](#platform-resolution)."
 
 // Flag value kinds (cliFlag.Arg): what a flag's value completes to in the shell
@@ -206,11 +228,11 @@ var cliFlags = []cliFlag{
 	// argName, not argFile: the value must be a bare, PATH-resolved binary name
 	// (allowCommandValue rejects a path), so offering filenames would suggest
 	// exactly what the flag refuses.
-	{Short: allowCommandFlagName, Long: allowCommandFlagName, AppliesTo: bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "status" + bt, Meaning: "approve an extra command binary beyond the " + cmdFieldSpan + " allowlist; repeatable", Arg: argName, Usage: "approve an extra command binary beyond the platform allowlist (repeatable)"},
+	{Short: allowCommandFlagName, Long: allowCommandFlagName, AppliesTo: bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "status" + bt + "/" + bt + "logs" + bt, Meaning: "approve an extra command binary beyond the " + cmdFieldSpan + " allowlist; repeatable", Arg: argName, Usage: "approve an extra command binary beyond the platform allowlist (repeatable)"},
 	// argName: the model has no enumerated-value kind (only argNone/argFile/
 	// argName), so this value offers no shell suggestions even though it is one
 	// of three fixed words. Adding a kind means teaching all four renderers.
-	{Short: platformFlagName, Long: platformFlagName, AppliesTo: bt + "generate" + bt + "/" + bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "status" + bt, Meaning: "the platform: " + bt + "kubernetes" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " (short: " + bt + "kube" + bt + ", " + bt + "dk" + bt + ", " + bt + "pm" + bt + "; default: resolved from env.yaml, or an interactive menu -- see Platform resolution)", Arg: argName, Usage: "kubernetes, docker, or podman (short: kube, dk, pm; default: from env.yaml, or a menu)"},
+	{Short: platformFlagName, Long: platformFlagName, AppliesTo: bt + "generate" + bt + "/" + bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "status" + bt + "/" + bt + "logs" + bt, Meaning: "the platform: " + bt + "kubernetes" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " (short: " + bt + "kube" + bt + ", " + bt + "dk" + bt + ", " + bt + "pm" + bt + "; default: resolved from env.yaml, or an interactive menu -- see Platform resolution)", Arg: argName, Usage: "kubernetes, docker, or podman (short: kube, dk, pm; default: from env.yaml, or a menu)"},
 	// argName, not argFile: a URL is not a filesystem path, so offering file
 	// suggestions would suggest exactly the wrong kind of value.
 	{Short: urlFlagName, Long: urlFlagName, AppliesTo: bt + "download" + bt, Meaning: "exact URL to download instead of Maven resolution; repeatable; when given, no resolution happens at all", Arg: argName, Usage: "exact URL to download instead of Maven resolution (repeatable)"},
@@ -220,14 +242,19 @@ var cliFlags = []cliFlag{
 	{Short: installFlagName, Long: installFlagName, AppliesTo: bt + "status" + bt, Meaning: "install the status script on every instance without prompting", Arg: argNone, Usage: "install the status script on every instance without prompting"},
 	{Short: detailsFlagShort, Long: detailsFlagName, AppliesTo: bt + "status" + bt, Meaning: "add the enrichment lines each view can report: worker node, CPU/memory use against allocation, image digest and referenced components; app version, java version, config path and heap", Arg: argNone, Usage: "add node, cpu/memory, digest, components; application version, java, config, heap"},
 	{Short: watchFlagShort, Long: watchFlagName, AppliesTo: bt + "status" + bt, Meaning: "re-render the report every 5s until interrupted (Ctrl-C)", Arg: argNone, Usage: "re-render the report every 5s until interrupted"},
-	{Short: allFlagName, Long: allFlagName, AppliesTo: bt + "status" + bt, Meaning: "report every connector instance found by image name (" + bt + statusreport.ImageMatch + bt + ") instead of the ones " + bt + "env.yaml" + bt + " describes -- every namespace on kubernetes, every container on docker/podman; cannot be combined with " + bt + podFlagName + bt + "/" + bt + containerFlagName + bt, Arg: argNone, Usage: "report every instance found by image name instead of the ones env.yaml describes"},
+	{Short: allFlagName, Long: allFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt, Meaning: "reach every connector instance found by image name (" + bt + statusreport.ImageMatch + bt + ") instead of the ones " + bt + "env.yaml" + bt + " describes -- every namespace on kubernetes, every container on docker/podman; cannot be combined with " + bt + podFlagName + bt + "/" + bt + containerFlagName + bt + ", nor with " + bt + followFlagName + bt + " under " + bt + "logs" + bt, Arg: argNone, Usage: "reach every instance found by image name instead of the ones env.yaml describes"},
 	{Short: outputFlagName, Long: outputFlagName, AppliesTo: bt + "status" + bt, Meaning: "output format: " + bt + "table" + bt + " (default) or " + bt + "json" + bt + ", one machine-readable document per run; " + bt + "json" + bt + " cannot be combined with " + bt + watchFlagName + bt, Arg: argName, Usage: "table (default) or json"},
-	{Short: podFlagName, Long: podFlagName, AppliesTo: bt + "status" + bt, Meaning: "limit checks to this kubernetes pod name; repeatable (default: every running pod); no effect on docker/podman", Arg: argName, Usage: "limit to this kubernetes pod (repeatable)"},
-	{Short: containerFlagName, Long: containerFlagName, AppliesTo: bt + "status" + bt, Meaning: "limit checks to this docker/podman container name; repeatable (default: every running container); no effect on kubernetes", Arg: argName, Usage: "limit to this docker/podman container (repeatable)"},
-	{Short: namespaceFlagName, Long: namespaceFlagName, AppliesTo: bt + "status" + bt, Meaning: "kubernetes namespace to query (default: the namespace of the deployment in env.yaml); no effect on docker/podman", Arg: argName, Usage: "kubernetes namespace to query"},
+	{Short: podFlagName, Long: podFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt, Meaning: "limit to this kubernetes pod name; repeatable (default: every running pod); no effect on docker/podman", Arg: argName, Usage: "limit to this kubernetes pod (repeatable)"},
+	{Short: containerFlagName, Long: containerFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt, Meaning: "limit to this docker/podman container name; repeatable (default: every running container); no effect on kubernetes", Arg: argName, Usage: "limit to this docker/podman container (repeatable)"},
+	{Short: namespaceFlagName, Long: namespaceFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt, Meaning: "kubernetes namespace to query (default: the namespace of the deployment in env.yaml); no effect on docker/podman", Arg: argName, Usage: "kubernetes namespace to query"},
 	{Short: managementPortFlagName, Long: managementPortFlagName, AppliesTo: bt + "status" + bt, Meaning: "actuator management port to reach inside each instance (default: the configured management port)", Arg: argName, Usage: "actuator management port inside each instance"},
 	{Short: userFlagName, Long: userFlagName, AppliesTo: bt + "status" + bt, Meaning: "actuator account the status script authenticates as (default " + bt + spec.StatusUserName + bt + ")", Arg: argName, Usage: "actuator account the status script authenticates as (default solmq-status)"},
-	{Short: commandFlagName, Long: commandFlagName, AppliesTo: bt + "status" + bt, Meaning: "override the platform CLI binary (" + bt + "kubectl" + bt + "/" + bt + "oc" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + ") used to reach each instance, instead of the " + cmdFieldSpan + " in that section", Arg: argName, Usage: "override the platform CLI binary used to reach each instance"},
+	{Short: commandFlagName, Long: commandFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt, Meaning: "override the platform CLI binary (" + bt + "kubectl" + bt + "/" + bt + "oc" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + ") used to reach each instance, instead of the " + cmdFieldSpan + " in that section", Arg: argName, Usage: "override the platform CLI binary used to reach each instance"},
+	{Short: followFlagName, Long: followFlagName, AppliesTo: bt + "logs" + bt, Meaning: "keep the log open and print new lines as they arrive, until interrupted (Ctrl-C); reads one instance, so it cannot be combined with " + bt + allFlagName + bt + " or " + bt + previousFlagName + bt, Arg: argNone, Usage: "keep the log open and print new lines until interrupted"},
+	{Short: previousFlagName, Long: previousFlagName, AppliesTo: bt + "logs" + bt, Meaning: "read the log of the previous container instead of the running one -- what a pod that is restarting printed before it died; kubernetes only, since neither docker nor podman keeps a prior run under the same name", Arg: argNone, Usage: "read the log of the previous container instead of the running one (kubernetes only)"},
+	{Short: tailFlagName, Long: tailFlagName, AppliesTo: bt + "logs" + bt, Meaning: "read only the last N lines, or " + bt + "all" + bt + " for the whole log (default: " + bt + "all" + bt + ")", Arg: argName, Usage: "read only the last N lines, or all (default: all)"},
+	{Short: sinceFlagName, Long: sinceFlagName, AppliesTo: bt + "logs" + bt, Meaning: "read only lines newer than this duration, spelled as a Go duration (" + bt + "30s" + bt + ", " + bt + "10m" + bt + ", " + bt + "2h" + bt + ")", Arg: argName, Usage: "read only lines newer than this duration, e.g. 10m"},
+	{Short: timestampsFlagName, Long: timestampsFlagName, AppliesTo: bt + "logs" + bt, Meaning: "prefix every line with the time the platform recorded for it", Arg: argNone, Usage: "prefix every line with the time the platform recorded for it"},
 }
 
 var cliVerbs = []cliVerb{
@@ -296,6 +323,23 @@ var cliVerbs = []cliVerb{
 				Example: "solmq-conn-util status all -d",
 			},
 		},
+	},
+	{
+		Name: "logs", Args: "[" + followFlagName + "] [" + previousFlagName + "] [" + tailFlagName + " N] [" + sinceFlagName + " d] [" + timestampsFlagName + "] [" + allFlagName + "] " + platformArgBracket + " [-e env.yaml] [" + podFlagName + " name] [" + containerFlagName + " name] [" + namespaceFlagName + " ns] [" + commandFlagName + " name] [" + allowCommandFlagName + " name]",
+		Flags:  []string{followFlagName, previousFlagName, tailFlagName, sinceFlagName, timestampsFlagName, allFlagName, platformFlagName, "-e", podFlagName, containerFlagName, namespaceFlagName, commandFlagName, allowCommandFlagName},
+		PosArg: posNone, Aliases: []string{"lg"},
+		Synopsis:   "logs [flags]",
+		Summary:    "Print each instance log, where status says what but not why",
+		Example:    "solmq-conn-util logs " + tailFlagName + " 100 -e env.yaml",
+		TreeSuffix: bt + "[" + followFlagName + "]" + bt + " " + bt + "[" + previousFlagName + "]" + bt + " " + bt + platformArgBracket + bt,
+		Detail: "Prints what each connector instance of the resolved platform has written, read through the same read-only " + bt + "kubectl" + bt + "/" + bt + "docker" + bt + "/" + bt + "podman" + bt + " path " + bt + "status" + bt + " uses -- the same " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", and the same preflight probe -- and discovering the same instances from " + bt + "env.yaml" + bt + ", so the two verbs can never disagree about which ones they mean. " +
+			"It is the answer to the question " + bt + "status" + bt + " leaves open: that view reports a restart count and an exit code, and this one reports the lines that preceded them. " +
+			previousSpan + " is the pairing that matters most -- it reads what the previous container printed before it died, which is the only place a crash loop explains itself; kubernetes keeps that log, docker and podman do not, so it is refused there rather than quietly ignored. " +
+			followSpan + " keeps the log open and prints new lines until interrupted (Ctrl-C, which is a clean exit, not a failure). It reads one instance, so it cannot be combined with " + allSpan + ", and it will not guess when discovery finds several -- it names them and asks for " + bt + podFlagName + bt + " instead. " +
+			tailSpan + " limits how far back the read starts (" + bt + tailFlagName + " all" + bt + " is the default), " + sinceSpan + " limits it by age, and " + timestampsSpan + " prefixes each line with the time the platform recorded. " +
+			allSpan + " ignores the instance names in " + bt + "env.yaml" + bt + " and reads every connector instance it can find by image name (" + bt + statusreport.ImageMatch + bt + "), across every namespace on kubernetes and every container on docker/podman. " +
+			bt + podFlagName + bt + " and " + bt + containerFlagName + bt + " (both repeatable) name instances directly, " + bt + namespaceFlagName + bt + " overrides the kubernetes namespace, " + bt + commandFlagName + bt + " overrides the platform CLI binary, and " + allowCommandSpan + " approves an extra one, the same as status. " +
+			"One instance prints its log alone, so the output pipes cleanly; several are separated by a " + bt + "==> name <==" + bt + " heading each. An instance that cannot be read is reported against itself and the rest are still printed, and the run then exits 1. " + platformResolutionPointer,
 	},
 	{
 		Name: "version", Args: "", Flags: nil, PosArg: posNone, Aliases: []string{"ver"},

@@ -99,13 +99,20 @@ type Management struct {
 }
 
 // Session is the Solace management session for leader-election (active_standby /
-// active_active).
+// active_active). The connector documents session.* as the same interface as
+// solace.java.* (doc.md section 10), so this carries the same key set as a
+// SolaceBinder -- solace-defaults and the connection's own verbatim
+// api-properties included, not only the tool-managed TLS keys. The two stay in
+// step through render's TestApplicationLeaderElectionSessionMatchesBinderKeySet
+// rather than through a shared type: the shapes coincide because of the
+// connector's contract, not because a session is a binder.
 type Session struct {
 	Host       string
 	MsgVPN     string
 	ClientUser string
 	ClientPass string
-	APIProps   []Prop // tool-managed TLS api-properties (empty when not tcps://)
+	Extras     []Prop // from solace-defaults (connect-retries, reconnect-retries, ...)
+	APIProps   []Prop // ordered api-properties (tool TLS keys first, then verbatim passthrough)
 }
 
 // LeaderElectionModel is the rendered solace.connector.management.leader-election

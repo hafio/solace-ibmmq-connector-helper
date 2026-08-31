@@ -11,7 +11,9 @@ import (
 // Stable secret names for the credential positions that belong to env.yaml as a
 // whole rather than to one binder. The two store passwords are re-exported from
 // internal/tls, which names them for the api-properties path, so the SSL bundle
-// and api-properties can never disagree about one password's name.
+// and api-properties can never disagree about one password's name. The two
+// leader-election names are the fallback for a management session no workflow
+// shares -- see leaderNames in Build.
 const (
 	TruststorePasswordName = tls.TruststorePasswordName
 	KeystorePasswordName   = tls.KeystorePasswordName
@@ -22,6 +24,12 @@ const (
 // secretFn records a credential under a stable name and returns the placeholder
 // the rendered config carries ("" for an unset credential).
 type secretFn func(stable string, c spec.Cred) string
+
+// leaderNameFn answers the stable names the management session's username and
+// password are recorded under. Which pair those are depends on the binders
+// already built, so Build supplies the closure rather than buildLeaderElection
+// deciding for itself.
+type leaderNameFn func(sess spec.Side) (user, pass string)
 
 // storeSecret adapts a secretFn to the narrower callback internal/tls needs, so
 // a store password mounted for the SSL bundle and the same password referenced

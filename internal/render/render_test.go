@@ -2,6 +2,7 @@ package render
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -316,14 +317,17 @@ target:
 	}
 }
 
-func TestApplicationLeaderElection(t *testing.T) {
-	src := `
+// leaderSrc/leaderDefs are shared by the leader-election render tests: one
+// connection ("edge") feeds both a workflow side and the management session, so
+// the two rendered blocks are built from the same tuple and must agree.
+const leaderSrc = `
 source:
   solace: {conn-ref: edge, queue: Q.IN}
 target:
   mq: {conn-ref: qm, queue: OUT}
 `
-	defs := `
+
+const leaderDefs = `
 connections:
   edge:
     solace:
@@ -332,6 +336,8 @@ connections:
       client-username: u
       client-password: ${SOL}
       key-alias: sc
+      api-properties:
+        REAPPLY_SUBSCRIPTIONS: true
   qm:
     mq:
       conn-name: h(1414)
@@ -355,24 +361,143 @@ leader-election:
   fail-over:
     max-attempts: 5
     back-off-multiplier: 1.5
+solace-defaults:
+  connect-retries: -1
+`
+
+// renderLeaderFixture renders leaderSrc against leaderDefs with mounted stores.
+func renderLeaderFixture(t *testing.T) string {
+	t.Helper()
+	d, err := spec.ParseDefaults([]byte(leaderDefs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", leaderSrc)}, d, consolidate.Opts{MountStores: true})
+	return Application(m)
+}
+
+func TestApplicationLeaderElection(t *testing.T) {
+	out := renderLeaderFixture(t)
+	for _, w := range []string{
+		"management:", "leader-election:", "mode: active_standby",
+		"fail-over:", "max-attempts: 5", "back-off-multiplier: 1.5",
+		"queue: mgmt-q",
+	} {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing %q\n---\n%s", w, out)
+		}
+	}
+	// The session block is asserted whole rather than line by line: key ORDER is
+	// the contract -- solace-defaults between the credentials and api-properties,
+	// verbatim passthrough last -- and a Contains loop cannot see order at all.
+	// The credentials carry the edge binder's stable names rather than a second
+	// LEADER_ELECTION_* pair, because the session resolves to that connection.
+	want := "      session:\n" +
+		"        host: tcps://b:55443\n" +
+		"        msg-vpn: prod\n" +
+		"        client-username: ${EDGE_CLIENT_USERNAME}\n" +
+		"        client-password: ${EDGE_CLIENT_PASSWORD}\n" +
+		"        connect-retries: -1\n" +
+		"        api-properties:\n" +
+		"          SSL_VALIDATE_CERTIFICATE: true\n" +
+		"          SSL_TRUST_STORE: /app/external/classpath/truststores/truststore.jks\n" +
+		"          SSL_TRUST_STORE_PASSWORD: ${TRUSTSTORE_PASSWORD}\n" +
+		"          SSL_TRUST_STORE_FORMAT: JKS\n" +
+		"          SSL_KEY_STORE: /app/external/classpath/truststores/keystore.jks\n" +
+		"          SSL_KEY_STORE_PASSWORD: ${KEYSTORE_PASSWORD}\n" +
+		"          SSL_KEY_STORE_FORMAT: JKS\n" +
+		"          SSL_PRIVATE_KEY_ALIAS: sc\n" +
+		"          REAPPLY_SUBSCRIPTIONS: true\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("session block mismatch, want:\n%s\n---got---\n%s", want, out)
+	}
+}
+
+// blockKeys returns the ordered key names inside the block introduced by header,
+// each prefixed by its indent relative to that block, so two blocks written at
+// different depths compare as the same shape.
+func blockKeys(t *testing.T, out, header string) []string {
+	t.Helper()
+	_, rest, ok := strings.Cut(out, header+"\n")
+	if !ok {
+		t.Fatalf("block %q not found\n---\n%s", header, out)
+	}
+	base := len(header) - len(strings.TrimLeft(header, " ")) + 2
+	var keys []string
+	for _, ln := range strings.Split(rest, "\n") {
+		if strings.TrimSpace(ln) == "" {
+			break
+		}
+		ind := len(ln) - len(strings.TrimLeft(ln, " "))
+		if ind < base {
+			break
+		}
+		k, _, _ := strings.Cut(strings.TrimSpace(ln), ":")
+		keys = append(keys, strings.Repeat(" ", ind-base)+k)
+	}
+	return keys
+}
+
+// TestApplicationLeaderElectionSessionMatchesBinderKeySet is the anti-drift
+// guard. The connector documents solace.connector.management.session.* as the
+// same interface as solace.java.*, but the two blocks are built and rendered by
+// separate code and have silently diverged before -- the session used to drop
+// solace-defaults and the connection's own api-properties. Rendered from one
+// connection the two key sequences must be identical: values differ, keys
+// must not.
+func TestApplicationLeaderElectionSessionMatchesBinderKeySet(t *testing.T) {
+	out := renderLeaderFixture(t)
+	binder := blockKeys(t, out, "              java:")
+	session := blockKeys(t, out, "      session:")
+	if len(binder) == 0 {
+		t.Fatal("binder solace.java block is empty")
+	}
+	if !slices.Equal(binder, session) {
+		t.Errorf("session key set drifted from the binder\nbinder:  %q\nsession: %q\n---\n%s", binder, session, out)
+	}
+}
+
+// TestApplicationLeaderElectionSessionPlaintext covers the non-TLS session: no
+// tcps:// host means no tool-managed api-properties, but solace-defaults and the
+// connection's own passthrough must still render. No workflow uses this broker,
+// so there is no binder to share credential names with and the session falls
+// back to the LEADER_ELECTION_* pair.
+func TestApplicationLeaderElectionSessionPlaintext(t *testing.T) {
+	defs := `
+leader-election:
+  mode: active_active
+  queue: mgmt-q
+  session:
+    host: tcp://b:55555
+    msg-vpn: prod
+    client-username: u
+    client-password: ${SOL}
+    api-properties:
+      REAPPLY_SUBSCRIPTIONS: true
+solace-defaults:
+  connect-retries: -1
+  reconnect-retries: -1
 `
 	d, err := spec.ParseDefaults([]byte(defs))
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{MountStores: true})
+	m, _ := consolidate.Build(nil, d, consolidate.Opts{})
 	out := Application(m)
-	for _, w := range []string{
-		"management:", "leader-election:", "mode: active_standby",
-		"fail-over:", "max-attempts: 5", "back-off-multiplier: 1.5",
-		"queue: mgmt-q", "session:", "host: tcps://b:55443", "msg-vpn: prod",
-		"client-username: ${LEADER_ELECTION_CLIENT_USERNAME}", "client-password: ${LEADER_ELECTION_CLIENT_PASSWORD}",
-		"SSL_TRUST_STORE: /app/external/classpath/truststores/truststore.jks",
-		"SSL_PRIVATE_KEY_ALIAS: sc",
-	} {
-		if !strings.Contains(out, w) {
-			t.Errorf("missing %q\n---\n%s", w, out)
-		}
+	want := "      session:\n" +
+		"        host: tcp://b:55555\n" +
+		"        msg-vpn: prod\n" +
+		"        client-username: ${LEADER_ELECTION_CLIENT_USERNAME}\n" +
+		"        client-password: ${LEADER_ELECTION_CLIENT_PASSWORD}\n" +
+		"        connect-retries: -1\n" +
+		"        reconnect-retries: -1\n" +
+		"        api-properties:\n" +
+		"          REAPPLY_SUBSCRIPTIONS: true\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("plaintext session block mismatch, want:\n%s\n---got---\n%s", want, out)
+	}
+	if strings.Contains(out, "SSL_") {
+		t.Errorf("a plaintext session must carry no tool TLS api-properties\n---\n%s", out)
 	}
 }
 

@@ -107,12 +107,13 @@ type Management struct {
 // LeaderElection captures solace.connector.management.leader-election plus the
 // management queue and Solace session used by active_active / active_standby.
 type LeaderElection struct {
-	Present  bool
-	Mode     string
-	Queue    string
-	ConnRef  string     // solace connection for the session (OR inline Session)
-	Session  *Side      // inline solace session (alternative to ConnRef)
-	FailOver *yaml.Node // verbatim leader-election.fail-over mapping
+	Present   bool
+	Mode      string
+	Queue     string
+	ConnRef   string     // solace connection for the session (OR inline Session)
+	Session   *Side      // inline management session (alternative to ConnRef)
+	SolaceKey bool       // solace: was renamed to session:; true is a validation error
+	FailOver  *yaml.Node // verbatim leader-election.fail-over mapping
 }
 
 // EffectiveMode returns le.Mode, defaulting to LeaderStandalone: an absent or
@@ -188,11 +189,16 @@ type rawSecurity struct {
 }
 
 type rawLeader struct {
-	Mode     string     `yaml:"mode"`
-	Queue    string     `yaml:"queue"`
-	ConnRef  string     `yaml:"conn-ref"`
-	Solace   *rawSolace `yaml:"solace"`    // inline session (alternative to conn-ref)
-	FailOver yaml.Node  `yaml:"fail-over"` // verbatim
+	Mode    string     `yaml:"mode"`
+	Queue   string     `yaml:"queue"`
+	ConnRef string     `yaml:"conn-ref"`
+	Session *rawSolace `yaml:"session"` // inline management session (alternative to conn-ref)
+	// solace: is the retired spelling of session:. Captured as a bare node rather
+	// than a *rawSolace so ANY shape written under it parses -- a scalar, a list, a
+	// half-migrated block -- and reaches validate as the rename error, instead of
+	// failing here as a yaml type error that names neither key.
+	Solace   yaml.Node `yaml:"solace"`
+	FailOver yaml.Node `yaml:"fail-over"` // verbatim
 }
 
 // ParseDefaults decodes a standalone defaults document. An empty/absent file
@@ -228,14 +234,15 @@ func defaultsFromRaw(raw rawDefaults) *Defaults {
 	}
 	if raw.LeaderElection != nil {
 		le := LeaderElection{
-			Present:  true,
-			Mode:     raw.LeaderElection.Mode,
-			Queue:    raw.LeaderElection.Queue,
-			ConnRef:  raw.LeaderElection.ConnRef,
-			FailOver: nodePtr(raw.LeaderElection.FailOver),
+			Present:   true,
+			Mode:      raw.LeaderElection.Mode,
+			Queue:     raw.LeaderElection.Queue,
+			ConnRef:   raw.LeaderElection.ConnRef,
+			SolaceKey: nodePtr(raw.LeaderElection.Solace) != nil,
+			FailOver:  nodePtr(raw.LeaderElection.FailOver),
 		}
-		if raw.LeaderElection.Solace != nil {
-			rs := rawSide{Solace: raw.LeaderElection.Solace}
+		if raw.LeaderElection.Session != nil {
+			rs := rawSide{Solace: raw.LeaderElection.Session}
 			sess := rs.toSide()
 			le.Session = &sess
 		}

@@ -1,6 +1,7 @@
 package consolidate
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -36,6 +37,23 @@ func testSecretRef() (secretFn, func() []SecretRef) {
 		return "${" + stable + "}"
 	}
 	return fn, func() []SecretRef { return secrets }
+}
+
+// fixedLeaderNames is the leaderNameFn a management session gets when no
+// binder shares its connection: the fixed LEADER_ELECTION_* pair. White-box
+// calls to buildLeaderElection have no binders around them, so this is what
+// Build would hand them.
+func fixedLeaderNames(spec.Side) (string, string) { return LeaderUsernameName, LeaderPasswordName }
+
+// propsNode parses a small YAML mapping into the *yaml.Node the spec carries
+// for verbatim passthrough (api-properties) and for solace-defaults.
+func propsNode(t *testing.T, y string) *yaml.Node {
+	t.Helper()
+	var n yaml.Node
+	if err := yaml.Unmarshal([]byte(y), &n); err != nil {
+		t.Fatal(err)
+	}
+	return n.Content[0]
 }
 
 func TestFormatScalarQuoting(t *testing.T) {
@@ -116,9 +134,16 @@ func TestMergeProp(t *testing.T) {
 
 func TestAppendPassthroughCollision(t *testing.T) {
 	var warns []string
-	out := appendPassthrough([]Prop{{Key: "T", Val: "x"}}, []Prop{{Key: "P", Val: "y"}, {Key: "T", Val: "z"}}, &warns, "bndr")
+	out := appendPassthrough([]Prop{{Key: "T", Val: "x"}}, []Prop{{Key: "P", Val: "y"}, {Key: "T", Val: "z"}}, &warns, binderOwner("bndr"))
 	if len(out) != 2 || len(warns) != 1 {
 		t.Fatalf("out=%v warns=%v", out, warns)
+	}
+	// The owner label is caller-supplied now that the leader-election session
+	// shares this function; the binder wording it replaced is load-bearing for
+	// anyone grepping their build output, so pin it byte for byte.
+	want := `binder "bndr": passthrough overrides tool-managed key "T"; tool value kept`
+	if warns[0] != want {
+		t.Errorf("warning = %q, want %q", warns[0], want)
 	}
 }
 
@@ -354,7 +379,8 @@ func TestBuildLeaderElection(t *testing.T) {
 	dangling := &spec.Defaults{LeaderElection: spec.LeaderElection{
 		Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q", ConnRef: "missing",
 	}}
-	le := buildLeaderElection(dangling, true, noopSecretRef)
+	var warns []string
+	le := buildLeaderElection(dangling, true, noopSecretRef, fixedLeaderNames, &warns)
 	if le == nil || le.Mode != spec.LeaderActiveStby || le.Queue != "mgmt-q" {
 		t.Fatalf("dangling conn-ref: le = %+v", le)
 	}
@@ -367,15 +393,17 @@ func TestBuildLeaderElection(t *testing.T) {
 	happy := &spec.Defaults{
 		LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveActive, Queue: "mgmt-q", ConnRef: "edge"},
 		Connections: map[string]spec.Side{
-			"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUserEnv: "EDGE_USER", ClientPassEnv: "EDGE_PASS", KeyAlias: "sc"},
+			"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUserEnv: "EDGE_USER", ClientPassEnv: "EDGE_PASS", KeyAlias: "sc",
+				APIProps: propsNode(t, "REAPPLY_SUBSCRIPTIONS: true\n")},
 		},
+		SolaceDefaults: propsNode(t, "connect-retries: -1\nreconnect-retries: -1\n"),
 		TLS: spec.TLSConfig{
 			Truststore: &spec.Store{File: "./certs/truststore.jks", PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"},
 			Keystore:   &spec.Store{File: "./certs/keystore.jks", PasswordEnv: "KEYSTORE_PASSWORD_ENV", Type: "JKS"},
 		},
 	}
 	happySecretRef, happySecrets := testSecretRef()
-	le = buildLeaderElection(happy, true, happySecretRef)
+	le = buildLeaderElection(happy, true, happySecretRef, fixedLeaderNames, &warns)
 	if le == nil || le.Session == nil || le.Session.Host != "tcps://b:55443" || le.Session.MsgVPN != "prod" {
 		t.Fatalf("conn-ref happy path: le = %+v", le)
 	}
@@ -417,22 +445,44 @@ func TestBuildLeaderElection(t *testing.T) {
 	if s := byStable[TruststorePasswordName]; s.EnvVar != "TRUSTSTORE_PASSWORD_ENV" {
 		t.Errorf("Secrets[%s].EnvVar = %q, want TRUSTSTORE_PASSWORD_ENV", TruststorePasswordName, s.EnvVar)
 	}
+	// solace-defaults reaches the session as direct session.* keys, in authored
+	// order, exactly as it reaches a binder's solace.java.*.
+	wantExtras := []Prop{{Key: "connect-retries", Val: "-1"}, {Key: "reconnect-retries", Val: "-1"}}
+	if !reflect.DeepEqual(le.Session.Extras, wantExtras) {
+		t.Errorf("conn-ref happy path: Extras = %+v, want %+v", le.Session.Extras, wantExtras)
+	}
+	// The connection's own verbatim api-properties land AFTER the tool-managed
+	// TLS keys, so a tool key always wins the position it needs.
+	last := le.Session.APIProps[len(le.Session.APIProps)-1]
+	if last.Key != "REAPPLY_SUBSCRIPTIONS" || last.Val != "true" {
+		t.Errorf("conn-ref happy path: last APIProp = %+v, want the connection passthrough", last)
+	}
 
 	// inline session (no conn-ref), non-tcps host: no TLS APIProps are added.
-	inline := &spec.Defaults{LeaderElection: spec.LeaderElection{
-		Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q",
-		Session: &spec.Side{System: spec.SystemSolace, Host: "tcp://b:55555", MsgVPN: "v", ClientUserEnv: "INLINE_USER", ClientPassEnv: "INLINE_PASS"},
-	}}
+	inline := &spec.Defaults{
+		LeaderElection: spec.LeaderElection{
+			Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q",
+			Session: &spec.Side{System: spec.SystemSolace, Host: "tcp://b:55555", MsgVPN: "v", ClientUserEnv: "INLINE_USER", ClientPassEnv: "INLINE_PASS",
+				APIProps: propsNode(t, "REAPPLY_SUBSCRIPTIONS: true\n")},
+		},
+		SolaceDefaults: propsNode(t, "connect-retries: -1\n"),
+	}
 	inlineSecretRef, _ := testSecretRef()
-	le = buildLeaderElection(inline, true, inlineSecretRef)
+	le = buildLeaderElection(inline, true, inlineSecretRef, fixedLeaderNames, &warns)
 	if le == nil || le.Session == nil || le.Session.Host != "tcp://b:55555" {
 		t.Fatalf("inline session: le = %+v", le)
 	}
 	if le.Session.ClientUser != "${"+LeaderUsernameName+"}" {
 		t.Errorf("inline session: Session.ClientUser = %q, want the %s placeholder (never the literal/env source)", le.Session.ClientUser, LeaderUsernameName)
 	}
-	if len(le.Session.APIProps) != 0 {
-		t.Errorf("inline session: non-tcps host should have no TLS APIProps, got %+v", le.Session.APIProps)
+	// A plaintext host adds no tool TLS props, but the inline block's own
+	// api-properties and solace-defaults must still come through -- they are what
+	// the session used to drop silently.
+	if want := []Prop{{Key: "REAPPLY_SUBSCRIPTIONS", Val: "true"}}; !reflect.DeepEqual(le.Session.APIProps, want) {
+		t.Errorf("inline session: APIProps = %+v, want only the inline passthrough %+v", le.Session.APIProps, want)
+	}
+	if want := []Prop{{Key: "connect-retries", Val: "-1"}}; !reflect.DeepEqual(le.Session.Extras, want) {
+		t.Errorf("inline session: Extras = %+v, want %+v", le.Session.Extras, want)
 	}
 
 	// mount rewrite in both states: config (mount=false) keeps the env.yaml path
@@ -446,12 +496,99 @@ func TestBuildLeaderElection(t *testing.T) {
 	}
 	rawSecretRef, _ := testSecretRef()
 	mntSecretRef, _ := testSecretRef()
-	raw := buildLeaderElection(mountable, false, rawSecretRef)
-	mnt := buildLeaderElection(mountable, true, mntSecretRef)
+	raw := buildLeaderElection(mountable, false, rawSecretRef, fixedLeaderNames, &warns)
+	mnt := buildLeaderElection(mountable, true, mntSecretRef, fixedLeaderNames, &warns)
 	if rawTS := trustStoreVal(raw); rawTS != "./certs/truststore.jks" {
 		t.Errorf("config (mount=false) truststore = %q, want ./certs/truststore.jks", rawTS)
 	}
 	if mntTS := trustStoreVal(mnt); mntTS != "/app/external/classpath/truststores/truststore.jks" {
 		t.Errorf("deploy (mount=true) truststore = %q", mntTS)
+	}
+
+	if len(warns) != 0 {
+		t.Errorf("no case here collides with a tool-managed key; warns = %v", warns)
+	}
+}
+
+// TestBuildLeaderElectionSessionPassthroughCollision pins the session half of
+// the passthrough rule: a verbatim key colliding with a tool-managed TLS key is
+// dropped, the tool value is kept, and the warning names the session rather than
+// a binder -- it has no binder name to quote.
+func TestBuildLeaderElectionSessionPassthroughCollision(t *testing.T) {
+	d := &spec.Defaults{
+		LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q", ConnRef: "edge"},
+		Connections: map[string]spec.Side{
+			"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUserEnv: "EDGE_USER", ClientPassEnv: "EDGE_PASS",
+				APIProps: propsNode(t, "SSL_TRUST_STORE: /wrong.jks\nREAPPLY_SUBSCRIPTIONS: true\n")},
+		},
+		TLS: spec.TLSConfig{Truststore: &spec.Store{File: "./certs/truststore.jks", PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"}},
+	}
+	secretRef, _ := testSecretRef()
+	var warns []string
+	le := buildLeaderElection(d, false, secretRef, fixedLeaderNames, &warns)
+	if ts := trustStoreVal(le); ts != "./certs/truststore.jks" {
+		t.Errorf("SSL_TRUST_STORE = %q, want the tool value to win", ts)
+	}
+	if last := le.Session.APIProps[len(le.Session.APIProps)-1]; last.Key != "REAPPLY_SUBSCRIPTIONS" {
+		t.Errorf("the non-colliding passthrough key should survive, got %+v", le.Session.APIProps)
+	}
+	want := `leader-election session: passthrough overrides tool-managed key "SSL_TRUST_STORE"; tool value kept`
+	if len(warns) != 1 || warns[0] != want {
+		t.Errorf("warns = %v, want exactly [%q]", warns, want)
+	}
+}
+
+// TestBuildLeaderElectionWarningsReachBuild proves the session's passthrough
+// warnings escape Build the way a binder's do. buildLeaderElection had no access
+// to the warning slice at all before, so a warning nobody ever saw is exactly
+// the failure this guards.
+func TestBuildLeaderElectionWarningsReachBuild(t *testing.T) {
+	d := &spec.Defaults{
+		LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q", ConnRef: "edge"},
+		Connections: map[string]spec.Side{
+			"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUserEnv: "EDGE_USER", ClientPassEnv: "EDGE_PASS",
+				APIProps: propsNode(t, "SSL_TRUST_STORE: /wrong.jks\n")},
+		},
+		TLS: spec.TLSConfig{Truststore: &spec.Store{File: "./certs/truststore.jks", PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"}},
+	}
+	_, warns := Build(nil, d, Opts{})
+	if !containsSub(warns, "leader-election session: passthrough overrides tool-managed key") {
+		t.Errorf("Build warns = %v, want the session collision among them", warns)
+	}
+}
+
+// TestBuildLeaderElectionSharesBinderSecretNames covers the two halves of the
+// credential-naming rule. A session that resolves to a connection a workflow
+// already uses is the same credential, so it carries that binder's stable names
+// and mounts one secret; a session on a broker no workflow touches has no binder
+// to share with and falls back to the fixed LEADER_ELECTION_* pair.
+func TestBuildLeaderElectionSharesBinderSecretNames(t *testing.T) {
+	conn := spec.Side{System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUserEnv: "EDGE_USER", ClientPassEnv: "EDGE_PASS"}
+	defs := func(leRef string) *spec.Defaults {
+		return &spec.Defaults{
+			LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q", ConnRef: leRef},
+			Connections:    map[string]spec.Side{"edge": conn, "mgmt-only": {System: spec.SystemSolace, Host: "tcp://m:55555", MsgVPN: "m", ClientUserEnv: "M_USER", ClientPassEnv: "M_PASS"}},
+		}
+	}
+	src := spec.Side{System: spec.SystemSolace, ConnRef: "edge", DestKind: spec.DestQueue, Dest: "Q1"}
+	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
+		Source: src, Target: mqSide("QM1", "MQ1", spec.DestQueue, false)}}
+
+	shared, _ := Build(wfs, defs("edge"), Opts{})
+	if got, want := shared.LeaderElection.Session.ClientUser, "${EDGE_CLIENT_USERNAME}"; got != want {
+		t.Errorf("shared session ClientUser = %q, want %q", got, want)
+	}
+	if got, want := shared.LeaderElection.Session.ClientPass, "${EDGE_CLIENT_PASSWORD}"; got != want {
+		t.Errorf("shared session ClientPass = %q, want %q", got, want)
+	}
+	for _, sec := range shared.Secrets {
+		if sec.Stable == LeaderUsernameName || sec.Stable == LeaderPasswordName {
+			t.Errorf("a shared session must not mount a second secret, got %q", sec.Stable)
+		}
+	}
+
+	lone, _ := Build(wfs, defs("mgmt-only"), Opts{})
+	if got, want := lone.LeaderElection.Session.ClientUser, "${"+LeaderUsernameName+"}"; got != want {
+		t.Errorf("management-only session ClientUser = %q, want %q", got, want)
 	}
 }

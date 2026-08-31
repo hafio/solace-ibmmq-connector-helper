@@ -151,8 +151,10 @@ solace:
       session:
         host: tcps://broker.internal:55443
         msg-vpn: prod
-        client-username: ${LEADER_ELECTION_CLIENT_USERNAME}
-        client-password: ${LEADER_ELECTION_CLIENT_PASSWORD}
+        client-username: ${PROD_SOLACE_CLIENT_USERNAME}
+        client-password: ${PROD_SOLACE_CLIENT_PASSWORD}
+        connect-retries: -1
+        reconnect-retries: -1
         api-properties:
           SSL_VALIDATE_CERTIFICATE: true
           SSL_TRUST_STORE: ./certs/truststore.jks
@@ -162,6 +164,7 @@ solace:
           SSL_KEY_STORE_PASSWORD: ${KEYSTORE_PASSWORD}
           SSL_KEY_STORE_FORMAT: JKS
           SSL_PRIVATE_KEY_ALIAS: solace-client
+          REAPPLY_SUBSCRIPTIONS: true
 management:
   server:
     port: 8090

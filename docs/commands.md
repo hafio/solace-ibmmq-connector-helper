@@ -22,6 +22,7 @@ command model in
 - `deploy` (`dp`) `[--platform kubernetes|docker|podman]`
 - `remove` (`rm`) `[--platform kubernetes|docker|podman]`
 - `status` (`sts`) `<container|application|all>` `[--details]` `[--platform kubernetes|docker|podman]`
+- `logs` (`lg`) `[--follow]` `[--previous]` `[--platform kubernetes|docker|podman]`
 - `version` (`ver`)
 - `validate` (`vld`)
 - `examples` (`eg`) `[dir]`
@@ -40,6 +41,7 @@ command model in
 | `solmq-conn-util status container <container\|application\|all> [--details] [--watch] [--all] [--output table\|json] [--install] [--platform kubernetes\|docker\|podman] [-e env.yaml] [--pod name] [--container name] [--namespace ns] [--management-port port] [--user name] [--command name] [--allow-command name]` | Report what the engine knows: state, restarts, age and image per instance |
 | `solmq-conn-util status application <container\|application\|all> [--details] [--watch] [--all] [--output table\|json] [--install] [--platform kubernetes\|docker\|podman] [-e env.yaml] [--pod name] [--container name] [--namespace ns] [--management-port port] [--user name] [--command name] [--allow-command name]` | Report what the connector knows: leader-election state, health and workflows |
 | `solmq-conn-util status all <container\|application\|all> [--details] [--watch] [--all] [--output table\|json] [--install] [--platform kubernetes\|docker\|podman] [-e env.yaml] [--pod name] [--container name] [--namespace ns] [--management-port port] [--user name] [--command name] [--allow-command name]` | Report both halves: the container table, then the application block per instance |
+| `solmq-conn-util logs [--follow] [--previous] [--tail N] [--since d] [--timestamps] [--all] [--platform kubernetes\|docker\|podman] [-e env.yaml] [--pod name] [--container name] [--namespace ns] [--command name] [--allow-command name]` | Print each instance log, where status says what but not why |
 | `solmq-conn-util version` | Print the utility name, version, Go version and OS/arch |
 | `solmq-conn-util validate [-e env.yaml]` | Lint the whole env.yaml + workflows |
 | `solmq-conn-util examples [dir] [-f]` | Write a starter env.yaml + workflows |
@@ -58,8 +60,8 @@ command model in
 | `-e`, `--env` | all except `examples`/`download` | config file, relative or absolute path (default: `env.yaml`) |
 | `-o`, `--out` | `generate` | write output to a file (default: stdout) |
 | `-f`, `--force` | `examples`/`download` | overwrite existing files |
-| `--allow-command` | `deploy`/`remove`/`status` | approve an extra command binary beyond the `command:` allowlist; repeatable |
-| `--platform` | `generate`/`deploy`/`remove`/`status` | the platform: `kubernetes`, `docker`, or `podman` (short: `kube`, `dk`, `pm`; default: resolved from env.yaml, or an interactive menu -- see Platform resolution) |
+| `--allow-command` | `deploy`/`remove`/`status`/`logs` | approve an extra command binary beyond the `command:` allowlist; repeatable |
+| `--platform` | `generate`/`deploy`/`remove`/`status`/`logs` | the platform: `kubernetes`, `docker`, or `podman` (short: `kube`, `dk`, `pm`; default: resolved from env.yaml, or an interactive menu -- see Platform resolution) |
 | `--url` | `download` | exact URL to download instead of Maven resolution; repeatable; when given, no resolution happens at all |
 | `--version` | `download` | pin the seed release (the IBM MQ client jar, or the syslog encoder jar) instead of resolving latest stable; empty means latest stable |
 | `--omit-lib-file` | `download` | a jar list that replaces (never merges with) the embedded default the omission rule compares against; an empty file omits nothing |
@@ -67,20 +69,25 @@ command model in
 | `--install` | `status` | install the status script on every instance without prompting |
 | `-d`, `--details` | `status` | add the enrichment lines each view can report: worker node, CPU/memory use against allocation, image digest and referenced components; app version, java version, config path and heap |
 | `-w`, `--watch` | `status` | re-render the report every 5s until interrupted (Ctrl-C) |
-| `--all` | `status` | report every connector instance found by image name (`solace-pubsub-connector-ibmmq`) instead of the ones `env.yaml` describes -- every namespace on kubernetes, every container on docker/podman; cannot be combined with `--pod`/`--container` |
+| `--all` | `status`/`logs` | reach every connector instance found by image name (`solace-pubsub-connector-ibmmq`) instead of the ones `env.yaml` describes -- every namespace on kubernetes, every container on docker/podman; cannot be combined with `--pod`/`--container`, nor with `--follow` under `logs` |
 | `--output` | `status` | output format: `table` (default) or `json`, one machine-readable document per run; `json` cannot be combined with `--watch` |
-| `--pod` | `status` | limit checks to this kubernetes pod name; repeatable (default: every running pod); no effect on docker/podman |
-| `--container` | `status` | limit checks to this docker/podman container name; repeatable (default: every running container); no effect on kubernetes |
-| `--namespace` | `status` | kubernetes namespace to query (default: the namespace of the deployment in env.yaml); no effect on docker/podman |
+| `--pod` | `status`/`logs` | limit to this kubernetes pod name; repeatable (default: every running pod); no effect on docker/podman |
+| `--container` | `status`/`logs` | limit to this docker/podman container name; repeatable (default: every running container); no effect on kubernetes |
+| `--namespace` | `status`/`logs` | kubernetes namespace to query (default: the namespace of the deployment in env.yaml); no effect on docker/podman |
 | `--management-port` | `status` | actuator management port to reach inside each instance (default: the configured management port) |
 | `--user` | `status` | actuator account the status script authenticates as (default `solmq-status`) |
-| `--command` | `status` | override the platform CLI binary (`kubectl`/`oc`, `docker`, or `podman`) used to reach each instance, instead of the `command:` in that section |
+| `--command` | `status`/`logs` | override the platform CLI binary (`kubectl`/`oc`, `docker`, or `podman`) used to reach each instance, instead of the `command:` in that section |
+| `--follow` | `logs` | keep the log open and print new lines as they arrive, until interrupted (Ctrl-C); reads one instance, so it cannot be combined with `--all` or `--previous` |
+| `--previous` | `logs` | read the log of the previous container instead of the running one -- what a pod that is restarting printed before it died; kubernetes only, since neither docker nor podman keeps a prior run under the same name |
+| `--tail` | `logs` | read only the last N lines, or `all` for the whole log (default: `all`) |
+| `--since` | `logs` | read only lines newer than this duration, spelled as a Go duration (`30s`, `10m`, `2h`) |
+| `--timestamps` | `logs` | prefix every line with the time the platform recorded for it |
 
 Flags may appear before, after, or between the positional arguments.
 
 ## Platform resolution
 
-The platform is resolved in order: `--platform` (which accepts the short spellings `kube`, `dk` and `pm`), if given; otherwise the single `kubernetes:`/`docker:`/`podman:` section in env.yaml, when exactly one is present; otherwise an interactive menu, when more than one is present. A `--platform` value with no matching section in env.yaml is a loud error, and so are zero sections. The menu -- and, under `status`, the install confirmation prompt -- never block when stdin is not a TTY; both fail with the same guidance instead of hanging.
+The platform is resolved in order: `--platform` (which accepts the short spellings `kube`, `dk` and `pm`), if given; otherwise the single `kubernetes:`/`docker:`/`podman:` section in env.yaml, when exactly one is present; otherwise an interactive menu, when more than one is present. A `--platform` value with no matching section in env.yaml is a loud error, and so are zero sections. `status` and `logs` are the exception, and only when the operator has already named the instances themselves (`--pod`/`--container`, or `--all`) alongside an explicit `--platform`: there is then nothing left to read from env.yaml, so a missing file and a section-less platform are both fine -- which is how an instance this tool never deployed is reached. The menu -- and, under `status`, the install confirmation prompt -- never block when stdin is not a TTY; both fail with the same guidance instead of hanging.
 
 ## Exit codes
 
@@ -166,6 +173,18 @@ Report both halves: the container table, then the application block per instance
 
 ```sh
 solmq-conn-util status all -d
+```
+
+### logs
+
+Alias: `lg`.
+
+Prints what each connector instance of the resolved platform has written, read through the same read-only `kubectl`/`docker`/`podman` path `status` uses -- the same `command:`, the same binary allowlist, `--allow-command`, and the same preflight probe -- and discovering the same instances from `env.yaml`, so the two verbs can never disagree about which ones they mean. It is the answer to the question `status` leaves open: that view reports a restart count and an exit code, and this one reports the lines that preceded them. `--previous` is the pairing that matters most -- it reads what the previous container printed before it died, which is the only place a crash loop explains itself; kubernetes keeps that log, docker and podman do not, so it is refused there rather than quietly ignored. `--follow` keeps the log open and prints new lines until interrupted (Ctrl-C, which is a clean exit, not a failure). It reads one instance, so it cannot be combined with `--all`, and it will not guess when discovery finds several -- it names them and asks for `--pod` instead. `--tail` limits how far back the read starts (`--tail all` is the default), `--since` limits it by age, and `--timestamps` prefixes each line with the time the platform recorded. `--all` ignores the instance names in `env.yaml` and reads every connector instance it can find by image name (`solace-pubsub-connector-ibmmq`), across every namespace on kubernetes and every container on docker/podman. `--pod` and `--container` (both repeatable) name instances directly, `--namespace` overrides the kubernetes namespace, `--command` overrides the platform CLI binary, and `--allow-command` approves an extra one, the same as status. One instance prints its log alone, so the output pipes cleanly; several are separated by a `==> name <==` heading each. An instance that cannot be read is reported against itself and the rest are still printed, and the run then exits 1. For how the platform is picked, see [Platform resolution](#platform-resolution).
+
+Flags: `--follow`; `--previous`; `--tail`; `--since`; `--timestamps`; `--all`; `--platform`; `-e`, `--env`; `--pod`; `--container`; `--namespace`; `--command`; `--allow-command`.
+
+```sh
+solmq-conn-util logs --tail 100 -e env.yaml
 ```
 
 ### version
