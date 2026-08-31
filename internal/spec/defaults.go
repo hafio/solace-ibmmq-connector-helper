@@ -66,6 +66,16 @@ const (
 	StatusUserPasswordEnvVar = "SECURITY_USER_SOLMQ_STATUS_PASSWORD"
 )
 
+// ConnectorContainerName is the name of the connector container inside a
+// generated kubernetes pod. It is a constant rather than a literal in the
+// renderer because the status verb has to find that container again in a pod's
+// containerStatuses to report its state, and a rename on one side without the
+// other would silently report a pod with no container facts at all.
+//
+// docker and podman need no equivalent: there the container *is* the instance
+// and its name is the operator's own (docker.name / podman.name in env.yaml).
+const ConnectorContainerName = "connector"
+
 // Label keys/values emitted on Kubernetes pods, compose services and podman
 // containers alike: solace-connector is a valid DNS-1123 subdomain prefix and
 // le-mode/role are valid label names, so one spelling works on every platform.

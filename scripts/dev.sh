@@ -101,6 +101,19 @@ task_scan() {
   run scan go tool govulncheck ./...
 }
 
+# Rewrite the committed artifacts the command model owns -- docs/commands.md,
+# docs/abbreviation.md and the four completion goldens -- by running every
+# go:generate directive. `./...` rather than the one package that has a directive
+# today, so a second one is picked up without editing this script.
+#
+# Local only, and deliberately in NO aggregate: `test` is what fails on drift, so
+# a regen inside `all`/`full` would quietly rewrite the evidence instead of
+# reporting it. Run it after changing a command, then run the gates.
+task_regen() {
+  [ -n "${CI:-}" ] && { warn "regen rewrites committed files; skipping in CI"; return 0; }
+  run regen go generate ./...
+}
+
 # Local only: the graph is a developer artifact, not a CI output.
 task_graphify() {
   [ -n "${CI:-}" ] && { warn "graphify is local-only; skipping in CI"; return 0; }
@@ -116,9 +129,12 @@ usage() {
   cat <<EOF
 usage: $(basename "$0") <task>...
 
-  build vet test cov scan graphify
+  build vet test cov scan regen graphify
   all   = $ALL            (what CI runs, as: all scan)
   full  = $FULL   (pre-tag sweep)
+
+  regen is local-only and in no aggregate: it rewrites generated files that
+  test gates, so run it deliberately, then run the gates.
 EOF
 }
 

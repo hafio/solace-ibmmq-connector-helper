@@ -7,15 +7,17 @@
 //	solmq-conn-util generate [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
 //	solmq-conn-util deploy   [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util remove   [--platform kubernetes|docker|podman] [-e env.yaml]
-//	solmq-conn-util status   [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
+//	solmq-conn-util status   <container|application|all> [-d] [-w] [--all] [--output table|json] [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util version
 //	solmq-conn-util validate [-e env.yaml]
 //	solmq-conn-util examples [dir] [-f]
+//	solmq-conn-util download jar mq|syslog [dir] [--url u] [--version v] [--omit-lib-file file] [--include-provided] [-f]
 //	solmq-conn-util auto-complete bash|zsh|fish|powershell
 package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -26,10 +28,10 @@ import (
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/examples"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/libs"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/scan"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
 
@@ -128,8 +130,9 @@ var verbHandlers = map[string]func(args []string, r runner.Runner) int{
 	"version":       func(args []string, r runner.Runner) int { return actVersion() },
 	"validate":      func(args []string, r runner.Runner) int { return runValidate(args) },
 	"examples":      func(args []string, r runner.Runner) int { return runExamples(args) },
+	"download":      func(args []string, r runner.Runner) int { return runDownload(args) },
 	"auto-complete": func(args []string, r runner.Runner) int { return runAutoComplete(args) },
-	"help":          func(args []string, r runner.Runner) int { usage(); return 0 },
+	"help":          func(args []string, r runner.Runner) int { return runHelp(args) },
 }
 
 // verbAliases maps each alternate spelling (cliVerb.Aliases in commands.go) to
@@ -165,21 +168,78 @@ func resolveVerb(name string) string {
 // resolved name.
 func dispatch(args []string, r runner.Runner) int {
 	if len(args) == 0 {
-		usage()
+		usage(os.Stderr)
 		return 2
 	}
 	if args[0] == "-h" || args[0] == "--help" {
-		usage()
+		usage(os.Stdout)
 		return 0
 	}
 	verb := resolveVerb(args[0])
 	h, ok := verbHandlers[verb]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", args[0])
-		usage()
+		usage(os.Stderr)
 		return 2
 	}
+	// `<command> -h` straight after the verb prints that command's own page --
+	// for every verb, including the ones that parse no flags of their own
+	// (version, help). A -h later among the arguments reaches the same page
+	// through the flag parser; see flagExit.
+	if len(args) > 1 && (args[1] == "-h" || args[1] == "--help") {
+		fmt.Fprint(os.Stdout, verbUsage(verb))
+		return 0
+	}
 	return h(args[1:], r)
+}
+
+// runHelp implements the help verb: the top-level summary, or -- with a
+// command name -- that command's own page, exactly what `<command> -h` prints.
+// Requested help goes to stdout; only an unknown name is a usage error.
+//
+// The name is checked against the model (verbUsage answers "" for a verb it
+// does not know) rather than against verbHandlers: this function is itself a
+// verbHandlers entry, and consulting the map it lives in would be an
+// initialization cycle. TestDispatchHandlersMatchModel keeps the two sets
+// equal, so the answer is the same either way.
+func runHelp(args []string) int {
+	if len(args) == 0 {
+		usage(os.Stdout)
+		return 0
+	}
+	page := verbUsage(resolveVerb(args[0]))
+	if page == "" {
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", args[0])
+		usage(os.Stderr)
+		return 2
+	}
+	fmt.Fprint(os.Stdout, page)
+	return 0
+}
+
+// verbFlagSet is the flag set every verb parses with. Its Usage is silenced
+// deliberately: Go's default dump lists both spellings of every flag
+// alphabetically, with no targets and no examples, so a parse error is
+// answered by flagExit's one-line hint and -h by the verb's own modeled page
+// instead of that dump.
+func verbFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.Usage = func() {}
+	return fs
+}
+
+// flagExit routes a flag-parse failure. -h/--help is a request, not a mistake:
+// the verb's own page goes to stdout and the exit is 0. Anything else is a
+// usage error -- the flag package has already said what was wrong on stderr,
+// so one hint naming the help page follows it, rather than a page nobody asked
+// for scrolling the error away.
+func flagExit(verb string, err error) int {
+	if errors.Is(err, flag.ErrHelp) {
+		fmt.Fprint(os.Stdout, verbUsage(verb))
+		return 0
+	}
+	fmt.Fprintf(os.Stderr, "run 'solmq-conn-util help %s' for its arguments and flags\n", verb)
+	return 2
 }
 
 // targetNames returns the modeled target/platform names for verb, in the order
@@ -194,6 +254,29 @@ func targetNames(verb string) []string {
 			names = append(names, tg.Name)
 		}
 		return names
+	}
+	return nil
+}
+
+// targetSetNames returns the modeled Sets names for verb's target, in the
+// order cliVerbs declares them ("" for an unknown verb/target, or a target
+// with no Sets). Mirrors targetNames one level deeper, for download/jar's
+// third command level.
+func targetSetNames(verb, target string) []string {
+	for _, v := range cliVerbs {
+		if v.Name != verb {
+			continue
+		}
+		for _, tg := range v.Targets {
+			if tg.Name != target {
+				continue
+			}
+			names := make([]string, 0, len(tg.Sets))
+			for _, s := range tg.Sets {
+				names = append(names, s.Name)
+			}
+			return names
+		}
 	}
 	return nil
 }
@@ -244,21 +327,23 @@ var platformGenerators = map[string]func(envPath, out string) int{
 // (generate kubernetes, ...) is rejected with a hint at --platform instead of
 // being resolved, per platformResolutionDetail in commands.go.
 func runGenerate(args []string) int {
-	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
+	fs := verbFlagSet("generate")
 	env := envFlag(fs)
 	out := outFlag(fs)
 	platform := platformFlag(fs)
 	pos, err := collectFlagsAndDirs(fs, args)
 	if err != nil {
-		return 2
+		return flagExit("generate", err)
 	}
 	if len(pos) > 0 {
+		// Through resolveTarget, so the modeled short spelling (`cfg`) reaches the
+		// same branch as the canonical word, the way status resolves its own target.
 		switch {
-		case pos[0] == tgtConfig:
+		case resolveTarget("generate", pos[0]) == tgtConfig:
 			return genConfig(*env, *out)
 		case contains(platformNames, pos[0]):
 			fmt.Fprintf(os.Stderr, "generate: %q is no longer a positional target; pass --platform %s instead\n", pos[0], pos[0])
-			usage()
+			fmt.Fprint(os.Stderr, verbUsage("generate"))
 			return 2
 		default:
 			fmt.Fprintf(os.Stderr, "generate: unknown target %q (want %s)\n", pos[0], wantList(append(targetNames("generate"), platformNames...)))
@@ -352,18 +437,18 @@ var actTargets = map[string]func(action, envPath string, r runner.Runner, extraA
 // unexpected argument -- both usage errors (exit 2), per
 // platformResolutionDetail in commands.go.
 func runAction(action string, args []string, r runner.Runner) int {
-	fs := flag.NewFlagSet(action, flag.ContinueOnError)
+	fs := verbFlagSet(action)
 	env := envFlag(fs)
 	platform := platformFlag(fs)
 	allow := allowCommandFlag(fs)
 	pos, err := collectFlagsAndDirs(fs, args)
 	if err != nil {
-		return 2
+		return flagExit(action, err)
 	}
 	if len(pos) > 0 {
 		if contains(platformNames, pos[0]) {
 			fmt.Fprintf(os.Stderr, "%s: %q is no longer a positional platform; pass --platform %s instead\n", action, pos[0], pos[0])
-			usage()
+			fmt.Fprint(os.Stderr, verbUsage(action))
 			return 2
 		}
 		fmt.Fprintf(os.Stderr, "%s: unexpected argument %q (the platform is now selected with --platform)\n", action, pos[0])
@@ -677,371 +762,6 @@ func loadEnvFile(envPath string) (*spec.Env, error) {
 	return spec.ParseEnv(data)
 }
 
-// ---- status --------------------------------------------------------------
-
-// repeatableName implements flag.Value for a repeatable, free-form name flag
-// (--pod, --container): it only collects raw values here, since the platform
-// (and therefore which flag applies) is not known until after parsing;
-// actStatus validates each one against validate.SafeToken before it reaches
-// an argv.
-type repeatableName struct{ vals *[]string }
-
-func (repeatableName) String() string { return "" } // flag.Value needs a zero-value String; nothing to show before parsing
-
-func (v repeatableName) Set(s string) error {
-	*v.vals = append(*v.vals, s)
-	return nil
-}
-
-// runStatus parses status's flags and hands them to actStatus.
-func runStatus(args []string, r runner.Runner) int {
-	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	env := envFlag(fs)
-	install := fs.Bool("install", false, "install the status script on every target without prompting")
-	platform := platformFlag(fs)
-	var pods, containers []string
-	fs.Var(repeatableName{&pods}, "pod", "limit checks to this kubernetes pod name (repeatable)")
-	fs.Var(repeatableName{&containers}, "container", "limit checks to this docker/podman container name (repeatable)")
-	namespace := fs.String("namespace", "", "kubernetes namespace to query")
-	port := fs.Int("management-port", 0, "actuator management port to reach inside each target")
-	user := fs.String("user", "", "actuator account the status script authenticates as (default "+spec.StatusUserName+")")
-	command := fs.String("command", "", "override the platform CLI binary used to reach each target")
-	allow := allowCommandFlag(fs)
-	pos, err := collectFlagsAndDirs(fs, args)
-	if err != nil {
-		return 2
-	}
-	if len(pos) > 0 {
-		fmt.Fprintf(os.Stderr, "status: unexpected argument %q\n", pos[0])
-		return 2
-	}
-	return actStatus(*env, *install, *platform, pods, containers, *namespace, *port, *user, *command, *allow, r)
-}
-
-// loadStatusEnv loads env.yaml the same way loadEnvFile does, except when the
-// operator has named explicit --pod/--container targets and an explicit
-// --platform: status then needs nothing from the file at all (see
-// platformResolutionDetail's status exception), so a missing file is not an
-// error and status proceeds against a zero Env (built-in command/port/user
-// defaults). A file that does exist but fails to parse is still reported --
-// its presence means the operator expects it to be read.
-func loadStatusEnv(envPath string, skipIfMissing bool) (*spec.Env, error) {
-	data, err := os.ReadFile(envPath)
-	if err != nil {
-		if skipIfMissing {
-			return &spec.Env{}, nil
-		}
-		return nil, fmt.Errorf("reading %s: %w", envPath, err)
-	}
-	return spec.ParseEnv(data)
-}
-
-// statusCommand resolves the CLI binary status execs through: the --command
-// override if given, else the platform's section command: in env.yaml when
-// the section is present, else the platform's own default -- the same
-// defaults applyKubeDefaults/applyDockerDefaults/applyPodmanDefaults fill in
-// at parse time, needed again here because status can run with no section at
-// all (explicit --pod/--container targets).
-func statusCommand(platform, override string, e *spec.Env) string {
-	if override != "" {
-		return override
-	}
-	switch platform {
-	case validate.PlatformKubernetes:
-		if e != nil && e.Kubernetes != nil && e.Kubernetes.Command != "" {
-			return e.Kubernetes.Command
-		}
-		return spec.DefaultKubeCommand
-	case validate.PlatformDocker:
-		if e != nil && e.Docker != nil && e.Docker.Command != "" {
-			return e.Docker.Command
-		}
-		return spec.DefaultDockerCommand
-	case validate.PlatformPodman:
-		if e != nil && e.Podman != nil && e.Podman.Command != "" {
-			return e.Podman.Command
-		}
-		return spec.DefaultPodmanCommand
-	default:
-		return ""
-	}
-}
-
-// statusNamespace resolves the kubernetes namespace status queries: the
-// --namespace override if given, else the kubernetes section's
-// deployment.namespace when present, else "" (the CLI's current-context
-// default). No effect on docker/podman.
-func statusNamespace(platform, override string, e *spec.Env) string {
-	if override != "" {
-		return override
-	}
-	if platform == validate.PlatformKubernetes && e != nil && e.Kubernetes != nil {
-		return e.Kubernetes.Deployment.Namespace
-	}
-	return ""
-}
-
-// resolveStatusTargets returns the targets status checks: the operator's own
-// --pod/--container values when given, otherwise discovered from env.yaml --
-// kubernetes lists running pods (runner.KubernetesPodNames, selector
-// app=<deployment name>), docker/podman use the section's configured
-// instance name.
-func resolveStatusTargets(platform string, pods, containers []string, namespace string, e *spec.Env, r runner.Runner, cmdArgv []string) ([]string, error) {
-	switch platform {
-	case validate.PlatformKubernetes:
-		if len(pods) > 0 {
-			return pods, nil
-		}
-		if e == nil || e.Kubernetes == nil {
-			return nil, fmt.Errorf("no kubernetes: section in env.yaml to discover pods from; pass --pod explicitly")
-		}
-		selector := "app=" + e.Kubernetes.Deployment.Name
-		names, err := runner.KubernetesPodNames(r, cmdArgv, namespace, selector)
-		if err != nil {
-			return nil, err
-		}
-		if len(names) == 0 {
-			return nil, fmt.Errorf("no pods found for selector %q in namespace %q; pass --pod explicitly", selector, namespace)
-		}
-		return names, nil
-	case validate.PlatformDocker:
-		if len(containers) > 0 {
-			return containers, nil
-		}
-		if e == nil || e.Docker == nil {
-			return nil, fmt.Errorf("no docker: section in env.yaml to discover the container name from; pass --container explicitly")
-		}
-		return []string{e.Docker.Name}, nil
-	case validate.PlatformPodman:
-		if len(containers) > 0 {
-			return containers, nil
-		}
-		if e == nil || e.Podman == nil {
-			return nil, fmt.Errorf("no podman: section in env.yaml to discover the container name from; pass --container explicitly")
-		}
-		return []string{e.Podman.Name}, nil
-	default:
-		return nil, fmt.Errorf("unknown platform %q", platform)
-	}
-}
-
-// actStatus resolves the platform and its targets, ensures the generated
-// status script is present on each (installing per install/prompt policy),
-// runs it, and prints the per-target report. See platformResolutionDetail and
-// the status Detail text in commands.go for the resolution order and the
-// install-or-skip behavior.
-func actStatus(envPath string, install bool, platformFlagVal string, pods, containers []string, namespaceFlagVal string, portFlagVal int, userFlagVal, commandFlagVal string, extraAllowed []string, r runner.Runner) int {
-	explicitTargets := len(pods) > 0 || len(containers) > 0
-
-	e, lerr := loadStatusEnv(envPath, explicitTargets && platformFlagVal != "")
-	if lerr != nil {
-		return errExit(lerr)
-	}
-
-	platform, perr := resolvePlatform(platformFlagVal, presentPlatforms(e), !explicitTargets)
-	if perr != nil {
-		return errExit(perr)
-	}
-
-	namespace := statusNamespace(platform, namespaceFlagVal, e)
-	if namespace != "" && !validate.SafeToken(namespace) {
-		return errExit(fmt.Errorf("--namespace %q contains an unsafe character (%s)", namespace, validate.UnsafeTokenReason))
-	}
-	for _, p := range pods {
-		if !validate.SafeToken(p) {
-			return errExit(fmt.Errorf("--pod %q contains an unsafe character (%s)", p, validate.UnsafeTokenReason))
-		}
-	}
-	for _, c := range containers {
-		if !validate.SafeToken(c) {
-			return errExit(fmt.Errorf("--container %q contains an unsafe character (%s)", c, validate.UnsafeTokenReason))
-		}
-	}
-
-	user := userFlagVal
-	if user == "" {
-		user = spec.StatusUserName
-	}
-	// Stricter than the other flags: the account name is also spliced into a
-	// sed address inside the generated script, where a '/' or a regex
-	// metacharacter would break the password lookup rather than fail loudly.
-	if !validate.SafeActuatorUser(user) {
-		return errExit(fmt.Errorf("--user %q is not a usable account name (%s)", user, validate.SafeActuatorUserReason))
-	}
-
-	port := portFlagVal
-	if port == 0 {
-		port = e.Defaults.EffectiveManagementPort()
-	}
-	if port < 1 || port > 65535 {
-		return errExit(fmt.Errorf("--management-port %d must be 1-65535", port))
-	}
-
-	command := statusCommand(platform, commandFlagVal, e)
-	cmdArgv, cerr := runner.ParseCommand(platform, command, extraAllowed)
-	if cerr != nil {
-		return errExit(cerr)
-	}
-
-	// Reuse the read-only preflight probe before touching anything, same as
-	// deploy/remove. The action argument only steers kubernetes' can-i verb
-	// (docker/podman ignore it); status never creates or deletes a deployment,
-	// so deploy's "create" is used as the closer of the two existing checks.
-	if code, ok := preflight(r, runner.ActionDeploy, platform, command, namespace, extraAllowed); !ok {
-		return code
-	}
-
-	targets, terr := resolveStatusTargets(platform, pods, containers, namespace, e, r, cmdArgv)
-	if terr != nil {
-		return errExit(terr)
-	}
-
-	script := statusscript.Render(port, user)
-	return runStatusOnTargets(r, cmdArgv, platform, namespace, e, targets, script, install)
-}
-
-// runStatusOnTargets ensures the status script is present on each target and
-// runs it, printing "<target>: " followed by the script's own output (one
-// line per continuation, so a multi-line report -- leader-election mode,
-// leader-election state, one line per workflow -- stays grouped under its
-// target). It never aborts the loop on a target's own non-zero exit: that is
-// the script's documented convention (1 standby, 2 error), data to report,
-// not a crash. It returns 0 only when every target reached the run step; a
-// probe/install failure or a declined install both count toward exit 1.
-func runStatusOnTargets(r runner.Runner, cmdArgv []string, platform, namespace string, e *spec.Env, targets []string, script string, install bool) int {
-	var present, missing []string
-	failed := false
-
-	for _, t := range targets {
-		ok, err := runner.ScriptInstalled(r, cmdArgv, platform, t, namespace, statusscript.ContainerPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s: error: %v\n", t, err)
-			failed = true
-			continue
-		}
-		if ok {
-			present = append(present, t)
-		} else {
-			missing = append(missing, t)
-		}
-	}
-
-	toRun := present
-	if len(missing) > 0 {
-		doInstall := install
-		if !doInstall {
-			var cerr error
-			doInstall, cerr = confirmInstall(missing)
-			if cerr != nil {
-				fmt.Fprintln(os.Stderr, "error:", cerr)
-				return 1
-			}
-		}
-		if doInstall {
-			for _, t := range missing {
-				if _, err := runner.InstallScript(r, cmdArgv, platform, t, namespace, statusscript.ContainerDir, statusscript.ContainerPath, script); err != nil {
-					fmt.Fprintf(os.Stderr, "%s: error installing status script: %v\n", t, err)
-					failed = true
-					continue
-				}
-				toRun = append(toRun, t)
-			}
-		} else {
-			for _, t := range missing {
-				fmt.Fprintf(os.Stderr, "%s: skipped (status script not installed, and the install prompt was declined)\n", t)
-			}
-			failed = true
-		}
-	}
-
-	// The deployment name exists only on kubernetes, and only when env.yaml was
-	// read at all -- explicit --pod targets can run with no section present.
-	deployment := ""
-	if platform == validate.PlatformKubernetes && e != nil && e.Kubernetes != nil {
-		deployment = e.Kubernetes.Deployment.Name
-	}
-	reported := false
-	for _, t := range toRun {
-		// The script always exits 0 and puts its findings in the output, so an
-		// error here is the exec failing rather than a standby instance -- report
-		// it and keep going, so one unreachable target does not hide the rest.
-		out, err := runner.RunStatusScript(r, cmdArgv, platform, t, namespace, statusscript.ContainerPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s: error running the status script: %v\n", t, err)
-			failed = true
-			continue
-		}
-		// Only docker has a group above the container, and it is read back from
-		// the container rather than assumed from the compose file's directory --
-		// one extra read-only inspect per target, skipped on the other platforms.
-		group := ""
-		if platform == validate.PlatformDocker {
-			group = runner.DockerComposeProject(r, cmdArgv, t)
-		}
-		if reported {
-			fmt.Println()
-		}
-		printTargetReport(statusBanner(platform, namespace, deployment, group, t), out)
-		reported = true
-	}
-
-	if failed {
-		return 1
-	}
-	return 0
-}
-
-// statusBanner is the one-line identity printed above a target's report: the
-// platform, then the names that locate that instance on it -- namespace /
-// deployment / pod on kubernetes, compose project / container on docker, the
-// container alone on podman. None of it can come from the report itself: the
-// script runs inside the container and knows nothing of what surrounds it.
-//
-// A name that is not set (no namespace configured, a container compose did not
-// create) is dropped rather than rendered as an empty segment, so a separator
-// always sits between two real names.
-func statusBanner(platform, namespace, deployment, group, target string) string {
-	parts := make([]string, 0, 4)
-	for _, s := range []string{namespace, deployment, group, target} {
-		if s != "" {
-			parts = append(parts, s)
-		}
-	}
-	return platform + "  " + strings.Join(parts, " / ")
-}
-
-// printTargetReport prints one target's report under its banner, indenting
-// every line by two. The identity is a banner rather than a lead-in on the
-// first line so the report lines stay left-aligned with each other however
-// long the pod name is.
-func printTargetReport(banner, out string) {
-	fmt.Printf("=== %s ===\n", banner)
-	body := strings.TrimRight(out, "\n")
-	if body == "" {
-		return
-	}
-	for _, l := range strings.Split(body, "\n") {
-		fmt.Printf("  %s\n", l)
-	}
-}
-
-// confirmInstall asks once whether to install the status script on the listed
-// missing targets, via the same promptLine seam and non-TTY refusal
-// promptPlatformMenu uses. "y"/"yes" (case-insensitive) installs; anything
-// else, including a blank line, declines.
-func confirmInstall(missing []string) (bool, error) {
-	line, err := promptLine(fmt.Sprintf("status script missing on %s -- install it now? [y/N] ", strings.Join(missing, ", ")))
-	if err != nil {
-		return false, fmt.Errorf("confirming the status script install interactively: %w; pass --install instead", err)
-	}
-	switch strings.ToLower(line) {
-	case "y", "yes":
-		return true, nil
-	default:
-		return false, nil
-	}
-}
-
 // ---- version ---------------------------------------------------------------
 
 // actVersion prints solmq-conn-util's own version (see the package-level
@@ -1055,10 +775,10 @@ func actVersion() int {
 // ---- validate / examples -----------------------------------------------------
 
 func runValidate(args []string) int {
-	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
+	fs := verbFlagSet("validate")
 	env := envFlag(fs)
 	if _, err := collectFlagsAndDirs(fs, args); err != nil {
-		return 2
+		return flagExit("validate", err)
 	}
 	req, _, envDir, lerr := loadEnv(*env)
 	if lerr != nil {
@@ -1080,12 +800,12 @@ func runValidate(args []string) int {
 // runExamples writes the embedded starter env.yaml + workflows to dir (default
 // the current directory).
 func runExamples(args []string) int {
-	fs := flag.NewFlagSet("examples", flag.ContinueOnError)
+	fs := verbFlagSet("examples")
 	force := fs.Bool("f", false, "overwrite existing files")
 	fs.BoolVar(force, "force", false, "overwrite existing files")
 	pos, err := collectFlagsAndDirs(fs, args)
 	if err != nil {
-		return 2
+		return flagExit("examples", err)
 	}
 	dir := "."
 	if len(pos) > 0 {
@@ -1106,6 +826,220 @@ func runExamples(args []string) int {
 	return 0
 }
 
+// ---- download --------------------------------------------------------------
+
+// downloadSets maps each modeled download-jar set name (cliVerbs's "jar"
+// target Sets in commands.go) to the libs.Input.Set value it selects, so
+// runDownload's accepted set names can never drift from the model -- see
+// TestDispatchHandlersMatchModel and TestDownloadSetMapMatchesModel, which
+// also gate this map against internal/libs.SetNames() directly.
+var downloadSets = map[string]string{
+	libs.SetMQ:     libs.SetMQ,
+	libs.SetSyslog: libs.SetSyslog,
+}
+
+// downloadFn is the injectable seam behind runDownload's call into
+// internal/libs: libs.Download in production, a fake in tests that captures
+// the Input it received instead of touching the network -- mirrors the
+// runner.Runner seam dispatch threads explicitly, so this package's own tests
+// stay decoupled from internal/libs's HTTP/Maven behavior. download never
+// shells out, so it carries no runner.Runner of its own; this is its only
+// injected boundary.
+var downloadFn = libs.Download
+
+// runDownload parses download's flags and validates all three positional
+// words (target, set, optional dir) against the model before calling
+// internal/libs -- mirrors runAutoComplete's missing/unknown-word handling
+// (including its usage()-only-on-missing asymmetry) so the words accepted by
+// help, completion, and dispatch can never drift from what actually runs.
+// downloadDeployedImage reads the connector image reference out of env.yaml so
+// download can tell the operator when the jar list it omits against was
+// captured from a DIFFERENT image than the one being deployed. It is the only
+// thing download reads config for -- never credentials, a platform, or
+// workflows -- and the value only ever reaches Report.OmitListImageMismatch.
+//
+// The read is advisory because download is the command you run BEFORE you have
+// a deployment: it must work in an empty directory with no config at all. So
+// the failure modes follow the precedent --omit-lib-file already sets, where a
+// file the operator NAMED failing to load is systemic but an absent default is
+// not:
+//
+//   - -e given explicitly and unreadable or malformed -> error, nothing runs.
+//   - -e defaulted and env.yaml absent -> "", no error, no warning.
+//   - -e defaulted and env.yaml malformed -> "", and a note on stderr, because
+//     silently ignoring a config that IS there would hide the very mismatch
+//     this exists to surface.
+//   - parsed but no image: block -> "", nothing to compare.
+//
+// fs.Visit is what separates the first two: comparing *envPath against the
+// default would read a deliberately typed "-e env.yaml" as if it were implicit.
+func downloadDeployedImage(fs *flag.FlagSet, envPath string) (string, error) {
+	explicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "e" || f.Name == "env" {
+			explicit = true
+		}
+	})
+
+	e, err := loadEnvFile(envPath)
+	if err != nil {
+		if explicit {
+			return "", fmt.Errorf("reading the image reference from %s: %w", envPath, err)
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		fmt.Fprintf(os.Stderr, "note: %s could not be read (%v), so the omit list cannot be checked against the image you deploy\n", envPath, err)
+		return "", nil
+	}
+	return e.Image.Ref(), nil
+}
+
+func runDownload(args []string) int {
+	fs := verbFlagSet("download")
+	var urls []string
+	urlVal := repeatableName{&urls}
+	fs.Var(urlVal, "url", "exact URL to download instead of Maven resolution (repeatable)")
+	version := fs.String("version", "", "pin the seed release instead of resolving latest stable (default: latest stable)")
+	omitLibFile := fs.String("omit-lib-file", "", "a jar list that replaces the embedded default the omission rule compares against (default: the embedded default; an empty file omits nothing)")
+	includeProvided := fs.Bool("include-provided", false, "download the whole closure even where the connector image already provides a jar")
+	envPath := envFlag(fs)
+	force := fs.Bool("f", false, "overwrite existing files")
+	fs.BoolVar(force, "force", false, "overwrite existing files")
+	pos, err := collectFlagsAndDirs(fs, args)
+	if err != nil {
+		return flagExit("download", err)
+	}
+
+	if len(pos) == 0 {
+		fmt.Fprintf(os.Stderr, "download: missing target (%s)\n\n", pipeList(targetNames("download")))
+		fmt.Fprint(os.Stderr, verbUsage("download"))
+		return 2
+	}
+	target := pos[0]
+	if !contains(targetNames("download"), target) {
+		fmt.Fprintf(os.Stderr, "download: unknown target %q (want %s)\n", target, wantList(targetNames("download")))
+		return 2
+	}
+
+	setWords := targetSetNames("download", target)
+	if len(pos) < 2 {
+		fmt.Fprintf(os.Stderr, "download: missing set (%s)\n\n", pipeList(setWords))
+		fmt.Fprint(os.Stderr, verbUsage("download"))
+		return 2
+	}
+	setArg := pos[1]
+	set, ok := downloadSets[setArg]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "download: unknown set %q (want %s)\n", setArg, wantList(setWords))
+		return 2
+	}
+
+	dir := "./libs"
+	if len(pos) > 2 {
+		dir = pos[2]
+	}
+	if len(pos) > 3 {
+		fmt.Fprintf(os.Stderr, "download: unexpected argument %q\n", pos[3])
+		return 2
+	}
+
+	deployedImage, ierr := downloadDeployedImage(fs, *envPath)
+	if ierr != nil {
+		return errExit(ierr)
+	}
+
+	rep, derr := downloadFn(libs.Input{
+		Dir:             dir,
+		Set:             set,
+		Version:         *version,
+		URLs:            urls,
+		Force:           *force,
+		OmitLibFile:     *omitLibFile,
+		IncludeProvided: *includeProvided,
+		DeployedImage:   deployedImage,
+	})
+	if derr != nil {
+		return errExit(derr)
+	}
+	return reportDownload(rep, dir, *omitLibFile)
+}
+
+// reportDownload prints libs.Download's Report mirroring runExamples' shape:
+// "wrote:"/"exists (use -f to overwrite):"/"failed:" lines, then three
+// clearly distinct blocks that must never blur together -- "omitted:" for an
+// artifact the connector image already provides (Report.Omitted; not a
+// problem, so it never affects the exit code), "guessed version:" for one
+// whose POM chain never resolved a version and fell back to latest stable
+// (Report.Fallback), and "unverified:" for one written without a digest
+// match, e.g. an explicit --url whose ".sha1" sidecar 404s (Report.Unverified;
+// also not a failure, but worth an operator's attention) -- then which omit
+// list was in effect (Report.OmitListProvenance, annotated "(built in)" when
+// omitLibFile was left empty) and any per-line omit list warnings
+// (Report.OmitListWarnings), then a counts footer, then a "next:" hint pointing at
+// the docker/podman libs.dir and kubernetes libs: config keys. When every
+// resolved artifact was omitted, the hint instead names --include-provided,
+// since there is no dir to point deployment config at and -f cannot revive a
+// jar the omission step already dropped.
+//
+// Exit code convention: this returns 1 whenever Report.Failed is non-empty,
+// whether one artifact failed among many or every one of them did -- the
+// exit code only ever signals "at least one failure"; a caller that needs to
+// tell a partial failure from a total one reads the written/skipped/omitted/
+// failed counts in the footer, not the exit code. A run where every artifact
+// was omitted (the image already has all of it) has an empty Failed and so
+// exits 0: that is success, not failure.
+func reportDownload(rep libs.Report, dir string, omitLibFile string) int {
+	for _, p := range rep.Written {
+		fmt.Fprintln(os.Stderr, "wrote:", p)
+	}
+	for _, p := range rep.Skipped {
+		fmt.Fprintln(os.Stderr, "exists (use -f to overwrite):", p)
+	}
+	for _, f := range rep.Failed {
+		fmt.Fprintf(os.Stderr, "failed: %s: %v\n", f.Name, f.Err)
+	}
+	for _, note := range rep.Omitted {
+		fmt.Fprintln(os.Stderr, "omitted:", note)
+	}
+	for _, note := range rep.Fallback {
+		fmt.Fprintln(os.Stderr, "guessed version:", note)
+	}
+	for _, note := range rep.Unverified {
+		fmt.Fprintln(os.Stderr, "unverified:", note)
+	}
+	if rep.OmitListProvenance != "" {
+		line := "omit list: " + rep.OmitListProvenance
+		if omitLibFile == "" {
+			line += " (built in; describes " + libs.EmbeddedListMinVersion + " and later)"
+		}
+		fmt.Fprintln(os.Stderr, line)
+	}
+	for _, w := range rep.OmitListWarnings {
+		fmt.Fprintln(os.Stderr, "omit list warning:", w)
+	}
+	if rep.OmitListImageMismatch != "" {
+		fmt.Fprintln(os.Stderr, "omit list warning:", rep.OmitListImageMismatch)
+	}
+	fmt.Fprintf(os.Stderr, "\n%d written, %d skipped, %d omitted, %d unverified, %d failed in %q\n",
+		len(rep.Written), len(rep.Skipped), len(rep.Omitted), len(rep.Unverified), len(rep.Failed), dir)
+
+	everythingOmitted := len(rep.Omitted) > 0 && len(rep.Written) == 0 && len(rep.Skipped) == 0 && len(rep.Failed) == 0
+	if everythingOmitted {
+		fmt.Fprintln(os.Stderr, "next: every resolved jar is already on the connector image, so nothing was downloaded; --include-provided downloads the full closure anyway (-f only overwrites a file already on disk, it never revives an omitted jar)")
+	} else {
+		next := fmt.Sprintf("next: point the docker/podman libs.dir or kubernetes libs: config key at %q", dir)
+		if len(rep.Omitted) > 0 {
+			next += "; the omitted jars are already on the connector image and need no copy"
+		}
+		fmt.Fprintln(os.Stderr, next)
+	}
+	if len(rep.Failed) > 0 {
+		return 1
+	}
+	return 0
+}
+
 // ---- auto-complete -------------------------------------------------------
 
 // completionShellRenderers maps each modeled "auto-complete" shell (cliVerbs in
@@ -1123,14 +1057,14 @@ var completionShellRenderers = map[string]func() string{
 // the script is rendered from the compiled-in command model, so it needs no
 // env.yaml and matches the binary that printed it.
 func runAutoComplete(args []string) int {
-	fs := flag.NewFlagSet("auto-complete", flag.ContinueOnError)
+	fs := verbFlagSet("auto-complete")
 	pos, err := collectFlagsAndDirs(fs, args)
 	if err != nil {
-		return 2
+		return flagExit("auto-complete", err)
 	}
 	if len(pos) == 0 {
-		fmt.Fprintf(os.Stderr, "auto-complete: missing shell (%s)\n", pipeList(targetNames("auto-complete")))
-		usage()
+		fmt.Fprintf(os.Stderr, "auto-complete: missing shell (%s)\n\n", pipeList(targetNames("auto-complete")))
+		fmt.Fprint(os.Stderr, verbUsage("auto-complete"))
 		return 2
 	}
 	h, ok := completionShellRenderers[pos[0]]
@@ -1302,6 +1236,9 @@ func printWarnings(warns []gen.Issue) {
 	}
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, usageText())
+// usage prints the top-level summary. The stream is the caller's statement of
+// intent: stdout when help was asked for (help, -h, --help -- pipeable, exit
+// 0), stderr when it is the side effect of a usage mistake (exit 2).
+func usage(w *os.File) {
+	fmt.Fprint(w, usageText())
 }

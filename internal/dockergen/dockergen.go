@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/yamlwriter"
 )
 
@@ -46,7 +47,7 @@ type yw = yamlwriter.Writer
 // Render returns the full docker-compose.yml. The application.yml and the
 // status script are each inlined via their own compose top-level configs entry
 // with content:, mounted into the service at /app/external/spring/config/application.yml
-// and /app/external/libs/status respectively.
+// and statusscript.ContainerPath respectively.
 func Render(in Input) string {
 	w := &yw{}
 
@@ -128,20 +129,15 @@ func renderService(w *yw, in Input, inst Instance) {
 		}
 	}
 	// configs: always two entries -- the inlined application.yml and status script.
-	//
-	// The status script's target sits inside the libs directory a libs volume
-	// mounts below, and unlike the kubernetes and podman renderers -- where
-	// emitting the file mount last keeps it nested -- compose has no ordering to
-	// control here: configs and volumes are separate fields, both handed to the
-	// engine, which mounts by destination depth so a parent lands before its
-	// child. That makes the nesting the engine's job rather than this file's, so
-	// verify it against a real engine when both are configured (see the docker
-	// smoke test in userguide.md) rather than trusting key order.
+	// Neither target is nested inside a volume mount below, so the engine's
+	// mount order between configs and volumes cannot shadow either of them. That
+	// was not true while the status script lived under /app/external/libs, where
+	// a libs volume mounted over it (see statusscript.ContainerDir).
 	w.Line(4, "configs:")
 	w.Line(6, "- source: "+inst.Name+"-app")
 	w.Line(8, "target: /app/external/spring/config/application.yml")
 	w.Line(6, "- source: "+inst.Name+"-status")
-	w.Line(8, "target: /app/external/libs/status")
+	w.Line(8, "target: "+statusscript.ContainerPath)
 	// volumes: stores first, then libs; omit the key when there are neither.
 	if len(in.Stores) > 0 || in.Libs != nil {
 		w.Line(4, "volumes:")

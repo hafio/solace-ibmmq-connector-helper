@@ -374,7 +374,7 @@ func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...st
 	statusName := p.Name + "-status"
 	plan.AppYAML = NamedDoc{Name: appName, Data: b.appYAML}
 	plan.StatusScript = NamedDoc{Name: statusName, Data: statusscript.Render(e.Defaults.EffectiveManagementPort(), spec.StatusUserName)}
-	plan.Service = p.Name + ".service"
+	plan.Service = PodmanServiceName(p.Name)
 	in := podmangen.Input{
 		Podman:  p,
 		Secrets: podmanSecretRefs(p.Name, plan.Secrets),
@@ -533,6 +533,13 @@ func toPodmanMount(m *mount) *podmangen.Mount {
 	}
 	return &podmangen.Mount{Source: m.Source, Target: m.Target}
 }
+
+// PodmanServiceName is the systemd unit name a quadlet .container file
+// generates for an instance. Shared with the status verb, which asks systemd
+// for that unit's restart count: under quadlet a restart recreates the
+// container, so the container's own counter reads 0 and only the unit knows how
+// many times the instance has died.
+func PodmanServiceName(name string) string { return name + ".service" }
 
 // PodmanSecretStoreName is the name a credential is stored under in podman's
 // secret store. That store is per-user and shared across every project on the

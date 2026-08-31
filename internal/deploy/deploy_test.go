@@ -51,7 +51,7 @@ func TestRenderFull(t *testing.T) {
 		"solace-connector/le-mode: standalone", "solace-connector/role: active",
 		"- name: secrets", "mountPath: /run/secrets", "defaultMode: 0400",
 		"mountPath: /app/external/classpath/truststores", "livenessProbe:", "tcpSocket:", "readinessProbe:",
-		"mountPath: /app/external/libs/status", "subPath: status",
+		"mountPath: /app/external/.status-script", "subPath: status",
 		"requests:", "limits:", `cpu: "1"`, "memory: 1Gi",
 		"kind: Service", "targetPort: 8090",
 	} {
@@ -156,7 +156,7 @@ spec:
               mountPath: /app/external/classpath/truststores
               readOnly: true
             - name: config
-              mountPath: /app/external/libs/status
+              mountPath: /app/external/.status-script
               subPath: status
               readOnly: true
           livenessProbe:
@@ -355,7 +355,7 @@ func TestRenderStatusScriptMountAfterLibs(t *testing.T) {
 	k.Libs = &spec.Libs{PVC: &spec.LibsPVC{Existing: "my-pvc"}}
 	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	libsIdx := strings.Index(out, "mountPath: /app/external/libs\n")
-	statusIdx := strings.Index(out, "mountPath: /app/external/libs/status")
+	statusIdx := strings.Index(out, "mountPath: /app/external/.status-script")
 	if libsIdx == -1 || statusIdx == -1 || statusIdx < libsIdx {
 		t.Errorf("status mount must come after the libs directory mount:\n%s", out)
 	}

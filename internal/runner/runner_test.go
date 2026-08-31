@@ -826,20 +826,44 @@ func TestPreflightUnknownAction(t *testing.T) {
 	}
 }
 
-// ---- KubernetesPodNames -------------------------------------------------------
+// ---- the status verb's read-only queries -------------------------------------
+//
+// Every case here asserts the exact argv crossing the exec boundary, because
+// that argv is the security boundary: no shell is involved, so what these
+// slices say is precisely what runs. The tool-authored tokens (subcommands,
+// flags, Go templates) are asserted verbatim for the same reason.
 
-func TestKubernetesPodNamesArgv(t *testing.T) {
+func TestKubernetesPodsJSONArgv(t *testing.T) {
 	cases := []struct {
-		name      string
-		namespace string
-		want      []string
+		name          string
+		namespace     string
+		selector      string
+		names         []string
+		allNamespaces bool
+		want          []string
 	}{
-		{"no namespace", "", []string{"kubectl", "get", "pods", "-l", "app=solmq-connector", "-o", "name"}},
-		{"with namespace", "solace", []string{"kubectl", "get", "pods", "-n", "solace", "-l", "app=solmq-connector", "-o", "name"}},
+		{
+			name: "by selector, no namespace", selector: "app=solmq-connector",
+			want: []string{"kubectl", "get", "pods", "-l", "app=solmq-connector", "-o", "json"},
+		},
+		{
+			name: "by selector in a namespace", namespace: "solace", selector: "app=solmq-connector",
+			want: []string{"kubectl", "get", "pods", "-n", "solace", "-l", "app=solmq-connector", "-o", "json"},
+		},
+		{
+			name: "explicit names", namespace: "solace", names: []string{"pod-a", "pod-b"},
+			want: []string{"kubectl", "get", "pods", "pod-a", "pod-b", "-n", "solace", "-o", "json"},
+		},
+		{
+			// --all is explicitly a cluster-wide search, so a namespace resolved
+			// from env.yaml must not narrow it back down.
+			name: "every namespace outranks a resolved namespace", namespace: "solace", allNamespaces: true,
+			want: []string{"kubectl", "get", "pods", "--all-namespaces", "-o", "json"},
+		},
 	}
 	for _, c := range cases {
 		f := &fakeRunner{}
-		if _, err := KubernetesPodNames(f, []string{"kubectl"}, c.namespace, "app=solmq-connector"); err != nil {
+		if _, err := KubernetesPodsJSON(f, []string{"kubectl"}, c.namespace, c.selector, c.names, c.allNamespaces); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
@@ -848,78 +872,251 @@ func TestKubernetesPodNamesArgv(t *testing.T) {
 	}
 }
 
-// TestDockerComposeProjectArgvAndValue covers the read that labels a docker
-// target with the compose project it belongs to. The project is read back from
-// the container rather than derived from the compose file's directory, so a
-// container brought up under a different project name still reports the truth.
-func TestDockerComposeProjectArgvAndValue(t *testing.T) {
-	f := &fakeRunner{out: "eg\n"}
-	if got := DockerComposeProject(f, []string{"docker"}, "solmq-connector"); got != "eg" {
-		t.Errorf("project = %q, want %q", got, "eg")
+func TestKubernetesPodsJSONRunFailureWraps(t *testing.T) {
+	f := &fakeRunner{err: fmt.Errorf("boom")}
+	_, err := KubernetesPodsJSON(f, []string{"kubectl"}, "", "app=solmq-connector", nil, false)
+	if err == nil {
+		t.Fatal("a run failure must surface as an error")
 	}
-	want := []string{
-		"docker", "inspect", "--format",
-		`{{index .Config.Labels "com.docker.compose.project"}}`,
-		"solmq-connector",
+	if !strings.Contains(err.Error(), "listing pods") {
+		t.Errorf("error should name the failed operation, got %v", err)
 	}
+}
+
+func TestKubernetesGetJSONArgv(t *testing.T) {
+	cases := []struct {
+		name      string
+		namespace string
+		kind      string
+		obj       string
+		want      []string
+	}{
+		{"deployment in a namespace", "solace", "deployment", "solmq-connector",
+			[]string{"kubectl", "get", "deployment", "solmq-connector", "-n", "solace", "-o", "json"}},
+		{"no namespace", "", "service", "solmq-connector",
+			[]string{"kubectl", "get", "service", "solmq-connector", "-o", "json"}},
+		{"a referenced object", "solace", "configmap", "solmq-connector-config",
+			[]string{"kubectl", "get", "configmap", "solmq-connector-config", "-n", "solace", "-o", "json"}},
+	}
+	for _, c := range cases {
+		f := &fakeRunner{}
+		if _, err := KubernetesGetJSON(f, []string{"kubectl"}, c.namespace, c.kind, c.obj); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
+			t.Errorf("%s: argv = %v, want %v", c.name, f.calls[0].argv, c.want)
+		}
+	}
+}
+
+// TestKubernetesGetJSONMissingObjectIsAnError covers the answer the components
+// check is actually asking for: a missing object exits non-zero, and the caller
+// turns that into "MISSING" rather than a failed run.
+func TestKubernetesGetJSONMissingObjectIsAnError(t *testing.T) {
+	f := &fakeRunner{err: fmt.Errorf("secrets \"nope\" not found")}
+	_, err := KubernetesGetJSON(f, []string{"kubectl"}, "solace", "secret", "nope")
+	if err == nil {
+		t.Fatal("a missing object must surface as an error")
+	}
+	if !strings.Contains(err.Error(), "secret/nope") {
+		t.Errorf("error should name the object, got %v", err)
+	}
+}
+
+func TestKubernetesTopArgv(t *testing.T) {
+	cases := []struct {
+		name          string
+		namespace     string
+		selector      string
+		names         []string
+		allNamespaces bool
+		want          []string
+	}{
+		{
+			// --containers attributes the sample to one container rather than
+			// summing the pod, so it is comparable with that container's limits.
+			name: "by selector", namespace: "solace", selector: "app=solmq-connector",
+			want: []string{"kubectl", "top", "pod", "-n", "solace", "-l", "app=solmq-connector", "--containers", "--no-headers"},
+		},
+		{
+			name: "explicit names", names: []string{"pod-a"},
+			want: []string{"kubectl", "top", "pod", "pod-a", "--containers", "--no-headers"},
+		},
+		{
+			name: "every namespace", allNamespaces: true,
+			want: []string{"kubectl", "top", "pod", "--all-namespaces", "--containers", "--no-headers"},
+		},
+	}
+	for _, c := range cases {
+		f := &fakeRunner{}
+		if _, err := KubernetesTop(f, []string{"kubectl"}, c.namespace, c.selector, c.names, c.allNamespaces); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
+			t.Errorf("%s: argv = %v, want %v", c.name, f.calls[0].argv, c.want)
+		}
+	}
+}
+
+// TestKubernetesTopWithoutMetricsAPIWraps covers the cluster without
+// metrics-server: kubectl fails, and the caller degrades to a note instead of
+// dropping the whole report.
+func TestKubernetesTopWithoutMetricsAPIWraps(t *testing.T) {
+	f := &fakeRunner{err: fmt.Errorf("Metrics API not available")}
+	_, err := KubernetesTop(f, []string{"kubectl"}, "", "app=x", nil, false)
+	if err == nil {
+		t.Fatal("an unavailable metrics API must surface as an error")
+	}
+	if !strings.Contains(err.Error(), "sampling pod resource usage") {
+		t.Errorf("error should name the failed operation, got %v", err)
+	}
+}
+
+// TestEngineInspectJSONArgv covers the one call that answers the whole
+// container view on docker and podman: every target in a single invocation.
+func TestEngineInspectJSONArgv(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := EngineInspectJSON(f, []string{"docker"}, []string{"a", "b", "c"}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"docker", "inspect", "a", "b", "c"}
+	if !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	}
+	// A chained command keeps its own tokens ahead of the subcommand.
+	f2 := &fakeRunner{}
+	if _, err := EngineInspectJSON(f2, []string{"sudo", "podman"}, []string{"solmq"}); err != nil {
+		t.Fatal(err)
+	}
+	want2 := []string{"sudo", "podman", "inspect", "solmq"}
+	if !reflect.DeepEqual(f2.calls[0].argv, want2) {
+		t.Errorf("argv = %v, want %v", f2.calls[0].argv, want2)
+	}
+}
+
+func TestEngineInspectJSONNoNamesIsAnErrorAndRunsNothing(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := EngineInspectJSON(f, []string{"docker"}, nil); err == nil {
+		t.Fatal("inspecting nothing must be an error")
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("nothing must run, got %v", f.calls)
+	}
+}
+
+func TestEngineInspectJSONFailureNamesTheTargets(t *testing.T) {
+	f := &fakeRunner{err: fmt.Errorf("no such object")}
+	_, err := EngineInspectJSON(f, []string{"docker"}, []string{"a", "b"})
+	if err == nil {
+		t.Fatal("a run failure must surface as an error")
+	}
+	if !strings.Contains(err.Error(), "a, b") {
+		t.Errorf("error should name the targets, got %v", err)
+	}
+}
+
+func TestEngineImageInspectJSONArgv(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := EngineImageInspectJSON(f, []string{"podman"}, "solace/x:2.14.1"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"podman", "image", "inspect", "solace/x:2.14.1"}
 	if !reflect.DeepEqual(f.calls[0].argv, want) {
 		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
 	}
 }
 
-// TestDockerComposeProjectDegradesToEmpty covers every way the lookup can fail
-// to produce a name. None of them is an error: the project only labels a target
-// in the status banner, so a missing one drops that segment rather than failing
-// a report that is otherwise fine.
-func TestDockerComposeProjectDegradesToEmpty(t *testing.T) {
+// TestEngineStatsArgv pins the template as well as the argv: docker and podman
+// disagree about the shape of their JSON stats, and these four template fields
+// are what both render identically.
+func TestEngineStatsArgv(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := EngineStats(f, []string{"docker"}, []string{"a", "b"}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"docker", "stats", "--no-stream", "--format",
+		"{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}", "a", "b"}
+	if !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	}
+	// --no-stream is what keeps this one sample rather than a stream that never
+	// returns; its absence would hang a status run.
+	if !contains(f.calls[0].argv, "--no-stream") {
+		t.Error("stats must not stream")
+	}
+}
+
+func TestEngineListArgv(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := EngineList(f, []string{"podman"}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"podman", "ps", "--all", "--no-trunc", "--format", "{{.Names}}\t{{.Image}}"}
+	if !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	}
+	// --all is deliberate: an instance that died is exactly what a search like
+	// this is for.
+	if !contains(f.calls[0].argv, "--all") {
+		t.Error("the discovery list must include stopped containers")
+	}
+}
+
+func contains(argv []string, want string) bool {
+	for _, a := range argv {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSystemctlNRestarts covers the only truthful restart count under podman
+// quadlet: systemd recreates the container, so the container's own counter
+// reads 0 however many times the instance has died.
+func TestSystemctlNRestarts(t *testing.T) {
 	cases := []struct {
-		name string
-		f    *fakeRunner
+		name     string
+		scope    QuadletScope
+		out      string
+		err      error
+		want     int
+		wantErr  bool
+		wantArgv []string
 	}{
-		{"inspect failed", &fakeRunner{err: fmt.Errorf("no such container")}},
-		{"nil label map renders as Go's no-value", &fakeRunner{outByCall: map[int]string{0: "<no value>\n"}}},
-		{"label absent, so the template renders nothing", &fakeRunner{outByCall: map[int]string{0: "\n"}}},
+		{
+			name: "user scope", scope: QuadletScope{UserMode: true}, out: "7\n", want: 7,
+			wantArgv: []string{"systemctl", "--user", "show", "solmq-connector.service", "-p", "NRestarts", "--value"},
+		},
+		{
+			name: "system scope", scope: QuadletScope{}, out: "0\n", want: 0,
+			wantArgv: []string{"systemctl", "show", "solmq-connector.service", "-p", "NRestarts", "--value"},
+		},
+		{
+			// systemd answers an unknown unit with an empty property rather than a
+			// failure, so the caller has to be able to fall back.
+			name: "unknown unit answers nothing", scope: QuadletScope{}, out: "\n", wantErr: true,
+			wantArgv: []string{"systemctl", "show", "solmq-connector.service", "-p", "NRestarts", "--value"},
+		},
+		{
+			name: "no systemd on this host", scope: QuadletScope{}, err: fmt.Errorf("executable file not found"), wantErr: true,
+			wantArgv: []string{"systemctl", "show", "solmq-connector.service", "-p", "NRestarts", "--value"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := DockerComposeProject(c.f, []string{"docker"}, "solmq-connector"); got != "" {
-				t.Errorf("project = %q, want empty", got)
+			f := &fakeRunner{outByCall: map[int]string{0: c.out}, err: c.err}
+			got, err := SystemctlNRestarts(f, c.scope, "solmq-connector.service")
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
+			}
+			if !c.wantErr && got != c.want {
+				t.Errorf("restarts = %d, want %d", got, c.want)
+			}
+			if !reflect.DeepEqual(f.calls[0].argv, c.wantArgv) {
+				t.Errorf("argv = %v, want %v", f.calls[0].argv, c.wantArgv)
 			}
 		})
-	}
-}
-
-func TestKubernetesPodNamesStripsPrefixAndDropsBlankLines(t *testing.T) {
-	f := &fakeRunner{out: "pod/solmq-connector-0\n\npod/solmq-connector-1\n  \n"}
-	got, err := KubernetesPodNames(f, []string{"kubectl"}, "", "app=solmq-connector")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"solmq-connector-0", "solmq-connector-1"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("names = %v, want %v", got, want)
-	}
-}
-
-func TestKubernetesPodNamesEmptyResultIsNotError(t *testing.T) {
-	// outByCall, not out: the fake substitutes "out" for an empty out field,
-	// which would look like a pod named "out".
-	f := &fakeRunner{outByCall: map[int]string{0: ""}}
-	got, err := KubernetesPodNames(f, []string{"kubectl"}, "", "app=nomatch")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 0 {
-		t.Errorf("names = %v, want empty", got)
-	}
-}
-
-func TestKubernetesPodNamesRunFailureWraps(t *testing.T) {
-	f := &fakeRunner{err: fmt.Errorf("boom")}
-	if _, err := KubernetesPodNames(f, []string{"kubectl"}, "", "app=solmq-connector"); err == nil {
-		t.Fatal("a run failure must surface as an error")
-	} else if !strings.Contains(err.Error(), "listing pods") {
-		t.Errorf("error should name the failed operation, got %v", err)
 	}
 }
 

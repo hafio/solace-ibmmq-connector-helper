@@ -22,7 +22,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 381 test functions, 594 case rows across 15 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 584 test functions, 851 case rows across 17 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/spec
 
@@ -378,7 +378,66 @@ Tests: [statusscript_test.go](../internal/statusscript/statusscript_test.go)
 | TestRenderVerifiesExposure | - | the has_entry membership check and the leaderelection/workflows exposure gate run before the first actuator request; an unexposed leaderelection stops the run on stderr (still exit 0), an unlocatable config only warns |
 | TestRenderSearchesSpringConfigLocations | - | the config search covers SPRING_CONFIG_LOCATION, SPRING_CONFIG_ADDITIONAL_LOCATION and SPRING_CONFIG_NAME, ConfigDir and its wildcard form, the ./ and ./config/ defaults, both YAML extensions, comma splitting with optional:/file: stripping, the classpath: skip, and runs before the exposure check and password lookup |
 | TestRenderEscapesUserForSedAddress | 7 names | USER_MATCH is regex-escaped for the sed address (dot, slash, brackets, star, backslash, anchors) while USER_NAME stays raw for the Authorization header |
-| TestFilenameAndPathConstants | - | Filename, ContainerDir, ContainerPath and ConfigPath equal their pinned values |
+| TestFilenameAndPathConstants | - | the script's name and directory, and that ContainerPath is not nested inside the libs, spring/config or classpath mounts -- the nesting that made the libs mount shadow it |
+| TestRenderReportsHealthComponents | - | the per-component health breakdown: a newline before every `{"status"` puts each component's status at the start of a line and its name at the end of the line above, so the name is carried forward in $pending (guarded with `${pending:-}` for set -u); the block prints only when something parsed |
+| TestRenderReportsJavaConfigAndHeap | - | the three details-level lines from outside the report endpoints: `java -version` (stderr redirected, folded to "openjdk 17.0.9" or passed through raw), the config the report was read from, and heap used/max tagged `area:heap`; each guarded so an absent source drops its line, a negative maximum is left out, and the byte arithmetic is deliberately NOT done here (busybox would read Jackson's 4.32013312E8 as 4) |
+| TestRenderHeaderNamesEveryReportedFact | - | the script's own header names what it reports, since it is the first thing someone running the script by hand reads |
+
+## internal/statusreport
+
+The CLI-side half of the status verb: the typed model both status views are built into, the parsers that fill it from what the engines and the in-container script emit, and the two renderings (human tables/blocks, and the --output json document). A pure package -- no os/exec, filesystem, network or globals -- so the whole report is testable from captured fixtures.
+
+Tests: [statusreport_test.go](../internal/statusreport/statusreport_test.go), [parse_test.go](../internal/statusreport/parse_test.go), [render_test.go](../internal/statusreport/render_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestAge | seconds / minutes / hours and minutes / days and hours / past a week / fractional seconds / docker zero time / empty / unparseable / clock skew ahead | the compact age a table column wants, against an injected clock; an unparseable or zero stamp is no age at all rather than an age of zero, and a host clock behind the engine's never renders negative |
+| TestParseQuantity | 12 values | kubernetes quantities (`120m`, `512Mi`), engine sizes (`512MiB`, `1.5GiB`, `1kB`), plain byte counts, and Jackson's scientific notation (`4.32013312E8`) -- the form a large heap actually arrives in; longest suffix wins, so `Mi` is never read as the decimal `M` |
+| TestPercent | 7 pairs | a whole-number percentage only when both sides read and the limit is non-zero; docker's unlimited container (limit 0) yields no percentage rather than a division |
+| TestBytesAndCores | 7 byte values / 3 core values | limits rendered in the binary units env.yaml writes them in; 0 (no docker limit) and -1 (no JVM maximum) both render as nothing |
+| TestBanners | section, all names / no names / gap in the middle / instance / podman | the two banner levels; an unset name is dropped so a separator always sits between two real names, and the instance form is unchanged from the report this verb printed before the container view existed |
+| TestTableAlignsColumnsAndNeverPadsTheLast | - | every column padded to its widest cell with a two-space gutter, an empty cell rendered `-` so a column never collapses, a short row padded rather than panicking, and no trailing whitespace on any line |
+| TestTableEmptyReportsNoRows | - | Empty lets a caller skip printing a heading with nothing under it |
+| TestKVAlignsValuesOnTheWidestKey | - | every value starts in the one column the widest key decides |
+| TestKVBuilderDropsEmptyValues | - | the report's noise rule in one place: a fact that was not collected prints nothing rather than a line saying it is unknown |
+| TestResourceLineDropsWhatIsMissing | nil / no usage / usage alone / usage and limit / all three / engine-formatted | a resource renders only what was collected, including docker's own both-sides-in-one-string form |
+| TestImageMismatch | identical / kubernetes-normalised / library namespace / implied latest / different tag / different repository / no running image / no expectation / digest pin matches / digest pin differs / digest pin with no reported digest | the failed-rollout check: tolerant of the spellings the engines use for one reference (so a correct kubernetes instance never reads as a mismatch), digest-pinned env.yaml answered from the digest, and never a claim when either side was not collected |
+| TestSortInstancesGroupsByNamespaceThenName | - | a repeated run prints the same order however the engine listed them, grouped by namespace for a cluster-wide report |
+| TestExitCodeText | - | a container that has not terminated carries no exit code |
+| TestParsePodsReadsBothHalvesOfARealPair | - | one `get pods -o json` yields identity, state, readiness, restarts, digest, node and limits; the container's own running-since stamp wins over the pod's startTime, and a CrashLoopBackOff reads as restarting with the last termination's exit code (137, OOMKilled) |
+| TestParsePodsComponentsComeFromWhatThePodReferences | - | components are read from the pod spec (volumes, envFrom, imagePullSecrets) rather than from env.yaml, an emptyDir is not a component, a mounted volume carries its path, and parsing claims no status -- that is a separate probe |
+| TestParsePodsSingleObjectDocument | - | `get pod <name> -o json` answers the object itself with no items array; both shapes parse, since status uses both |
+| TestParsePodsPendingAndTerminatedStates | pending, no container status / waiting on an image pull / terminated | a pod with no container status yet still reports a state from its phase, and each waiting/terminated reason reaches the report |
+| TestParsePodsReadinessIsOnlyAVerdictWhenAProbeExists | - | without a readiness probe the column reads n/a, since kubernetes would otherwise report ready as soon as the container runs |
+| TestParsePodsPicksTheConnectorContainer | - | a sidecar's restarts and limits are never reported as the connector's |
+| TestParsePodsSeveralContainersNoneNamedConnector | - | no container-level fact is claimed when the connector cannot be identified; the pod phase still gives a state |
+| TestParsePodsImageFilterIsWhatAllSearchesBy | - | the --all image filter keeps only connector pods, and an unfiltered parse keeps everything -- the filter is --all's, not the parser's opinion |
+| TestParsePodsErrorsAndSkips | empty / undecodable / one bad item in a list | an unreadable response is an error, but one unreadable item is skipped so the rest of the report survives |
+| TestParseDeploymentAndService | - | replica counts, `replicas` omitted defaulting to the API's 1, service ports with the omitted protocol defaulting to TCP, a service merged without losing the deployment counts, a service-only workload, and an undecodable service |
+| TestObjectExists | secret / bound claim / pending claim / not a document / empty | a live object reports "present", a volume claim reports its own phase (the only status here that can be bad while the object exists) |
+| TestApplyTop | - | the connector's row wins over a sidecar's, a percentage appears only where a limit was read, and a pod the metrics API said nothing about keeps no usage |
+| TestParseInspectDocker | - | docker's leading slash stripped from the name, the compose project read off the container's own label in the same call, the configured image reference rather than the local id, the nanocpu/memory ceilings, the age, and mounts/networks as attached components |
+| TestParseInspectStatesAndHealthSpellings | exited / oom killed / restarting / paused / created / podman stopped cleanly / unknown status / podman Healthcheck key / no healthcheck | every engine status normalised, a clean stop reporting no exit code (a zero exit adds nothing to the state), both spellings of podman's healthcheck block, and n/a where no healthcheck is defined -- the usual case, since the generated compose and quadlet artifacts declare none |
+| TestParseInspectFilterAndErrors | - | the --all image filter, an empty response, and an undecodable one |
+| TestParseImageDigest | - | the first RepoDigest is the registry digest; an image never pushed has none, which is not an error |
+| TestApplyStats | - | the engine's own percentages are taken as given (docker's memory string already carries both sides), and a container with no sample keeps no usage |
+| TestEngineNamesByImage | - | --all discovery keeps the containers whose image matches, skipping malformed rows |
+| TestParseApplication | - | every line of the script's report: leader election, health, health components, uptime, version, java, config, raw heap bytes rendered to a percentage, numerically-ordered workflows, and the script's own stderr note arriving on the same combined stream |
+| TestParseApplicationKeepsWhatItDoesNotRecognise | - | an unknown line is kept as a note, so an instance carrying a newer script still reports everything it printed |
+| TestParseApplicationHealthDetailAndBareHeap | - | health-detail is not swallowed by the health prefix that starts the same way, and an unbounded heap reports no maximum and no percentage |
+| TestParseApplicationCRLFAndBlankLines | - | CRLF output and blank lines parse identically |
+| TestParseApplicationIndentedLineWithNoBlockIsANote | - | an indented line with no block header above it is a note, never a workflow |
+| TestRenderContainerViewBasic | - | the section banner, the column set, and the workload summary; the basic level carries neither the NODE column nor any detail block, and kubernetes reports READY rather than a HEALTH column |
+| TestRenderContainerViewDetails | - | the details block: digest, resource lines, the components table, and the image-expected line whose presence is itself the finding; an instance with no sample carries no resource lines at all |
+| TestRenderContainerViewDockerUsesHealthColumn | - | docker reports the engine's healthcheck verdict where kubernetes reports readiness, and has no NODE column |
+| TestRenderContainerViewAllNamespacesLeadsWithNamespace | - | instances spanning namespaces cannot share one banner, so each row leads with its own; one shared namespace rides in the banner instead |
+| TestRenderApplicationViewBasicAndDetails | - | the unchanged instance banner, the aligned basic lines, right-aligned workflow ids, enrichment only at the details level, and no container table in this view |
+| TestRenderFailedInstanceKeepsItsBlock | - | an instance whose script could not run still gets a banner with the failure as a body line, and the container table that explains it comes first |
+| TestRenderNotesAndScriptNotesShareOneIdiom | - | a note the CLI made and a note the script made read the same, and run-level notes come after the facts they qualify |
+| TestRenderEmptyReport | - | a report with no instances renders nothing |
+| TestRenderInstanceWithNoContainerFactsStillReportsItsApplication | - | a failed engine query leaves no table but does not cost the application half |
+| TestJSONIsTheSameModelTheTablesRender | - | the document round-trips, carries schemaVersion and the field spellings a consumer keys off (the compatibility contract), and omits an unset field entirely rather than emitting null |
+| TestJSONEmptyRunIsAnEmptyList | - | an empty run is `[]`, so a consumer can iterate without a nil check |
 
 ## internal/yamlwriter
 
@@ -496,7 +555,7 @@ Tests: [dockergen_test.go](../internal/dockergen/dockergen_test.go)
 | TestStoresOnlyAndLibsOnly | stores only | volumes block contains only the store mount line |
 | TestStoresOnlyAndLibsOnly | libs only | volumes block contains only the libs mount line |
 | TestSplitLinesNoTrailingNewline | - | app.yml lacking trailing newline still renders content line with no dropped element |
-| TestStatusScriptConfigSourceAndTarget | - | the service references a second `<name>-status` config and mounts it at /app/external/libs/status |
+| TestStatusScriptConfigSourceAndTarget | - | the service references a second `<name>-status` config and mounts it at /app/external/.status-script |
 | TestStatusScriptContentIsEscaped | - | the status script body is inlined under the status config's content: block, indented 6 spaces, blank line preserved as truly empty, and its shell `$` doubled |
 | TestContentEscapesDollarsForCompose | $VAR / ${VAR} / ${VAR:-default} / $(cmd) / $$ | each shape reaches the content block with every `$` doubled, so compose's interpolation pass delivers it unchanged instead of blanking it or rejecting the document |
 | TestContentEscapesDollarsForCompose | no lone `$` | dropping every `$$` pair from the rendered document leaves no `$` behind anywhere |
@@ -586,7 +645,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 
 ## internal/runner
 
-The os/exec seam -- ParseCommand safe-tokenizing, kubectl/docker/podman deploy and remove argv, quadlet scope resolution, and WriteFile modes.
+The os/exec seam -- ParseCommand safe-tokenizing, kubectl/docker/podman deploy and remove argv, the status verb's read-only queries, quadlet scope resolution, and WriteFile modes.
 
 Tests: [runner_test.go](../internal/runner/runner_test.go)
 
@@ -649,12 +708,19 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestPreflightRejectsDisallowedBinaryBeforeRunning | - | a command outside the platform allowlist (curl) is rejected before the probe ever runs, zero runner calls |
 | TestPreflightExtraAllowedThreadsThrough | - | "sudo podman" is rejected without extraAllowed and accepted with it, running argv [sudo podman info] |
 | TestPreflightUnknownAction | - | an action other than deploy/remove is rejected, zero runner calls |
-| TestKubernetesPodNamesArgv | no namespace / with namespace | KubernetesPodNames issues `get pods -l <selector> -o name`, adding `-n <namespace>` when given |
-| TestDockerComposeProjectArgvAndValue | - | the compose project is read from the container's own com.docker.compose.project label via `docker inspect --format`, not derived from the compose file's directory |
-| TestDockerComposeProjectDegradesToEmpty | inspect failed / no-value / absent label | every way the lookup can come up empty yields "" rather than an error, so the banner drops the segment instead of failing an otherwise fine report |
-| TestKubernetesPodNamesStripsPrefixAndDropsBlankLines | - | each `pod/` prefix is stripped and blank/whitespace-only lines are dropped |
-| TestKubernetesPodNamesEmptyResultIsNotError | - | no matching pods returns an empty slice, not an error |
-| TestKubernetesPodNamesRunFailureWraps | - | a run failure surfaces as an error naming the "listing pods" operation |
+| TestKubernetesPodsJSONArgv | by selector, no namespace / by selector in a namespace / explicit names / every namespace | `get pods ... -o json` in each of its three scopings; `--all-namespaces` outranks a namespace resolved from env.yaml, so a cluster-wide search is never narrowed back down |
+| TestKubernetesPodsJSONRunFailureWraps | - | a run failure surfaces as an error naming the "listing pods" operation |
+| TestKubernetesGetJSONArgv | deployment in a namespace / no namespace / a referenced object | `get <kind> <name> [-n ns] -o json` for the workload summary and for each object a pod references |
+| TestKubernetesGetJSONMissingObjectIsAnError | - | a missing object exits non-zero and the error names it, which is the answer the components check asks for -- reported as MISSING rather than as a failed run |
+| TestKubernetesTopArgv | by selector / explicit names / every namespace | `top pod --containers --no-headers`, attributing the sample to one container so it is comparable with that container's limits |
+| TestKubernetesTopWithoutMetricsAPIWraps | - | a cluster with no metrics API fails here, naming the operation, so the caller can degrade to a note |
+| TestEngineInspectJSONArgv | - | one `inspect a b c` covers every target, and a chained command keeps its own tokens ahead of the subcommand |
+| TestEngineInspectJSONNoNamesIsAnErrorAndRunsNothing | - | inspecting nothing is an error and starts no process |
+| TestEngineInspectJSONFailureNamesTheTargets | - | a failure names the containers it was asked about |
+| TestEngineImageInspectJSONArgv | - | `image inspect <ref>`, where the registry digest lives (the container's own inspect does not carry it) |
+| TestEngineStatsArgv | - | `stats --no-stream --format <template>`: the four tab-separated template fields docker and podman render identically, and --no-stream so the call cannot stream forever |
+| TestEngineListArgv | - | `ps --all --no-trunc --format <template>` for --all discovery, including stopped containers -- an instance that died is what such a search is for |
+| TestSystemctlNRestarts | user scope / system scope / unknown unit answers nothing / no systemd on this host | `systemctl [--user] show <unit> -p NRestarts --value`, the only truthful restart count under quadlet; an empty or unreadable answer is an error so the caller can fall back to the container's own counter |
 | TestScriptInstalledArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | ScriptInstalled execs the marker-echoing probe through each platform's exec form, `-n <namespace>` only for kubernetes when given |
 | TestScriptInstalledReadsMarkers | present / absent / marker among engine chatter / present despite a non-zero exit | the answer comes from the marker on stdout, so a marker is believed even when the engine also reported a non-zero exit |
 | TestScriptInstalledUnreachableTargetIsError | engine error with no marker / clean exit with no marker | no marker at all means the probe never ran, so it errors rather than silently reporting absent |
@@ -719,11 +785,111 @@ Tests: [examples_test.go](../internal/examples/examples_test.go)
 | TestWriteMkdirError | - | Write returns error when target dir path is under a regular file |
 | TestShippedExamplesGenerateConfig | - | embedded example set written to disk generates config via gen.Config with no errors and at least one non-empty rendered application.yml |
 
+## internal/libs
+
+Resolve the Maven dependency closure for the IBM MQ / syslog jar sets and download the jars to a local directory -- version resolution (including a pinned `--version`), image-aware omission against a connector image's jar list, and the safe download/redirect machinery.
+
+Tests: [libs_test.go](../internal/libs/libs_test.go), [maven_test.go](../internal/libs/maven_test.go), [image_test.go](../internal/libs/image_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestDownloadURLHappyPath | - | a single --url download writes the jar under its basename with no Failed/Skipped |
+| TestDownloadRejectsNonHTTPSURL | - | a plain http:// --url errors before any request or directory creation, Report stays zero-valued |
+| TestDownloadRedirectToHTTPRejected | - | a redirect Location that downgrades to http:// is rejected as a Failure, nothing written |
+| TestDownloadRedirectToHTTPSFollowed | - | an https redirect is followed and the file is written under the originally-requested URL's basename, not the redirect target's |
+| TestDownloadSkipsExistingWithoutForce | - | an existing file is reported Skipped and no HTTP request is made at all (skip before request) |
+| TestDownloadOverwritesWithForce | - | Force true overwrites an existing file with the newly fetched bytes |
+| TestDownloadPerArtifactFailureDoesNotBlockOthers | - | one URL 404ing still lets a second URL in the same call succeed and land in Written |
+| TestDownloadUncreatableDirIsSystemic | - | a destination directory that cannot be created (parent is a file) is a systemic error, zero Report |
+| TestDownloadUnknownSetIsSystemic | - | an unrecognized Set is a systemic error naming the bad value plus both valid names, and creates no directory |
+| TestResolveSeedPerSet | mq / syslog | each set maps to its seed coordinate, and the mq seed is asserted NOT to be the javax build (com.ibm.mq.allclient), which cannot satisfy the image's jakarta.jms binder |
+| TestValidateFilenameShapeRejections | empty / . / .. / a slash or backslash segment / absolute / non-.jar / control char | each shape is rejected |
+| TestValidateFilenameShapeAccepts | - | a plain versioned jar name passes |
+| TestFilenameFromEscapedPathRejectsEscapedTraversal | - | a percent-encoded ../ segment is caught after decoding, not waved through because the raw segment looked clean |
+| TestFilenameFromEscapedPathAcceptsPlainName | - | a plain path's final segment is returned as the filename |
+| TestDownloadByteCapTripLeavesNoTempFile | - | a body exceeding maxArtifactBytes is a Failure and leaves no temp file behind in the destination directory |
+| TestDownloadUserinfoNotInOutput | - | a URL carrying userinfo never leaks the username or password into Failure.Name or Failure.Err |
+| TestDownloadTooManyRedirectsFails | - | a chain past maxRedirectHops is a Failure naming "too many redirects", not an infinite follow |
+| TestDownloadEmptyBodyLeavesNoTempFile | - | a clean 200 OK with a zero-byte body is a Failure, not a silently-accepted empty jar; no temp file is left behind |
+| TestDownloadContentLengthMismatchLeavesNoTempFile | - | a body shorter than its own advertised Content-Length is a Failure naming the mismatch, not a truncated jar reported as written |
+| TestDownloadSHA1MatchSucceeds | - | a jar whose downloaded body matches its .sha1 sidecar writes normally and reports no Unverified entries |
+| TestDownloadSHA1MismatchFailsAndLeavesNoFile | - | a .sha1 sidecar that does not match the downloaded body is a Failure naming sha1, nothing written, no leftover temp file |
+| TestDownloadMalformedSHA1SidecarRejected | too short / non-hex / empty / html body | each malformed .sha1 sidecar body is a Failure and nothing is written |
+| TestDownloadURLUnverifiedOn404SidecarStillWrites | - | a --url download whose .sha1 sidecar 404s still writes the jar, reported in Unverified rather than Failed |
+| TestDownloadMavenResolved404SidecarFailsArtifact | - | unlike --url, a Maven-resolved artifact (mq/syslog Set) whose .sha1 sidecar 404s is a Failure, not Unverified -- a resolved closure is never written unverified |
+| TestDownloadContentLengthUnknownWithGoodSHA1Succeeds | - | a response with no Content-Length still succeeds when its .sha1 sidecar verifies the body |
+| TestDownloadContentLengthUnknownWithNoDigestFails | - | a response with neither a Content-Length nor a verifiable .sha1 (sidecar 404s) is a Failure, leaving no temp file |
+| TestDownloadOmitsDependencyImageProvidesAtNewerVersion | - | a dependency the image already has at an equal-or-newer version is never requested over HTTP and lands in Report.Omitted naming the jar and the image's version, while the seed itself still downloads |
+| TestDownloadEmptyOmitListFileOmitsNothing | - | a supplied --omit-lib-file that parses to no entries at all REPLACES the embedded default rather than merging with it, so the whole closure -- seed and dependency -- downloads and Report.Omitted stays empty; OmitListProvenance still names the supplied file |
+| TestDownloadCommentsOnlyOmitListFileOmitsNothing | - | an --omit-lib-file containing only comments and blank lines omits nothing, same as an empty file |
+| TestDownloadNeverOmitsSeedEvenWhenImageClaimsHugeVersion | - | an omit-list entry naming the seed's own artifact at an absurd version never omits the seed -- Download identifies the seed by Coord equality, not by trusting the omit list |
+| TestDownloadDownloadsArtifactImageHasOlderVersion | - | an artifact the image has only at an older version still downloads, with nothing in Report.Omitted |
+| TestDownloadDownloadsArtifactAbsentFromImage | - | an artifact absent from the image list entirely downloads |
+| TestDownloadIncludeProvidedDownloadsEverything | - | --include-provided (IncludeProvided true) downloads an artifact the image list would otherwise have satisfied, and Report.Omitted stays empty |
+| TestDownloadURLNeverOmittedEvenWhenImageHasIt | - | an explicit --url downloads even when the image list already has that exact jar -- omission never applies to --url |
+| TestDownloadBadOmitLibFilePathIsSystemic | - | an unreadable --omit-lib-file path is a systemic error naming the path, with nothing written |
+| TestDownloadEmbeddedDefaultListLoadFailureIsSystemic | - | a corrupted embedded default omit list (a line exceeding the scanner's token-size ceiling) is a systemic error naming "embedded default omit list", zero Report, nothing written |
+| TestDownloadReadsDeployedImageFromEnv | default present / no env.yaml / explicit -e unreadable / defaulted malformed / no image block | the advisory config read: the image reaches libs.Input, an absent default is silent and still downloads, and only a file the operator named is systemic |
+| TestDownloadReportsOmitListProvenance | - | Report.OmitListProvenance names the --omit-lib-file path used; a line that fails to split is skipped silently, and a rejected entry no closure artifact asks about produces NO warning -- the noise fix |
+| TestDownloadWarnsWhenRejectedEntryAffectedThisClosure | - | a rejected entry naming an artifact the closure does resolve warns, names that artifact, and the jar is downloaded rather than omitted |
+| TestDownloadVersionPinsSeed | - | --version pins the seed to that release, and the resulting closure/filename reflect the pinned version, not latest stable |
+| TestDownloadVersionRejectsPathEscape | - | a --version value containing a path escape is rejected before any network access |
+| TestDownloadSetPathAlwaysResolvesEvenWhenFilesExist | - | unlike --url (TestDownloadSkipsExistingWithoutForce), the mq/syslog Set path always attempts Maven resolution first -- even with every plausible target file already on disk -- because it cannot know the target filenames without resolving the closure first |
+| TestSetNames | - | SetNames() returns the exact ordered [mq, syslog] list the CLI layer gates against |
+
+| TestCompareVersions | patch / lexical-trap / major / prerelease suffix / date-like / short segments / equal / empty | compareVersions orders numeric segments correctly, ranks a pre-release suffix lower, and is antisymmetric under argument swap |
+| TestCompareVersions | Final / RELEASE / GA equal the plain release | Maven treats those words as aliases of the empty qualifier, so 4.1.135.Final and 4.1.135 are the same version rather than one outranking the other |
+| TestCompareVersions | release qualifier below a number, above a prerelease; SP above the release | pins the aligned-segment case, where strings.Compare would otherwise make "Final" beat "1" and read 1.0.Final as newer than 1.0.1 |
+| TestIsPreRelease | SNAPSHOT / M1 / m2 / alpha / beta / cr / pr / ea / preview / plain release / date-like / empty | isPreRelease recognizes every qualifier convention Maven Central uses and accepts a bare numeric or date-like release |
+| TestIsPreRelease | Final / RELEASE / GA / SP | a release qualifier is NOT a pre-release -- counting it as one would skip every netty and hibernate release when picking a latest stable version |
+| TestValidateCoordPart | valid group/artifact/version/qualifier forms / empty / traversal / doubled dot / slash / backslash / NUL | validateCoordPart accepts safe coordinate segments and rejects every unsafe one before it can reach a URL |
+| TestLatestStablePrefersRelease | - | latestStable returns metadata's <release> when it is itself a stable version |
+| TestLatestStableSkipsPreReleaseCandidateInRelease | - | the verified jackson-annotations case: <release> names a candidate, so the highest surviving stable <version> is used instead |
+| TestLatestStableAllPreReleaseVersionsIsError | - | every listed version being a pre-release is an error, never a silent pre-release pick |
+| TestLatestStableUnreachableMetadataIsError | - | an unreachable maven-metadata.xml is an error |
+| TestResolveClosureMQJakarta | - | the verified com.ibm.mq.jakarta.client closure resolves to seed + BC trio + jakarta.jms-api + org.json:json at the versions the seed's POM declares |
+| TestResolveClosureMQJavax | - | the verified com.ibm.mq.allclient closure resolves to seed + BC trio + javax.jms-api + org.json:json |
+| TestResolveClosureSyslogResolvesParentProperties | - | the verified logstash-logback-encoder:9.0 -> jackson-databind:3.0.1 case: jackson-databind's own version-less dependencies are resolved through its parent jackson-base's <properties>, none marked Fallback |
+| TestResolveClosureAppliesScopeOptionalTypeFilter | - | test/provided/system/import scope, optional=true, and type=pom dependencies are all excluded from the closure; plain compile/runtime deps survive |
+| TestResolveClosureDependencyVersionFromDependencyManagement | - | a version-less dependency resolves from its parent's <dependencyManagement> |
+| TestResolveClosurePropertyDefinedTwoParentsUp | - | a `${property}` version defined only on the grandparent POM still resolves by walking the full parent chain |
+| TestResolveClosureUndefinedPropertyFallsBackToLatestStable | - | a `${property}` with no definition anywhere in the parent chain falls back to that dependency's own latest stable release, marked Fallback |
+| TestResolveClosureDependencyCycleTerminates | - | a dependency cycle (x -> y -> x) terminates and both artifacts appear exactly once |
+| TestResolveClosureArtifactCountCap | - | a closure past maxArtifacts is truncated to exactly maxArtifacts rather than growing unbounded |
+| TestResolveClosureHostileGroupIDIsDropped | - | a dependency with a path-traversal groupId is dropped from the closure and never reaches the HTTP layer, while a sibling good dependency still resolves |
+| TestResolveClosureUnreachableSeedMetadataIsError | - | the seed's own maven-metadata.xml being unreachable is an error |
+| TestResolveClosureUnreachableDependencyPomKeepsArtifact | - | a non-seed dependency whose POM 404s stays in the closure at its declared version rather than being dropped or erroring; libs.Download's own per-artifact Failure is where a real fetch problem surfaces |
+| TestResolveClosureDependencyVersionUsesProjectVersionProperty | - | resolveProperty's `${project.version}` case: a dependency version referring back to its declaring POM's own version resolves correctly |
+| TestResolveClosureDependencyVersionUsesProjectGroupIdProperty | - | resolveProperty's `${project.groupId}` case: the substitution fires and its result reaches the closure unchanged |
+| TestResolveClosureDependencyUnresolvableVersionAndUnreachableMetadataIsDropped | - | resolveDependencyVersion's ok=false path: a dependency with no version anywhere in the chain, whose own latest-stable fallback also 404s, is silently dropped from the closure like any other malformed item |
+| TestResolveClosureAtPinnedVersionNeverFetchesMetadata | - | resolveClosureAt with a pinned version never consults maven-metadata.xml at all, and the seed artifact is not marked Fallback |
+| TestResolveClosureAtPinnedVersionResolvesDependencyClosure | - | the verified com.ibm.mq.jakarta.client:9.4.2.0 pin still resolves its jakarta.jms-api:3.0.0 dependency through the normal parent/dependency chain |
+| TestResolveClosureAtPinnedVersionNotFoundIsActionableError | - | a pinned version that does not exist on Maven Central is an error naming both the version and the artifact |
+| TestResolveClosureAtPinnedVersionInvalidCharsetIsError | - | a pinned version outside the safe coordinate charset is rejected before it can reach the HTTP layer |
+| TestResolveParentChainDetectsCycle | - | a parent-POM cycle (a -> b -> a) is detected and errors rather than looping forever |
+| TestResolveParentChainExceedsMaxDepth | - | a parent chain past maxParentDepth (with no cycle) is capped with an error |
+| TestJarURL | - | jarURL assembles the Maven Central path from group/artifact/version exactly |
+
+| TestSplitJarBasename | hyphenated / dotted / short date-like / hyphen-in-version / Final qualifier / alpha qualifier / underscore in version / no digit-led hyphen / plain | splitJarBasename recovers (artifact, version) from a real jar filename across every naming convention lib-list actually contains, and refuses a name with no digit-led hyphen to split on |
+| TestSplitJarBasename | classifier stripped (netty native, sources) | a trailing classifier is not part of the version and is dropped, so the entry parses instead of being rejected whole |
+| TestValidateImageVersionQualifiers | accepted / rejected | Final/RELEASE/GA/SP join numerics and pre-release qualifiers as orderable, while genuine garbage (9zzzzzzzzzzz, a bare classifier, an unknown word) stays rejected -- the gate exists so a stale entry cannot compare as newer than a real release |
+| TestImageNameTag | hub / no namespace / registry with a port / no tag / digest / empty | an image reference splits into name and tag; the tag separator is found in the last path element so a registry port is not mistaken for it |
+| TestImageMismatchNote | silent: none / captured tag / newer tag / the floor itself / past every capture / registry mirror. warns: below the floor / different image / digest / no tag | the embedded list describes a RANGE, so any release at or above `EmbeddedListMinVersion` is silent -- a differing tag is not itself a mismatch; below the floor, a different image, or a reference with no comparable tag warns and names both the reference and what it was judged against |
+| TestDownloadImageMismatchReported | uncovered (2.9.0) / covered (2.13.0, 2.14.1) / none / --omit-lib-file | the check end to end: only an image the embedded list cannot speak for warns, both ends of the covered range stay silent, and a named omit list suppresses it -- the operator declared that list, as with an explicit --url. Every suppression case uses the uncovered reference, so it cannot pass vacuously |
+| TestEmbeddedOmitListFullyParses | - | every line of the shipped image list either is not a jar reference or parses to an orderable version, so a future capture that reintroduces an unparseable shape fails the build instead of printing warnings on every run |
+| TestSplitJarBasenameRejectsNonJar | - | a non-.jar name is rejected outright |
+| TestLoadImageLibsSkipsCommentsAndBlankLines | - | a `#`-commented header line and blank/whitespace-only lines are skipped, leaving only the real jar entry |
+| TestLoadImageLibsSkipsUnsplittableLineWithoutFailing | - | a line that does not split into artifact+version (e.g. jrt-fs.jar) is skipped rather than failing the whole load |
+| TestLoadImageLibsToleratesSurroundingWhitespace | - | leading/trailing whitespace and a trailing \r around a jar name do not stop it from loading |
+| TestLoadImageLibsBadPathIsError | - | a nonexistent --omit-lib-file path is an error |
+| TestLoadImageLibsEmbeddedDefault | - | an empty path loads the binary's embedded default (captured from solace/solace-pubsub-connector-ibmmq:2.13.0), which carries the BC/jakarta.jms-api/json/logstash-logback-encoder versions and deliberately omits com.ibm.mq.jakarta.client (the licensing carve-out) |
+| TestImageSatisfies | image has a newer version / equal version / older version / does not have it at all | imageSatisfies reports provided=true and the image's version for an equal-or-newer match, and provided=false (with the image's version, or none) otherwise |
+
 ## cmd/solmq-conn-util
 
-The CLI shell -- flag parsing, the exit-code contract, the generate/validate/examples/auto-complete commands, verb aliases, and the deploy/remove seams for all three engines. The completion tests also gate the four generated shell scripts against the command model.
+The CLI shell -- flag parsing, the exit-code contract, the generate/validate/examples/auto-complete commands, verb aliases, and the deploy/remove seams for all three engines. The completion tests also gate the four generated shell scripts against the command model, and the doc tests gate the two generated markdown references against it.
 
-Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.go](../cmd/solmq-conn-util/commands_doc_test.go), [completion_test.go](../cmd/solmq-conn-util/completion_test.go)
+Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.go](../cmd/solmq-conn-util/commands_doc_test.go), [abbreviation_doc_test.go](../cmd/solmq-conn-util/abbreviation_doc_test.go), [completion_test.go](../cmd/solmq-conn-util/completion_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
@@ -734,6 +900,8 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestExitCodeContract | help short -h | run([-h]) returns exit code 0 |
 | TestExitCodeContract | help long --help | run([--help]) returns exit code 0 |
 | TestExitCodeContract | help word | run([help]) returns exit code 0 |
+| TestExitCodeContract | 5 requested-help spellings | `status -h`, `deploy --help`, `-h` among a verb's flags (routed as flag.ErrHelp), `help status`, and `help sts` each exit 0 -- requested help is never an error, wherever it is asked |
+| TestExitCodeContract | help with an unknown command | run([help, bogus]) returns exit code 2 |
 | TestExitCodeContract | unknown flag -nope | run returns exit code 2 for unrecognized flag |
 | TestExitCodeContract | missing env file | run returns exit code 1 when env file does not exist |
 | TestExitCodeContract | invalid spec | run returns exit code 1 for structurally invalid workflow |
@@ -741,9 +909,11 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestExitCodeContract | auto-complete bogus shell | run([auto-complete, bogus]) returns exit code 2 |
 | TestExitCodeContract | completion is no longer a command | run([completion, bash]) returns exit code 2 -- the rename to `auto-complete` is a clean break with no compatibility alias, pinned so it cannot silently regress |
 | TestExitCodeContract | 8 near misses | d / v / s / g / comp / h / hlp / stat each exit 2: none was picked as an alias, so none may resolve |
-| TestVerbAliasesDispatchLikeCanonical | gen / dep / del / sts / ver / vld / eg | each alias reaches the same handler as its canonical verb, so the alias table and the dispatch map cannot drift apart |
+| TestExitCodeContract | dep is no longer deploy | run([dep]) returns exit code 2 -- deploy's short form was aligned with solace-util's `dp`, a clean break with no compatibility alias, pinned the same way the `completion` rename is |
+| TestVerbAliasesDispatchLikeCanonical | gen / dp / rm / sts / ver / vld / eg / dl | each alias reaches the same handler as its canonical verb, so the alias table and the dispatch map cannot drift apart |
 | TestGenerateConfigStdoutAndFileMatch | stdout run | exit 0 and stdout contains 'spring:' |
 | TestGenerateConfigStdoutAndFileMatch | file run | exit 0 and written file content equals prior stdout exactly |
+| TestGenerateConfigTargetAliasResolves | - | `cfg` resolves to the `config` target and `gen cfg` emits application.yml (exit 0, stdout has `spring:`) -- pins that the positional goes through resolveTarget, so a modeled target alias is not documented-but-rejected |
 | TestGenerateFlagsBeforeAndAfterPositional | flags before positional target | exit 0 and output file written |
 | TestGenerateFlagsBeforeAndAfterPositional | flags after positional target | exit 0 and output file written |
 | TestGenerateConfigWorkflowCapExceeded | - | a folder over validate.MaxWorkflows (20) is a fatal error (exit 1) naming the count and the cap, and writes no `-o` output file |
@@ -767,6 +937,22 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestExamplesWriteSkipForceThenGenerate | re-run with -f before dir | exits 0 and overwrites existing file |
 | TestExamplesWriteSkipForceThenGenerate | generate on shipped examples | generate config on generated env.yaml exits 0 |
 | TestExamplesDefaultDir | - | examples with no dir arg exits 0 and creates ./examples/workflow-0.yaml |
+| TestDownloadMissingAndUnknownWordsRejected | missing target / unknown target / missing set / unknown set | each is a usage error (exit 2) naming the offending word, with downloadFn and the runner both left uncalled |
+| TestDownloadDirDefaultAndPositionalOverride | default dir / explicit dir | the trailing [dir] positional defaults to ./libs and threads an explicit value through to Input.Dir unchanged |
+| TestDownloadSetReachesInput | mq / syslog | both modeled sets thread through to libs.Input.Set unchanged |
+| TestDownloadURLFlagRepeatable | - | repeated --url collects every occurrence, in order, into Input.URLs |
+| TestDownloadJMSFlagIsGone | mq / syslog, either value | the removed --jms flag is an unknown flag: exit 2 and downloadFn never runs, so a script still passing it fails loudly instead of being silently ignored |
+| TestDownloadForceFlagReachesInput | default false / -f short / --force long | both -f and --force spellings reach Input.Force, defaulting to false |
+| TestDownloadVersionFlagReachesInput | default empty / explicit pin | --version defaults to "" (latest stable) and an explicit pin reaches Input.Version unchanged |
+| TestDownloadOmitLibFileFlagReachesInput | default empty / explicit path | --omit-lib-file defaults to "" (the embedded list) and an explicit path reaches Input.OmitLibFile unchanged |
+| TestDownloadIncludeProvidedFlagReachesInput | default false / --include-provided | --include-provided defaults to false and reaches Input.IncludeProvided true when given |
+| TestDownloadReportExitCode | clean write / skip only / omitted only / partial failure / total failure / systemic error | a clean write, a skip-only run, and an omitted-only run all exit 0; a non-empty Report.Failed -- whether partial or total -- and a systemic downloadFn error both exit 1 identically, pinning the deliberate choice not to mint a distinct code for partial vs total failure |
+| TestDownloadReportPrintsWrittenSkippedFailedAndFallback | - | reportDownload prints "wrote:"/"exists (use -f to overwrite):"/"failed:" lines and a Fallback note labelled "guessed version:", mirroring runExamples' line shapes |
+| TestDownloadReportPrintsOmittedBlockDistinctFromFallback | - | Report.Omitted prints its own "omitted:"-prefixed lines, distinct from "failed:" and "guessed version:", and the counts footer names the omitted count; exit stays 0 with no Failed entries |
+| TestDownloadReportExitZeroWhenEverythingOmitted | - | a Report where every artifact was omitted (nothing written, skipped, or failed) exits 0, and the counts footer reads "0 written, 0 skipped, 4 omitted, 0 failed" |
+| TestDownloadReportNextHint | no omissions / with omissions | the "next:" hint always points at wiring libs.dir/libs: config key, gaining an extra clause about the omitted jars already being on the image only when Report.Omitted is non-empty |
+| TestDownloadReportPrintsOmitListProvenance | built in / explicit file | the "omit list:" line names Report.OmitListProvenance, annotated "(built in)" only when --omit-lib-file was left empty; an explicit path prints bare, and each Report.OmitListWarnings entry gets its own "omit list warning:" line |
+| TestDownloadSetMapMatchesModel | - | downloadSets (main.go's set-name dispatch table), the model's download/jar Sets, and internal/libs.SetNames() all name exactly the same sets |
 | TestGenerateKubernetesStdout | - | exit 0 and stdout contains kind: Deployment |
 | TestGenerateDockerToFile | - | exit 0 and compose file contains services: and image: img:1 |
 | TestGeneratePodmanQuadletStdout | - | exit 0 and stdout contains unit banner '# === solmq-conn-util.container ===' |
@@ -788,35 +974,58 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestPlatformMenuNonTTYRefusesWithPlatformHint | - | the menu refuses to block when stdin is not a TTY, failing with an error naming --platform instead of hanging |
 | TestPlatformZeroSectionsIsLoudError | - | with no --platform and no section present at all, the error names all three section keys |
 | TestOldPositionalFormsRejectedWithPlatformHint | deploy kubernetes / remove docker / generate podman | the pre-rework positional grammar is a usage error (exit 2) that points at --platform, not resolved as a target |
-| TestStatusBannerNamesTheInstancePerPlatform | k8s / docker / podman | the banner carries namespace/deployment/pod, compose-project/container, or the container alone, and drops any name that is not set rather than leaving an empty segment |
-| TestStatusDockerBannerCarriesComposeProject | - | a docker target's banner carries its compose project, read by one extra read-only inspect issued after the report is run |
-| TestStatusDockerBannerWithoutComposeProject | - | a container compose did not create drops the group segment, leaving no dangling separator |
-| TestStatusScriptPresentRunsAndReportsOutput | - | an already-installed script is just run; stdout prints its output under the target's `=== ... ===` banner, every line indented by two so the report stays left-aligned however long the pod name is |
-| TestStatusAbsentPlusInstallFlagInstallsThenRuns | - | --install installs a missing script on the target with no prompt, then runs it |
-| TestStatusAbsentPromptYesInstallsThenRuns | - | without --install, a "y" answer to the install prompt (via the injected promptLine seam) installs then runs |
-| TestStatusAbsentPromptNoSkipsAndExitsOne | - | declining the install prompt skips the target (no install, no run) and the overall exit code is 1 |
-| TestStatusStandbyReportedWithoutAbortingOtherTargets | - | standby prints like any other answer (the script always exits 0), the loop still reaches the next target, and the overall exit code stays 0 |
-| TestStatusRunFailureReportedAndExitsOne | - | a non-zero exit from the run can only be a failed exec, so that target is reported on stderr and the exit code is 1, while a reachable target in the same run still reports |
-| TestStatusInstallPromptNonTTYRefusesWithInstallHint | - | the install confirmation refuses to block when stdin is not a TTY, failing with an error naming --install and installing/running nothing |
-| TestStatusTargetValidationRejectsBadPodAndNamespace | bad pod name / bad namespace | an unsafe --pod or --namespace value is rejected via validate.SafeToken before any exec |
+| TestStatusTargetWordIsRequired | - | a bare `status` prints the target words and the verb's own help page, exits 2, and runs nothing -- the deliberate breaking change, since neither view is a safe default; the short spellings (cnt, app) are deliberately absent, since aliases are documented only in the markdown docs |
+| TestStatusUnknownAndExtraTargetWords | unknown word / a second word | each is a usage error (exit 2) naming the problem, with nothing run |
+| TestStatusTargetsMatchModel | - | the drift gate between the modeled target words, the constants the views switch on, and statusTargetArgBracket (which cannot be built from the model, since cliVerbs' own initialiser uses it) |
+| TestStatusTargetAliasesResolve | cnt / app / container / all / unknown | resolveTarget maps each alias to its canonical word and passes an unknown one through; `sts cnt` really drives the container view, which costs one preflight and one get |
+| TestStatusRejectsImpossibleFlagCombinations | unknown --output / json with watch / --all with --pod / --all with --container / --install, --user and --management-port on the container view | every combination that cannot mean anything is refused (exit 2) before a single query runs, rather than being silently ignored |
+| TestWatchFlagAcceptsBareAndInterval | bare / interval / off / 3 rejected values | the flag is boolean in every documented sense (IsBoolFlag) but also takes the deliberately undocumented `-w=<seconds>` form, bounded |
+| TestStatusContainerViewReadsEngineFactsWithoutExecing | - | one read-only `get pods -o json` answers discovery and the whole table together (2 calls in all), nothing is exec'd into, and every column reaches the output |
+| TestStatusContainerDetailsSamplesAndChecksComponents | - | --details adds one sampling call for the run and one presence check per distinct referenced object (deduplicated across pods), plus the NODE column, digest and resource lines |
+| TestStatusContainerDetailsWithoutMetricsServerDegradesToANote | - | a cluster with no metrics API costs the resource lines and nothing else: a note naming what to install, the table still printed, exit 0 |
+| TestStatusDockerContainerViewIsOneInspect | - | one inspect answers every docker target and carries the compose project too; docker reports HEALTH where kubernetes reports READY |
+| TestStatusPodmanRestartCountComesFromSystemd | - | the quadlet truth: the count in the table comes from `systemctl show ... NRestarts`, not from podman's own counter |
+| TestStatusPodmanRestartCountFallsBackWhenSystemdCannotAnswer | - | a container systemd knows nothing about keeps the container's own counter, and nothing fails |
+| TestStatusAllSearchesByImage | kubernetes searches every namespace / docker lists then inspects the matches | --all finds instances by image reference: `--all-namespaces` plus a client-side filter on kubernetes (with a NAMESPACE column), `ps --all` then an inspect of only the matches on docker |
+| TestStatusAllWithNoMatchIsActionable | - | an empty search names the image it looked for, since there is no env.yaml in play to point at |
+| TestStatusApplicationViewRunsTheScriptAndRendersItsFacts | - | the exact application block: the unchanged banner, values aligned in one column, right-aligned workflow ids, and no container table |
+| TestStatusApplicationDetailsAddsTheEnrichmentLines | - | one script run, two levels of report: --details renders uptime/version/java/config/heap (raw bytes rendered to 412Mi of 1Gi) and the health components, and the basic level renders none of them |
+| TestStatusFailedScriptRunStillGetsItsOwnBlock | - | an instance whose script could not run keeps its banner with the failure as a body line, the container table above it explains why, a reachable instance in the same run still reports, and the exit code is 1 |
+| TestStatusInstallPaths | --install installs without asking / prompt answered yes installs / prompt declined skips the instance and exits 1 | the probe/install/run dance, with the declined case reporting the reason in the instance's own block rather than on stderr |
+| TestStatusInstallPromptNonTTYRefusesWithInstallHint | - | the install confirmation refuses to block when stdin is not a TTY, pointing at --install and installing/running nothing |
+| TestStatusStandbyIsAnAnswerNotAFailure | - | standby prints like any other answer (the script always exits 0) and the run still exits 0 |
+| TestStatusJSONOutputIsOneDocument | - | --output json emits one parseable document carrying schemaVersion and both halves of each instance |
+| TestStatusImageMismatchIsReportedAtBothLevels | basic reports it as a note / details reports it per instance / a matching image says nothing at all | the failed-rollout finding surfaces at both levels -- a run-level note where the per-instance detail block is not printed, the image-expected line where it is, and nothing at all when the running image is the configured one |
+| TestStatusDockerDetailsAddsDigestAndStats | - | on docker/podman the digest lives on the image, so --details costs an `image inspect` plus the `stats --no-stream` sample (4 calls in all), and both reach the report |
 | TestStatusRejectsUnsafeUserBeforeAnyExec | 4 names | a --user carrying '/', '$', a space or a quote is rejected via validate.SafeActuatorUser before any exec, since the name reaches a sed address in the script |
+| TestStatusTargetValidationRejectsBadPodAndNamespace | bad pod name / bad namespace | an unsafe --pod or --namespace value is rejected via validate.SafeToken before any exec |
 | TestStatusManagementPortBounds | -1 / 65536 | an out-of-range --management-port is rejected before any exec |
+| TestStatusNoPodsFoundNamesTheSelector | - | discovery with nothing matching names the selector, the namespace, and --pod -- the things an operator would fix |
 | TestVersionOutputShape | - | `version` prints `solmq-conn-util <version> <go version> <GOOS>/<GOARCH>`, exit 0; the package-level version var defaults to "dev" in an un-injected test build |
 | TestAbsPath | absolute input | absPath returns input unchanged when already absolute |
 | TestAbsPath | relative input | absPath joins relative path onto base dir |
 | TestCommandsDocInSync | - | docs/commands.md equals what the command model renders; -update rewrites it instead of asserting |
-| TestCommandsModelMatchesUsage | - | every InUsage command, every flag, and every verb alias in the model appears in usage(), and usage() lists no command the model omits |
-| TestCommandsModelMatchesUsage | platform short spellings | usage() carries the `--platform` shorts as the pipe-joined list built from platformAliasList, so `-h` cannot fall behind the docs when that table changes (joined, not per-alias: `kube` alone is a substring of `kubernetes`) |
+| TestCommandsModelMatchesUsage | - | the summary page is one line per modeled command carrying its description, points at `help <command>`, shows no alias anywhere (md-only, by decision), and no line exceeds the 100-column budget the page is designed never to wrap in |
+| TestAbbreviationDocInSync | - | docs/abbreviation.md equals what the command model renders; -update rewrites it instead of asserting (same `-update` flag as TestCommandsDocInSync -- one registration per package) |
+| TestAbbreviationDocCoversModel | - | every verb alias, target alias, platformAliasList short spelling and short flag form has a row on the page, and the page renders no more rows than the model declares -- the check the byte comparison cannot make, since a regenerated file agrees with a renderer that forgot a whole class of abbreviation |
+| TestAbbreviationDocTableShape | - | every table row has its header's cell count, counted honouring the `\|` escape tableCell writes, so an unescaped delimiter in a flag Meaning fails instead of silently rendering a broken table |
+| TestVerbUsagePages | one subtest per verb | every per-command page carries its Synopsis, description, every target word (and set) with its summary, every modeled flag the verb takes -- each spelling plus its terse Usage text, wrap-tolerantly asserted -- and its example; no alias appears and no line exceeds the width budget |
+| TestVerbUsagePages | orphans and platform shorts | every modeled flag is listed by at least one verb (a flag no verb lists would appear on no help page at all), and `--platform`'s Usage text names each short spelling from platformAliasList -- the assertion that used to point at the summary's flag table, which is gone |
 | TestAutoCompleteDispatchPrintsScript | bash / zsh / fish / powershell | `auto-complete <shell>` exits 0, writes the script to stdout, and never reaches the runner |
 | TestCompletionGoldenInSync | bash / zsh / fish / powershell | each rendered script equals its snapshot under cmd/solmq-conn-util/testdata/completions; -update rewrites them |
 | TestCompletionCoversModel | bash / zsh / fish / powershell | every modeled verb, target, flag spelling and verb alias reaches every shell (fish exempts a verb with no targets/posarg/flags, e.g. version, which has nothing beyond word 1 to normalize), with descriptions in the three shells that show them |
+| TestCompletionOnlyDownloadJarHasSets | - | pins the third command level to exactly where the model puts it today: no target other than download/jar carries a non-empty Sets list |
+| TestCompletionThirdLevelOffersSets | bash / zsh / fish / powershell | once "download jar" (or alias "dl jar") is typed, every renderer offers the mq/syslog sets by name and description |
+| TestCompletionThirdLevelUnlocksPosArg | bash / zsh / fish / powershell | the trailing [dir] positional is offered only after all three words (verb, target, set) are typed, never after just "download jar" |
 | TestCompletionRecognizesFlagAliases | bash / zsh / powershell | every spelling flag.Parse accepts (-e, --e, -env, --env) is in the value-skipping table, so a value is never mistaken for a positional |
+| TestCompletionDownloadFlagsDescribed | - | all four download flags (--url, --version, --omit-lib-file, --include-provided) are modeled by exact Long spelling, with the description reaching every shell that carries one (bash compgen word lists carry none) |
+| TestCompletionOmitLibFileCompletesFiles | bash / zsh / fish / powershell | --omit-lib-file completes file paths in every shell, the same value kind -e/--env already gets |
 | TestCompletionShellStructure | bash / zsh / fish / powershell | each script keeps the registration line that makes it load, and the zsh script opens with #compdef |
 | TestCompletionVerbAliasesResolveToCanonical | bash / zsh / fish / powershell | each shell's own alias-normalization construct ($verb= case arm, __fish_seen_subcommand_from, $verbAlias[...]) maps every verb alias to its canonical verb name (same fish exemption as TestCompletionCoversModel) |
 | TestCompletionVerbAliasesNotOfferedAtWordOne | bash / zsh / fish / powershell | no verb alias appears in the position-1 candidate list (compgen -W, the zsh verbs array, the __fish_use_subcommand lines, the powershell $verbs array) -- recognized everywhere, but never offered on TAB |
 | TestCompletionValueKindsReachScripts | bash / zsh / fish / powershell | a path flag completes files and `examples` completes directories in every shell |
 | TestCompletionOutputIsPlainASCIILF | bash / zsh / fish / powershell | generated scripts are plain ASCII, LF only, newline-terminated |
-| TestCompletionModelMetadataComplete | - | every verb has a description and a known PosArg, every flag a known Arg and a non-empty Meaning, every modeled shell a renderer and a snapshot; verb/target names and verb aliases stay [a-z0-9-] for unquoted case patterns, and no alias collides with another verb, another alias, or -h/--help |
+| TestCompletionModelMetadataComplete | - | every verb has a description and a known PosArg, every flag a known Arg and a non-empty Meaning, every modeled shell a renderer and a snapshot; verb/target names and verb/target aliases stay [a-z0-9-] for unquoted case patterns, no alias collides with another verb, another alias, a target under the same verb, or -h/--help, and no description carries an apostrophe -- fish escapes it, powershell doubles it and zsh passes it through bashQuote, so the raw text would never appear in those scripts |
 | TestPlainText | code spans stripped / newline folded / tab and CR folded / whitespace runs collapse / trimmed / control chars dropped / empty / only backticks / punctuation preserved | model text is reduced to a single-line tooltip that cannot break the enclosing shell statement |
 | TestShellQuoting | plain / empty / apostrophe / backslash / dollar and backtick / double quote / semicolon and pipe | bashQuote, fishQuote and psQuote each neutralize their shell's escape rules |
 | TestZshEntry | plain / colon in the value escaped / colon in the description left alone / apostrophe quoted / empty description | _describe entries split on the intended colon only |

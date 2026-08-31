@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -9,9 +10,12 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/libs"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusreport"
 )
 
 // ---- fixtures -----------------------------------------------------------------
@@ -300,11 +304,24 @@ func TestExitCodeContract(t *testing.T) {
 		{"help short", []string{"-h"}, 0},
 		{"help long", []string{"--help"}, 0},
 		{"help word", []string{"help"}, 0},
+		// Requested help is never an error, wherever it is asked: after a verb,
+		// as the help verb's argument, or somewhere among the flags (routed
+		// through the flag parser as ErrHelp).
+		{"verb help short", []string{"status", "-h"}, 0},
+		{"verb help long", []string{"deploy", "--help"}, 0},
+		{"verb help via flag parser", []string{"examples", "-f", "-h"}, 0},
+		{"help with a command", []string{"help", "status"}, 0},
+		{"help with an alias", []string{"help", "sts"}, 0},
+		{"help with an unknown command", []string{"help", "bogus"}, 2},
 		{"unknown flag", []string{"generate", "config", "-nope"}, 2},
 		{"missing env file", []string{"generate", "config", "-e", filepath.Join(validDir, "does-not-exist.yaml")}, 1},
 		{"invalid spec", []string{"generate", "config", "-e", filepath.Join(invalidDir, "env.yaml")}, 1},
 		{"generate bogus target", []string{"generate", "bogus"}, 2},
 		{"deploy bogus platform", []string{"deploy", "bogus"}, 2},
+		{"download missing target", []string{"download"}, 2},
+		{"download unknown target", []string{"download", "bogus"}, 2},
+		{"download missing set", []string{"download", "jar"}, 2},
+		{"download unknown set", []string{"download", "jar", "bogus"}, 2},
 		{"auto-complete no shell", []string{"auto-complete"}, 2},
 		{"auto-complete bogus shell", []string{"auto-complete", "bogus"}, 2},
 		// "completion" was the verb's old name; the rename to "auto-complete" is a
@@ -321,6 +338,11 @@ func TestExitCodeContract(t *testing.T) {
 		{"near miss h", []string{"h"}, 2},
 		{"near miss hlp", []string{"hlp"}, 2},
 		{"near miss stat", []string{"stat"}, 2},
+		// "dep" was deploy's short form before it was aligned with solace-util's
+		// "dp". Same clean-break rule as the "completion" rename above: the old
+		// spelling is not kept as a compatibility alias, and pinning it here is
+		// what stops it quietly coming back.
+		{"dep is no longer deploy", []string{"dep"}, 2},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -372,7 +394,7 @@ func truncate(s string) string {
 
 // ---- a1) alias resolution ---------------------------------------------------
 
-// TestVerbAliasesDispatchLikeCanonical checks each of the seven modeled
+// TestVerbAliasesDispatchLikeCanonical checks each of the eight modeled
 // aliases (cliVerb.Aliases in commands.go) reaches exactly the same handler as
 // its canonical verb: the same trailing args, dispatched once under the alias
 // and once under the canonical name, must produce the same exit code, the
@@ -388,12 +410,13 @@ func TestVerbAliasesDispatchLikeCanonical(t *testing.T) {
 		rest      []string
 	}{
 		{"generate", "gen", []string{"bogus"}},
-		{"deploy", "dep", []string{"bogus"}},
+		{"deploy", "dp", []string{"bogus"}},
 		{"remove", "rm", []string{"bogus"}},
 		{"status", "sts", []string{"bogus"}},
 		{"version", "ver", nil},
 		{"validate", "vld", []string{"-e", missingEnv}},
 		{"examples", "eg", []string{"-nope"}},
+		{"download", "dl", []string{"jar", "bogus"}},
 	}
 	for _, c := range cases {
 		t.Run(c.alias, func(t *testing.T) {
@@ -521,6 +544,29 @@ func TestGenerateConfigStdoutAndFileMatch(t *testing.T) {
 	}
 	if string(b) != stdout {
 		t.Errorf("file content differs from stdout:\nfile=%q\nstdout=%q", b, stdout)
+	}
+}
+
+// TestGenerateConfigTargetAliasResolves covers the `cfg` short spelling the same
+// way TestStatusTargetAliasesResolve covers cnt/app: the model declares it, so
+// the positional must reach genConfig through resolveTarget rather than a
+// literal comparison against the canonical word. Without the resolve call the
+// alias is documented but exits 2, which is the failure this pins.
+func TestGenerateConfigTargetAliasResolves(t *testing.T) {
+	t.Setenv(spec.StatusUserPasswordEnvVar, "pinned-for-reproducible-output")
+
+	if got := resolveTarget("generate", "cfg"); got != tgtConfig {
+		t.Errorf("resolveTarget(generate, cfg) = %q, want %q", got, tgtConfig)
+	}
+
+	envPath := filepath.Join(workflowDir(t, validWF), "env.yaml")
+	var code int
+	stdout := captureStdout(t, func() { code = run([]string{"gen", "cfg", "-e", envPath}) })
+	if code != 0 {
+		t.Fatalf("`gen cfg` exit=%d, want 0", code)
+	}
+	if !strings.Contains(stdout, "spring:") {
+		t.Errorf("`gen cfg` stdout missing spring:\n%s", stdout)
 	}
 }
 
@@ -760,6 +806,594 @@ func TestExamplesDefaultDir(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(tmp, "workflow-0.yaml")); err != nil {
 		t.Errorf("default dir '.' (current directory) not written to: %v", err)
 	}
+}
+
+// ---- j) download subcommand -------------------------------------------------------
+
+// fakeDownload records every Input reaching the injectable downloadFn seam
+// (see main.go) so tests can assert exactly what runDownload built, without
+// ever touching the network or internal/libs's own Maven/HTTP behavior --
+// mirrors fakeRunner's role for the deploy/remove seam. resp/err are returned
+// to every call.
+type fakeDownload struct {
+	calls []libs.Input
+	resp  libs.Report
+	err   error
+}
+
+func (f *fakeDownload) call(in libs.Input) (libs.Report, error) {
+	f.calls = append(f.calls, in)
+	return f.resp, f.err
+}
+
+// useFakeDownload installs f as the downloadFn seam for the duration of the
+// test, restoring the production libs.Download on cleanup.
+func useFakeDownload(t *testing.T, f *fakeDownload) {
+	t.Helper()
+	old := downloadFn
+	downloadFn = f.call
+	t.Cleanup(func() { downloadFn = old })
+}
+
+// TestDownloadMissingAndUnknownWordsRejected covers all three command-level
+// validations runDownload enforces before ever calling downloadFn: a missing
+// or unknown target, and a missing or unknown set -- mirroring
+// runAutoComplete's messages and exit codes for the same shape of error.
+func TestDownloadMissingAndUnknownWordsRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"missing target", []string{"download"}, "missing target"},
+		{"unknown target", []string{"download", "bogus"}, `unknown target "bogus"`},
+		{"missing set", []string{"download", "jar"}, "missing set"},
+		{"unknown set", []string{"download", "jar", "bogus"}, `unknown set "bogus"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeDownload{}
+			useFakeDownload(t, f)
+			r := &fakeRunner{}
+			var code int
+			stderr := captureStderr(t, func() { code = dispatch(c.args, r) })
+			if code != 2 {
+				t.Errorf("dispatch(%v) = %d, want 2", c.args, code)
+			}
+			if !strings.Contains(stderr, c.want) {
+				t.Errorf("dispatch(%v) stderr = %q, want substring %q", c.args, stderr, c.want)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("dispatch(%v): downloadFn must not be invoked on a rejection, got %d calls", c.args, len(f.calls))
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("dispatch(%v): runner must not be invoked, got %d calls", c.args, len(r.calls))
+			}
+		})
+	}
+}
+
+// TestDownloadDirDefaultAndPositionalOverride covers the trailing [dir]
+// positional: "./libs" when omitted, and the given value when present.
+func TestDownloadDirDefaultAndPositionalOverride(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default dir", []string{"download", "jar", "mq"}, "./libs"},
+		{"explicit dir", []string{"download", "jar", "mq", "mylibs"}, "mylibs"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeDownload{}
+			useFakeDownload(t, f)
+			if code := dispatch(c.args, &fakeRunner{}); code != 0 {
+				t.Fatalf("dispatch(%v) = %d, want 0", c.args, code)
+			}
+			if len(f.calls) != 1 {
+				t.Fatalf("downloadFn calls = %d, want 1", len(f.calls))
+			}
+			if f.calls[0].Dir != c.want {
+				t.Errorf("Input.Dir = %q, want %q", f.calls[0].Dir, c.want)
+			}
+		})
+	}
+}
+
+// TestDownloadSetReachesInput covers both modeled sets threading through to
+// libs.Input.Set unchanged.
+func TestDownloadSetReachesInput(t *testing.T) {
+	cases := []struct {
+		name string
+		set  string
+		want string
+	}{
+		{"mq", "mq", libs.SetMQ},
+		{"syslog", "syslog", libs.SetSyslog},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeDownload{}
+			useFakeDownload(t, f)
+			args := []string{"download", "jar", c.set}
+			if code := dispatch(args, &fakeRunner{}); code != 0 {
+				t.Fatalf("dispatch(%v) = %d, want 0", args, code)
+			}
+			if f.calls[0].Set != c.want {
+				t.Errorf("Input.Set = %q, want %q", f.calls[0].Set, c.want)
+			}
+		})
+	}
+}
+
+// TestDownloadURLFlagRepeatable covers --url collecting every occurrence, in
+// order, into libs.Input.URLs.
+func TestDownloadURLFlagRepeatable(t *testing.T) {
+	f := &fakeDownload{}
+	useFakeDownload(t, f)
+	args := []string{"download", "jar", "mq", "--url", "https://example.com/a.jar", "--url", "https://example.com/b.jar"}
+	if code := dispatch(args, &fakeRunner{}); code != 0 {
+		t.Fatalf("dispatch(%v) = %d, want 0", args, code)
+	}
+	want := []string{"https://example.com/a.jar", "https://example.com/b.jar"}
+	if !reflect.DeepEqual(f.calls[0].URLs, want) {
+		t.Errorf("Input.URLs = %v, want %v", f.calls[0].URLs, want)
+	}
+}
+
+// TestDownloadForceFlagReachesInput covers -f/--force defaulting to false and
+// both spellings reaching libs.Input.Force.
+func TestDownloadForceFlagReachesInput(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"default false", []string{"download", "jar", "syslog"}, false},
+		{"-f short", []string{"download", "jar", "syslog", "-f"}, true},
+		{"--force long", []string{"download", "jar", "syslog", "--force"}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeDownload{}
+			useFakeDownload(t, f)
+			if code := dispatch(c.args, &fakeRunner{}); code != 0 {
+				t.Fatalf("dispatch(%v) = %d, want 0", c.args, code)
+			}
+			if f.calls[0].Force != c.want {
+				t.Errorf("Input.Force = %v, want %v", f.calls[0].Force, c.want)
+			}
+		})
+	}
+}
+
+// TestDownloadVersionFlagReachesInput covers --version defaulting to "" (the
+// libs.Input contract for "latest stable") and an explicit value reaching
+// libs.Input.Version unchanged -- pinning the SEED release, per task 1.
+func TestDownloadVersionFlagReachesInput(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default empty", []string{"download", "jar", "mq"}, ""},
+		{"explicit pin", []string{"download", "jar", "mq", "--version", "9.4.2.0"}, "9.4.2.0"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeDownload{}
+			useFakeDownload(t, f)
+			if code := dispatch(c.args, &fakeRunner{}); code != 0 {
+				t.Fatalf("dispatch(%v) = %d, want 0", c.args, code)
+			}
+			if f.calls[0].Version != c.want {
+				t.Errorf("Input.Version = %q, want %q", f.calls[0].Version, c.want)
+			}
+		})
+	}
+}
+
+// TestDownloadOmitLibFileFlagReachesInput covers --omit-lib-file defaulting to
+// "" (the libs.Input contract for the embedded jar list) and an explicit path
+// reaching libs.Input.OmitLibFile unchanged.
+func TestDownloadOmitLibFileFlagReachesInput(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default empty", []string{"download", "jar", "mq"}, ""},
+		{"explicit path", []string{"download", "jar", "mq", "--omit-lib-file", "other-image-libs.txt"}, "other-image-libs.txt"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeDownload{}
+			useFakeDownload(t, f)
+			if code := dispatch(c.args, &fakeRunner{}); code != 0 {
+				t.Fatalf("dispatch(%v) = %d, want 0", c.args, code)
+			}
+			if f.calls[0].OmitLibFile != c.want {
+				t.Errorf("Input.OmitLibFile = %q, want %q", f.calls[0].OmitLibFile, c.want)
+			}
+		})
+	}
+}
+
+// TestDownloadIncludeProvidedFlagReachesInput covers --include-provided
+// defaulting to false and reaching libs.Input.IncludeProvided true when given.
+func TestDownloadIncludeProvidedFlagReachesInput(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"default false", []string{"download", "jar", "syslog"}, false},
+		{"--include-provided", []string{"download", "jar", "syslog", "--include-provided"}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeDownload{}
+			useFakeDownload(t, f)
+			if code := dispatch(c.args, &fakeRunner{}); code != 0 {
+				t.Fatalf("dispatch(%v) = %d, want 0", c.args, code)
+			}
+			if f.calls[0].IncludeProvided != c.want {
+				t.Errorf("Input.IncludeProvided = %v, want %v", f.calls[0].IncludeProvided, c.want)
+			}
+		})
+	}
+}
+
+// TestDownloadReportExitCode covers reportDownload's exit contract: a
+// systemic error (downloadFn's own error return) and a non-empty
+// Report.Failed both exit non-zero; a clean write, a skip-only run, and a
+// run where everything was omitted (the image already has all of it -- see
+// task 2's version-aware omission) all exit 0.
+//
+// Exit-code convention (the finding's decision): a non-empty Report.Failed
+// always exits 1, whether it holds one failure among several successes or
+// every requested artifact -- the two "per-artifact failure" cases below
+// (one of two written, and all failed) both exit 1 identically. This tool
+// does not mint a distinct code for "partial" vs "total" failure, matching
+// the documented exit codes (0 success, 1 processing error, 2 usage error)
+// in docs/commands.md; a caller that must tell partial from total reads the
+// written/skipped/omitted/failed counts reportDownload prints to stderr, not
+// the exit code (see reportDownload's doc comment).
+func TestDownloadReportExitCode(t *testing.T) {
+	cases := []struct {
+		name string
+		rep  libs.Report
+		err  error
+		want int
+	}{
+		{"clean write", libs.Report{Written: []string{"libs/a.jar"}}, nil, 0},
+		{"skip only", libs.Report{Skipped: []string{"libs/a.jar"}}, nil, 0},
+		{"omitted only", libs.Report{Omitted: []string{"bcprov-jdk18on-1.84.jar: the image has 1.84"}}, nil, 0},
+		{"partial failure", libs.Report{Written: []string{"libs/a.jar"}, Failed: []libs.Failure{{Name: "b.jar", Err: fmt.Errorf("404")}}}, nil, 1},
+		{"total failure", libs.Report{Failed: []libs.Failure{{Name: "a.jar", Err: fmt.Errorf("404")}, {Name: "b.jar", Err: fmt.Errorf("404")}}}, nil, 1},
+		{"systemic error", libs.Report{}, fmt.Errorf("boom"), 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeDownload{resp: c.rep, err: c.err}
+			useFakeDownload(t, f)
+			var code int
+			stderr := captureStderr(t, func() { code = dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
+			if code != c.want {
+				t.Errorf("dispatch = %d, want %d\nstderr:\n%s", code, c.want, stderr)
+			}
+		})
+	}
+}
+
+// TestDownloadReportPrintsWrittenSkippedFailedAndFallback pins
+// reportDownload's line shapes, mirroring runExamples' "wrote:"/"exists (use
+// -f to overwrite):" convention plus a "failed:" line and a Fallback note
+// clearly labelled as a guessed version.
+func TestDownloadReportPrintsWrittenSkippedFailedAndFallback(t *testing.T) {
+	f := &fakeDownload{resp: libs.Report{
+		Written:  []string{"libs/a.jar"},
+		Skipped:  []string{"libs/b.jar"},
+		Failed:   []libs.Failure{{Name: "c.jar", Err: fmt.Errorf("404")}},
+		Fallback: []string{"c.jar: version could not be resolved from the POM chain, used latest stable"},
+	}}
+	useFakeDownload(t, f)
+	var code int
+	stderr := captureStderr(t, func() { code = dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
+	if code != 1 {
+		t.Errorf("dispatch = %d, want 1 (Report.Failed non-empty)", code)
+	}
+	for _, want := range []string{
+		"wrote: libs/a.jar",
+		"exists (use -f to overwrite): libs/b.jar",
+		"failed: c.jar: 404",
+		"guessed version:",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q, got:\n%s", want, stderr)
+		}
+	}
+}
+
+// TestDownloadReportPrintsOmittedBlockDistinctFromFallback covers the
+// Report.Omitted, Report.Fallback, and Report.Unverified blocks: each is
+// printed under its own prefix, so an operator can see at a glance that an
+// artifact was skipped because the connector image already provides it
+// ("omitted:"), had its version guessed ("guessed version:"), or could not be
+// verified against a digest ("unverified:") -- never confusing any of those
+// three with each other or with a "failed:" (something went wrong) line.
+// Exit is 0: none of the three is a failure.
+func TestDownloadReportPrintsOmittedBlockDistinctFromFallback(t *testing.T) {
+	f := &fakeDownload{resp: libs.Report{
+		Written:    []string{"libs/com.ibm.mq.jakarta.client-10.0.0.0.jar"},
+		Omitted:    []string{"bcprov-jdk18on-1.84.jar: the image has 1.84", "jakarta.jms-api-3.0.0.jar: the image has 3.1.0"},
+		Fallback:   []string{"logstash-logback-encoder-9.0.jar: version could not be resolved from the POM chain, used latest stable"},
+		Unverified: []string{"custom.jar: no .sha1 sidecar was published for this url"},
+	}}
+	useFakeDownload(t, f)
+	var code int
+	stderr := captureStderr(t, func() { code = dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
+	if code != 0 {
+		t.Errorf("dispatch = %d, want 0 (no Failed entries)", code)
+	}
+	for _, want := range []string{
+		"omitted: bcprov-jdk18on-1.84.jar: the image has 1.84",
+		"omitted: jakarta.jms-api-3.0.0.jar: the image has 3.1.0",
+		"guessed version: logstash-logback-encoder-9.0.jar",
+		"unverified: custom.jar: no .sha1 sidecar was published for this url",
+		"2 omitted",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q, got:\n%s", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "failed:") {
+		t.Errorf("an omission, fallback, or unverified note must never be reported as a failure, got:\n%s", stderr)
+	}
+}
+
+// TestDownloadReportExitZeroWhenEverythingOmitted pins the requirement that
+// "you already have all of it" is success: a Report whose every artifact was
+// omitted (nothing written, nothing skipped, nothing failed) must still exit
+// 0, the counts footer must say so, and the "next:" hint must name
+// --include-provided as the way to download anyway rather than the normal
+// dir-pointing hint -- an operator naturally reaches for -f there, which does
+// not apply: -f only overwrites a file already on disk, never an artifact the
+// omission step already dropped.
+func TestDownloadReportExitZeroWhenEverythingOmitted(t *testing.T) {
+	f := &fakeDownload{resp: libs.Report{
+		Omitted: []string{
+			"bcprov-jdk18on-1.84.jar: the image has 1.84",
+			"bcpkix-jdk18on-1.84.jar: the image has 1.84",
+			"bcutil-jdk18on-1.84.jar: the image has 1.84",
+			"jakarta.jms-api-3.0.0.jar: the image has 3.1.0",
+		},
+	}}
+	useFakeDownload(t, f)
+	var code int
+	stderr := captureStderr(t, func() { code = dispatch([]string{"download", "jar", "mq", "--version", "9.4.2.0"}, &fakeRunner{}) })
+	if code != 0 {
+		t.Fatalf("dispatch = %d, want 0 when every artifact was omitted, stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "0 written, 0 skipped, 4 omitted, 0 unverified, 0 failed") {
+		t.Errorf("stderr counts footer missing the omitted count, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "--include-provided") {
+		t.Errorf("stderr missing the --include-provided hint when everything was omitted, got:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "point the docker/podman") {
+		t.Errorf("the dir-pointing hint must not appear when everything was omitted (there is nothing to point at), got:\n%s", stderr)
+	}
+}
+
+// TestDownloadReportNextHint pins the previously-uncovered "next:" hint: the
+// base line always appears, and the omitted-jars clause appears only when
+// Report.Omitted is non-empty (and something else was also written or
+// skipped -- the all-omitted case is covered separately by
+// TestDownloadReportExitZeroWhenEverythingOmitted, which takes the other
+// "next:" branch entirely).
+func TestDownloadReportNextHint(t *testing.T) {
+	const base = "next: point the docker/podman libs.dir or kubernetes libs: config key at"
+	const omittedClause = "the omitted jars are already on the connector image and need no copy"
+
+	t.Run("no omissions", func(t *testing.T) {
+		f := &fakeDownload{resp: libs.Report{Written: []string{"libs/a.jar"}}}
+		useFakeDownload(t, f)
+		stderr := captureStderr(t, func() { dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
+		if !strings.Contains(stderr, base) {
+			t.Errorf("stderr missing base next: hint, got:\n%s", stderr)
+		}
+		if strings.Contains(stderr, omittedClause) {
+			t.Errorf("omitted-jars clause must be absent with an empty Report.Omitted, got:\n%s", stderr)
+		}
+	})
+
+	t.Run("with omissions", func(t *testing.T) {
+		f := &fakeDownload{resp: libs.Report{
+			Written: []string{"libs/a.jar"},
+			Omitted: []string{"bcprov-jdk18on-1.84.jar: the image has 1.84"},
+		}}
+		useFakeDownload(t, f)
+		stderr := captureStderr(t, func() { dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
+		if !strings.Contains(stderr, base) {
+			t.Errorf("stderr missing base next: hint, got:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, omittedClause) {
+			t.Errorf("stderr missing the omitted-jars clause, got:\n%s", stderr)
+		}
+	})
+}
+
+// TestDownloadReportPrintsOmitListProvenance covers the "omit list:" line:
+// annotated "(built in; describes <floor> and later)" when --omit-lib-file
+// was left empty (Report.OmitListProvenance then names the embedded
+// default), printed bare when an explicit path was given, and any per-line
+// Report.OmitListWarnings (entries the omit list loader rejected as
+// unparseable) surfaced as their own lines.
+//
+// The annotation carries the floor because the filename alone names one
+// tag, and an operator reading "2.13.0" while deploying 2.14.1 would
+// reasonably conclude the omissions were judged against the wrong image.
+func TestDownloadReportPrintsOmitListProvenance(t *testing.T) {
+	t.Run("built in", func(t *testing.T) {
+		f := &fakeDownload{resp: libs.Report{
+			Written:            []string{"libs/a.jar"},
+			OmitListProvenance: "solace-pubsub-connector-ibmmq-2.13.0",
+		}}
+		useFakeDownload(t, f)
+		stderr := captureStderr(t, func() { dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
+		want := "omit list: solace-pubsub-connector-ibmmq-2.13.0 (built in; describes " + libs.EmbeddedListMinVersion + " and later)"
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q, got:\n%s", want, stderr)
+		}
+	})
+
+	t.Run("explicit file", func(t *testing.T) {
+		f := &fakeDownload{resp: libs.Report{
+			Written:            []string{"libs/a.jar"},
+			OmitListProvenance: "./my-image-libs.txt",
+			OmitListWarnings:   []string{"jackson-core-9zzz.jar: version \"9zzz\" rejected as unparseable -- treated as not provided by the image"},
+		}}
+		useFakeDownload(t, f)
+		args := []string{"download", "jar", "mq", "--omit-lib-file", "./my-image-libs.txt"}
+		stderr := captureStderr(t, func() { dispatch(args, &fakeRunner{}) })
+		if !strings.Contains(stderr, "omit list: ./my-image-libs.txt") {
+			t.Errorf("stderr missing the explicit-file provenance line, got:\n%s", stderr)
+		}
+		if strings.Contains(stderr, "./my-image-libs.txt (built in)") {
+			t.Errorf("an explicit --omit-lib-file must not be annotated (built in), got:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "omit list warning: jackson-core-9zzz.jar") {
+			t.Errorf("stderr missing the omit list warning line, got:\n%s", stderr)
+		}
+	})
+}
+
+// TestDownloadSetMapMatchesModel guards download/jar's third command level
+// the same way TestDispatchHandlersMatchModel guards verbs and generate's
+// target: downloadSets (main.go's set-name dispatch table) must name exactly
+// the sets cliVerbs models under download's "jar" target, and both must name
+// exactly internal/libs's own SetNames() -- so the CLI model, dispatch, and
+// the package can never quietly disagree about what "mq" or "syslog" means.
+func TestDownloadSetMapMatchesModel(t *testing.T) {
+	assertSameNameSet(t, "download jar set", nameSet(targetSetNames("download", "jar")), keySet(downloadSets))
+	assertSameNameSet(t, "download jar set (libs)", nameSet(libs.SetNames()), keySet(downloadSets))
+}
+
+// TestDownloadJMSFlagIsGone pins the removal itself. --jms selected between the
+// jakarta and javax IBM MQ clients; the javax build cannot satisfy the image's
+// jakarta.jms binder, so the flag could only ever be set wrong, and both
+// clients in one directory is worse still (they carry the same com.ibm.mq.*
+// classes, and load order decides).
+//
+// The failure mode worth pinning is the quiet one: a script still passing the
+// flag must fail as a usage error rather than appear to work while the argument
+// is ignored. Go's flag package reports it as an unknown flag, which is exit 2
+// here, and downloadFn is never reached.
+func TestDownloadJMSFlagIsGone(t *testing.T) {
+	for _, args := range [][]string{
+		{"download", "jar", "mq", "--jms", "jakarta"},
+		{"download", "jar", "mq", "--jms", "javax"},
+		{"download", "jar", "syslog", "--jms", "jakarta"},
+	} {
+		f := &fakeDownload{}
+		useFakeDownload(t, f)
+		if code := dispatch(args, &fakeRunner{}); code != 2 {
+			t.Errorf("dispatch(%v) = %d, want 2 (unknown flag)", args, code)
+		}
+		if len(f.calls) != 0 {
+			t.Errorf("dispatch(%v): downloadFn must not run, got %d calls", args, len(f.calls))
+		}
+	}
+}
+
+// downloadEnvWithImage writes an env.yaml carrying just the top-level image
+// block, which is the only part download reads.
+func downloadEnvWithImage(t *testing.T, dir, tag string) string {
+	t.Helper()
+	body := "image:\n  name: solace/solace-pubsub-connector-ibmmq\n  tag: " + tag + "\n"
+	write(t, dir, "env.yaml", body)
+	return filepath.Join(dir, "env.yaml")
+}
+
+// TestDownloadReadsDeployedImageFromEnv pins the five precedence rows for the
+// config read download just gained.
+//
+// The read exists only so the command can say when the jar list it omits
+// against was captured from a different image than the one being deployed. It
+// is advisory by design: download is the command you run BEFORE you have a
+// deployment, so it has to work in an empty directory. That is why an absent
+// default env.yaml is silent while a file the operator NAMED failing to load
+// is systemic -- the same split --omit-lib-file already draws.
+func TestDownloadReadsDeployedImageFromEnv(t *testing.T) {
+	const wantRef = "solace/solace-pubsub-connector-ibmmq:2.14.1"
+
+	t.Run("default env.yaml present: the image reaches libs", func(t *testing.T) {
+		dir := t.TempDir()
+		downloadEnvWithImage(t, dir, "2.14.1")
+		f := &fakeDownload{}
+		useFakeDownload(t, f)
+		t.Chdir(dir)
+		if code := dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}); code != 0 {
+			t.Fatalf("exit=%d, want 0", code)
+		}
+		if got := f.calls[0].DeployedImage; got != wantRef {
+			t.Errorf("DeployedImage = %q, want %q", got, wantRef)
+		}
+	})
+
+	t.Run("no env.yaml at all: silent, and still runs", func(t *testing.T) {
+		f := &fakeDownload{}
+		useFakeDownload(t, f)
+		t.Chdir(t.TempDir())
+		if code := dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}); code != 0 {
+			t.Fatalf("exit=%d, want 0: download must work with no config at all", code)
+		}
+		if got := f.calls[0].DeployedImage; got != "" {
+			t.Errorf("DeployedImage = %q, want empty", got)
+		}
+	})
+
+	t.Run("explicit -e that cannot be read is systemic", func(t *testing.T) {
+		f := &fakeDownload{}
+		useFakeDownload(t, f)
+		args := []string{"download", "jar", "mq", "-e", filepath.Join(t.TempDir(), "nope.yaml")}
+		if code := dispatch(args, &fakeRunner{}); code != 1 {
+			t.Errorf("exit=%d, want 1: the operator named this file", code)
+		}
+		if len(f.calls) != 0 {
+			t.Errorf("downloadFn must not run, got %d calls", len(f.calls))
+		}
+	})
+
+	t.Run("defaulted env.yaml that is malformed does not stop the download", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "env.yaml", "image: [this is not a mapping\n")
+		f := &fakeDownload{}
+		useFakeDownload(t, f)
+		t.Chdir(dir)
+		if code := dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}); code != 0 {
+			t.Fatalf("exit=%d, want 0: a broken config must not break a download that does not need it", code)
+		}
+		if got := f.calls[0].DeployedImage; got != "" {
+			t.Errorf("DeployedImage = %q, want empty", got)
+		}
+	})
+
+	t.Run("env.yaml with no image block", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "env.yaml", "workflows:\n  dir: .\n")
+		f := &fakeDownload{}
+		useFakeDownload(t, f)
+		t.Chdir(dir)
+		if code := dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}); code != 0 {
+			t.Fatalf("exit=%d, want 0", code)
+		}
+		if got := f.calls[0].DeployedImage; got != "" {
+			t.Errorf("DeployedImage = %q, want empty: nothing to compare", got)
+		}
+	})
 }
 
 // ---- generate kubernetes / docker / podman ---------------------------------------
@@ -1531,101 +2165,680 @@ func TestOldPositionalFormsRejectedWithPlatformHint(t *testing.T) {
 }
 
 // ---- m) status ------------------------------------------------------------------
+//
+// status now answers two questions behind a target word, so these cases come in
+// three groups: the word itself and the flag combinations that cannot mean
+// anything (rejected before any query runs), the container view (engine facts,
+// no exec into anything), and the application view (the in-container script,
+// still through the probe/install/run dance).
+//
+// The engine queries are asserted by their argv and their COUNT: one call for
+// many instances is the whole cost argument for collecting engine facts by
+// default, and a regression to one call per instance would pass every content
+// assertion while quietly multiplying the cost.
 
-// TestStatusScriptPresentRunsAndReportsOutput covers the simplest matrix
-// entry: the script is already installed, so status just runs it and prints
-// its output under the target's banner, every line indented by two.
-func TestStatusScriptPresentRunsAndReportsOutput(t *testing.T) {
-	q := &queueRunner{resp: []queuedResp{
-		{"", nil},                                // preflight: kubectl auth can-i create deployment
-		{runner.ScriptPresentMarker + "\n", nil}, // ScriptInstalled: present
-		{"leader-election mode: standalone\nleader-election state: active\n", nil}, // RunStatusScript
-	}}
+// podsJSON is the `kubectl get pods -o json` answer these cases work from: one
+// running pod and one crash-looping pod of the same deployment.
+const podsJSON = `{"items":[
+	  {"metadata":{"name":"pod-a","namespace":"prod"},
+	   "spec":{"nodeName":"node-a","containers":[{"name":"connector","image":"solace/x:2.14.1",
+	     "readinessProbe":{"tcpSocket":{"port":8090}},
+	     "resources":{"limits":{"cpu":"1","memory":"1Gi"}},
+	     "volumeMounts":[{"name":"config","mountPath":"/app/external/spring/config/application.yml"}]}],
+	   "volumes":[{"name":"config","configMap":{"name":"solmq-connector-config"}}]},
+	   "status":{"phase":"Running","containerStatuses":[{"name":"connector","ready":true,"restartCount":0,
+	     "image":"solace/x:2.14.1","imageID":"docker-pullable://solace/x@sha256:9f2a1c",
+	     "state":{"running":{"startedAt":"2026-08-18T04:12:07Z"}}}]}},
+	  {"metadata":{"name":"pod-b","namespace":"prod"},
+	   "spec":{"containers":[{"name":"connector","image":"solace/x:2.14.1",
+	     "readinessProbe":{"tcpSocket":{"port":8090}}}]},
+	   "status":{"phase":"Running","startTime":"2026-08-18T04:11:05Z",
+	    "containerStatuses":[{"name":"connector","ready":false,"restartCount":7,
+	     "image":"solace/x:2.14.1",
+	     "state":{"waiting":{"reason":"CrashLoopBackOff"}},
+	     "lastState":{"terminated":{"exitCode":137,"reason":"OOMKilled"}}}]}}]}`
+
+// onePodJSON is the same document narrowed to one healthy pod, for the cases
+// that are about the application half rather than the table.
+const onePodJSON = `{"items":[{"metadata":{"name":"pod-a"},
+	  "spec":{"containers":[{"name":"connector","image":"solace/x:2.14.1"}]},
+	  "status":{"phase":"Running","containerStatuses":[{"name":"connector","ready":true,"restartCount":0,
+	    "image":"solace/x:2.14.1","state":{"running":{"startedAt":"2026-08-18T04:12:07Z"}}}]}}]}`
+
+// dockerInspect is the `docker inspect` answer for one composed container.
+const dockerInspect = `[{"Name":"/solmq-connector","State":{"Status":"running","StartedAt":"2026-08-18T04:12:07Z","Health":{"Status":"healthy"}},
+  "RestartCount":0,"Config":{"Image":"solace/x:2.14.1","Labels":{"com.docker.compose.project":"eg"}},
+  "HostConfig":{"NanoCpus":0,"Memory":0}}]`
+
+const appReport = "leader-election mode: active_standby\nleader-election state: active\nhealth: UP\n"
+
+// ---- the target word and the flag combinations that cannot mean anything ----
+
+// TestStatusTargetWordIsRequired covers the deliberate breaking change: the two
+// views answer different questions, so neither is a safe default and a bare
+// `status` prints the verb's own usage instead of guessing.
+func TestStatusTargetWordIsRequired(t *testing.T) {
+	f := &fakeRunner{}
 	var code int
-	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+	stderr := captureStderr(t, func() { code = dispatch([]string{"status"}, f) })
+	if code != 2 {
+		t.Errorf("exit=%d, want 2", code)
+	}
+	for _, want := range []string{"missing target", "container", "application", "all", "Targets:"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr should carry %q, got:\n%s", want, stderr)
+		}
+	}
+	// The short spellings (cnt, app) are deliberately absent: aliases keep
+	// working but are documented only in the markdown docs, and this page is
+	// rendered by the same verbUsage the no-alias gate covers
+	// (TestVerbUsagePages).
+	for _, alias := range []string{" cnt ", " app "} {
+		if strings.Contains(stderr, alias) {
+			t.Errorf("the help page should not show alias %q, got:\n%s", strings.TrimSpace(alias), stderr)
+		}
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("nothing must run, got %d calls", len(f.calls))
+	}
+}
+
+func TestStatusUnknownAndExtraTargetWords(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"unknown word", []string{"status", "bogus"}, "unknown target"},
+		{"a second word", []string{"status", "all", "extra"}, "unexpected argument"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeRunner{}
+			var code int
+			stderr := captureStderr(t, func() { code = dispatch(c.args, f) })
+			if code != 2 {
+				t.Errorf("exit=%d, want 2", code)
+			}
+			if !strings.Contains(stderr, c.want) {
+				t.Errorf("stderr should say %q, got:\n%s", c.want, stderr)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("nothing must run, got %d calls", len(f.calls))
+			}
+		})
+	}
+}
+
+// TestStatusTargetsMatchModel is the drift gate between the words the model
+// documents, the constants the views switch on, and the bracket every usage
+// line and doc renders. statusTargetArgBracket cannot be built from the model
+// (cliVerbs' own initialiser uses it), so this is what keeps them in step.
+func TestStatusTargetsMatchModel(t *testing.T) {
+	modeled := targetNames("status")
+	want := []string{statusTargetContainer, statusTargetApplication, statusTargetAll}
+	if strings.Join(modeled, ",") != strings.Join(want, ",") {
+		t.Errorf("modeled target words = %v, want %v", modeled, want)
+	}
+	if got := "<" + pipeList(modeled) + ">"; got != statusTargetArgBracket {
+		t.Errorf("statusTargetArgBracket = %q, want %q", statusTargetArgBracket, got)
+	}
+	// Every word the views accept has to be a modeled word, and every modeled
+	// word has to reach a view.
+	for _, w := range modeled {
+		if _, code := statusView([]string{w}); code != 0 {
+			t.Errorf("modeled word %q does not resolve to a view", w)
+		}
+	}
+}
+
+func TestStatusTargetAliasesResolve(t *testing.T) {
+	cases := []struct{ typed, want string }{
+		{"cnt", statusTargetContainer},
+		{"app", statusTargetApplication},
+		{"container", statusTargetContainer},
+		{"all", statusTargetAll},
+		{"bogus", "bogus"}, // unknown words pass through for the caller to reject
+	}
+	for _, c := range cases {
+		if got := resolveTarget("status", c.typed); got != c.want {
+			t.Errorf("resolveTarget(%q) = %q, want %q", c.typed, got, c.want)
+		}
+	}
+	// And an alias really drives the view: cnt runs the container half, which
+	// never execs into anything.
+	q := &queueRunner{resp: []queuedResp{{"", nil}, {podsJSON, nil}}}
+	var code int
+	captureStdout(t, func() {
+		code = dispatch([]string{"sts", "cnt", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
-	// No env.yaml behind an explicit --pod, so the banner carries the platform
-	// and the pod alone -- an unresolved namespace or deployment is dropped
-	// rather than printed as an empty segment.
-	want := "=== kubernetes  pod-a ===\n" +
-		"  leader-election mode: standalone\n" +
-		"  leader-election state: active\n"
-	if stdout != want {
-		t.Errorf("stdout = %q, want %q", stdout, want)
-	}
-	if len(q.calls) != 3 {
-		t.Fatalf("want 3 runner calls, got %d: %+v", len(q.calls), q.calls)
+	if len(q.calls) != 2 {
+		t.Errorf("the container view should cost preflight + one get, got %d calls: %+v", len(q.calls), q.calls)
 	}
 }
 
-// TestStatusAbsentPlusInstallFlagInstallsThenRuns covers --install: a missing
-// script is installed without any prompt, then run.
-func TestStatusAbsentPlusInstallFlagInstallsThenRuns(t *testing.T) {
+// TestStatusRejectsImpossibleFlagCombinations covers every combination that
+// cannot mean anything. Each is refused before a single query runs, rather than
+// being silently ignored -- an operator who typed --install on the container
+// view expects it to do something.
+func TestStatusRejectsImpossibleFlagCombinations(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"unknown output format", []string{"status", "all", "--output", "yaml"}, "unknown --output"},
+		{"json and watch", []string{"status", "all", "--output", "json", "-w"}, "cannot be combined with --watch"},
+		{"all with an explicit pod", []string{"status", "all", "--all", "--pod", "pod-a"}, "cannot be combined with --pod/--container"},
+		{"all with an explicit container", []string{"status", "all", "--all", "--container", "c1"}, "cannot be combined with --pod/--container"},
+		{"install on the container view", []string{"status", "container", "--install"}, "--install applies to the application"},
+		{"user on the container view", []string{"status", "cnt", "--user", "ops"}, "--user applies to the application"},
+		{"management port on the container view", []string{"status", "container", "--management-port", "9090"}, "--management-port applies to the application"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeRunner{}
+			var code int
+			stderr := captureStderr(t, func() { code = dispatch(c.args, f) })
+			if code != 2 {
+				t.Errorf("exit=%d, want 2", code)
+			}
+			if !strings.Contains(stderr, c.want) {
+				t.Errorf("stderr should explain the conflict (%q), got:\n%s", c.want, stderr)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("nothing must run, got %d calls", len(f.calls))
+			}
+		})
+	}
+}
+
+// TestWatchFlagAcceptsBareAndInterval covers the flag that is boolean in every
+// documented sense but also takes an interval. The =<seconds> form is
+// deliberately undocumented (see watchFlag), so this is the only place it is
+// asserted at all.
+func TestWatchFlagAcceptsBareAndInterval(t *testing.T) {
+	var w watchFlag
+	if !w.IsBoolFlag() {
+		t.Fatal("the bare -w spelling needs IsBoolFlag")
+	}
+	if err := w.Set("true"); err != nil || !w.on || w.interval != watchDefaultSeconds*time.Second {
+		t.Errorf("bare -w = %+v, err %v", w, err)
+	}
+	if err := w.Set("30"); err != nil || !w.on || w.interval != 30*time.Second {
+		t.Errorf("-w=30 = %+v, err %v", w, err)
+	}
+	if err := w.Set("false"); err != nil || w.on {
+		t.Errorf("-w=false should turn it off, got %+v err %v", w, err)
+	}
+	for _, bad := range []string{"0", "3601", "soon"} {
+		if err := (&watchFlag{}).Set(bad); err == nil {
+			t.Errorf("-w=%s should be rejected", bad)
+		}
+	}
+}
+
+// ---- the container view ---------------------------------------------------------
+
+// TestStatusContainerViewReadsEngineFactsWithoutExecing is the shape of the new
+// view: one read-only query answers discovery and the whole table, and nothing
+// is ever exec'd into -- the in-container script is not involved at all.
+func TestStatusContainerViewReadsEngineFactsWithoutExecing(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
-		{"", nil},                               // preflight
-		{runner.ScriptAbsentMarker + "\n", nil}, // ScriptInstalled: absent
-		{"", nil},                               // InstallScript
-		{"leader-election mode: standalone\nleader-election state: active\n", nil}, // RunStatusScript
+		{"", nil},       // preflight: kubectl auth can-i create deployment
+		{podsJSON, nil}, // get pods -o json: discovery and facts together
 	}}
-	if code := dispatch([]string{"status", "--install", "--platform", "kubernetes", "--pod", "pod-a"}, q); code != 0 {
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "container", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
+	})
+	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
-	if len(q.calls) != 4 {
-		t.Fatalf("want 4 runner calls, got %d: %+v", len(q.calls), q.calls)
+	for _, want := range []string{
+		// Both pods share a namespace, so it rides in the banner rather than
+		// repeating down a column of its own.
+		"== kubernetes  prod ==",
+		"NAME", "STATE", "READY", "RESTARTS", "AGE", "IMAGE",
+		"pod-a", "running", "yes",
+		"pod-b", "restarting (CrashLoopBackOff)", "no", "7",
+		"solace/x:2.14.1",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("table is missing %q, got:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "NAMESPACE") {
+		t.Errorf("one namespace belongs in the banner, not in a column, got:\n%s", stdout)
+	}
+	if len(q.calls) != 2 {
+		t.Fatalf("want 2 calls (preflight, get pods), got %d: %+v", len(q.calls), q.calls)
+	}
+	// Nothing was exec'd: no probe, no install, no script run.
+	for _, c := range q.calls {
+		for _, tok := range c.argv {
+			if tok == "exec" {
+				t.Errorf("the container view must not exec into anything: %v", c.argv)
+			}
+		}
+	}
+	if got := q.calls[1].argv; got[len(got)-1] != "json" {
+		t.Errorf("discovery should ask for json, got %v", got)
 	}
 }
 
-// TestStatusAbsentPromptYesInstallsThenRuns covers the same absent-script case
-// without --install: one prompt (via the injected promptLine seam) answered
-// "y" installs, then runs.
-func TestStatusAbsentPromptYesInstallsThenRuns(t *testing.T) {
-	withPromptAnswer(t, "y")
+// TestStatusContainerDetailsSamplesAndChecksComponents covers what --details
+// adds on kubernetes: one sampling call for the whole run, and one presence
+// check per distinct referenced object -- deduplicated, since every pod of a
+// deployment references the same ones.
+func TestStatusContainerDetailsSamplesAndChecksComponents(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
-		{"", nil},                               // preflight
-		{runner.ScriptAbsentMarker + "\n", nil}, // probe: absent
-		{"", nil},                               // install
-		{"leader-election mode: standalone\nleader-election state: active\n", nil}, // run
+		{"", nil},       // preflight
+		{podsJSON, nil}, // get pods
+		{"pod-a   connector   120m   512Mi\n", nil},                                // top pod --containers
+		{`{"kind":"ConfigMap","metadata":{"name":"solmq-connector-config"}}`, nil}, // get configmap (pod-a's only reference)
 	}}
-	if code := dispatch([]string{"status", "--platform", "kubernetes", "--pod", "pod-a"}, q); code != 0 {
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "container", "-d", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
+	})
+	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
+	for _, want := range []string{
+		"NODE", "node-a",
+		"digest:", "sha256:9f2a1c",
+		"cpu:", "120m of 1 (12%)",
+		"memory:", "512Mi of 1Gi (50%)",
+		"components:", "configmap", "solmq-connector-config", "present",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("details view is missing %q, got:\n%s", want, stdout)
+		}
+	}
 	if len(q.calls) != 4 {
-		t.Fatalf("want 4 runner calls, got %d: %+v", len(q.calls), q.calls)
+		t.Fatalf("want 4 calls (preflight, get pods, top, one component check), got %d: %+v", len(q.calls), q.calls)
+	}
+	if !containsToken(q.calls[2].argv, "--containers") {
+		t.Errorf("the sample must be per container, got %v", q.calls[2].argv)
 	}
 }
 
-// TestStatusAbsentPromptNoSkipsAndExitsOne covers declining the install
-// prompt: the target is skipped (never installed, never run) and the overall
-// exit code is 1.
-func TestStatusAbsentPromptNoSkipsAndExitsOne(t *testing.T) {
-	withPromptAnswer(t, "n")
+// TestStatusContainerDetailsWithoutMetricsServerDegradesToANote covers the
+// cluster with no metrics API: an optional add-on being absent must cost the
+// resource lines and nothing else -- the report still prints, and the exit code
+// is still about the instances, not about the collection.
+func TestStatusContainerDetailsWithoutMetricsServerDegradesToANote(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
-		{"", nil},                               // preflight
-		{runner.ScriptAbsentMarker + "\n", nil}, // probe: absent
+		{"", nil},
+		{onePodJSON, nil},
+		{"error: Metrics API not available\n", fmt.Errorf("exit status 1")}, // top fails
 	}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "container", "-d", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0 (a missing add-on is not a failed status run)", code)
+	}
+	if !strings.Contains(stdout, "status: no resource usage") {
+		t.Errorf("the report should carry a note, got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "metrics-server") {
+		t.Errorf("the note should say what to install, got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "pod-a") {
+		t.Errorf("the table must still print, got:\n%s", stdout)
+	}
+}
+
+// TestStatusDockerContainerViewIsOneInspect covers docker: one inspect answers
+// every target, and the compose project comes off the container's own label in
+// that same call rather than costing a second lookup per target.
+func TestStatusDockerContainerViewIsOneInspect(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},            // preflight: docker info
+		{dockerInspect, nil}, // inspect
+	}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "container", "--platform", "docker", "--container", "solmq-connector"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	// docker reports a healthcheck verdict where kubernetes reports readiness.
+	for _, want := range []string{"HEALTH", "healthy", "solmq-connector", "solace/x:2.14.1"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("table is missing %q, got:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "READY") {
+		t.Errorf("docker has no readiness concept, got:\n%s", stdout)
+	}
+	if len(q.calls) != 2 {
+		t.Fatalf("want 2 calls (preflight, inspect), got %d: %+v", len(q.calls), q.calls)
+	}
+}
+
+// TestStatusPodmanRestartCountComesFromSystemd covers the quadlet truth: podman
+// recreates the container on restart, so its own counter reads 0 and systemd is
+// the only thing that remembers.
+func TestStatusPodmanRestartCountComesFromSystemd(t *testing.T) {
+	podmanInspect := `[{"Name":"solmq-connector","State":{"Status":"running","StartedAt":"2026-08-18T04:12:07Z"},
+	  "RestartCount":0,"Config":{"Image":"solace/x:2.14.1"},"HostConfig":{}}]`
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},            // preflight: podman info
+		{podmanInspect, nil}, // inspect
+		{"7\n", nil},         // systemctl show ... NRestarts
+	}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "container", "--platform", "podman", "--container", "solmq-connector"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if !strings.Contains(stdout, "7") {
+		t.Errorf("the systemd count should reach the table, got:\n%s", stdout)
+	}
+	last := q.calls[len(q.calls)-1].argv
+	if last[0] != "systemctl" || !containsToken(last, "NRestarts") {
+		t.Errorf("last call = %v, want a systemctl NRestarts read", last)
+	}
+}
+
+// TestStatusPodmanRestartCountFallsBackWhenSystemdCannotAnswer covers a
+// container systemd knows nothing about (not quadlet-managed, or no systemd on
+// the host): the container's own counter stays, and nothing fails.
+func TestStatusPodmanRestartCountFallsBackWhenSystemdCannotAnswer(t *testing.T) {
+	podmanInspect := `[{"Name":"solmq-connector","State":{"Status":"running","StartedAt":"2026-08-18T04:12:07Z"},
+	  "RestartCount":3,"Config":{"Image":"solace/x:2.14.1"},"HostConfig":{}}]`
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},
+		{podmanInspect, nil},
+		{"", fmt.Errorf("systemctl: not found")},
+	}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "container", "--platform", "podman", "--container", "solmq-connector"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if !strings.Contains(stdout, "3") {
+		t.Errorf("the container's own count should remain, got:\n%s", stdout)
+	}
+}
+
+// TestStatusAllSearchesByImage covers --all on both kinds of platform: the
+// operator names nothing, so the image reference is what identifies an
+// instance.
+func TestStatusAllSearchesByImage(t *testing.T) {
+	t.Run("kubernetes searches every namespace", func(t *testing.T) {
+		pods := `{"items":[
+		  {"metadata":{"name":"ours","namespace":"prod"},
+		   "spec":{"containers":[{"name":"connector","image":"reg/solace-pubsub-connector-ibmmq:2.14.1"}]},
+		   "status":{"phase":"Running","containerStatuses":[{"name":"connector","ready":true,"state":{"running":{"startedAt":"2026-08-18T04:12:07Z"}}}]}},
+		  {"metadata":{"name":"another-teams","namespace":"other"},
+		   "spec":{"containers":[{"name":"connector","image":"reg/solace-pubsub-connector-ibmmq:2.13.0"}]},
+		   "status":{"phase":"Running","containerStatuses":[{"name":"connector","ready":true,"state":{"running":{"startedAt":"2026-08-18T04:12:07Z"}}}]}},
+		  {"metadata":{"name":"theirs","namespace":"other"},
+		   "spec":{"containers":[{"name":"app","image":"nginx:1.27"}]},
+		   "status":{"phase":"Running"}}]}`
+		q := &queueRunner{resp: []queuedResp{{"", nil}, {pods, nil}}}
+		var code int
+		stdout := captureStdout(t, func() {
+			code = dispatch([]string{"status", "container", "--platform", "kubernetes", "--all"}, q)
+		})
+		if code != 0 {
+			t.Fatalf("exit=%d, want 0", code)
+		}
+		if !containsToken(q.calls[1].argv, "--all-namespaces") {
+			t.Errorf("--all must search the whole cluster, got %v", q.calls[1].argv)
+		}
+		for _, want := range []string{"ours", "another-teams"} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("connector pod %q should be reported, got:\n%s", want, stdout)
+			}
+		}
+		if strings.Contains(stdout, "theirs") {
+			t.Errorf("an unrelated pod must be filtered out, got:\n%s", stdout)
+		}
+		// Instances found in different namespaces cannot share one banner, so each
+		// row carries its own.
+		if !strings.Contains(stdout, "NAMESPACE") {
+			t.Errorf("a cluster-wide table spanning namespaces needs the namespace column, got:\n%s", stdout)
+		}
+		for _, want := range []string{"prod", "other"} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("namespace %q should appear, got:\n%s", want, stdout)
+			}
+		}
+	})
+
+	t.Run("docker lists then inspects the matches", func(t *testing.T) {
+		list := "solmq-connector\tsolace/solace-pubsub-connector-ibmmq:2.14.1\nredis\tredis:7\n"
+		inspect := `[{"Name":"/solmq-connector","State":{"Status":"running","StartedAt":"2026-08-18T04:12:07Z"},
+		  "Config":{"Image":"solace/solace-pubsub-connector-ibmmq:2.14.1"},"HostConfig":{}}]`
+		q := &queueRunner{resp: []queuedResp{{"", nil}, {list, nil}, {inspect, nil}}}
+		var code int
+		stdout := captureStdout(t, func() {
+			code = dispatch([]string{"status", "container", "--platform", "docker", "--all"}, q)
+		})
+		if code != 0 {
+			t.Fatalf("exit=%d, want 0", code)
+		}
+		if !containsToken(q.calls[1].argv, "ps") || !containsToken(q.calls[1].argv, "--all") {
+			t.Errorf("discovery should list every container, got %v", q.calls[1].argv)
+		}
+		// Only the matching name reaches the inspect argv.
+		if !containsToken(q.calls[2].argv, "solmq-connector") || containsToken(q.calls[2].argv, "redis") {
+			t.Errorf("only matches should be inspected, got %v", q.calls[2].argv)
+		}
+		if !strings.Contains(stdout, "solmq-connector") {
+			t.Errorf("got:\n%s", stdout)
+		}
+	})
+}
+
+// TestStatusAllWithNoMatchIsActionable covers the empty search: it names what
+// it looked for, since there is no env.yaml in play to point at.
+func TestStatusAllWithNoMatchIsActionable(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{{"", nil}, {`{"items":[]}`, nil}}}
+	var code int
 	stderr := captureStderr(t, func() {
-		code := dispatch([]string{"status", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+		code = dispatch([]string{"status", "container", "--platform", "kubernetes", "--all"}, q)
+	})
+	if code != 1 {
+		t.Errorf("exit=%d, want 1", code)
+	}
+	if !strings.Contains(stderr, "solace-pubsub-connector-ibmmq") {
+		t.Errorf("the error should name the image it searched for, got:\n%s", stderr)
+	}
+}
+
+// ---- the application view -------------------------------------------------------
+
+// TestStatusApplicationViewRunsTheScriptAndRendersItsFacts covers the path this
+// verb has always had, now rendered from the parsed model rather than echoed
+// verbatim: the values line up, and the banner is unchanged.
+func TestStatusApplicationViewRunsTheScriptAndRendersItsFacts(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},                                // preflight
+		{onePodJSON, nil},                        // get pods
+		{runner.ScriptPresentMarker + "\n", nil}, // probe: present
+		{appReport + "workflows:\n   0: running\n  10: stopped\n", nil}, // run
+	}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "application", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	want := "=== kubernetes  pod-a ===\n" +
+		"  leader-election mode:  active_standby\n" +
+		"  leader-election state: active\n" +
+		"  health:                UP\n" +
+		"  workflows:\n" +
+		"     0: running\n" +
+		"    10: stopped\n"
+	if stdout != want {
+		t.Errorf("stdout =\n%q\nwant\n%q", stdout, want)
+	}
+	// The application view prints no table, even though it collected the engine
+	// facts it needs to explain a failure.
+	if strings.Contains(stdout, "STATE") {
+		t.Errorf("the application view must not print the container table, got:\n%s", stdout)
+	}
+}
+
+// TestStatusApplicationDetailsAddsTheEnrichmentLines covers -d on the
+// application side: the script always prints every line it can, and the level
+// decides which of them reach the operator.
+func TestStatusApplicationDetailsAddsTheEnrichmentLines(t *testing.T) {
+	full := appReport +
+		"health components:\n  solace: UP\n  ibmmq: UP\n" +
+		"uptime: 3d 4h 31m\nversion: 2.14.1\njava: openjdk 17.0.9\n" +
+		"config: /app/external/spring/config/application.yml\n" +
+		"heap: 432013312 of 1073741824\n"
+
+	report := func(args ...string) string {
+		q := &queueRunner{resp: []queuedResp{
+			{"", nil}, {onePodJSON, nil},
+			{runner.ScriptPresentMarker + "\n", nil}, {full, nil},
+		}}
+		return captureStdout(t, func() {
+			if code := dispatch(args, q); code != 0 {
+				t.Fatalf("%v: exit=%d, want 0", args, code)
+			}
+		})
+	}
+
+	details := report("status", "app", "-d", "--platform", "kubernetes", "--pod", "pod-a")
+	for _, want := range []string{
+		"uptime:", "3d 4h 31m",
+		"version:", "2.14.1",
+		"java:", "openjdk 17.0.9",
+		"config:", "/app/external/spring/config/application.yml",
+		// The script hands over raw bytes on purpose; the rendering happens here.
+		"heap:", "412Mi of 1Gi (40%)",
+		"health components:", "solace: UP", "ibmmq:  UP",
+	} {
+		if !strings.Contains(details, want) {
+			t.Errorf("details block is missing %q, got:\n%s", want, details)
+		}
+	}
+
+	// The same collection at the basic level prints none of it: one script run,
+	// two levels of report.
+	basic := report("status", "app", "--platform", "kubernetes", "--pod", "pod-a")
+	for _, mustNot := range []string{"uptime:", "version:", "java:", "config:", "heap:", "health components:"} {
+		if strings.Contains(basic, mustNot) {
+			t.Errorf("the basic level must not carry %q, got:\n%s", mustNot, basic)
+		}
+	}
+}
+
+// TestStatusFailedScriptRunStillGetsItsOwnBlock is the other half of the
+// rework: an instance whose script could not run keeps its banner, with the
+// failure as a body line under the container facts that explain it. Before this
+// change that instance produced one stderr line and no block at all.
+func TestStatusFailedScriptRunStillGetsItsOwnBlock(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},                                // preflight
+		{podsJSON, nil},                          // get pods: pod-a fine, pod-b crash looping
+		{runner.ScriptPresentMarker + "\n", nil}, // pod-a probe
+		{runner.ScriptPresentMarker + "\n", nil}, // pod-b probe
+		{appReport, nil},                         // pod-a run
+		{"command terminated with exit code 126\n", fmt.Errorf("exit status 126")}, // pod-b run
+	}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "all", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1 (an instance that could not be run)", code)
+	}
+	if !strings.Contains(stdout, "=== kubernetes  prod / pod-b ===") {
+		t.Errorf("the failed instance needs its own banner, got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "status: could not run the status script") {
+		t.Errorf("the failure belongs in the block, got:\n%s", stdout)
+	}
+	// And the table above it says why: restarting, 7 restarts.
+	if !strings.Contains(stdout, "restarting (CrashLoopBackOff)") {
+		t.Errorf("the container facts should explain it, got:\n%s", stdout)
+	}
+	// A reachable instance in the same run still reports normally.
+	if !strings.Contains(stdout, "=== kubernetes  prod / pod-a ===") {
+		t.Errorf("one failure must not hide the rest, got:\n%s", stdout)
+	}
+}
+
+func TestStatusInstallPaths(t *testing.T) {
+	base := func(extra ...queuedResp) *queueRunner {
+		return &queueRunner{resp: append([]queuedResp{
+			{"", nil},                               // preflight
+			{onePodJSON, nil},                       // get pods
+			{runner.ScriptAbsentMarker + "\n", nil}, // probe: absent
+		}, extra...)}
+	}
+
+	t.Run("--install installs without asking", func(t *testing.T) {
+		q := base(queuedResp{"", nil}, queuedResp{appReport, nil})
+		captureStdout(t, func() {
+			if code := dispatch([]string{"status", "app", "--install", "--platform", "kubernetes", "--pod", "pod-a"}, q); code != 0 {
+				t.Fatalf("exit=%d, want 0", code)
+			}
+		})
+		if len(q.calls) != 5 {
+			t.Fatalf("want 5 calls (preflight, get, probe, install, run), got %d: %+v", len(q.calls), q.calls)
+		}
+	})
+
+	t.Run("prompt answered yes installs", func(t *testing.T) {
+		withPromptAnswer(t, "y")
+		q := base(queuedResp{"", nil}, queuedResp{appReport, nil})
+		captureStdout(t, func() {
+			if code := dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, q); code != 0 {
+				t.Fatalf("exit=%d, want 0", code)
+			}
+		})
+		if len(q.calls) != 5 {
+			t.Fatalf("want 5 calls, got %d: %+v", len(q.calls), q.calls)
+		}
+	})
+
+	t.Run("prompt declined skips the instance and exits 1", func(t *testing.T) {
+		withPromptAnswer(t, "n")
+		q := base()
+		var code int
+		stdout := captureStdout(t, func() {
+			code = dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+		})
 		if code != 1 {
 			t.Fatalf("exit=%d, want 1", code)
 		}
+		// The reason travels with the instance, not on stderr where nothing
+		// explains it.
+		if !strings.Contains(stdout, "status: the status script is not installed") {
+			t.Errorf("the skip should be reported in the block, got:\n%s", stdout)
+		}
+		if len(q.calls) != 3 {
+			t.Fatalf("nothing should be installed or run, got %d calls: %+v", len(q.calls), q.calls)
+		}
 	})
-	if !strings.Contains(stderr, "pod-a: skipped") {
-		t.Errorf("stderr should report the skipped target, got:\n%s", stderr)
-	}
-	if len(q.calls) != 2 {
-		t.Fatalf("want 2 runner calls (preflight, probe) -- no install, no run -- got %d: %+v", len(q.calls), q.calls)
-	}
 }
 
 // TestStatusInstallPromptNonTTYRefusesWithInstallHint is the confirmInstall
 // counterpart to TestPlatformMenuNonTTYRefusesWithPlatformHint: the install
-// confirmation shares the same stdin seam, so it must also refuse rather than
-// block on a read that would never return, and point at --install (not
-// --platform, which is already satisfied here).
+// confirmation shares the same stdin seam, so it must refuse rather than block
+// on a read that would never return, and point at --install.
 func TestStatusInstallPromptNonTTYRefusesWithInstallHint(t *testing.T) {
 	oldStdin := os.Stdin
 	pr, pw, perr := os.Pipe()
@@ -1638,118 +2851,198 @@ func TestStatusInstallPromptNonTTYRefusesWithInstallHint(t *testing.T) {
 		_ = pw.Close()
 		_ = pr.Close()
 	})
+	_ = pw.Close() // EOF: a read returns immediately, as it would in CI
 
-	q := &queueRunner{resp: []queuedResp{
-		{"", nil},                               // preflight
-		{runner.ScriptAbsentMarker + "\n", nil}, // probe: script absent
-	}}
-	stderr := captureStderr(t, func() {
-		code := dispatch([]string{"status", "--platform", "kubernetes", "--pod", "pod-a"}, q)
-		if code != 1 {
-			t.Fatalf("exit=%d, want 1", code)
-		}
-	})
-	if !strings.Contains(stderr, "--install") {
-		t.Errorf("non-tty install prompt error should mention --install, got:\n%s", stderr)
-	}
-	if len(q.calls) != 2 {
-		t.Fatalf("want 2 runner calls (preflight, probe) -- nothing installed or run -- got %d: %+v", len(q.calls), q.calls)
-	}
-}
-
-// TestStatusBannerNamesTheInstancePerPlatform covers the identity line above
-// each report. It exists because the report itself cannot carry any of this:
-// the script runs inside the container and knows nothing of the namespace,
-// deployment or compose project that locate it from outside.
-//
-// Every unresolved name is dropped rather than rendered as an empty segment,
-// which is what an explicit --pod with no env.yaml, or a container compose did
-// not create, actually produces.
-func TestStatusBannerNamesTheInstancePerPlatform(t *testing.T) {
-	tests := []struct {
-		name                                           string
-		platform, namespace, deployment, group, target string
-		want                                           string
-	}{
-		{
-			name: "kubernetes, everything resolved", platform: "kubernetes",
-			namespace: "prod", deployment: "solmq-connector", target: "solmq-connector-7d9f8c6b5-x2n4q",
-			want: "kubernetes  prod / solmq-connector / solmq-connector-7d9f8c6b5-x2n4q",
-		},
-		{
-			name: "kubernetes, explicit --pod with no env.yaml", platform: "kubernetes",
-			target: "pod-a", want: "kubernetes  pod-a",
-		},
-		{
-			name: "docker, container in a compose project", platform: "docker",
-			group: "eg", target: "solmq-connector", want: "docker  eg / solmq-connector",
-		},
-		{
-			name: "docker, container compose did not create", platform: "docker",
-			target: "solmq-connector", want: "docker  solmq-connector",
-		},
-		{
-			name: "podman, container only", platform: "podman",
-			target: "solmq-connector", want: "podman  solmq-connector",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := statusBanner(tt.platform, tt.namespace, tt.deployment, tt.group, tt.target); got != tt.want {
-				t.Errorf("statusBanner = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-// TestStatusDockerBannerCarriesComposeProject pins the one platform whose
-// banner needs a second lookup: the compose project is read back from the
-// container's own label rather than guessed from the compose file's directory,
-// so it costs one read-only inspect per target, after the report is run.
-func TestStatusDockerBannerCarriesComposeProject(t *testing.T) {
-	q := &queueRunner{resp: []queuedResp{
-		{"", nil},                                // preflight: docker info
-		{runner.ScriptPresentMarker + "\n", nil}, // probe: present
-		{"leader-election mode: standalone\nleader-election state: active\n", nil}, // run
-		{"eg\n", nil}, // inspect: the compose project label
-	}}
-	var code int
-	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "--platform", "docker", "--container", "solmq-connector"}, q)
-	})
-	if code != 0 {
-		t.Fatalf("exit=%d, want 0", code)
-	}
-	if !strings.Contains(stdout, "=== docker  eg / solmq-connector ===") {
-		t.Errorf("banner missing the compose project, got:\n%s", stdout)
-	}
-	last := q.calls[len(q.calls)-1].argv
-	if len(last) < 2 || last[1] != "inspect" {
-		t.Errorf("last call = %v, want a docker inspect", last)
-	}
-}
-
-// TestStatusDockerBannerWithoutComposeProject covers the same path when the
-// container was not created by compose: the inspect answers nothing usable and
-// the group segment is dropped instead of leaving a dangling separator.
-func TestStatusDockerBannerWithoutComposeProject(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
 		{"", nil},
-		{runner.ScriptPresentMarker + "\n", nil},
-		{"leader-election mode: standalone\nleader-election state: active\n", nil},
-		{"<no value>\n", nil}, // inspect: no such label
+		{onePodJSON, nil},
+		{runner.ScriptAbsentMarker + "\n", nil},
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "--platform", "docker", "--container", "solmq-connector"}, q)
+		code = dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	if !strings.Contains(stdout, "--install") {
+		t.Errorf("the refusal should point at --install, got:\n%s", stdout)
+	}
+	if len(q.calls) != 3 {
+		t.Fatalf("nothing installed or run, got %d calls: %+v", len(q.calls), q.calls)
+	}
+}
+
+// TestStatusStandbyIsAnAnswerNotAFailure keeps the contract the whole verb is
+// built on: the script always exits 0 and carries the state in its output, so a
+// standby instance prints like any other and the run still exits 0.
+func TestStatusStandbyIsAnAnswerNotAFailure(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},
+		{podsJSON, nil},
+		{runner.ScriptPresentMarker + "\n", nil},
+		{runner.ScriptPresentMarker + "\n", nil},
+		{"leader-election mode: active_standby\nleader-election state: standby\n", nil},
+		{"leader-election mode: active_standby\nleader-election state: active\n", nil},
+	}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0 (standby is an answer, not a failure)", code)
+	}
+	for _, want := range []string{"leader-election state: standby", "leader-election state: active"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing %q, got:\n%s", want, stdout)
+		}
+	}
+}
+
+// ---- output format ---------------------------------------------------------------
+
+// TestStatusJSONOutputIsOneDocument covers --output json: the same model the
+// tables render, as one parseable document on stdout.
+func TestStatusJSONOutputIsOneDocument(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},
+		{onePodJSON, nil},
+		{runner.ScriptPresentMarker + "\n", nil},
+		{appReport, nil},
+	}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "all", "--output", "json", "--platform", "kubernetes", "--pod", "pod-a"}, q)
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
-	if !strings.Contains(stdout, "=== docker  solmq-connector ===") {
-		t.Errorf("banner should carry the container alone, got:\n%s", stdout)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("stdout must be one json document: %v\n%s", err, stdout)
+	}
+	if doc["schemaVersion"] != float64(statusreport.SchemaVersion) {
+		t.Errorf("schemaVersion = %v", doc["schemaVersion"])
+	}
+	insts, ok := doc["instances"].([]any)
+	if !ok || len(insts) != 1 {
+		t.Fatalf("instances = %v", doc["instances"])
+	}
+	inst := insts[0].(map[string]any)
+	if inst["name"] != "pod-a" {
+		t.Errorf("name = %v", inst["name"])
+	}
+	if _, ok := inst["container"]; !ok {
+		t.Error("the container half belongs in the document")
+	}
+	if _, ok := inst["application"]; !ok {
+		t.Error("the application half belongs in the document")
 	}
 }
+
+// TestStatusImageMismatchIsReportedAtBothLevels covers the failed-rollout
+// finding: a pod still on the old tag looks healthy in every other line of the
+// report, so the comparison against `image:` in env.yaml has to surface at the
+// basic level too -- where the per-instance detail block is not printed at all.
+func TestStatusImageMismatchIsReportedAtBothLevels(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "env.yaml")
+	env := "image:\n  name: solace/x\n  tag: \"2.15.0\"\nkubernetes:\n  deployment:\n    name: solmq-connector\n    namespace: prod\n"
+	if err := os.WriteFile(envPath, []byte(env), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deployment := `{"kind":"Deployment","metadata":{"name":"solmq-connector"},"spec":{"replicas":1},"status":{"readyReplicas":1,"updatedReplicas":1,"availableReplicas":1}}`
+
+	t.Run("basic reports it as a note", func(t *testing.T) {
+		q := &queueRunner{resp: []queuedResp{{"", nil}, {onePodJSON, nil}, {deployment, nil}}}
+		var code int
+		stdout := captureStdout(t, func() {
+			code = dispatch([]string{"status", "container", "-e", envPath, "--platform", "kubernetes", "--pod", "pod-a"}, q)
+		})
+		if code != 0 {
+			t.Fatalf("exit=%d, want 0 (a wrong image is a finding, not a failed run)", code)
+		}
+		for _, want := range []string{"status:", "not running the image env.yaml configures", "solace/x:2.15.0", "--details"} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("the note should carry %q, got:\n%s", want, stdout)
+			}
+		}
+	})
+
+	t.Run("details reports it per instance", func(t *testing.T) {
+		q := &queueRunner{resp: []queuedResp{
+			{"", nil}, {onePodJSON, nil}, {deployment, nil},
+			{"pod-a   connector   120m   512Mi\n", nil}, // top
+		}}
+		var code int
+		stdout := captureStdout(t, func() {
+			code = dispatch([]string{"status", "container", "-d", "-e", envPath, "--platform", "kubernetes", "--pod", "pod-a"}, q)
+		})
+		if code != 0 {
+			t.Fatalf("exit=%d, want 0", code)
+		}
+		if !strings.Contains(stdout, "image-expected:") || !strings.Contains(stdout, "solace/x:2.15.0") {
+			t.Errorf("the per-instance line is missing, got:\n%s", stdout)
+		}
+		// One statement of the finding, not two.
+		if strings.Contains(stdout, "instance(s) are not running") {
+			t.Errorf("the run-level note is redundant at the details level, got:\n%s", stdout)
+		}
+	})
+
+	t.Run("a matching image says nothing at all", func(t *testing.T) {
+		matching := "image:\n  name: solace/x\n  tag: \"2.14.1\"\nkubernetes:\n  deployment:\n    name: solmq-connector\n"
+		matchPath := filepath.Join(dir, "match.yaml")
+		if err := os.WriteFile(matchPath, []byte(matching), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		q := &queueRunner{resp: []queuedResp{{"", nil}, {onePodJSON, nil}, {deployment, nil}}}
+		var code int
+		stdout := captureStdout(t, func() {
+			code = dispatch([]string{"status", "container", "-e", matchPath, "--platform", "kubernetes", "--pod", "pod-a"}, q)
+		})
+		if code != 0 {
+			t.Fatalf("exit=%d, want 0", code)
+		}
+		if strings.Contains(stdout, "not running the image") {
+			t.Errorf("a correct image must be silent, got:\n%s", stdout)
+		}
+	})
+}
+
+// TestStatusDockerDetailsAddsDigestAndStats covers what --details costs on
+// docker and podman: the digest lives on the image rather than on the container
+// there, so it is a second call, and the resource sample is a third.
+func TestStatusDockerDetailsAddsDigestAndStats(t *testing.T) {
+	imageInspect := `[{"Id":"sha256:local","RepoDigests":["solace/x@sha256:9f2a1c4d8e"]}]`
+	stats := "solmq-connector\t0.15%\t512MiB / 1GiB\t50.00%\n"
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},            // preflight: docker info
+		{dockerInspect, nil}, // inspect
+		{imageInspect, nil},  // image inspect: the registry digest
+		{stats, nil},         // stats --no-stream
+	}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "container", "-d", "--platform", "docker", "--container", "solmq-connector"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	for _, want := range []string{"digest:", "sha256:9f2a1c4d8e", "cpu:", "0.15%", "memory:", "512MiB / 1GiB", "(50.00%)"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("details block is missing %q, got:\n%s", want, stdout)
+		}
+	}
+	if len(q.calls) != 4 {
+		t.Fatalf("want 4 calls (preflight, inspect, image inspect, stats), got %d: %+v", len(q.calls), q.calls)
+	}
+	if !containsToken(q.calls[3].argv, "--no-stream") {
+		t.Errorf("the sample must not stream, got %v", q.calls[3].argv)
+	}
+}
+
+// ---- boundary checks, unchanged in intent -----------------------------------------
 
 // TestStatusRejectsUnsafeUserBeforeAnyExec pins the boundary check on --user:
 // the account name reaches a sed address inside the generated script, so a
@@ -1758,77 +3051,13 @@ func TestStatusDockerBannerWithoutComposeProject(t *testing.T) {
 func TestStatusRejectsUnsafeUserBeforeAnyExec(t *testing.T) {
 	for _, user := range []string{"bad/user", "who$e", "a b", "quote'd"} {
 		f := &fakeRunner{}
-		code := dispatch([]string{"status", "--platform", "docker", "--container", "c1", "--user", user}, f)
+		code := dispatch([]string{"status", "app", "--platform", "docker", "--container", "c1", "--user", user}, f)
 		if code != 1 {
 			t.Errorf("--user %q: exit=%d, want 1", user, code)
 		}
 		if len(f.calls) != 0 {
 			t.Errorf("--user %q: runner must not be invoked, got %d calls", user, len(f.calls))
 		}
-	}
-}
-
-// TestStatusStandbyReportedWithoutAbortingOtherTargets asserts that standby is
-// reported as the ordinary answer it is: the script always exits 0 and carries
-// the state in its output, so a standby target prints like any other, the loop
-// still reaches the next target, and the overall exit code stays 0.
-func TestStatusStandbyReportedWithoutAbortingOtherTargets(t *testing.T) {
-	// Every target is probed before any is run, so one install prompt can list
-	// all the missing ones -- hence both probes ahead of both runs here.
-	q := &queueRunner{resp: []queuedResp{
-		{"", nil},                                // preflight
-		{runner.ScriptPresentMarker + "\n", nil}, // pod-a probe: present
-		{runner.ScriptPresentMarker + "\n", nil}, // pod-b probe: present
-		{"leader-election mode: standalone\nleader-election state: standby\n", nil}, // pod-a run: standby
-		{"leader-election mode: standalone\nleader-election state: active\n", nil},  // pod-b run: active
-	}}
-	var code int
-	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
-	})
-	if code != 0 {
-		t.Fatalf("exit=%d, want 0 (standby is an answer, not a failure)", code)
-	}
-	for _, want := range []string{
-		"=== kubernetes  pod-a ===\n  leader-election mode: standalone", "  leader-election state: standby",
-		"=== kubernetes  pod-b ===\n  leader-election mode: standalone", "  leader-election state: active",
-	} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("stdout missing %q, got:\n%s", want, stdout)
-		}
-	}
-	if len(q.calls) != 5 {
-		t.Fatalf("want 5 runner calls, got %d: %+v", len(q.calls), q.calls)
-	}
-}
-
-// TestStatusRunFailureReportedAndExitsOne is the counterpart to the standby
-// case: since the script itself always exits 0, a non-zero exit can only mean
-// the exec failed, so that target is reported as an error and the overall exit
-// code is 1 -- while a reachable target in the same run still prints normally.
-func TestStatusRunFailureReportedAndExitsOne(t *testing.T) {
-	q := &queueRunner{resp: []queuedResp{
-		{"", nil},                                // preflight
-		{runner.ScriptPresentMarker + "\n", nil}, // pod-a probe: present
-		{runner.ScriptPresentMarker + "\n", nil}, // pod-b probe: present
-		{"Error from server: pods \"pod-a\" not found\n", fmt.Errorf("exit status 1")}, // pod-a run: exec failed
-		{"leader-election mode: standalone\nleader-election state: active\n", nil},     // pod-b run: fine
-	}}
-	var code int
-	var stdout string
-	stderr := captureStderr(t, func() {
-		stdout = captureStdout(t, func() {
-			code = dispatch([]string{"status", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
-		})
-	})
-	if code != 1 {
-		t.Fatalf("exit=%d, want 1 (a target that could not be run)", code)
-	}
-	if !strings.Contains(stderr, "pod-a") {
-		t.Errorf("stderr should name the failed target, got:\n%s", stderr)
-	}
-	if !strings.Contains(stdout, "=== kubernetes  pod-b ===") {
-		t.Errorf("a reachable target must still report, got:\n%s", stdout)
 	}
 }
 
@@ -1840,8 +3069,8 @@ func TestStatusTargetValidationRejectsBadPodAndNamespace(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"bad pod name", []string{"status", "--platform", "kubernetes", "--pod", "bad pod name"}},
-		{"bad namespace", []string{"status", "--platform", "kubernetes", "--pod", "goodpod", "--namespace", "bad;ns"}},
+		{"bad pod name", []string{"status", "all", "--platform", "kubernetes", "--pod", "bad pod name"}},
+		{"bad namespace", []string{"status", "all", "--platform", "kubernetes", "--pod", "goodpod", "--namespace", "bad;ns"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1863,7 +3092,7 @@ func TestStatusManagementPortBounds(t *testing.T) {
 	for _, p := range []string{"-1", "65536"} {
 		t.Run(p, func(t *testing.T) {
 			f := &fakeRunner{}
-			args := []string{"status", "--platform", "kubernetes", "--pod", "pod-a", "--management-port", p}
+			args := []string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a", "--management-port", p}
 			if code := dispatch(args, f); code != 1 {
 				t.Errorf("--management-port %s: exit=%d, want 1", p, code)
 			}
@@ -1872,6 +3101,41 @@ func TestStatusManagementPortBounds(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStatusNoPodsFoundNamesTheSelector covers discovery from env.yaml with
+// nothing matching: the message has to carry the selector and namespace it
+// used, since those are what the operator would fix.
+func TestStatusNoPodsFoundNamesTheSelector(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "env.yaml")
+	if err := os.WriteFile(envPath, []byte("kubernetes:\n  deployment:\n    name: solmq-connector\n    namespace: prod\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	q := &queueRunner{resp: []queuedResp{{"", nil}, {`{"items":[]}`, nil}}}
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"status", "container", "--platform", "kubernetes", "-e", envPath}, q)
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	for _, want := range []string{"app=solmq-connector", "prod", "--pod"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the error should carry %q, got:\n%s", want, stderr)
+		}
+	}
+}
+
+// containsToken reports whether argv carries the exact token, so a case can
+// assert one flag without pinning the whole slice.
+func containsToken(argv []string, want string) bool {
+	for _, a := range argv {
+		if a == want {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- n) version -------------------------------------------------------------------

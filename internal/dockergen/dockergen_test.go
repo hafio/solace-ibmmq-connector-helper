@@ -75,7 +75,7 @@ func TestRenderFull_WithEverything(t *testing.T) {
       - source: solmq-connector-app
         target: /app/external/spring/config/application.yml
       - source: solmq-connector-status
-        target: /app/external/libs/status
+        target: /app/external/.status-script
     volumes:
       - /abs/certs/truststore.jks:/app/external/classpath/truststores/truststore.jks:ro
       - /abs/libs:/app/external/libs:ro
@@ -140,7 +140,7 @@ func TestRenderFull_Minimal(t *testing.T) {
       - source: solmq-app
         target: /app/external/spring/config/application.yml
       - source: solmq-status
-        target: /app/external/libs/status
+        target: /app/external/.status-script
 configs:
   solmq-app:
     content: |
@@ -307,13 +307,13 @@ func TestLabelsPerMode(t *testing.T) {
 
 // TestStatusScriptConfigSourceAndTarget covers the second configs entry: the
 // service references <name>-status and mounts it at
-// /app/external/libs/status.
+// /app/external/.status-script.
 func TestStatusScriptConfigSourceAndTarget(t *testing.T) {
 	out := Render(Input{
 		Docker:   &spec.Docker{Name: "s"},
 		Instance: Instance{Name: "solmq", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
-	if !strings.Contains(out, "      - source: solmq-status\n        target: /app/external/libs/status\n") {
+	if !strings.Contains(out, "      - source: solmq-status\n        target: /app/external/.status-script\n") {
 		t.Errorf("status config source/target pair missing:\n%s", out)
 	}
 	if !strings.Contains(out, "  solmq-status:\n    content: |\n") {

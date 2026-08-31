@@ -139,6 +139,12 @@ func TestCompletionCoversModel(t *testing.T) {
 					if describes[shell] {
 						contains("target description", tg.Desc)
 					}
+					for _, s := range tg.Sets {
+						contains("set", s.Name)
+						if describes[shell] {
+							contains("set description", s.Desc)
+						}
+					}
 				}
 				for _, f := range v.Flags {
 					for _, lit := range spell(f) {
@@ -151,6 +157,122 @@ func TestCompletionCoversModel(t *testing.T) {
 			}
 			for _, lit := range helpLiterals[shell] {
 				contains("help alias", lit)
+			}
+		})
+	}
+}
+
+// downloadJarTarget returns download's "jar" target (the one modeled target
+// with a third level today), failing the test if the model does not have it.
+func downloadJarTarget(t *testing.T) completionItem {
+	t.Helper()
+	for _, v := range completionVerbs() {
+		if v.Name != "download" {
+			continue
+		}
+		for _, tg := range v.Targets {
+			if tg.Name == "jar" {
+				return tg
+			}
+		}
+	}
+	t.Fatal("model has no download/jar target")
+	return completionItem{}
+}
+
+// TestCompletionOnlyDownloadJarHasSets pins the third command level to exactly
+// where the model puts it today. A future target silently growing a Sets list
+// would otherwise only surface as a completion behavior nobody notices --
+// this makes it a reviewable model diff instead, and documents the assumption
+// every renderer's position-3/4 dispatch logic relies on.
+func TestCompletionOnlyDownloadJarHasSets(t *testing.T) {
+	for _, v := range completionVerbs() {
+		for _, tg := range v.Targets {
+			if v.Name == "download" && tg.Name == "jar" {
+				continue
+			}
+			if len(tg.Sets) != 0 {
+				t.Errorf("target %q under verb %q unexpectedly has Sets; only download/jar is expected to", tg.Name, v.Name)
+			}
+		}
+	}
+}
+
+// TestCompletionThirdLevelOffersSets checks the new third command level end to
+// end: download's only target (jar) fans out into its two sets, and every
+// renderer offers them once "download jar" (or the alias "dl jar") has been
+// typed. bash/zsh/powershell key their lookup construct by the CANONICAL verb
+// name only, because $verb is normalized from an alias to its canonical
+// spelling once, before any position-based lookup runs (the same
+// normalization TestCompletionVerbAliasesResolveToCanonical checks elsewhere)
+// -- so "download" appearing here already covers "dl". fish has no single
+// $verb to normalize, so its own condition lists both names directly, checked
+// below.
+func TestCompletionThirdLevelOffersSets(t *testing.T) {
+	scripts := renderedCompletions(t)
+	jar := downloadJarTarget(t)
+	if len(jar.Sets) == 0 {
+		t.Fatal("download/jar has no Sets; nothing to test")
+	}
+
+	cases := map[string]string{
+		"bash": "    download)\n" +
+			`      case "$2" in` + "\n" +
+			`        jar) printf 'mq syslog' ;;`,
+		"zsh": "    download)\n" +
+			`      case "$2" in` + "\n" +
+			`        jar) s=(`,
+		"powershell": "$sets['download']['jar'] = @(",
+		"fish": "__fish_seen_subcommand_from download dl" +
+			"; and __fish_seen_subcommand_from jar" +
+			"; and not __fish_seen_subcommand_from mq syslog",
+	}
+	for shell, want := range cases {
+		t.Run(shell, func(t *testing.T) {
+			if !strings.Contains(scripts[shell], want) {
+				t.Errorf("%s completion is missing the third-level sets construct %q", shell, want)
+			}
+		})
+	}
+
+	// The set names and descriptions themselves reach every shell verbatim --
+	// the same guarantee TestCompletionCoversModel gives the first two levels
+	// (and now, via the loop added there, this level too); repeated here
+	// scoped to just download/jar so a failure names the exact pair.
+	for _, s := range jar.Sets {
+		for shell, script := range scripts {
+			if !strings.Contains(script, s.Name) {
+				t.Errorf("%s completion is missing set %q", shell, s.Name)
+			}
+			if shell != "bash" && !strings.Contains(script, s.Desc) {
+				t.Errorf("%s completion is missing set description %q", shell, s.Desc)
+			}
+		}
+	}
+}
+
+// TestCompletionThirdLevelUnlocksPosArg checks the word after the set: since
+// download declares PosArg posDir, every renderer must offer a directory once
+// "download jar mq" (verb, target, set) has all been typed -- but must NOT
+// offer one after just "download jar" (verb, target only), which is exactly
+// the regression the position-3/4 split guards against.
+func TestCompletionThirdLevelUnlocksPosArg(t *testing.T) {
+	cases := map[string]string{
+		"bash": `  elif [ "$positional" -eq 2 ]; then` + "\n" +
+			`    if [ -n "$(_solmq_conn_util_sets "$verb" "$arg1")" ]; then`,
+		"zsh": "  elif (( positional == 2 )); then\n" +
+			`    if _solmq_conn_util_has_sets "$verb" "$arg1"; then`,
+		"powershell": "elseif ($positional -eq 2) {\n" +
+			"        if ($sets.ContainsKey($verb) -and $sets[$verb].ContainsKey($arg1)) {",
+		"fish": "__fish_seen_subcommand_from download dl" +
+			"; and __fish_seen_subcommand_from jar" +
+			"; and __fish_seen_subcommand_from mq syslog",
+	}
+	scripts := renderedCompletions(t)
+	for shell, want := range cases {
+		t.Run(shell, func(t *testing.T) {
+			if !strings.Contains(scripts[shell], want) {
+				t.Errorf("%s completion does not unlock the directory positional after a set is typed (want %q)", shell, want)
 			}
 		})
 	}
@@ -174,6 +296,66 @@ func TestCompletionRecognizesFlagAliases(t *testing.T) {
 						t.Errorf("%s completion does not recognize flag spelling %q", shell, alias)
 					}
 				}
+			}
+		})
+	}
+}
+
+// TestCompletionDownloadFlagsDescribed pins every flag download introduces
+// (--url, --version, --omit-lib-file, --include-provided) by literal
+// name, on top of the generic per-flag coverage TestCompletionCoversModel
+// already gives every modeled flag -- so a typo in a Long spelling, or a
+// Meaning that never made it into cliFlags, fails here by name instead of
+// only as an unnamed gap in the generic loop.
+func TestCompletionDownloadFlagsDescribed(t *testing.T) {
+	// bash's compgen word lists carry no descriptions; the other three do.
+	describes := map[string]bool{"zsh": true, "fish": true, "powershell": true}
+
+	scripts := renderedCompletions(t)
+	want := map[string]bool{
+		"--url":              false,
+		"--version":          false,
+		"--omit-lib-file":    false,
+		"--include-provided": false,
+	}
+	for _, f := range completionFlags() {
+		if _, ok := want[f.Long]; !ok {
+			continue
+		}
+		want[f.Long] = true
+		for shell, script := range scripts {
+			if !describes[shell] {
+				continue
+			}
+			if !strings.Contains(script, f.Desc) {
+				t.Errorf("%s completion is missing %s description %q", shell, f.Long, f.Desc)
+			}
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("expected flag %q is not modeled in cliFlags", name)
+		}
+	}
+}
+
+// TestCompletionOmitLibFileCompletesFiles checks that --omit-lib-file is wired
+// to the same file-completion path -e/--env already gets (TestCompletionValueKindsReachScripts
+// above proves that path exists at all; this proves --omit-lib-file, specifically,
+// is on it): the flag has no short form, so its own alias/spec construct is
+// pinned by its Long spelling alone in every shell.
+func TestCompletionOmitLibFileCompletesFiles(t *testing.T) {
+	scripts := renderedCompletions(t)
+	cases := map[string]string{
+		"bash":       "-omit-lib-file|--omit-lib-file) printf 'file' ;;",
+		"zsh":        "-omit-lib-file|--omit-lib-file) print -n 'file' ;;",
+		"fish":       "-l omit-lib-file -r -F",
+		"powershell": "$flagArg['--omit-lib-file'] = 'file'",
+	}
+	for shell, want := range cases {
+		t.Run(shell, func(t *testing.T) {
+			if !strings.Contains(scripts[shell], want) {
+				t.Errorf("%s completion does not complete files after --omit-lib-file (want %q)", shell, want)
 			}
 		})
 	}
@@ -296,6 +478,45 @@ func TestCompletionModelMetadataComplete(t *testing.T) {
 				t.Errorf("target %q under %q has an empty Summary", tg.Name, v.Name)
 			}
 			assertShellSafeName(t, "target", tg.Name)
+			// A target alias is spliced into shell case patterns and fish
+			// conditions exactly as a verb alias is, so it needs the same charset
+			// gate -- and it must not collide with the canonical word of any
+			// target under the same verb, which would make the pattern ambiguous.
+			for _, a := range tg.Aliases {
+				assertShellSafeName(t, "target alias", a)
+				for _, other := range v.Targets {
+					if other.Name == a {
+						t.Errorf("%q target alias %q collides with target %q", v.Name, a, other.Name)
+					}
+				}
+			}
+			for _, s := range tg.Sets {
+				if plainText(s.Summary) == "" {
+					t.Errorf("set %q under %q %q has an empty Summary", s.Name, v.Name, tg.Name)
+				}
+				assertShellSafeName(t, "set", s.Name)
+			}
+		}
+	}
+
+	// Every description reaching a completion script must avoid the apostrophe.
+	// fish escapes it, powershell doubles it, and zsh's entries pass through
+	// bashQuote, so the raw text never appears verbatim in those three scripts --
+	// which is what TestCompletionCoversModel checks for. Failing here names the
+	// one string to reword instead of three generated scripts that look wrong.
+	for _, v := range completionVerbs() {
+		if strings.Contains(v.Desc, "'") {
+			t.Errorf("verb %q description carries an apostrophe, which three shells quote away: %q", v.Name, v.Desc)
+		}
+		for _, tg := range v.Targets {
+			if strings.Contains(tg.Desc, "'") {
+				t.Errorf("target %q description carries an apostrophe, which three shells quote away: %q", tg.Name, tg.Desc)
+			}
+			for _, st := range tg.Sets {
+				if strings.Contains(st.Desc, "'") {
+					t.Errorf("set %q description carries an apostrophe, which three shells quote away: %q", st.Name, st.Desc)
+				}
+			}
 		}
 	}
 

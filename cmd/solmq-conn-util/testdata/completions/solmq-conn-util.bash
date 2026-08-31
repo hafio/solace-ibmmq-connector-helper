@@ -23,6 +23,10 @@ _solmq_conn_util_flag_arg() {
     -o|--o|-out|--out) printf 'file' ;;
     -allow-command|--allow-command) printf 'name' ;;
     -platform|--platform) printf 'name' ;;
+    -url|--url) printf 'name' ;;
+    -version|--version) printf 'name' ;;
+    -omit-lib-file|--omit-lib-file) printf 'file' ;;
+    -output|--output) printf 'name' ;;
     -pod|--pod) printf 'name' ;;
     -container|--container) printf 'name' ;;
     -namespace|--namespace) printf 'name' ;;
@@ -37,7 +41,23 @@ _solmq_conn_util_flag_arg() {
 _solmq_conn_util_targets() {
   case "$1" in
     generate) printf 'config' ;;
+    status) printf 'container application all' ;;
+    download) printf 'jar' ;;
     auto-complete) printf 'bash zsh fish powershell' ;;
+    *) printf '' ;;
+  esac
+}
+
+# _solmq_conn_util_sets <verb> <target> prints the target's own further
+# words -- the third command level -- or nothing when it has none.
+_solmq_conn_util_sets() {
+  case "$1" in
+    download)
+      case "$2" in
+        jar) printf 'mq syslog' ;;
+        *) printf '' ;;
+      esac
+      ;;
     *) printf '' ;;
   esac
 }
@@ -48,9 +68,10 @@ _solmq_conn_util_flags() {
     generate) printf '--platform -e --env -o --out' ;;
     deploy) printf '--platform -e --env --allow-command' ;;
     remove) printf '--platform -e --env --allow-command' ;;
-    status) printf '--install --platform -e --env --pod --container --namespace --management-port --user --command --allow-command' ;;
+    status) printf '-d --details -w --watch --all --output --install --platform -e --env --pod --container --namespace --management-port --user --command --allow-command' ;;
     validate) printf '-e --env' ;;
     examples) printf '-f --force' ;;
+    download) printf '-e --env --url --version --omit-lib-file --include-provided -f --force' ;;
     *) printf '' ;;
   esac
 }
@@ -60,6 +81,7 @@ _solmq_conn_util_flags() {
 _solmq_conn_util_posarg() {
   case "$1" in
     examples) printf 'dir' ;;
+    download) printf 'dir' ;;
     *) printf '' ;;
   esac
 }
@@ -77,7 +99,7 @@ _solmq_conn_util_paths() {
 }
 
 _solmq_conn_util() {
-  local cur prev word kind targets verb=''
+  local cur prev word kind targets sets verb='' arg1='' arg2=''
   local i positional=0
 
   cur="${COMP_WORDS[COMP_CWORD]}"
@@ -92,7 +114,9 @@ _solmq_conn_util() {
   esac
 
   # Walk what is already typed, skipping flags and their values, to find the
-  # verb and how many positional arguments already follow it.
+  # verb, its first two positional arguments (target and, if the target
+  # itself fans out into a further word, that word), and how many
+  # positional arguments already follow the verb in total.
   i=1
   while [ "$i" -lt "$COMP_CWORD" ]; do
     word="${COMP_WORDS[$i]}"
@@ -102,7 +126,17 @@ _solmq_conn_util() {
         if [ -n "$(_solmq_conn_util_flag_arg "$word")" ]; then i=$((i + 1)); fi
         ;;
       *)
-        if [ -z "$verb" ]; then verb="$word"; else positional=$((positional + 1)); fi
+        if [ -z "$verb" ]; then
+          verb="$word"
+        elif [ -z "$arg1" ]; then
+          arg1="$word"
+          positional=$((positional + 1))
+        elif [ -z "$arg2" ]; then
+          arg2="$word"
+          positional=$((positional + 1))
+        else
+          positional=$((positional + 1))
+        fi
         ;;
     esac
     i=$((i + 1))
@@ -112,18 +146,19 @@ _solmq_conn_util() {
   # blocks above stay keyed by canonical verb names only.
   case "$verb" in
     gen) verb="generate" ;;
-    dep) verb="deploy" ;;
+    dp) verb="deploy" ;;
     rm) verb="remove" ;;
     sts) verb="status" ;;
     ver) verb="version" ;;
     vld) verb="validate" ;;
     eg) verb="examples" ;;
+    dl) verb="download" ;;
   esac
 
   # Aliases are deliberately absent from this word list -- the TAB menu for
   # word 1 keeps showing only canonical verbs.
   if [ -z "$verb" ]; then
-    COMPREPLY=( $(compgen -W 'generate deploy remove status version validate examples auto-complete help -h --help' -- "$cur") )
+    COMPREPLY=( $(compgen -W 'generate deploy remove status version validate examples download auto-complete help -h --help' -- "$cur") )
     return
   fi
 
@@ -142,6 +177,17 @@ _solmq_conn_util() {
     fi
     kind="$(_solmq_conn_util_posarg "$verb")"
     if [ -n "$kind" ]; then _solmq_conn_util_paths "$cur" "$kind"; return; fi
+  elif [ "$positional" -eq 1 ]; then
+    sets="$(_solmq_conn_util_sets "$verb" "$arg1")"
+    if [ -n "$sets" ]; then
+      COMPREPLY=( $(compgen -W "$sets" -- "$cur") )
+      return
+    fi
+  elif [ "$positional" -eq 2 ]; then
+    if [ -n "$(_solmq_conn_util_sets "$verb" "$arg1")" ]; then
+      kind="$(_solmq_conn_util_posarg "$verb")"
+      if [ -n "$kind" ]; then _solmq_conn_util_paths "$cur" "$kind"; return; fi
+    fi
   fi
 
   COMPREPLY=()

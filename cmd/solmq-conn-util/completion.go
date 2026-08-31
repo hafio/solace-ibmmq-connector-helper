@@ -14,6 +14,10 @@ import "strings"
 //
 //	word 1                          the verb names, plus -h/--help
 //	word 2 after a verb             that verb's targets, or a directory (PosArg)
+//	word 3 after a verb+target      the target's own further words (Sets), when
+//	                                it has any -- a third command level (only
+//	                                `download jar` has one today: `mq`/`syslog`)
+//	word 4 after a verb+target+set  a directory (PosArg), when the verb has one
 //	a value after -e/--env, -o/--out    a filesystem path
 //	a value after --allow-command   nothing: it is a free-form binary name, and
 //	                                allowCommandValue rejects anything path-shaped
@@ -24,8 +28,19 @@ import "strings"
 // arguments -- `generate -e env.yaml <TAB>` must still offer targets.
 
 // completionItem is one completable word plus the description those shells that
-// support one will show beside it.
-type completionItem struct{ Name, Desc string }
+// support one will show beside it, and any further words it itself fans out
+// into. Sets flattens cliTarget.Sets the same way completionVerb.Targets
+// flattens cliVerb.Targets, so a target that is itself a third command level
+// (today only download's "jar") reaches the renderers through the same shape
+// as a verb's targets, rather than a special case.
+type completionItem struct {
+	Name, Desc string
+	Sets       []completionItem
+	// Aliases are cliTarget.Aliases: recognised wherever the canonical word is,
+	// never offered, exactly like a verb's. Every renderer therefore uses
+	// itemNames to OFFER a word and itemSeenNames/aliasPattern to RECOGNISE one.
+	Aliases []string
+}
 
 // completionFlag is one cliFlag flattened for the renderers: the spellings to
 // offer, every spelling to recognize when skipping a value, the value kind, and
@@ -77,7 +92,7 @@ func completionVerbs() []completionVerb {
 	for _, v := range cliVerbs {
 		cv := completionVerb{Name: v.Name, Desc: plainText(verbBlurb(v)), PosArg: v.PosArg, Aliases: v.Aliases}
 		for _, tg := range v.Targets {
-			cv.Targets = append(cv.Targets, completionItem{Name: tg.Name, Desc: plainText(tg.Summary)})
+			cv.Targets = append(cv.Targets, flattenTarget(tg))
 		}
 		for _, sh := range v.Flags {
 			f, ok := byShort[sh]
@@ -93,6 +108,17 @@ func completionVerbs() []completionVerb {
 		out = append(out, cv)
 	}
 	return out
+}
+
+// flattenTarget flattens one cliTarget, and recursively its own Sets, into a
+// completionItem -- so a target that fans out into a further command level
+// reaches every renderer without a second flattening function.
+func flattenTarget(tg cliTarget) completionItem {
+	item := completionItem{Name: tg.Name, Desc: plainText(tg.Summary), Aliases: tg.Aliases}
+	for _, s := range tg.Sets {
+		item.Sets = append(item.Sets, flattenTarget(s))
+	}
+	return item
 }
 
 // verbsWithAliases returns the flattened verbs that declare at least one
@@ -259,6 +285,31 @@ func renderBashCompletion() string {
 	add("}")
 	add("")
 
+	add("# _solmq_conn_util_sets <verb> <target> prints the target's own further")
+	add("# words -- the third command level -- or nothing when it has none.")
+	add("_solmq_conn_util_sets() {")
+	add(`  case "$1" in`)
+	for _, v := range completionVerbs() {
+		if !verbHasSets(v) {
+			continue
+		}
+		add("    " + v.Name + ")")
+		add(`      case "$2" in`)
+		for _, tg := range v.Targets {
+			if len(tg.Sets) == 0 {
+				continue
+			}
+			add("        " + aliasPattern(tg) + ") printf " + bashQuote(itemNames(tg.Sets)) + " ;;")
+		}
+		add("        *) printf '' ;;")
+		add("      esac")
+		add("      ;;")
+	}
+	add("    *) printf '' ;;")
+	add("  esac")
+	add("}")
+	add("")
+
 	add("# _solmq_conn_util_flags <verb> prints the flag spellings valid under the verb.")
 	add("_solmq_conn_util_flags() {")
 	add(`  case "$1" in`)
@@ -302,7 +353,7 @@ func renderBashCompletion() string {
 	add("")
 
 	add("_solmq_conn_util() {")
-	add("  local cur prev word kind targets verb=''")
+	add("  local cur prev word kind targets sets verb='' arg1='' arg2=''")
 	add("  local i positional=0")
 	add("")
 	add(`  cur="${COMP_WORDS[COMP_CWORD]}"`)
@@ -317,7 +368,9 @@ func renderBashCompletion() string {
 	add("  esac")
 	add("")
 	add("  # Walk what is already typed, skipping flags and their values, to find the")
-	add("  # verb and how many positional arguments already follow it.")
+	add("  # verb, its first two positional arguments (target and, if the target")
+	add("  # itself fans out into a further word, that word), and how many")
+	add("  # positional arguments already follow the verb in total.")
 	add("  i=1")
 	add(`  while [ "$i" -lt "$COMP_CWORD" ]; do`)
 	add(`    word="${COMP_WORDS[$i]}"`)
@@ -327,7 +380,17 @@ func renderBashCompletion() string {
 	add(`        if [ -n "$(_solmq_conn_util_flag_arg "$word")" ]; then i=$((i + 1)); fi`)
 	add("        ;;")
 	add("      *)")
-	add(`        if [ -z "$verb" ]; then verb="$word"; else positional=$((positional + 1)); fi`)
+	add(`        if [ -z "$verb" ]; then`)
+	add(`          verb="$word"`)
+	add(`        elif [ -z "$arg1" ]; then`)
+	add(`          arg1="$word"`)
+	add(`          positional=$((positional + 1))`)
+	add(`        elif [ -z "$arg2" ]; then`)
+	add(`          arg2="$word"`)
+	add(`          positional=$((positional + 1))`)
+	add(`        else`)
+	add(`          positional=$((positional + 1))`)
+	add(`        fi`)
 	add("        ;;")
 	add("    esac")
 	add("    i=$((i + 1))")
@@ -365,6 +428,17 @@ func renderBashCompletion() string {
 	add("    fi")
 	add(`    kind="$(_solmq_conn_util_posarg "$verb")"`)
 	add(`    if [ -n "$kind" ]; then _solmq_conn_util_paths "$cur" "$kind"; return; fi`)
+	add(`  elif [ "$positional" -eq 1 ]; then`)
+	add(`    sets="$(_solmq_conn_util_sets "$verb" "$arg1")"`)
+	add(`    if [ -n "$sets" ]; then`)
+	add(`      COMPREPLY=( $(compgen -W "$sets" -- "$cur") )`)
+	add("      return")
+	add("    fi")
+	add(`  elif [ "$positional" -eq 2 ]; then`)
+	add(`    if [ -n "$(_solmq_conn_util_sets "$verb" "$arg1")" ]; then`)
+	add(`      kind="$(_solmq_conn_util_posarg "$verb")"`)
+	add(`      if [ -n "$kind" ]; then _solmq_conn_util_paths "$cur" "$kind"; return; fi`)
+	add("    fi")
 	add("  fi")
 	add("")
 	add("  COMPREPLY=()")
@@ -432,6 +506,65 @@ func renderZshCompletion() string {
 	add("}")
 	add("")
 
+	add("# _solmq_conn_util_sets <verb> <target> offers the target's own further")
+	add("# words -- the third command level; 1 when it has none.")
+	add("_solmq_conn_util_sets() {")
+	add("  local -a s")
+	add(`  case "$1" in`)
+	for _, v := range completionVerbs() {
+		if !verbHasSets(v) {
+			continue
+		}
+		add("    " + v.Name + ")")
+		add(`      case "$2" in`)
+		for _, tg := range v.Targets {
+			if len(tg.Sets) == 0 {
+				continue
+			}
+			entries := make([]string, 0, len(tg.Sets))
+			for _, s := range tg.Sets {
+				entries = append(entries, zshEntry(s.Name, s.Desc))
+			}
+			add("        " + aliasPattern(tg) + ") s=(" + strings.Join(entries, " ") + ") ;;")
+		}
+		add("        *) return 1 ;;")
+		add("      esac")
+		add("      ;;")
+	}
+	add("    *) return 1 ;;")
+	add("  esac")
+	add("  _describe -t sets 'set' s")
+	add("  return 0")
+	add("}")
+	add("")
+
+	add("# _solmq_conn_util_has_sets <verb> <target> reports whether the target")
+	add("# itself fans out into a further word, without offering it -- used to gate")
+	add("# the positional argument that can follow a set, since _solmq_conn_util_sets")
+	add("# above calls _describe as a side effect and so cannot be used as a probe.")
+	add("_solmq_conn_util_has_sets() {")
+	add(`  case "$1" in`)
+	for _, v := range completionVerbs() {
+		if !verbHasSets(v) {
+			continue
+		}
+		add("    " + v.Name + ")")
+		add(`      case "$2" in`)
+		for _, tg := range v.Targets {
+			if len(tg.Sets) == 0 {
+				continue
+			}
+			add("        " + aliasPattern(tg) + ") return 0 ;;")
+		}
+		add("        *) return 1 ;;")
+		add("      esac")
+		add("      ;;")
+	}
+	add("    *) return 1 ;;")
+	add("  esac")
+	add("}")
+	add("")
+
 	add("# _solmq_conn_util_flags <verb> offers the verb's flags; 1 when it has none.")
 	add("_solmq_conn_util_flags() {")
 	add("  local -a f")
@@ -472,7 +605,7 @@ func renderZshCompletion() string {
 
 	add("_solmq_conn_util() {")
 	add("  local -a verbs")
-	add("  local verb='' cur prev kind")
+	add("  local verb='' arg1='' arg2='' cur prev kind")
 	add("  local -i i positional=0")
 	add("")
 	add(`  cur="${words[CURRENT]}"`)
@@ -489,11 +622,18 @@ func renderZshCompletion() string {
 	add("  # words is 1-indexed and words[1] is the command, so the already-typed")
 	add("  # arguments are 2..CURRENT-1. Flags and their values are skipped, because")
 	add("  # they may appear before, after, or between the positional arguments.")
+	add("  # arg1/arg2 capture the verb's first two positionals (target and, if the")
+	add("  # target itself fans out into a further word, that word).")
 	add("  for (( i = 2; i < CURRENT; i++ )); do")
 	add(`    case "${words[i]}" in`)
 	add("      -*=*) ;;")
 	add(`      -*) [[ -n "$(_solmq_conn_util_flag_arg "${words[i]}")" ]] && (( i++ )) ;;`)
-	add(`      *) if [[ -z "$verb" ]]; then verb="${words[i]}"; else (( positional++ )); fi ;;`)
+	add("      *)")
+	add(`        if [[ -z "$verb" ]]; then verb="${words[i]}"`)
+	add(`        elif [[ -z "$arg1" ]]; then arg1="${words[i]}"; (( positional++ ))`)
+	add(`        elif [[ -z "$arg2" ]]; then arg2="${words[i]}"; (( positional++ ))`)
+	add(`        else (( positional++ )); fi`)
+	add("        ;;")
 	add("    esac")
 	add("  done")
 	add("")
@@ -532,6 +672,15 @@ func renderZshCompletion() string {
 	add("      dir) _files -/; return ;;")
 	add("      file) _files; return ;;")
 	add("    esac")
+	add("  elif (( positional == 1 )); then")
+	add(`    _solmq_conn_util_sets "$verb" "$arg1" && return`)
+	add("  elif (( positional == 2 )); then")
+	add(`    if _solmq_conn_util_has_sets "$verb" "$arg1"; then`)
+	add(`      case "$(_solmq_conn_util_posarg "$verb")" in`)
+	add("        dir) _files -/; return ;;")
+	add("        file) _files; return ;;")
+	add("      esac")
+	add("    fi")
 	add("  fi")
 	add("}")
 	add("")
@@ -583,22 +732,56 @@ func renderFishCompletion() string {
 			continue
 		}
 		cond := "__fish_seen_subcommand_from " + fishSeenNames(v) +
-			"; and not __fish_seen_subcommand_from " + itemNames(v.Targets)
+			"; and not __fish_seen_subcommand_from " + itemSeenNames(v.Targets)
 		for _, tg := range v.Targets {
 			add("complete -c solmq-conn-util -n " + fishQuote(cond) + " -a " + fishQuote(tg.Name) + " -d " + fishQuote(tg.Desc))
 		}
 	}
 	add("")
 
-	add("# Positional arguments that are not targets.")
+	add("# Sets, the third command level: a target's own further words, offered")
+	add("# once the verb and that specific target are both seen and until one is")
+	add("# chosen. Fish has no position counter of its own -- __fish_seen_subcommand_from")
+	add("# matches anywhere on the command line -- so nesting this a level deeper")
+	add("# than Targets above is just one more clause, not a special case.")
+	for _, v := range verbs {
+		for _, tg := range v.Targets {
+			if len(tg.Sets) == 0 {
+				continue
+			}
+			cond := "__fish_seen_subcommand_from " + fishSeenNames(v) +
+				"; and __fish_seen_subcommand_from " + itemSeenNames([]completionItem{tg}) +
+				"; and not __fish_seen_subcommand_from " + itemNames(tg.Sets)
+			for _, s := range tg.Sets {
+				add("complete -c solmq-conn-util -n " + fishQuote(cond) + " -a " + fishQuote(s.Name) + " -d " + fishQuote(s.Desc))
+			}
+		}
+	}
+	add("")
+
+	add("# Positional arguments that are not targets or sets. A verb whose target")
+	add("# itself fans out into sets only offers this once one of those sets has")
+	add("# been seen too.")
 	for _, v := range verbs {
 		if v.PosArg == posNone {
 			continue
 		}
 		// posDir is the only non-none kind; TestCompletionModelMetadataComplete
 		// fails loudly if a verb ever declares one the renderers do not handle.
-		if v.PosArg == posDir {
+		if v.PosArg != posDir {
+			continue
+		}
+		if len(v.Targets) == 0 {
 			cond := "__fish_seen_subcommand_from " + fishSeenNames(v)
+			add("complete -c solmq-conn-util -n " + fishQuote(cond) + " -a '(__fish_complete_directories)' -d " + fishQuote("directory"))
+			continue
+		}
+		for _, tg := range v.Targets {
+			cond := "__fish_seen_subcommand_from " + fishSeenNames(v) +
+				"; and __fish_seen_subcommand_from " + tg.Name
+			if len(tg.Sets) > 0 {
+				cond += "; and __fish_seen_subcommand_from " + itemNames(tg.Sets)
+			}
 			add("complete -c solmq-conn-util -n " + fishQuote(cond) + " -a '(__fish_complete_directories)' -d " + fishQuote("directory"))
 		}
 	}
@@ -716,6 +899,37 @@ func renderPowerShellCompletion() string {
 	}
 	add("")
 
+	add("    # Target aliases, resolved to their canonical word before the lookups")
+	add("    # below, exactly as $verbAlias is for verbs. Aliases are absent from")
+	add("    # $targets above, so the TAB menu keeps showing one spelling per target.")
+	add("    $targetAlias = @{}")
+	for _, v := range completionVerbs() {
+		for _, tg := range v.Targets {
+			for _, a := range tg.Aliases {
+				add("    $targetAlias[" + psQuote(a) + "] = " + psQuote(tg.Name))
+			}
+		}
+	}
+	add("")
+
+	add("    # A target's own further words -- the third command level -- keyed by")
+	add("    # verb then by target name; only download/jar has any today.")
+	add("    $sets = @{}")
+	for _, v := range completionVerbs() {
+		for _, tg := range v.Targets {
+			if len(tg.Sets) == 0 {
+				continue
+			}
+			items := make([]string, 0, len(tg.Sets))
+			for _, s := range tg.Sets {
+				items = append(items, "@{ Name = "+psQuote(s.Name)+"; Desc = "+psQuote(s.Desc)+" }")
+			}
+			add("    if (-not $sets.ContainsKey(" + psQuote(v.Name) + ")) { $sets[" + psQuote(v.Name) + "] = @{} }")
+			add("    $sets[" + psQuote(v.Name) + "][" + psQuote(tg.Name) + "] = @(" + strings.Join(items, ", ") + ")")
+		}
+	}
+	add("")
+
 	add("    $flags = @{}")
 	for _, v := range completionVerbs() {
 		if len(v.Flags) == 0 {
@@ -798,9 +1012,13 @@ func renderPowerShellCompletion() string {
 	add("    }")
 	add("")
 
-	add("    # Walk what is typed, skipping flags and their values, to find the verb and")
-	add("    # how many positional arguments already follow it.")
+	add("    # Walk what is typed, skipping flags and their values, to find the verb,")
+	add("    # its first two positional arguments (target and, if the target itself")
+	add("    # fans out into a further word, that word), and how many positional")
+	add("    # arguments already follow the verb in total.")
 	add("    $verb = ''")
+	add("    $arg1 = ''")
+	add("    $arg2 = ''")
 	add("    $positional = 0")
 	add("    $i = 0")
 	add("    while ($i -lt $words.Count) {")
@@ -812,6 +1030,8 @@ func renderPowerShellCompletion() string {
 	add("        }")
 	add("        else {")
 	add("            if ($verb -eq '') { $verb = $w }")
+	add("            elseif ($arg1 -eq '') { $arg1 = $w; $positional++ }")
+	add("            elseif ($arg2 -eq '') { $arg2 = $w; $positional++ }")
 	add("            else { $positional++ }")
 	add("        }")
 	add("        $i++")
@@ -819,6 +1039,7 @@ func renderPowerShellCompletion() string {
 	add("")
 
 	add("    if ($verbAlias.ContainsKey($verb)) { $verb = $verbAlias[$verb] }")
+	add("    if ($targetAlias.ContainsKey($arg1)) { $arg1 = $targetAlias[$arg1] }")
 	add("")
 
 	add("    if ($verb -eq '') {")
@@ -841,12 +1062,37 @@ func renderPowerShellCompletion() string {
 	add("            return")
 	add("        }")
 	add("    }")
+	add("    elseif ($positional -eq 1) {")
+	add("        if ($sets.ContainsKey($verb) -and $sets[$verb].ContainsKey($arg1)) {")
+	add("            & $emit $sets[$verb][$arg1] $wordToComplete")
+	add("            return")
+	add("        }")
+	add("    }")
+	add("    elseif ($positional -eq 2) {")
+	add("        if ($sets.ContainsKey($verb) -and $sets[$verb].ContainsKey($arg1)) {")
+	add("            if ($posArg.ContainsKey($verb)) {")
+	add("                & $emitPaths $wordToComplete ($posArg[$verb] -eq 'dir')")
+	add("            }")
+	add("        }")
+	add("    }")
 	add("}")
 
 	return strings.Join(l, "\n") + "\n"
 }
 
 // ---- small shared formatters --------------------------------------------------
+
+// verbHasSets reports whether any of v's targets themselves fan out into a
+// third level (Sets), so a renderer can skip emitting a lookup case entirely
+// for a verb where every target is a leaf.
+func verbHasSets(v completionVerb) bool {
+	for _, tg := range v.Targets {
+		if len(tg.Sets) > 0 {
+			return true
+		}
+	}
+	return false
+}
 
 // itemNames joins completion item names with spaces, for the word lists bash's
 // compgen -W and fish's __fish_seen_subcommand_from both take.
@@ -856,6 +1102,29 @@ func itemNames(items []completionItem) string {
 		names = append(names, it.Name)
 	}
 	return strings.Join(names, " ")
+}
+
+// itemSeenNames joins every spelling of the given words -- canonical names and
+// their aliases -- space separated, for the places a script asks "has one of
+// these already been typed?". Offering uses itemNames instead, so an alias is
+// accepted without ever appearing in a TAB menu.
+func itemSeenNames(items []completionItem) string {
+	names := make([]string, 0, len(items))
+	for _, it := range items {
+		names = append(names, it.Name)
+		names = append(names, it.Aliases...)
+	}
+	return strings.Join(names, " ")
+}
+
+// aliasPattern renders one word and its aliases as a shell case pattern
+// ("jar|j"), so a case block keyed by a canonical word still matches when the
+// operator typed an alias.
+func aliasPattern(it completionItem) string {
+	if len(it.Aliases) == 0 {
+		return it.Name
+	}
+	return it.Name + "|" + strings.Join(it.Aliases, "|")
 }
 
 // offeredSpellings joins every spelling the given flags offer, space separated.

@@ -117,6 +117,19 @@ function Task-scan {
   return (Invoke-Logged 'scan' 'go' @('tool','govulncheck','./...'))
 }
 
+# Rewrite the committed artifacts the command model owns -- docs/commands.md,
+# docs/abbreviation.md and the four completion goldens -- by running every
+# go:generate directive. './...' rather than the one package that has a directive
+# today, so a second one is picked up without editing this script.
+#
+# Local only, and deliberately in NO aggregate: `test` is what fails on drift, so
+# a regen inside all/full would quietly rewrite the evidence instead of
+# reporting it. Run it after changing a command, then run the gates.
+function Task-regen {
+  if ($env:CI) { Warn 'regen rewrites committed files; skipping in CI'; return 0 }
+  return (Invoke-Logged 'regen' 'go' @('generate','./...'))
+}
+
 function Task-graphify {
   if ($env:CI) { Warn 'graphify is local-only; skipping in CI'; return 0 }
   if (-not (Get-Command graphify -ErrorAction SilentlyContinue)) {
@@ -133,9 +146,12 @@ function Show-Usage {
   @"
 usage: dev.ps1 <task>...
 
-  build vet test cov scan graphify
+  build vet test cov scan regen graphify
   all   = $($All -join ' ')            (what CI runs, as: all scan)
   full  = $($Full -join ' ')   (pre-tag sweep)
+
+  regen is local-only and in no aggregate: it rewrites generated files that
+  test gates, so run it deliberately, then run the gates.
 "@ | Write-Host
 }
 

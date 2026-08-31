@@ -369,11 +369,19 @@ func TestRenderEscapesUserForSedAddress(t *testing.T) {
 // TestFilenameAndPathConstants pins the exported path constants against each
 // other so ContainerPath can never silently diverge from Filename/ContainerDir.
 func TestFilenameAndPathConstants(t *testing.T) {
-	if Filename != "status" {
-		t.Errorf("Filename = %q, want %q", Filename, "status")
+	if Filename != ".status-script" {
+		t.Errorf("Filename = %q, want %q", Filename, ".status-script")
 	}
-	if ContainerDir != "/app/external/libs" {
-		t.Errorf("ContainerDir = %q, want %q", ContainerDir, "/app/external/libs")
+	// Not the libs mount, and not nested in any other mount: the script used to
+	// live under /app/external/libs, where a libs bind mount could shadow it
+	// unless every renderer declared the mounts in the right order.
+	if ContainerDir != "/app/external" {
+		t.Errorf("ContainerDir = %q, want %q", ContainerDir, "/app/external")
+	}
+	for _, mount := range []string{"/app/external/libs", "/app/external/spring/config", "/app/external/classpath"} {
+		if strings.HasPrefix(ContainerPath, mount+"/") {
+			t.Errorf("ContainerPath %q is nested inside the %q mount, which is the conflict this path avoids", ContainerPath, mount)
+		}
 	}
 	if want := ContainerDir + "/" + Filename; ContainerPath != want {
 		t.Errorf("ContainerPath = %q, want %q", ContainerPath, want)
@@ -469,5 +477,98 @@ func TestRenderWarnsOnEmptyWorkflowsOnlyWhenActive(t *testing.T) {
 	// reason to fall back to one.
 	if strings.Contains(out, "  else\n"+`    echo "status: $BASE/workflows`) {
 		t.Errorf("empty-workflow warning is still ungated:\n%s", out)
+	}
+}
+
+// TestRenderReportsHealthComponents covers the per-component breakdown, which
+// is the app-level fact closest to "is it actually moving messages". Spring
+// serialises each component as "<name>":{"status":"X"}, so the parse puts a
+// newline before every {"status" and carries the name forward from the line
+// above -- the assertions below pin that mechanism, since a regression would
+// silently report no components at all rather than fail.
+func TestRenderReportsHealthComponents(t *testing.T) {
+	out := Render(8090, "solmq-status")
+	for _, want := range []string{
+		`echo "health components:"`,
+		`sed -e 's/{[[:space:]]*"status"/`,
+		`if [ -n "$st" ] && [ -n "${pending:-}" ]; then`,
+		`pending=$(printf %s "$chunk" | sed -n 's/.*"`,
+		`if [ -n "$HC_ROWS" ]; then`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	// The block only prints when something was parsed, and the whole thing sits
+	// inside the health guard -- no health document, no components.
+	if strings.Index(out, "HC_ROWS=") < strings.Index(out, `HEALTH=$(get "$BASE/health")`) {
+		t.Error("the component parse must come after the health document is fetched")
+	}
+	// $pending is read with set -u in force, so it needs the default-value form.
+	if strings.Contains(out, `[ -n "$pending" ]`) {
+		t.Errorf("an unguarded $pending would abort under set -u:\n%s", out)
+	}
+}
+
+// TestRenderReportsJavaConfigAndHeap covers the three details-level lines that
+// come from outside the actuator's report endpoints: the JVM the instance runs
+// on, the configuration the report was read from, and heap use.
+func TestRenderReportsJavaConfigAndHeap(t *testing.T) {
+	out := Render(8090, "solmq-status")
+	for _, want := range []string{
+		// java writes -version to stderr, so the redirect is load-bearing.
+		`if command -v java >/dev/null 2>&1; then`,
+		`JAVA_RAW=$(java -version 2>&1 | head -n 1)`,
+		`echo "java: $JAVA_LINE"`,
+		`echo "java: $JAVA_RAW"`,
+		`echo "config: $CONFIG_LIST"`,
+		`HEAP_USED=$(metric 'jvm.memory.used?tag=area:heap')`,
+		`HEAP_MAX=$(metric 'jvm.memory.max?tag=area:heap')`,
+		`echo "heap: $HEAP_USED of $HEAP_MAX"`,
+		`echo "heap: $HEAP_USED"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	// Every one of the three is guarded, so an image without java, an instance
+	// with no readable config, and a JVM that reports no heap metric each drop
+	// their line rather than printing an empty value.
+	for _, guard := range []string{
+		`if [ -n "${JAVA_LINE:-}" ]; then`,
+		`if [ -n "$CONFIG_LIST" ]; then`,
+		`if [ -n "$HEAP_USED" ]; then`,
+	} {
+		if !strings.Contains(out, guard) {
+			t.Errorf("line is not guarded (%q missing):\n%s", guard, out)
+		}
+	}
+	// An unbounded heap reports a negative maximum, which must not be printed as
+	// a ceiling.
+	if !strings.Contains(out, `"" | -*) echo "heap: $HEAP_USED" ;;`) {
+		t.Errorf("a negative or absent heap maximum must be left out:\n%s", out)
+	}
+	// The area:heap tag is what makes the number comparable with -Xmx rather
+	// than including metaspace and the code cache.
+	if !strings.Contains(out, "tag=area:heap") {
+		t.Errorf("heap metrics must be tagged to the heap area:\n%s", out)
+	}
+	// The bytes are handed over raw on purpose: busybox arithmetic would read
+	// Jackson's scientific notation (4.32013312E8) as 4.
+	if strings.Contains(out, "HEAP_USED / 1048576") {
+		t.Errorf("the script must not do the byte arithmetic itself:\n%s", out)
+	}
+}
+
+// TestRenderHeaderNamesEveryReportedFact keeps the script's own header honest:
+// it is the first thing an operator reads when running the script by hand, so
+// it has to name what the script now reports.
+func TestRenderHeaderNamesEveryReportedFact(t *testing.T) {
+	out := Render(8090, "solmq-status")
+	header := out[:strings.Index(out, "PORT=")]
+	for _, want := range []string{"leader-election", "health", "java", "heap", "version"} {
+		if !strings.Contains(header, want) {
+			t.Errorf("the header does not mention %q:\n%s", want, header)
+		}
 	}
 }

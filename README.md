@@ -22,9 +22,22 @@ so splitting them across connectors stays your decision.
   mounted as a file under `/run/secrets/` -- a Kubernetes Secret volume, a compose
   environment-provider secret, or a podman secret. No credential value or host
   variable name reaches any generated file, and nothing secret is written to disk.
-- **`status` tells you which instance is active**, on any platform, by exec'ing
-  into each running instance and reading its own actuator; `version` prints the
-  build's own version plus its Go/OS/arch, for bug reports.
+- **`status` reports each instance from either side**: `status container` reads
+  the engine from outside (state, restarts, age, the image actually running),
+  `status application` execs into each instance and reads its own actuator (which
+  one is active, health, workflows), and `status all` reports both. `-d` adds
+  node, CPU/memory, digest and referenced objects; `--all` finds every connector
+  instance by image name; `--output json` emits the same facts as one document.
+  `version` prints the build's own version plus its Go/OS/arch, for bug reports.
+- **`download jar` fetches the IBM MQ client jars (or the syslog encoder jar)**
+  from Maven Central over HTTPS into a local directory, so the `libs.dir` bind
+  mount and the `libs.pvc`/`libs.download` deploy sections have something to
+  point at. Each jar's sha1 is checked against Maven Central's own published
+  digest before it lands on disk. It is **image-aware**: a jar the connector
+  image already ships at an equal-or-newer version is skipped and reported
+  rather than re-fetched -- but the built-in image jar list is a snapshot of
+  one specific image, so deploying to a different one needs its own list (see
+  [userguide.md](userguide.md) section 12).
 
 Every term above -- binders, durable subscriptions, leader-election, the secrets
 model -- is explained in depth in [userguide.md](userguide.md).
@@ -115,20 +128,32 @@ solmq-conn-util generate [config] [--platform kubernetes|docker|podman] [-e env.
                                                                    Emit application.yml, or the resolved platform's artifacts
 solmq-conn-util deploy  [--platform kubernetes|docker|podman] [-e env.yaml]  Generate for the resolved platform, then apply it
 solmq-conn-util remove  [--platform kubernetes|docker|podman] [-e env.yaml]  Tear the same platform down
-solmq-conn-util status  [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
-                                                                   Ensure and run the status script; report per-instance leader-election + workflow state
+solmq-conn-util status  <container|application|all> [-d] [-w] [--all] [--output table|json]
+                        [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
+                                                                   Report each instance: the engine's view, the connector's own, or both
 solmq-conn-util version                                           Print the utility name, version, Go version and OS/arch
 solmq-conn-util validate            [-e env.yaml]                 Lint the whole env.yaml + workflows
 solmq-conn-util examples [dir] [-f]                               Write a starter env.yaml + workflows
 solmq-conn-util auto-complete bash|zsh|fish|powershell            Print a shell completion script
+solmq-conn-util download jar mq|syslog [dir] [-e env.yaml] [--version v] [--omit-lib-file file]
+                                       [--include-provided] [--url u] [-f]
+                                                                   Fetch IBM MQ or syslog jars from Maven Central into a local directory
+
+# The in-binary help is shorter than this table: `solmq-conn-util -h` lists the
+# commands, and `solmq-conn-util help <command>` (or `<command> -h`) prints that
+# command's arguments, flags, and examples.
 
 -e, --env     Config file, relative or absolute path (default: env.yaml)
 -o, --out     generate output file (default: stdout)
--f, --force   examples: overwrite existing files
+-f, --force   examples/download jar: overwrite existing files
+--version     download jar: pin the seed release instead of resolving latest stable
+--omit-lib-file  download jar: jar list that REPLACES the embedded default (default: embedded list)
+--include-provided  download jar: download the whole closure even where the image already provides it
+--url         download jar: repeatable; exact URLs to fetch, skipping Maven resolution and image-aware omission
 ```
 
 Every verb above except `auto-complete` and `help` also has a short alias
-(`gen`, `dep`, `rm`, `sts`, `ver`, `vld`, `eg`), and `--platform` accepts
+(`gen`, `dp`, `rm`, `sts`, `ver`, `vld`, `eg`, `dl`), and `--platform` accepts
 `kube`, `dk` and `pm` -- see [userguide.md](userguide.md) section 3 for both
 tables.
 
@@ -154,9 +179,13 @@ never drifts from the commands that binary accepts
   5), the `env.yaml` connector defaults (section 6), the deploy targets --
   kubernetes/docker/podman (section 7), the secrets model (section 8), what gets
   generated (section 9), determining which instance is active (section 10), the
-  sample set (section 11), and gotchas (section 12).
+  sample set (section 11), fetching the IBM MQ and syslog jars (section 12), and
+  gotchas (section 13).
 - [docs/commands.md](docs/commands.md) -- the full command tree / reference,
   generated from the command model and gated against drift.
+- [docs/abbreviation.md](docs/abbreviation.md) -- every short spelling the CLI
+  accepts (commands, status targets, platforms, flags), keyed by the
+  abbreviation; generated from the same model and gated the same way.
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) -- building, dev-script tasks, tests
   and golden fixtures, CI release, design notes.
 - [solmq-conn-util-generator.html](solmq-conn-util-generator.html) -- a standalone browser

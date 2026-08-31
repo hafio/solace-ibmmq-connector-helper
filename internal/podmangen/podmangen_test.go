@@ -71,7 +71,7 @@ podman run -d \
   -v ./solmq-connector-application.yml:/app/external/spring/config/application.yml:ro \
   -v /abs/certs/truststore.jks:/app/external/classpath/truststores/truststore.jks:ro \
   -v /abs/libs:/app/external/libs:ro \
-  -v ./solmq-connector-status:/app/external/libs/status:ro \
+  -v ./solmq-connector-status:/app/external/.status-script:ro \
   solace/solace-pubsub-connector-ibmmq:2.13.0
 `
 	if got := RenderRunScript(fullInput()); got != want {
@@ -131,7 +131,7 @@ podman run -d \
   --label solace-connector/role=active \
   -p 8090:8090 \
   -v ./solmq-connector-application.yml:/app/external/spring/config/application.yml:ro \
-  -v ./solmq-connector-status:/app/external/libs/status:ro \
+  -v ./solmq-connector-status:/app/external/.status-script:ro \
   solace/solace-pubsub-connector-ibmmq:2.13.0
 `
 	if got := RenderRunScript(minimalInput()); got != want {
@@ -164,7 +164,7 @@ Secret=solmq-connector-MQ_CONN_1_PASSWORD,type=mount,target=MQ_CONN_1_PASSWORD
 Volume=./solmq-connector-application.yml:/app/external/spring/config/application.yml:ro
 Volume=/abs/certs/truststore.jks:/app/external/classpath/truststores/truststore.jks:ro
 Volume=/abs/libs:/app/external/libs:ro
-Volume=./solmq-connector-status:/app/external/libs/status:ro
+Volume=./solmq-connector-status:/app/external/.status-script:ro
 
 [Service]
 Restart=unless-stopped
@@ -192,7 +192,7 @@ Label=solace-connector/le-mode=standalone
 Label=solace-connector/role=active
 PublishPort=8090:8090
 Volume=./solmq-connector-application.yml:/app/external/spring/config/application.yml:ro
-Volume=./solmq-connector-status:/app/external/libs/status:ro
+Volume=./solmq-connector-status:/app/external/.status-script:ro
 
 [Install]
 WantedBy=default.target
@@ -253,14 +253,14 @@ func TestStatusScriptMountNestsAfterLibs(t *testing.T) {
 
 	run := RenderRunScript(in)
 	libsIdx := strings.Index(run, "-v /abs/libs:/app/external/libs:ro")
-	statusIdx := strings.Index(run, "-v ./solmq-connector-status:/app/external/libs/status:ro")
+	statusIdx := strings.Index(run, "-v ./solmq-connector-status:/app/external/.status-script:ro")
 	if libsIdx == -1 || statusIdx == -1 || statusIdx < libsIdx {
 		t.Errorf("RenderRunScript status mount must follow the libs mount, got:\n%s", run)
 	}
 
 	unit := RenderQuadlet(in)
 	libsIdx = strings.Index(unit.Content, "Volume=/abs/libs:/app/external/libs:ro")
-	statusIdx = strings.Index(unit.Content, "Volume=./solmq-connector-status:/app/external/libs/status:ro")
+	statusIdx = strings.Index(unit.Content, "Volume=./solmq-connector-status:/app/external/.status-script:ro")
 	if libsIdx == -1 || statusIdx == -1 || statusIdx < libsIdx {
 		t.Errorf("RenderQuadlet status mount must follow the libs volume, got:\n%s", unit.Content)
 	}

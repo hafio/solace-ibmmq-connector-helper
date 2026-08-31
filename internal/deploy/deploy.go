@@ -11,6 +11,7 @@ import (
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/yamlwriter"
 )
 
@@ -407,7 +408,7 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 		w.Line(14, "mountPath: /libs")
 	}
 	w.Line(6, "containers:")
-	w.Line(8, "- name: connector")
+	w.Line(8, "- name: "+spec.ConnectorContainerName)
 	w.Line(10, "image: "+inst.Image)
 	w.Line(10, "ports:")
 	w.Line(12, "- name: management")
@@ -465,12 +466,11 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 		w.Line(14, "mountPath: /app/external/libs")
 		w.Line(14, "readOnly: true")
 	}
-	// The status-script mount must be declared last: it mounts a single file
-	// inside /app/external/libs, and a directory mount (the libs one above, when
-	// present) shadows anything nested under its path unless that nested mount
-	// comes after it in the list.
+	// The status script is a sibling of the libs/spring/classpath mounts rather
+	// than nested inside one, so no ordering between them matters any more. The
+	// subPath is the ConfigMap key, which is unrelated to the container path.
 	w.Line(12, "- name: config")
-	w.Line(14, "mountPath: /app/external/libs/status")
+	w.Line(14, "mountPath: "+statusscript.ContainerPath)
 	w.Line(14, "subPath: status")
 	w.Line(14, "readOnly: true")
 	// probes (tcpSocket — see prompt.md "Probes"; keep isolated for a later switch)

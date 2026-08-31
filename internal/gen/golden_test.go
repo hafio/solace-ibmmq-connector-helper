@@ -373,7 +373,7 @@ spec:
 	}
 	// The status-script mount is unconditional and always last (deploy.go:
 	// renderDeployment), so a libs directory mount above never shadows it.
-	b.WriteString("            - name: config\n              mountPath: /app/external/libs/status\n              subPath: status\n              readOnly: true\n")
+	b.WriteString("            - name: config\n              mountPath: /app/external/.status-script\n              subPath: status\n              readOnly: true\n")
 	b.WriteString(`          livenessProbe:
             tcpSocket:
               port: 8090

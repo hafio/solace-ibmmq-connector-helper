@@ -9,6 +9,7 @@ package podmangen
 
 import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/yamlwriter"
 )
 
@@ -18,8 +19,10 @@ const appYAMLTarget = "/app/external/spring/config/application.yml"
 
 // statusTarget is the in-container path the rendered status script is
 // bind-mounted to (read-only); like application.yml, podman cannot inline
-// file content, so the script has to be a bind mount too.
-const statusTarget = "/app/external/libs/status"
+// file content, so the script has to be a bind mount too. It comes from
+// statusscript rather than being repeated here, so moving the path is one edit
+// instead of four.
+const statusTarget = statusscript.ContainerPath
 
 // javaToolOptions is the JAVA_TOOL_OPTIONS value set when the connector uses MQ TLS,
 // selecting the IBM cipher mappings the connector expects.

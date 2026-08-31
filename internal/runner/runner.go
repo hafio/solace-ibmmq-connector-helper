@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -398,65 +399,199 @@ func PodmanRemove(r Runner, sc QuadletScope, services, units []string) (string, 
 
 // ---- status verb: discovery and in-container exec ---------------------------
 
-// KubernetesPodNames lists the pods matching selector by running
-// `<cmd> get pods [-n namespace] -l selector -o name` and stripping the "pod/"
-// prefix `-o name` prints, one name per line. It is read-only: it never
-// creates, deletes, or execs into anything.
+// The status verb's read-only queries. Every one of them goes out as an argv
+// slice through the same Runner seam the deploy path uses -- no shell, ever --
+// and every operator-supplied token in them (namespace, selector, target name)
+// must already be validated by the caller. Tokens this package adds itself
+// (subcommands, flags, output formats, Go templates) are tool-authored
+// constants: a brace or a quote in one of them is data to the process, never to
+// a shell, because no shell is involved.
 //
-// An empty match is not an error here -- it returns an empty slice so the
-// caller can produce an actionable "no pods found for selector ..." message
-// with the namespace/selector it used, rather than a generic wrapped error.
+// They are deliberately one call for many targets wherever the CLI allows it
+// (`get pods` for a whole selector, `inspect a b c`), so a status run costs a
+// roughly fixed number of calls rather than one per instance.
+
+// KubernetesPodsJSON lists pods as a JSON document: `<cmd> get pods -o json`
+// scoped by exactly one of selector, explicit names, or every namespace.
 //
-// namespace and selector are operator-supplied and must already be validated
-// by the caller before reaching this function.
-func KubernetesPodNames(r Runner, cmd []string, namespace, selector string) ([]string, error) {
+// It is read-only and never creates, deletes, or execs into anything. An empty
+// match is not an error -- kubectl answers with an empty List -- so the caller
+// can produce an actionable "no pods found for selector ..." message naming the
+// namespace and selector it used, rather than a generic wrapped error.
+//
+// -o json rather than -o name because the same call then answers the whole
+// container view (state, restart counts, images, limits) for no extra request:
+// discovery and the report read one document.
+func KubernetesPodsJSON(r Runner, cmd []string, namespace, selector string, names []string, allNamespaces bool) (string, error) {
 	argv := append(append([]string(nil), cmd...), "get", "pods")
+	argv = append(argv, names...)
+	switch {
+	case allNamespaces:
+		// --all-namespaces outranks a namespace: --all is explicitly a
+		// cluster-wide search, so a namespace resolved from env.yaml must not
+		// narrow it back down.
+		argv = append(argv, "--all-namespaces")
+	case namespace != "":
+		argv = append(argv, "-n", namespace)
+	}
+	if selector != "" {
+		argv = append(argv, "-l", selector)
+	}
+	argv = append(argv, "-o", "json")
+	out, err := r.Run(Cmd{Argv: argv})
+	if err != nil {
+		return out, fmt.Errorf("listing pods: %w\n%s", err, out)
+	}
+	return out, nil
+}
+
+// KubernetesGetJSON reads one object as JSON: `<cmd> get <kind> <name> -o json`.
+// Used for the workload summary (deployment, service) and for the presence of
+// each object a pod references (secret, configmap, persistentvolumeclaim).
+//
+// kind is a tool-authored constant; name and namespace are operator-supplied and
+// must already be validated by the caller. A missing object exits non-zero here,
+// which the caller reports as "missing" rather than as a failure -- that is the
+// answer it asked for.
+func KubernetesGetJSON(r Runner, cmd []string, namespace, kind, name string) (string, error) {
+	argv := append(append([]string(nil), cmd...), "get", kind, name)
 	if namespace != "" {
 		argv = append(argv, "-n", namespace)
 	}
-	argv = append(argv, "-l", selector, "-o", "name")
+	argv = append(argv, "-o", "json")
 	out, err := r.Run(Cmd{Argv: argv})
 	if err != nil {
-		return nil, fmt.Errorf("listing pods (selector %q): %w\n%s", selector, err, out)
+		return out, fmt.Errorf("reading %s/%s: %w\n%s", kind, name, err, out)
 	}
-	names := []string{}
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		names = append(names, strings.TrimPrefix(line, "pod/"))
-	}
-	return names, nil
+	return out, nil
 }
 
-// ComposeProjectLabel is the label docker compose stamps on every container it
-// creates, naming the project -- the group a set of containers is brought up
-// and down together as.
-const ComposeProjectLabel = "com.docker.compose.project"
-
-// DockerComposeProject returns the compose project a container belongs to, read
-// back from its own label rather than derived from the compose file's directory,
-// so a container brought up under a different project name still reports the one
-// it is actually in.
+// KubernetesTop samples pod resource usage:
+// `<cmd> top pod [names|-l selector] --containers --no-headers`.
 //
-// It is read-only and best-effort: the project only labels a target in status
-// output, so an inspect that fails, a container compose did not create, or an
-// engine that renders a missing label as Go's "<no value>" all yield "" and the
-// caller drops that segment instead of failing the report.
-//
-// container is operator-supplied and must already be validated by the caller.
-func DockerComposeProject(r Runner, cmd []string, container string) string {
-	argv := append(append([]string(nil), cmd...), "inspect", "--format",
-		`{{index .Config.Labels "`+ComposeProjectLabel+`"}}`, container)
+// --containers attributes the sample to the connector container rather than
+// summing every container in the pod, so the number is comparable with that
+// container's own limits. It needs a metrics API in the cluster
+// (metrics-server); when that is absent kubectl fails here and the caller
+// degrades to a note rather than dropping the report.
+func KubernetesTop(r Runner, cmd []string, namespace, selector string, names []string, allNamespaces bool) (string, error) {
+	argv := append(append([]string(nil), cmd...), "top", "pod")
+	argv = append(argv, names...)
+	switch {
+	case allNamespaces:
+		argv = append(argv, "--all-namespaces")
+	case namespace != "":
+		argv = append(argv, "-n", namespace)
+	}
+	if selector != "" {
+		argv = append(argv, "-l", selector)
+	}
+	argv = append(argv, "--containers", "--no-headers")
 	out, err := r.Run(Cmd{Argv: argv})
 	if err != nil {
-		return ""
+		return out, fmt.Errorf("sampling pod resource usage: %w\n%s", err, out)
 	}
-	if p := strings.TrimSpace(out); p != "<no value>" {
-		return p
+	return out, nil
+}
+
+// EngineInspectJSON inspects one or more containers: `<cmd> inspect <names...>`
+// on docker or podman, which answers a JSON array in the order the names were
+// given. One call covers every target, and its output carries the compose
+// project label too, so nothing else has to be asked for it.
+//
+// names are operator-supplied (or read back from the engine under --all) and
+// must already be validated by the caller.
+func EngineInspectJSON(r Runner, cmd []string, names []string) (string, error) {
+	if len(names) == 0 {
+		return "", fmt.Errorf("no container named to inspect")
 	}
-	return ""
+	argv := append(append([]string(nil), cmd...), "inspect")
+	out, err := r.Run(Cmd{Argv: append(argv, names...)})
+	if err != nil {
+		return out, fmt.Errorf("inspecting %s: %w\n%s", strings.Join(names, ", "), err, out)
+	}
+	return out, nil
+}
+
+// EngineImageInspectJSON inspects an image: `<cmd> image inspect <ref>`, whose
+// RepoDigests carry the registry digest the running image was pulled by --
+// which the container's own inspect output does not report.
+//
+// ref comes back from the engine's container inspect rather than from the
+// operator, so the caller re-validates it before it reaches this argv.
+func EngineImageInspectJSON(r Runner, cmd []string, ref string) (string, error) {
+	argv := append(append([]string(nil), cmd...), "image", "inspect", ref)
+	out, err := r.Run(Cmd{Argv: argv})
+	if err != nil {
+		return out, fmt.Errorf("inspecting image %s: %w\n%s", ref, err, out)
+	}
+	return out, nil
+}
+
+// engineStatsFormat is the Go template `stats` renders each row with. A template
+// rather than --format json deliberately: docker and podman disagree about the
+// field names and even the shape (an array versus one object per line) of their
+// JSON stats, while these four template fields mean the same thing on both.
+// Tabs separate the fields, which no value here contains.
+const engineStatsFormat = "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"
+
+// EngineStats samples container resource usage:
+// `<cmd> stats --no-stream --format <template> <names...>`.
+//
+// --no-stream takes one sample and exits instead of streaming, but this is
+// still a measurement rather than a metadata read: the engine has to watch the
+// cgroup for an interval to compute a CPU percentage, which is why it is the
+// one query the details level pays for rather than the default.
+func EngineStats(r Runner, cmd []string, names []string) (string, error) {
+	argv := append(append([]string(nil), cmd...), "stats", "--no-stream", "--format", engineStatsFormat)
+	out, err := r.Run(Cmd{Argv: append(argv, names...)})
+	if err != nil {
+		return out, fmt.Errorf("sampling container resource usage: %w\n%s", err, out)
+	}
+	return out, nil
+}
+
+// engineListFormat is the Go template `ps` renders each row with: the name a
+// container is addressed by, and the image reference --all matches against.
+const engineListFormat = "{{.Names}}\t{{.Image}}"
+
+// EngineList lists every container the engine knows about, running or not:
+// `<cmd> ps --all --no-trunc --format <template>`. --all discovery filters the
+// result by image reference, since without env.yaml or an explicit name the
+// image is the only thing that identifies a connector instance.
+//
+// Stopped containers are included on purpose: an instance that died is exactly
+// what a search like this is for.
+func EngineList(r Runner, cmd []string) (string, error) {
+	argv := append(append([]string(nil), cmd...), "ps", "--all", "--no-trunc", "--format", engineListFormat)
+	out, err := r.Run(Cmd{Argv: argv})
+	if err != nil {
+		return out, fmt.Errorf("listing containers: %w\n%s", err, out)
+	}
+	return out, nil
+}
+
+// SystemctlNRestarts asks systemd how many times a quadlet-managed unit has
+// been restarted: `systemctl [--user] show <unit> -p NRestarts --value`.
+//
+// This is the only truthful restart count under podman quadlet: systemd
+// recreates the container rather than restarting it, so the container's own
+// RestartCount reads 0 however many times the instance has died, and the unit is
+// the only thing that remembers.
+//
+// unit is derived from the configured instance name (gen.PodmanServiceName) and
+// must already be validated by the caller. An empty or unparseable answer is an
+// error, so the caller can fall back to the container's own counter.
+func SystemctlNRestarts(r Runner, sc QuadletScope, unit string) (int, error) {
+	out, err := r.Run(Cmd{Argv: sc.systemctlArgs("show", unit, "-p", "NRestarts", "--value")})
+	if err != nil {
+		return 0, fmt.Errorf("reading %s restart count from systemd: %w\n%s", unit, err, out)
+	}
+	n, cerr := strconv.Atoi(strings.TrimSpace(out))
+	if cerr != nil {
+		return 0, fmt.Errorf("reading %s restart count from systemd: unexpected answer %q", unit, strings.TrimSpace(out))
+	}
+	return n, nil
 }
 
 // execArgv builds the `<cmd> exec` argv prefix shared by ScriptInstalled,

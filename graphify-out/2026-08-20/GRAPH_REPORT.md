@@ -1,16 +1,16 @@
 # Graph Report - solace-ibmmq-connector-helper  (2026-08-20)
 
 ## Corpus Check
-- 71 files · ~167,592 words
+- 71 files · ~168,152 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1197 nodes · 3457 edges · 77 communities (64 shown, 13 thin omitted)
+- 1197 nodes · 3457 edges · 78 communities (64 shown, 14 thin omitted)
 - Extraction: 83% EXTRACTED · 17% INFERRED · 0% AMBIGUOUS · INFERRED: 597 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `a4d15b72`
+- Built from commit: `affff7d7`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -19,7 +19,7 @@
 - validate.go
 - .Run
 - main.go
-- runner.go
+- PodmanDeploy
 - gen.go
 - SolaceProps
 - solmq-conn-util test catalogue
@@ -74,13 +74,13 @@
 - run
 - Render
 - main_test.go
-- runStatusOnTargets
+- runner.go
 - repeatableName
 - Defaults
 - Defaults
 - Cred
 - TestDispatchHandlersMatchModel
-- SafeToken
+- CheckDeployCommand
 - Kubernetes
 - spec.go
 - Side
@@ -88,6 +88,7 @@
 - 10. Status: which instance is active
 - 7. Deploy targets (`kubernetes:`, `docker:`, `podman:`)
 - 8. Secrets model
+- allowCommandValue
 
 ## God Nodes (most connected - your core abstractions)
 1. `hasErr()` - 66 edges
@@ -116,15 +117,15 @@
 ## Import Cycles
 - None detected.
 
-## Communities (77 total, 13 thin omitted)
+## Communities (78 total, 14 thin omitted)
 
 ### Community 0 - "consolidate_extra_test.go"
 Cohesion: 0.17
 Nodes (14): containsSub(), TestApplyStatusAccessCarriesOperatorRoles(), TestApplyStatusAccessExposureIsFixed(), TestBuildCipherConflictWarning(), TestBuildLeaderElection(), TestBuildMessageLoopWarning(), TestBuildMQmTLSBundle(), TestBuildSolaceTopicSourceEmitsConsumerTopic() (+6 more)
 
 ### Community 1 - "validate.go"
-Cohesion: 0.19
-Nodes (26): Workflow, checkContainerTarget(), checkDocker(), checkDuplicateSources(), checkImagePull(), checkKeyAliasConflicts(), checkKube(), checkLibs() (+18 more)
+Cohesion: 0.16
+Nodes (32): Workflow, checkContainerTarget(), checkDocker(), checkDuplicateSources(), checkImage(), checkImagePull(), checkKeyAliasConflicts(), checkKube() (+24 more)
 
 ### Community 2 - ".Run"
 Cohesion: 0.11
@@ -134,9 +135,9 @@ Nodes (84): TestCheckContainerCommandUnlistedBinaryRejected(), TestCheckKubeComm
 Cohesion: 0.13
 Nodes (32): actStatus(), allowCommandFlag(), collectFlagsAndDirs(), contains(), envFlag(), loadEnvFile(), loadStatusEnv(), main() (+24 more)
 
-### Community 4 - "runner.go"
-Cohesion: 0.14
-Nodes (18): canIVerb(), DockerComposeProject(), Cmd, QuadletScope, Kubernetes(), kubeVerb(), PodmanDeploy(), PodmanRemove() (+10 more)
+### Community 4 - "PodmanDeploy"
+Cohesion: 0.22
+Nodes (10): QuadletScope, PodmanDeploy(), PodmanRemove(), ResolveQuadletScope(), TestPodmanDeployReloadThenStart(), TestPodmanDeployStartFailureIsReported(), TestPodmanDeploySystemModeNoUserFlag(), TestPodmanRemoveStopFailureIsReported() (+2 more)
 
 ### Community 5 - "gen.go"
 Cohesion: 0.08
@@ -310,9 +311,9 @@ Nodes (17): breEscape(), Render(), TestFilenameAndPathConstants(), TestRenderAli
 Cohesion: 0.11
 Nodes (53): dispatch(), captureStderr(), manyWorkflowsDir(), podmanEnv(), podmanEnvSudo(), TestAbsPath(), TestAllowCommandFlagBadValueExitsUsageError(), TestAllowCommandFlagRepeatableThreadsToRunner() (+45 more)
 
-### Community 63 - "runStatusOnTargets"
-Cohesion: 0.12
-Nodes (18): confirmInstall(), printTargetReport(), runStatusOnTargets(), statusBanner(), execArgv(), InstallScript(), RunStatusScript(), ScriptInstalled() (+10 more)
+### Community 63 - "runner.go"
+Cohesion: 0.10
+Nodes (26): confirmInstall(), printTargetReport(), runStatusOnTargets(), statusBanner(), canIVerb(), DockerComposeProject(), execArgv(), Cmd (+18 more)
 
 ### Community 65 - "Defaults"
 Cohesion: 0.17
@@ -326,9 +327,9 @@ Nodes (3): Image, Cred, placeholderSecretRef()
 Cohesion: 0.47
 Nodes (6): assertSameNameSet(), keySet(), nameSet(), TestDispatchHandlersMatchModel(), TestPlatformMapsCoverThreeNames(), V
 
-### Community 69 - "SafeToken"
-Cohesion: 0.14
-Nodes (12): CheckDeployCommand(), checkImage(), checkSecurityUserRoles(), TestCheckDeployCommandAcceptReject(), TestCheckDeployCommandEndOfFlagsMarkerMidCommand(), TestCheckDeployCommandErrorTexts(), TestSafeActuatorUser(), TestSafeToken() (+4 more)
+### Community 69 - "CheckDeployCommand"
+Cohesion: 0.40
+Nodes (5): CheckDeployCommand(), TestCheckDeployCommandAcceptReject(), TestCheckDeployCommandEndOfFlagsMarkerMidCommand(), TestCheckDeployCommandErrorTexts(), Tokenize()
 
 ### Community 70 - "Kubernetes"
 Cohesion: 0.08
@@ -361,12 +362,12 @@ Nodes (5): 8.1 Declaring a credential, 8.2 Stable names, 8.3 How each platform d
 ## Knowledge Gaps
 - **127 isolated node(s):** `solmq-conn-util.bash script`, `github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn`, `Defaults`, `NO_COLOR`, `graphify` (+122 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **13 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **14 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Defaults` connect `Defaults` to `validate.go`, `.Run`, `gen.go`, `SolaceProps`, `SafeToken`, `Side`, `spec_test.go`, `Model`, `Render`, `buildLeaderElection`, `consolidate.go`, `Build`?**
+- **Why does `Defaults` connect `Defaults` to `validate.go`, `.Run`, `gen.go`, `SolaceProps`, `Side`, `spec_test.go`, `Model`, `Render`, `buildLeaderElection`, `consolidate.go`, `Build`?**
   _High betweenness centrality (0.026) - this node is a cross-community bridge._
 - **Why does `Build()` connect `Build` to `consolidate_extra_test.go`, `Defaults`, `validate.go`, `gen.go`, `SolaceProps`, `Model`, `buildLeaderElection`, `consolidate.go`, `consolidate_test.go`?**
   _High betweenness centrality (0.025) - this node is a cross-community bridge._

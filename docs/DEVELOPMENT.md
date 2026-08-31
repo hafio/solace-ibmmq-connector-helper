@@ -23,7 +23,7 @@ Or use the mirrored task runner (`dev.sh` / `dev.ps1`, behaviorally identical):
 .\scripts\dev.ps1 full        # same on Windows PowerShell
 ```
 
-Tasks: `build vet test cov scan graphify`, plus aggregates `all` (= build vet test, run by CI
+Tasks: `build vet test cov scan regen graphify`, plus aggregates `all` (= build vet test, run by CI
 as `all scan`) and `full` (= all + cov + scan + graphify, the pre-tag sweep). Gates
 build/vet/test/scan are fatal. `scan` is `go tool govulncheck ./...`, fatal on any finding — every
 Go vuln-DB finding is reachable-and-fixable, so there is nothing to warn-and-pass on. The scanner is
@@ -34,7 +34,10 @@ packages from a module on a newer `go` directive. The Go toolchain itself is pin
 Go rather than whatever the runner image preinstalls -- bump the pin deliberately when upgrading
 locally. `build` honors `TARGET_OS`/`TARGET_ARCH` and writes
 `dist/solmq-conn-util-<os>-<arch>[.exe]` (host os/arch when unset), so one task serves the laptop and
-the CI matrix. `graphify` is local-only (warn-skips under CI). `image`/`up`/`down` are omitted --
+the CI matrix. `regen` runs every `go:generate` directive, rewriting the generated docs and
+completion goldens; like `graphify` it is local-only (warn-skips under CI) and belongs to no
+aggregate, because `test` is what fails on drift and a regen inside a sweep would rewrite the
+evidence instead of reporting it. `image`/`up`/`down` are omitted --
 the tool ships no Dockerfile or local stack (it generates artifacts for other engines; it is not
 itself containerized).
 
@@ -47,13 +50,17 @@ asserted byte-for-byte by the tests (`internal/gen/golden_test.go`).
 expanded to individual cases. Keep it in sync: a test or case added, removed, or renamed
 updates the matching row in the same change.
 
-[`commands.md`](commands.md) is the **generated** command reference, rendered from the
-command model in [`cmd/solmq-conn-util/commands.go`](../cmd/solmq-conn-util/commands.go). Do not edit
-it by hand; `TestCommandsDocInSync` fails the build if it drifts from the model. Regenerate
-after changing a command:
+[`commands.md`](commands.md) is the **generated** command reference and
+[`abbreviation.md`](abbreviation.md) the **generated** lookup of every short spelling, both
+rendered from the command model in
+[`cmd/solmq-conn-util/commands.go`](../cmd/solmq-conn-util/commands.go) (the abbreviation
+renderer lives in [`abbreviation.go`](../cmd/solmq-conn-util/abbreviation.go)). Do not edit
+either by hand; `TestCommandsDocInSync` and `TestAbbreviationDocInSync` fail the build if one
+drifts from the model. Regenerate after changing a command:
 
 ```sh
-go generate ./cmd/solmq-conn-util   # = go test . -run "TestCommandsDocInSync|TestCompletionGoldenInSync" -update
+./scripts/dev.sh regen              # = go generate ./...
+go generate ./cmd/solmq-conn-util   # = go test . -run "TestCommandsDocInSync|TestAbbreviationDocInSync|TestCompletionGoldenInSync" -update
 ```
 
 ### Shell completion

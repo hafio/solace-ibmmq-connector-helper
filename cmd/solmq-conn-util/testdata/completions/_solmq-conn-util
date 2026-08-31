@@ -25,6 +25,10 @@ _solmq_conn_util_flag_arg() {
     -o|--o|-out|--out) print -n 'file' ;;
     -allow-command|--allow-command) print -n 'name' ;;
     -platform|--platform) print -n 'name' ;;
+    -url|--url) print -n 'name' ;;
+    -version|--version) print -n 'name' ;;
+    -omit-lib-file|--omit-lib-file) print -n 'file' ;;
+    -output|--output) print -n 'name' ;;
     -pod|--pod) print -n 'name' ;;
     -container|--container) print -n 'name' ;;
     -namespace|--namespace) print -n 'name' ;;
@@ -40,11 +44,46 @@ _solmq_conn_util_targets() {
   local -a t
   case "$1" in
     generate) t=('config:Emit application.yml') ;;
+    status) t=('container:Report what the engine knows: state, restarts, age and image per instance' 'application:Report what the connector knows: leader-election state, health and workflows' 'all:Report both halves: the container table, then the application block per instance') ;;
+    download) t=('jar:Download a set of jars and their dependencies into a directory') ;;
     auto-complete) t=('bash:Print the bash completion script' 'zsh:Print the zsh completion script' 'fish:Print the fish completion script' 'powershell:Print the PowerShell completion script') ;;
     *) return 1 ;;
   esac
   _describe -t targets 'target' t
   return 0
+}
+
+# _solmq_conn_util_sets <verb> <target> offers the target's own further
+# words -- the third command level; 1 when it has none.
+_solmq_conn_util_sets() {
+  local -a s
+  case "$1" in
+    download)
+      case "$2" in
+        jar) s=('mq:Download the IBM MQ client jar and its dependencies' 'syslog:Download the logstash syslog encoder jar and its dependencies') ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+  _describe -t sets 'set' s
+  return 0
+}
+
+# _solmq_conn_util_has_sets <verb> <target> reports whether the target
+# itself fans out into a further word, without offering it -- used to gate
+# the positional argument that can follow a set, since _solmq_conn_util_sets
+# above calls _describe as a side effect and so cannot be used as a probe.
+_solmq_conn_util_has_sets() {
+  case "$1" in
+    download)
+      case "$2" in
+        jar) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # _solmq_conn_util_flags <verb> offers the verb's flags; 1 when it has none.
@@ -54,9 +93,10 @@ _solmq_conn_util_flags() {
     generate) f=('--platform:the platform: kubernetes, docker, or podman (short: kube, dk, pm; default: resolved from env.yaml, or an interactive menu -- see Platform resolution)' '-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '-o:write output to a file (default: stdout)' '--out:write output to a file (default: stdout)') ;;
     deploy) f=('--platform:the platform: kubernetes, docker, or podman (short: kube, dk, pm; default: resolved from env.yaml, or an interactive menu -- see Platform resolution)' '-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '--allow-command:approve an extra command binary beyond the command: allowlist; repeatable') ;;
     remove) f=('--platform:the platform: kubernetes, docker, or podman (short: kube, dk, pm; default: resolved from env.yaml, or an interactive menu -- see Platform resolution)' '-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '--allow-command:approve an extra command binary beyond the command: allowlist; repeatable') ;;
-    status) f=('--install:install the status script on every instance without prompting' '--platform:the platform: kubernetes, docker, or podman (short: kube, dk, pm; default: resolved from env.yaml, or an interactive menu -- see Platform resolution)' '-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '--pod:limit checks to this kubernetes pod name; repeatable (default: every running pod); no effect on docker/podman' '--container:limit checks to this docker/podman container name; repeatable (default: every running container); no effect on kubernetes' '--namespace:kubernetes namespace to query (default: the namespace of the deployment in env.yaml); no effect on docker/podman' '--management-port:actuator management port to reach inside each instance (default: the configured management port)' '--user:actuator account the status script authenticates as (default solmq-status)' '--command:override the platform CLI binary (kubectl/oc, docker, or podman) used to reach each instance, instead of the command: in that section' '--allow-command:approve an extra command binary beyond the command: allowlist; repeatable') ;;
+    status) f=('-d:add the enrichment lines each view can report: worker node, CPU/memory use against allocation, image digest and referenced components; app version, java version, config path and heap' '--details:add the enrichment lines each view can report: worker node, CPU/memory use against allocation, image digest and referenced components; app version, java version, config path and heap' '-w:re-render the report every 5s until interrupted (Ctrl-C)' '--watch:re-render the report every 5s until interrupted (Ctrl-C)' '--all:report every connector instance found by image name (solace-pubsub-connector-ibmmq) instead of the ones env.yaml describes -- every namespace on kubernetes, every container on docker/podman; cannot be combined with --pod/--container' '--output:output format: table (default) or json, one machine-readable document per run; json cannot be combined with --watch' '--install:install the status script on every instance without prompting' '--platform:the platform: kubernetes, docker, or podman (short: kube, dk, pm; default: resolved from env.yaml, or an interactive menu -- see Platform resolution)' '-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '--pod:limit checks to this kubernetes pod name; repeatable (default: every running pod); no effect on docker/podman' '--container:limit checks to this docker/podman container name; repeatable (default: every running container); no effect on kubernetes' '--namespace:kubernetes namespace to query (default: the namespace of the deployment in env.yaml); no effect on docker/podman' '--management-port:actuator management port to reach inside each instance (default: the configured management port)' '--user:actuator account the status script authenticates as (default solmq-status)' '--command:override the platform CLI binary (kubectl/oc, docker, or podman) used to reach each instance, instead of the command: in that section' '--allow-command:approve an extra command binary beyond the command: allowlist; repeatable') ;;
     validate) f=('-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)') ;;
     examples) f=('-f:overwrite existing files' '--force:overwrite existing files') ;;
+    download) f=('-e:config file, relative or absolute path (default: env.yaml)' '--env:config file, relative or absolute path (default: env.yaml)' '--url:exact URL to download instead of Maven resolution; repeatable; when given, no resolution happens at all' '--version:pin the seed release (the IBM MQ client jar, or the syslog encoder jar) instead of resolving latest stable; empty means latest stable' '--omit-lib-file:a jar list that replaces (never merges with) the embedded default the omission rule compares against; an empty file omits nothing' '--include-provided:download the whole closure even where the connector image already provides a jar, instead of omitting it' '-f:overwrite existing files' '--force:overwrite existing files') ;;
     *) return 1 ;;
   esac
   _describe -t options 'option' f
@@ -68,13 +108,14 @@ _solmq_conn_util_flags() {
 _solmq_conn_util_posarg() {
   case "$1" in
     examples) print -n 'dir' ;;
+    download) print -n 'dir' ;;
     *) print -n '' ;;
   esac
 }
 
 _solmq_conn_util() {
   local -a verbs
-  local verb='' cur prev kind
+  local verb='' arg1='' arg2='' cur prev kind
   local -i i positional=0
 
   cur="${words[CURRENT]}"
@@ -91,11 +132,18 @@ _solmq_conn_util() {
   # words is 1-indexed and words[1] is the command, so the already-typed
   # arguments are 2..CURRENT-1. Flags and their values are skipped, because
   # they may appear before, after, or between the positional arguments.
+  # arg1/arg2 capture the verb's first two positionals (target and, if the
+  # target itself fans out into a further word, that word).
   for (( i = 2; i < CURRENT; i++ )); do
     case "${words[i]}" in
       -*=*) ;;
       -*) [[ -n "$(_solmq_conn_util_flag_arg "${words[i]}")" ]] && (( i++ )) ;;
-      *) if [[ -z "$verb" ]]; then verb="${words[i]}"; else (( positional++ )); fi ;;
+      *)
+        if [[ -z "$verb" ]]; then verb="${words[i]}"
+        elif [[ -z "$arg1" ]]; then arg1="${words[i]}"; (( positional++ ))
+        elif [[ -z "$arg2" ]]; then arg2="${words[i]}"; (( positional++ ))
+        else (( positional++ )); fi
+        ;;
     esac
   done
 
@@ -103,27 +151,29 @@ _solmq_conn_util() {
   # blocks above stay keyed by canonical verb names only.
   case "$verb" in
     gen) verb="generate" ;;
-    dep) verb="deploy" ;;
+    dp) verb="deploy" ;;
     rm) verb="remove" ;;
     sts) verb="status" ;;
     ver) verb="version" ;;
     vld) verb="validate" ;;
     eg) verb="examples" ;;
+    dl) verb="download" ;;
   esac
 
   # Aliases are deliberately absent from this list -- the TAB menu for word 1
   # keeps showing only canonical verbs.
   if [[ -z "$verb" ]]; then
     verbs=(
-      'generate:Render application.yml, or the artifacts for the resolved platform, to stdout or a file'
+      'generate:Render application.yml, or the deploy artifacts for the resolved platform'
       'deploy:Generate for a platform, then apply it'
       'remove:Tear down what deploy created for a platform'
-      'status:Ensure and run the status script, printing per-instance leader-election and workflow state'
+      'status:Report each instance: container (engine), application (connector), or all'
       'version:Print the utility name, version, Go version and OS/arch'
       'validate:Lint the whole env.yaml + workflows'
       'examples:Write a starter env.yaml + workflows'
+      'download:Download IBM MQ or syslog encoder jars and their dependencies'
       'auto-complete:Print a shell completion script'
-      'help:Print the usage summary (also -h, --help)'
+      'help:Print this summary, or the help page of one command'
       '-h:Print the usage summary'
       '--help:Print the usage summary'
     )
@@ -142,6 +192,15 @@ _solmq_conn_util() {
       dir) _files -/; return ;;
       file) _files; return ;;
     esac
+  elif (( positional == 1 )); then
+    _solmq_conn_util_sets "$verb" "$arg1" && return
+  elif (( positional == 2 )); then
+    if _solmq_conn_util_has_sets "$verb" "$arg1"; then
+      case "$(_solmq_conn_util_posarg "$verb")" in
+        dir) _files -/; return ;;
+        file) _files; return ;;
+      esac
+    fi
   fi
 }
 

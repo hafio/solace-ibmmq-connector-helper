@@ -36,6 +36,11 @@ documentation index; this guide is the complete reference.
 > pass `--platform` (and, for `status`, `--install`) rather than rely on either
 > prompt.**
 >
+> **Breaking change: `status` takes a target word.** `status container`,
+> `status application` (short `cnt`, `app`) or `status all` -- a bare `status`
+> now prints that list and exits 2 instead of running the application report.
+> See section 10.
+>
 > **Breaking change: `delete` is now `remove`.** The teardown verb is spelled
 > `remove`, with `rm` as its short alias -- `del` is gone. `delete` is not kept
 > as a hidden alias: typing it reports an unknown command and prints the usage
@@ -55,9 +60,10 @@ documentation index; this guide is the complete reference.
 7. [Deploy targets (kubernetes, docker, podman)](#7-deploy-targets-kubernetes-docker-podman)
 8. [Secrets model](#8-secrets-model)
 9. [What gets generated](#9-what-gets-generated)
-10. [Status: which instance is active](#10-status-which-instance-is-active)
+10. [Status: the container, the connector, or both](#10-status-the-container-the-connector-or-both)
 11. [examples](#11-examples)
-12. [Notes and gotchas](#12-notes-and-gotchas)
+12. [download jar](#12-download-jar)
+13. [Notes and gotchas](#13-notes-and-gotchas)
 
 ---
 
@@ -82,7 +88,11 @@ workflow files it discovers alongside it. `generate`, `validate`, and `examples`
 are pure build-time steps: they read and write plain files and need no network,
 broker, or cluster. `deploy`/`remove` additionally shell out to the target CLI
 (`kubectl`/`oc`, `docker`, or `podman` + `systemctl`) to apply or tear down what was
-generated -- run those where that CLI and its context are available.
+generated -- run those where that CLI and its context are available. `download`
+is the one verb that reaches the network on its own: it fetches jar files over
+HTTPS from Maven Central (or your own `--url` mirror) into a local directory --
+see section 12. `status` execs into a running instance to query its actuator but
+makes no outbound network call of its own.
 
 ### 1.1 Shell completion
 
@@ -183,41 +193,61 @@ says so (section 4.1).
 ## 3. Commands
 
 The first argument is a **verb**. `generate` takes an optional second argument,
-`config`, which emits `application.yml`; the platform for
+`config` (short `cfg`), which emits `application.yml`; the platform for
 `generate`/`deploy`/`remove`/`status` comes from `--platform` (or the resolution
 order in the note above), never from a positional argument.
 
 ```text
 solmq-conn-util generate (gen) [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
                                                                    Emit application.yml, or the resolved platform's artifacts
-solmq-conn-util deploy (dep)   [--platform kubernetes|docker|podman] [-e env.yaml] [--allow-command name]
+solmq-conn-util deploy (dp)    [--platform kubernetes|docker|podman] [-e env.yaml] [--allow-command name]
                                                                    Generate for the resolved platform, then apply it
 solmq-conn-util remove (rm)    [--platform kubernetes|docker|podman] [-e env.yaml] [--allow-command name]
                                                                    Tear down what deploy created for the resolved platform
-solmq-conn-util status (sts)   [--install] [--platform kubernetes|docker|podman] [-e env.yaml] [flags...]
-                                                                   Ensure and run the status script; print per-instance leader-election + workflow state
+solmq-conn-util status (sts)   <container|application|all> [-d] [-w] [--all] [--output table|json] [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
+                                                                   Report each instance: the engine's view (container), the connector's own (application), or both (all)
 solmq-conn-util version (ver)                                     Print the utility name, version, Go version and OS/arch
 solmq-conn-util validate (vld)      [-e env.yaml]                 Lint the whole env.yaml + workflows
 solmq-conn-util examples (eg) [dir] [-f]                          Write a starter env.yaml + workflows
 solmq-conn-util auto-complete bash|zsh|fish|powershell            Print a shell completion script (section 1.1)
+solmq-conn-util download (dl) jar mq|syslog [dir] [-e env.yaml] [--version v] [--omit-lib-file file] [--include-provided] [--url u] [-f]
+                                                                   Fetch IBM MQ or syslog jars from Maven Central into a local directory (section 12)
 ```
+
+> **The in-binary help is deliberately shorter than this section.**
+> `solmq-conn-util -h` lists one line per command; the arguments, flags, and
+> examples live on each command's own page, printed by
+> `solmq-conn-util help <command>` or `<command> -h` (stdout, exit 0 -- the same
+> page follows a usage mistake on stderr with exit 2). The short aliases in the
+> table below work everywhere but appear only here and in
+> [docs/commands.md](docs/commands.md), never in terminal help.
+
+`status` requires a **target word** (`container`, `application` or `all`; short
+`cnt`, `app`) naming which half of the state to report -- see section 10. A bare
+`status` prints that list and exits 2.
+
+`download` is a **three-level** command: the verb `download`, the target `jar`,
+and a **set** (`mq` or `syslog`) that the target itself fans out into. All three
+words are required -- a bare `download`, a bare `download jar`, and an unknown
+target or set are each a loud usage error (exit 2) that lists the valid words.
 
 Every verb has exactly one short alias, except `auto-complete` and `help`:
 
 | Verb | Alias |
 |------|-------|
 | `generate` | `gen` |
-| `deploy` | `dep` |
+| `deploy` | `dp` |
 | `remove` | `rm` |
 | `status` | `sts` |
 | `version` | `ver` |
 | `validate` | `vld` |
 | `examples` | `eg` |
+| `download` | `dl` |
 | `auto-complete` | none |
 | `help` | none (still answers to `-h`, `--help`) |
 
 An alias is recognized everywhere the full verb is, including shell completion
-(`solmq-conn-util dep <TAB>` completes `deploy`'s own flags and targets) -- but
+(`solmq-conn-util dp <TAB>` completes `deploy`'s own flags and targets) -- but
 aliases are deliberately never offered as a TAB suggestion themselves, so the
 completion menu only ever lists the verbs above; that is intentional, not a bug.
 
@@ -242,12 +272,20 @@ reference at [docs/commands.md](docs/commands.md).
 
 | flag | applies to | meaning |
 |------|-----------|---------|
-| `-e`, `--env` | all except `examples` | config file, relative or absolute path (default: `env.yaml`) |
+| `-e`, `--env` | all except `examples` | config file, relative or absolute path (default: `env.yaml`). `download jar` reads only the `image` block from it, to check the jar list it omits against matches the image you deploy (section 12) |
 | `-o`, `--out` | `generate` | write output to a file (default: stdout) |
-| `-f`, `--force` | `examples` | overwrite existing files |
+| `-f`, `--force` | `examples`/`download jar` | overwrite existing files; on `download jar` this never reaches an artifact the image-aware omission check already dropped -- use `--include-provided` for that (see section 12) |
+| `--version` | `download jar mq\|syslog` | pin the seed artifact to this release instead of resolving latest stable; empty (the default) means latest stable, same as before this flag existed. Dependency versions still come from the pinned release's own POM (and parent chain) -- see section 12 |
+| `--omit-lib-file` | `download jar mq\|syslog` | path to a jar list that REPLACES the embedded default entirely (an empty file omits nothing); captured from a different connector image -- see section 12 |
+| `--include-provided` | `download jar mq\|syslog` | download the whole resolved closure regardless of what the image already provides; skips the omission check entirely -- see section 12 |
+| `--url` | `download jar` | repeatable; when given, exactly those URLs are downloaded and no Maven resolution (and no omission check) happens at all |
 | `--platform` | `generate`/`deploy`/`remove`/`status` | the platform: `kubernetes`, `docker`, or `podman` (short: `kube`, `dk`, `pm`; default: resolved from `env.yaml`, or an interactive menu -- see the breaking-change note above) |
 | `--allow-command` | `deploy`/`remove`/`status` | approve an extra command binary beyond the `command:` allowlist; repeatable |
-| `--install` | `status` | install the status script on every instance without prompting |
+| `-d`, `--details` | `status` | add the enrichment lines to whichever view is printed: worker node, CPU/memory use against allocation, image digest and referenced components; app version, java version, config path and heap (section 10.3) |
+| `-w`, `--watch` | `status` | re-render the report every 5s until interrupted (section 10.5) |
+| `--all` | `status` | report every connector instance found by image name instead of the ones `env.yaml` describes -- every namespace on kubernetes, every container on docker/podman; cannot be combined with `--pod`/`--container` (section 10.4) |
+| `--output` | `status` | `table` (default) or `json`, one machine-readable document per run; cannot be combined with `--watch` (section 10.6) |
+| `--install` | `status` | install the status script on every instance without prompting; applies to the `application`/`all` views |
 | `--pod` | `status` | limit checks to this kubernetes pod name; repeatable (default: every running pod); no effect on docker/podman |
 | `--container` | `status` | limit checks to this docker/podman container name; repeatable (default: every running container); no effect on kubernetes |
 | `--namespace` | `status` | kubernetes namespace to query (default: the deployment's namespace in `env.yaml`); no effect on docker/podman |
@@ -258,9 +296,10 @@ reference at [docs/commands.md](docs/commands.md).
 Flags may appear before, after, or between the positional arguments. Exit codes:
 **0** success, **1** a processing error (bad input, unreadable file, missing env
 var, a deploy command that failed), **2** a usage error (missing/unknown verb or
-target, unknown flag). `status`'s own exit code is about whether every instance
-could be reached and run, not whether each is active -- see section 10
-for how to read the per-instance report.
+target, unknown flag, or a flag combination that cannot mean anything).
+`status`'s own exit code is about whether every instance could be reached and
+run, not whether each is active, and an engine query that degrades never changes
+it -- see section 10.7.
 
 - **`generate config`** reads the workflow files + the connector defaults from
   `env.yaml` and prints `application.yml`. It **fails fast**: it stops at the first
@@ -276,9 +315,11 @@ for how to read the per-instance report.
   `command:`'s binary must be on the platform allowlist (or approved with
   `--allow-command`), and both verbs run a read-only login/daemon preflight before
   writing or applying anything -- see section 7.
-- **`status`** ensures the status script is present on each running instance of
-  the resolved platform, runs it, and prints per-instance leader-election and
-  workflow state -- see section 10.
+- **`status`** reports the state of each instance of the resolved platform. Its
+  target word picks which half: `container` reads the engine from outside
+  (state, restarts, age, image), `application` runs the generated script inside
+  each instance (leader election, health, workflows), and `all` reports both --
+  see section 10.
 - **`version`** prints the build's own version (stamped in at build time), the Go
   version it was built with, and its `GOOS`/`GOARCH` -- for bug reports and to
   confirm which build is installed. Takes no flags.
@@ -288,6 +329,9 @@ for how to read the per-instance report.
 - **`auto-complete <shell>`** prints a completion script for `bash`, `zsh`, `fish` or
   `powershell` on stdout -- see section 1.1. It reads no `env.yaml` and touches
   nothing on disk.
+- **`download jar mq|syslog [dir]`** fetches jars into `<dir>` (default `./libs`)
+  from Maven Central over HTTPS -- see section 12. It does **not** read
+  `env.yaml`; there is no `-e` flag.
 - `generate` output is buffered and only written on full success -- you never get a
   half-written `-o` file.
 
@@ -810,8 +854,10 @@ kubernetes:
     syslog:
       host: syslog.corp
       port: 514
-      protocol: udp              # udp (default) | tcp (needs the logstash-logback-encoder jar on the classpath)
-  libs:                          # entirely optional; exactly one of pvc/download
+      protocol: udp              # udp (default) | tcp (needs the logstash-logback-encoder jar on the
+                                 # classpath -- see "solmq-conn-util download jar syslog", section 12)
+  libs:                          # entirely optional; exactly one of pvc/download; populate a PVC or the
+                                 # URLs below with "solmq-conn-util download jar mq" (section 12)
     pvc:
       existing: jar-libs-pvc     # ...a PVC that already holds the IBM MQ jars
       # create:                  # ...or provision an NFS-backed PV + PVC
@@ -858,8 +904,8 @@ kubernetes:
 | `deployment` | `resources.cpu`, `resources.memory` | one value each; emitted as identical requests **and** limits (guaranteed QoS); a bare integer like `cpu: 1` is auto-quoted |
 | `secrets.image-pull` | `name`, `create` | optional registry credential for pulling the image. `name` alone references a Secret you made (`kubectl create secret docker-registry`); adding `create: true` has the tool build it from the top-level `image` block instead. Omitted, nothing is created -- see section 8 |
 | `service` | `enabled`, `port` | emit a Service on this port; `port` accepts a bare port or `host:container`, the same syntax as docker/podman `ports` (7.2/7.3); unset defaults to the effective management port |
-| `logging.syslog` | `host`, `port`, `protocol` | optional; emits `logback-spring.xml` into the ConfigMap (mounted at `/app/external/classpath/logback-spring.xml`) plus `LOGGING_SYSLOG_*` env vars (appname = `deployment.name`); `protocol` is `udp` (default) or `tcp` -- **tcp requires the `logstash-logback-encoder` jar on the connector classpath** (provide it via `libs`) |
-| `libs` | `pvc` \| `download` | optional; exactly one mode; makes the IBM MQ java libraries available at `/app/external/libs` (read-only) |
+| `logging.syslog` | `host`, `port`, `protocol` | optional; emits `logback-spring.xml` into the ConfigMap (mounted at `/app/external/classpath/logback-spring.xml`) plus `LOGGING_SYSLOG_*` env vars (appname = `deployment.name`); `protocol` is `udp` (default) or `tcp` -- **tcp requires the `logstash-logback-encoder` jar on the connector classpath** (provide it via `libs`; fetch it with `solmq-conn-util download jar syslog`, section 12) |
+| `libs` | `pvc` \| `download` | optional; exactly one mode; makes the IBM MQ java libraries available at `/app/external/libs` (read-only); `solmq-conn-util download jar mq` (section 12) fetches the jars themselves, into a PVC-mountable directory or ready to list under `libs.download.urls` |
 | `libs.pvc` | `create` / `existing` | `create` emits an NFS-backed PersistentVolume (`<name>-pv`) + PersistentVolumeClaim; `existing` references a pre-provisioned PVC (`create` XOR `existing`) |
 | `libs.download` | `urls`, `image`, `pvc` | an initContainer `wget`s each URL into `/libs` at pod start; the shared volume is an `emptyDir` unless `pvc` names an existing PVC |
 | `secrets.credentials.create` | `name`, `source` | `source: env` reads listed vars from the environment; `source: file` reads `KEY=VALUE` (or YAML) from `values-file` |
@@ -896,6 +942,9 @@ of `/run/secrets` -- would be substituted by compose from the environment the CL
 hands it, writing the plaintext credentials into the compose file. If you edit a
 generated compose file by hand, keep the doubling.
 
+Populate the `libs.dir` directory with `solmq-conn-util download jar mq` (section 12)
+before the first `deploy`.
+
 ```yaml
 docker:
   command: docker                # or "docker --context foo"
@@ -908,7 +957,8 @@ docker:
   stores:                        # opt in to bind-mounting tls.*.file host paths
     mount-path: /app/external/classpath/truststores   # fixed in-container path; must be this value
   # libs:
-  #   dir: ./libs                # host dir bind-mounted to /app/external/libs
+  #   dir: ./libs                # host dir bind-mounted to /app/external/libs; populate it with
+                                 # "solmq-conn-util download jar mq" (section 12)
 ```
 
 ### 7.3 podman
@@ -951,7 +1001,8 @@ podman:
   stores:                        # opt in to bind-mounting tls.*.file host paths
     mount-path: /app/external/classpath/truststores   # fixed in-container path; must be this value
   # libs:
-  #   dir: ./libs
+  #   dir: ./libs                # host dir bind-mounted to /app/external/libs; populate it with
+                                 # "solmq-conn-util download jar mq" (section 12)
 ```
 
 Common docker/podman options: `name` (a DNS-1123 label -- it flows
@@ -1117,7 +1168,10 @@ Secret volume for kubernetes, a bind mount onto that same fixed dir for docker/p
 
 **The status script and its labels ship on every target, every platform.** All
 three deploy targets always carry the rendered status script (section 10) at
-`/app/external/libs/status` inside the container -- there is no option to omit it
+`/app/external/.status-script` inside the container -- a **sibling** of the
+`libs/`, `spring/` and `classpath/` mounts, deliberately not inside one. It used
+to live at `/app/external/libs/status`, where mounting your own jar directory
+onto `libs` shadowed it. There is no option to omit it
 -- and always set the static label `solace-connector/le-mode` to the instance's
 leader-election mode (`standalone` / `active_active` / `active_standby`). A second
 label, `solace-connector/role: active`, is added only for `standalone` and
@@ -1129,7 +1183,7 @@ own leader election) to decide, so no static value would stay accurate.
 `deployment.namespace` (emitted first; applying it when the namespace already
 exists is a no-op), then a `ConfigMap` mounting `application.yml` at
 `/app/external/spring/config/application.yml` (via `subPath`) and the status script
-under its own `status` key, mounted at `/app/external/libs/status`, a `Deployment`
+under its own `status` key, mounted at `/app/external/.status-script`, a `Deployment`
 (pod template carrying the `solace-connector/le-mode`/`role` labels above), an
 optional `Service`, the credentials/stores `Secret`s, and any libs
 `PersistentVolume`/`PersistentVolumeClaim`. Probes use a **tcpSocket**
@@ -1145,7 +1199,7 @@ provisioned from an NFS PV+PVC) or an initContainer that `wget`s jars into an
 
 **`generate --platform docker` -> a `docker-compose.yml`** with `application.yml`
 inlined under compose `configs:`, the status script inlined as a second `configs:`
-entry mounted at `/app/external/libs/status` (both with `$` doubled against
+entry mounted at `/app/external/.status-script` (both with `$` doubled against
 compose interpolation -- section 7.2), the credential `secrets:` entries
 read from the environment (section 8.3), bind mounts for stores/libs, and the
 `solace-connector/le-mode`/`role`
@@ -1158,62 +1212,91 @@ section 8), with the same labels applied via `--label`/`Label=`.
 
 ---
 
-## 10. Status: which instance is active
+## 10. Status: the container, the connector, or both
 
-`solmq-conn-util status` answers "which of my instances is the active one right
-now?" by exec'ing into each running instance and asking its own Spring actuator
-endpoints -- no separate monitoring stack, and no assumption made from outside
-the container.
+`solmq-conn-util status` reports the state of every connector instance. It takes
+a **target word** that picks which half of that state you want, because the two
+halves answer different questions and come from different places:
 
 ```sh
-solmq-conn-util status --platform kubernetes -e env.yaml
+solmq-conn-util status container    # what the container engine knows
+solmq-conn-util status application  # what the connector knows about itself
+solmq-conn-util status all          # both, container first
 ```
 
-The platform resolves the same way as `generate`/`deploy`/`remove` (section 3):
-`--platform` if given, else the single section present in `env.yaml`, else an
-interactive menu. `status` then discovers every running instance of that
-platform -- every pod matching the deployment's `app=<name>` selector on
-kubernetes, or the configured container name on docker/podman -- unless you
-narrow it with repeatable `--pod` / `--container`.
+| Word | Short | Answers | Read from |
+|------|-------|---------|-----------|
+| `container` | `cnt` | Is it up? How often has it died? Which image is it actually running? | Outside the container: read-only `kubectl get` / `docker inspect` / `podman inspect` |
+| `application` | `app` | Is this the active instance? Is it healthy? Are the workflows running? | Inside the container: the generated status script, querying the instance's own Spring actuator |
+| `all` | none | Both, with the container table first | Both of the above |
 
-### First run: installing the script
+> **Breaking change: the target word is required.** A bare `solmq-conn-util
+> status` used to print the application report; it now prints the list of target
+> words and exits 2. Neither half is a safe default -- a script that wants the
+> old behaviour should say `status application`, and `status all` is usually what
+> a human wants.
 
-Every artifact `generate`/`deploy` produces already carries the status script
-(section 9), but an instance that predates this feature, or one this tool never
-deployed, may not have it installed. The first time `status` finds it missing on
-a target, it asks once:
+The platform resolves exactly as it does for `generate`/`deploy`/`remove`
+(section 3), and the instances are discovered the same way as before: every pod
+matching the deployment's `app=<name>` selector on kubernetes, or the configured
+container name on docker/podman, unless you narrow it with repeatable
+`--pod` / `--container` -- or widen it with `--all` (below).
 
+### 10.1 `status container` -- the engine's view
+
+```text
+== kubernetes  prod / solmq-connector ==
+NAME                          STATE                          READY  RESTARTS  AGE   IMAGE
+solmq-connector-7d9f8c-k8m1r  restarting (CrashLoopBackOff)  no     7         3d7h  solace/solace-pubsub-connector-ibmmq:2.14.1
+solmq-connector-7d9f8c-x2n4q  running                        yes    0         3d7h  solace/solace-pubsub-connector-ibmmq:2.14.1
+
+deployment: solmq-connector  1/2 ready, 1 up-to-date, 2 available
+service:    solmq-connector  8090/TCP
 ```
-status script missing on solmq-connector-7d9f8c6b5-x2n4q -- install it now? [y/N]
-```
 
-Answer `y` to install it on every missing target for this run, or pass
-`--install` up front to skip the prompt entirely. Declining (or a blank answer)
-skips that target for this run without installing anything, and `status` exits
-with code 1. **The prompt refuses to block when stdin is not a TTY** -- a CI job
-or script must pass `--install` (or ensure the script is already installed), or
-the run fails immediately with that guidance instead of hanging.
+One table per platform, with the same columns everywhere so a docker host and a
+cluster read alike. Two columns differ by platform, because the platforms do:
 
-### Sample output
+| Column | Meaning |
+|--------|---------|
+| `NAME` | The pod or container name -- what you would pass to `--pod`/`--container` |
+| `STATE` | `running`, `exited`, `waiting`, `restarting`, `paused` or `unknown`, normalised across the three engines, qualified by the engine's own reason (`CrashLoopBackOff`, `ImagePullBackOff`, `OOMKilled`) or by the exit code when that is all there is |
+| `READY` (kubernetes) | The readiness-probe verdict. `n/a` when the pod declares no readiness probe, since kubernetes then reports ready as soon as the container runs and the column would say nothing |
+| `HEALTH` (docker/podman) | The engine's **own healthcheck** verdict -- `healthy`/`unhealthy`/`starting` -- which is a different thing from the connector's `health:` line in the application view. `n/a` when the container defines no healthcheck, which is the usual case: the compose and quadlet artifacts this tool generates declare none, so the value only appears when the image itself carries a `HEALTHCHECK` |
+| `RESTARTS` | How many times the container has restarted. On podman this comes from **systemd**, not from podman -- see the quadlet note below |
+| `AGE` | How long the container has been running |
+| `IMAGE` | The image reference the container is actually running |
 
-```
-=== kubernetes  prod / solmq-connector / solmq-connector-7d9f8c6b5-x2n4q ===
-  leader-election mode: active_standby
+Below the table, on kubernetes only, the workload the pods belong to: the
+Deployment's replica counts and the Service that fronts it, each read with one
+`kubectl get`. Both are best-effort -- an instance this tool never deployed may
+have neither, and a read that fails becomes a `status:` note rather than a
+failed run.
+
+> **Podman restart counts come from systemd.** Under quadlet a restart
+> **recreates** the container, so podman's own `RestartCount` reads 0 no matter
+> how many times the instance has died. `status` therefore asks systemd
+> (`systemctl [--user] show <name>.service -p NRestarts`) and reports that
+> instead. Where systemd cannot answer -- a container that is not
+> quadlet-managed, a host without systemd, a podman machine on another OS -- the
+> container's own counter is reported and nothing fails.
+
+### 10.2 `status application` -- the connector's view
+
+```text
+=== kubernetes  prod / solmq-connector / solmq-connector-7d9f8c-x2n4q ===
+  leader-election mode:  active_standby
   leader-election state: active
-  health: UP
-  uptime: 3d 4h 31m
-  version: 2.14.1
+  health:                UP
   workflows:
      0: running
      9: running
     10: stopped
 
-=== kubernetes  prod / solmq-connector / solmq-connector-7d9f8c6b5-k8m1r ===
-  leader-election mode: active_standby
+=== kubernetes  prod / solmq-connector / solmq-connector-7d9f8c-k8m1r ===
+  leader-election mode:  active_standby
   leader-election state: standby
-  health: UP
-  uptime: 3d 4h 31m
-  version: 2.14.1
+  health:                UP
 ```
 
 One block per instance, under a **banner naming the instance**: the platform,
@@ -1225,60 +1308,252 @@ the container's own `com.docker.compose.project` label rather than guessed from
 the compose file's directory. A name that is not set is dropped rather than
 printed as an empty segment.
 
-Under it, indented and left-aligned with each other:
-
 | Line | From | Notes |
 |------|------|-------|
 | `leader-election mode` | `leader-election.mode` (section 6) | `standalone` / `active_active` / `active_standby` |
 | `leader-election state` | `/actuator/leaderelection` | `active` or `standby`, read live per instance |
 | `health` | `/actuator/health` | `UP`, or the status plus a `health-detail` line carrying the whole document (`show-details` is always on, so it names the failing component) |
-| `uptime` | `/actuator/metrics/process.uptime` | `<d>d <h>h <m>m` |
-| `version` | `/actuator/info` | the build version, when the image publishes one |
 | `workflows` | `/actuator/workflows` | one `<id>: <state>` row per workflow, ids **ordered numerically** (`1..9..10..19`, not the actuator's own map order, which lists 10 before 2) and **right-aligned so the colons line up** |
 
-`health`, `uptime` and `version` are enrichment: each line is dropped when its
-endpoint answers nothing, rather than reported as missing, since none of them
-says whether the instance is doing its job. All three endpoints are in the fixed
-exposure list this tool writes, so they need no extra configuration.
+`health` is dropped when the endpoint answers nothing, rather than reported as
+missing. With `replicas: 2` (or more) you get one block per pod, which is the
+whole point under `active_standby`: which pod is active is only knowable at
+runtime, so the manifest asserts no `role` label and the script answers per pod
+instead. The standby's block carries its leader-election lines and **no workflow
+lines** -- a standby runs none, so that is the normal shape and is deliberately
+not warned about.
 
-With `replicas: 2` (or more) you get one block per pod -- `status` selects
-`app=<deployment name>` and execs into every match, which is the whole point
-under `active_standby`: which pod is active is only knowable at runtime, so
-the manifest asserts no `role` label and the script answers per pod instead.
-The standby's block carries its leader-election lines and **no workflow
-lines** -- a standby runs none, so that is the normal shape and is
-deliberately not warned about. Use `--pod` to narrow to one.
-
-**Only configured workflows are listed.** The connector reports its full set
-of workflow slots and marks every unconfigured one `N/A`, so one real workflow
-would otherwise print twenty lines; those are filtered out, as is any entry
-with no state at all (a nested fragment of the JSON that the script's
-brace-splitting parser picked up). Real states are never filtered against a
-fixed list -- a state this tool has not seen before still reaches you, since
-hiding it would be worse than showing it. If *every* entry is empty or `N/A`,
-that is reported on stderr rather than silently leaving the workflow lines out. A target that does not expose `workflows` in
+**Only configured workflows are listed.** The connector reports its full set of
+workflow slots and marks every unconfigured one `N/A`, so one real workflow
+would otherwise print twenty lines; those are filtered out, as is any entry with
+no state at all. Real states are never filtered against a fixed list -- a state
+this tool has not seen before still reaches you. If *every* entry is empty or
+`N/A` on an **active** instance, that is reported as a note rather than silently
+leaving the workflow lines out. An instance that does not expose `workflows` in
 `management.endpoints.web.exposure.include` still reports leader-election, with a
-warning on stderr that per-workflow state is missing; one that does not expose
-`leaderelection` reports nothing and explains why on stderr, since that is the
-endpoint the whole report is built from. Either way the script still exits 0 --
-see below.
+note saying per-workflow state is missing; one that does not expose
+`leaderelection` reports nothing and explains why, since that is the endpoint the
+whole report is built from.
 
-### The manual alternative
+#### First run: installing the script
 
-`status` is a thin wrapper around a script the connector container can run on its
-own. To check an instance yourself, without the CLI:
+Every artifact `generate`/`deploy` produces already carries the status script
+(section 9), but an instance that predates this feature, or one this tool never
+deployed, may not have it installed. The first time an application view finds it
+missing, it asks once:
+
+```
+status script missing on solmq-connector-7d9f8c6b5-x2n4q -- install it now? [y/N]
+```
+
+Answer `y` to install it on every missing instance for this run, or pass
+`--install` up front to skip the prompt. Declining (or a blank answer) skips
+those instances and `status` exits 1. **The prompt refuses to block when stdin is
+not a TTY** -- a CI job must pass `--install` (or ensure the script is already
+installed), or the run fails immediately with that guidance instead of hanging.
+`--install`, `--user` and `--management-port` steer that script, so they apply to
+the `application` and `all` views only; passing one with `container` is a usage
+error (exit 2) rather than a flag that silently does nothing.
+
+> **An instance that cannot answer still gets a block.** If the script cannot be
+> probed, installed, or run on an instance, that instance's block is still
+> printed, with the failure as a `status:` line in the body -- under the
+> container facts that explain it. Before this, such an instance produced one
+> line on stderr and no block at all, which is exactly backwards: the
+> crash-looping instance is the one you most need to see.
+
+### 10.3 `-d` / `--details`
+
+`--details` adds the enrichment lines to whichever view is printed. It is opt-in
+because it needs one **sampling** call per run (`kubectl top`, `docker stats`) on
+top of the metadata reads, and on kubernetes that call needs a metrics API in the
+cluster.
+
+On the container side, a block per instance under the table:
+
+```text
+solmq-connector-7d9f8c-x2n4q
+  digest:  sha256:9f2a1c4d8e...
+  started: 2026-08-18T04:12:07Z
+  cpu:     120m of 1 (12%)
+  memory:  512Mi of 1Gi (50%)
+  components:
+    KIND                   NAME                         STATUS   MOUNT
+    configmap              solmq-connector-config       present  /app/external/spring/config/application.yml
+    persistentvolumeclaim  solmq-libs                   Bound    /app/external/libs
+    secret                 solmq-connector-credentials  present  /run/secrets
+```
+
+- a `NODE` column in the table (kubernetes), naming the worker node
+- **`digest`** -- the image digest actually running. On kubernetes it arrives in
+  the pod document for free; on docker/podman it costs one `image inspect`, since
+  those engines report a digest on the image rather than on the container
+- **`cpu`/`memory`** -- usage against whatever ceiling the engine reports. The
+  numbers are the engine's own, in the engine's own units: kubernetes reports
+  millicores and bytes against the pod's limits, while `docker stats` reports a
+  host-relative CPU percentage and a memory string that already carries both
+  sides. Nothing is converted between them, because converting would invent
+  precision the engine never gave
+- **`components`** -- the objects the workload actually references, read from the
+  pod spec (or the container's mounts, networks and secrets on docker/podman)
+  rather than from `env.yaml`, so this works for an instance this tool never
+  deployed. On kubernetes each one is checked with a `kubectl get`, deduplicated
+  across pods, and reported `present`, `MISSING`, or a volume claim's own phase
+  (`Bound`/`Pending`)
+- **`image-expected`** -- printed **only when the running image differs from
+  `image:` in `env.yaml`**, which is what catches a pod still on the old tag
+  after a rollout that never completed. The comparison tolerates the spellings
+  the engines use for one reference (kubernetes normalises `solace/x:1` to
+  `docker.io/solace/x:1`), and when `env.yaml` pins a digest the digest actually
+  running is what answers
+
+On the application side:
+
+```text
+  uptime:                3d 4h 31m
+  version:               2.14.1
+  java:                  openjdk 17.0.9
+  config:                /app/external/spring/config/application.yml
+  heap:                  412Mi of 1Gi (40%)
+  health components:
+    solace: UP
+    ibmmq:  UP
+```
+
+| Line | From |
+|------|------|
+| `uptime` | `/actuator/metrics/process.uptime` |
+| `version` | `/actuator/info` -- the build version, when the image publishes one |
+| `java` | `java -version` inside the container; dropped when the image has no `java` on `PATH` |
+| `config` | the configuration file the script read the account and exposure list from, resolved the way Spring itself resolves it (see "Instances this tool did not deploy" below) |
+| `heap` | `/actuator/metrics/jvm.memory.used` and `jvm.memory.max`, tagged `area:heap` so the number is comparable with `-Xmx` |
+| `health components` | the per-component statuses in the health document -- which dependency is up and which is not |
+
+Each line is dropped when its source answers nothing, rather than reported as
+missing. If a line you expect is absent on an instance that predates this
+feature, its installed script is older than this build: reinstall it with
+`--install`.
+
+> **Reading the script by hand?** The `heap:` line it prints carries **raw
+> bytes**, not `Mi`/`Gi` -- the CLI does that conversion. The script cannot: a
+> large heap may arrive from Micrometer in scientific notation (`4.32013312E8`),
+> which busybox integer arithmetic would silently read as `4`.
+
+### 10.4 `--all`: find every instance by image
+
+`--all` ignores the instance names in `env.yaml` and reports every connector
+instance it can find, identified by image reference -- any image whose name
+contains `solace-pubsub-connector-ibmmq`:
 
 ```sh
-kubectl exec <pod> -- sh /app/external/libs/status
-docker exec <container> sh /app/external/libs/status
-podman exec <container> sh /app/external/libs/status
+solmq-conn-util status container --platform kubernetes --all
+solmq-conn-util status all --platform docker --all -d
+```
+
+- **kubernetes**: every namespace (`kubectl get pods --all-namespaces`), filtered
+  by image. When the instances found span more than one namespace the table gains
+  a `NAMESPACE` column, since no single namespace can head the banner; when they
+  all sit in one, that one heads the banner as usual. This needs permission to
+  list pods cluster-wide.
+- **docker/podman**: every container on the host, running **or stopped** --
+  an instance that died is exactly what a search like this is for -- then one
+  `inspect` over the matches.
+
+`--all` cannot be combined with `--pod`/`--container` (exit 2): those narrow to
+names, and `--all` deliberately ignores names. It needs no `env.yaml`, but it
+still needs a resolvable platform, so pass `--platform` where the file is absent.
+
+### 10.5 `-w` / `--watch`
+
+`--watch` re-renders the report every 5s until you interrupt it (Ctrl-C, which
+exits 0), clearing the screen between ticks and printing a header naming the
+interval and the time. On Windows it turns on the console's ANSI processing
+itself, so a plain `conhost` window redraws as well as Windows Terminal does.
+
+The install confirmation is asked at most once for a whole watch loop: the answer
+cannot change between ticks, and a prompt would block the redraw.
+
+### 10.6 `--output json`
+
+`--output json` emits one machine-readable document per run instead of the
+tables -- the same model the tables are rendered from, so the two can never
+disagree:
+
+```json
+{
+  "schemaVersion": 1,
+  "platform": "kubernetes",
+  "namespace": "prod",
+  "workload": { "deployment": "solmq-connector", "ready": 1, "desired": 2, "upToDate": 1, "available": 2 },
+  "instances": [
+    {
+      "name": "solmq-connector-7d9f8c-x2n4q",
+      "namespace": "prod",
+      "container": { "state": "running", "ready": "yes", "restarts": 0, "age": "3d7h",
+                     "image": "solace/solace-pubsub-connector-ibmmq:2.14.1" },
+      "application": { "leaderElectionMode": "active_standby", "leaderElectionState": "active",
+                       "health": "UP", "workflows": [ { "id": "0", "state": "running" } ] }
+    }
+  ]
+}
+```
+
+- Field names are a **compatibility contract**. A field may be added at the same
+  `schemaVersion`, so parse leniently and ignore what you do not know; a rename
+  or a change of meaning bumps the version.
+- A field with nothing in it is **omitted**, not emitted as `null` or `""`, so
+  presence is a meaningful test. `instances` is always present, as a list.
+- The document is the only thing on stdout; notes and warnings go to stderr, so
+  stdout stays parseable. Exit codes are unchanged.
+- `--output json` cannot be combined with `--watch` (exit 2).
+
+### 10.7 What the exit code means, and what each view costs
+
+`status`'s own exit code is about whether every instance could be **reached and
+run**, never about which instance is active or whether anything is healthy:
+
+- **0** -- every instance was reported. A standby instance, an unhealthy
+  container, a crash-looping pod, a missing metrics API: all of these are
+  *answers*, printed in the report.
+- **1** -- at least one instance's script could not be probed, installed or run
+  (each such instance says so in its own block), or the whole run could not
+  start (no instances found, an unreadable `env.yaml`, a failed preflight).
+- **2** -- a usage error: a missing or unknown target word, an unknown flag, or a
+  flag combination that cannot mean anything.
+
+An engine query that degrades -- no metrics API, an unreadable Deployment, a
+component that could not be checked -- never changes the exit code. It becomes a
+`status:` note in the report, the same idiom the in-container script uses for its
+own notes, so a problem found outside the container and one found inside read the
+same way.
+
+Every engine query is read-only and goes out as a validated argv slice, never a
+shell string (section 7's rules apply here too). They are deliberately **one
+call for many instances**, so the cost barely grows with the replica count:
+
+| View | kubernetes | docker | podman |
+|------|-----------|--------|--------|
+| `container` | 1 read-only preflight + 1 `get pods` (+ `get deployment`/`get service`) | preflight + 1 `inspect` for every target | preflight + 1 `inspect` + 1 `systemctl show` per instance |
+| `application` | + 1 probe and 1 script run per instance | same | same |
+| `-d` adds | 1 `top pod` for the run + 1 `get` per distinct referenced object | 1 `stats --no-stream` + 1 `image inspect` per distinct image | same as docker |
+| `--all` adds | nothing (the same list call, cluster-wide) | 1 `ps` before the inspect | 1 `ps` before the inspect |
+
+### 10.8 The manual alternative
+
+`status`'s application half is a thin wrapper around a script the connector
+container can run on its own. To check an instance yourself, without the CLI:
+
+```sh
+kubectl exec <pod> -- sh /app/external/.status-script
+docker exec <container> sh /app/external/.status-script
+podman exec <container> sh /app/external/.status-script
 ```
 
 To sweep every pod behind a Deployment:
 
 ```sh
 for p in $(kubectl get pods -l app=solmq-connector -o name); do
-  echo "$p:"; kubectl exec "$p" -- sh /app/external/libs/status
+  echo "$p:"; kubectl exec "$p" -- sh /app/external/.status-script
 done
 ```
 
@@ -1292,30 +1567,35 @@ instance. A standby instance and a misconfigured endpoint never look like that.
 To branch on the result, read the output rather than `$?`:
 
 ```sh
-kubectl exec <pod> -- sh /app/external/libs/status | grep -q 'state: active'
+kubectl exec <pod> -- sh /app/external/.status-script | grep -q 'state: active'
 ```
 
-The `status` command's own exit code follows the same idea: 0 when every instance
-could be reached and run, 1 when one could not -- never a statement about which
-instance is active. Read the per-instance report lines for that.
+The script prints every line it can, at every level: the CLI decides which of
+them a basic report shows and which need `--details`. Running it by hand shows
+all of them.
 
-### Instances this tool did not deploy
+> **Upgrading from a build that used `/app/external/libs/status`:** a container
+> deployed by the older tool carries the script at the old path, so `status`
+> reports it missing and offers to install it at the new one (`--install` accepts
+> without prompting). Redeploying replaces the mount outright -- on kubernetes
+> that needs a `kubectl rollout restart`, since `subPath` mounts do not refresh.
+
+### 10.9 Instances this tool did not deploy
 
 `status` also works against a **foreign** instance -- one deployed by hand, or by
-an older version of this tool -- as long as the status script and the reserved
-`solmq-status` account (section 6.1) are present on it. Combine `--platform` with
-explicit `--pod` / `--container` targets and `status` needs nothing else from
-`env.yaml` at all; `--management-port` and `--user` cover a non-default setup (a
-management port other than the connector default, or an actuator account under a
-different name):
+an older version of this tool. The container view needs nothing from it at all;
+the application view needs the status script and a reachable actuator account
+(`solmq-status`, section 6.1). Combine `--platform` with explicit
+`--pod`/`--container` targets, or `--all`, and `status` needs nothing from
+`env.yaml`; `--management-port` and `--user` cover a non-default setup:
 
 ```sh
-solmq-conn-util status --platform kubernetes --pod other-team-connector-0 \
+solmq-conn-util status all --platform kubernetes --pod other-team-connector-0 \
   --namespace other-ns --management-port 9090 --user ops-readonly
 ```
 
-`--command` overrides the platform CLI binary used to reach a target (instead of
-the matching section's `command:`, which may not even exist for a foreign
+`--command` overrides the platform CLI binary used to reach an instance (instead
+of the matching section's `command:`, which may not even exist for a foreign
 instance), and `--allow-command` approves an extra one beyond the platform
 allowlist, the same as `deploy`/`remove`.
 
@@ -1333,7 +1613,12 @@ config can be found at all, the script says so and still queries the endpoint
 unauthenticated, which is the right answer for a foreign instance running with
 management security disabled in its own connector configuration. (This tool's
 `env.yaml` has no such switch -- instances it generates always carry the secured
-setup and the reserved account.)
+setup and the reserved account.) The `config:` line under `--details` reports
+which file it actually used.
+
+A pod with several containers and none of them named `connector` (the name this
+tool gives it) is reported at pod level only: guessing which container is the
+connector would be worse than saying nothing about any of them.
 
 ---
 
@@ -1375,7 +1660,320 @@ always generates cleanly:
 
 ---
 
-## 12. Notes and gotchas
+## 12. `download jar`
+
+```sh
+solmq-conn-util download jar mq      [dir] [-e env.yaml] [--version v] [--omit-lib-file file] [--include-provided] [--url u] [-f]
+solmq-conn-util download jar syslog  [dir] [-e env.yaml] [--version v] [--omit-lib-file file] [--include-provided] [--url u] [-f]
+```
+
+Fetches the jars a deploy target's `libs` section expects on disk (section 7.1's
+`libs.pvc`/`libs.download`, section 7.2/7.3's `libs.dir`) into `<dir>` (default
+`./libs`), so you have something to point those keys at. It does **not** read
+`env.yaml` -- there is no `-e` flag -- and it makes no other change to your
+config.
+
+### The two sets
+
+| set | seeds from | for |
+|-----|-----------|-----|
+| `mq` | the IBM MQ client jar and its dependency closure | the connector's IBM MQ connection |
+| `syslog` | `net.logstash.logback:logstash-logback-encoder` and its dependency closure | `logging.syslog.protocol: tcp` (section 7.1) |
+
+The `mq` seed is **always** `com.ibm.mq:com.ibm.mq.jakarta.client` (JMS 3.0,
+`jakarta.jms`), and there is no flag to change it. IBM publishes a second build,
+`com.ibm.mq.allclient` (JMS 2.0, `javax.jms`), but it cannot be used here: the
+connector image is a Jakarta stack -- it ships `jakarta.jms-api`, Spring 6 and
+`mq-jms-spring-boot-starter` 3.x -- and a client implementing `javax.jms` cannot
+satisfy a `jakarta.jms` binder.
+
+Nor can you have both. The two builds are the same client compiled against
+different JMS APIs, so both carry `com.ibm.mq.*` and `com.ibm.msg.client.*`;
+with both on one classpath, load order decides which wins, silently. If you
+genuinely need the javax build for some other purpose, fetch it with `--url`,
+into a directory that is not the connector's.
+
+### Version resolution
+
+The seed artifact resolves to **`--version`'s value** when given, or to its
+**latest stable release** on Maven Central when `--version` is empty (the
+default, and the only behavior before this flag existed). Either way, every
+dependency below the seed is pinned to **whatever version the seed's own POM
+(and parent POM chain) declares** for it, not to each dependency's own latest.
+This is deliberate: always-latest previously produced a skewed BouncyCastle
+trio where two of the three jars disagreed with the third. Because an
+unpinned seed tracks latest-stable, the exact filenames and byte sizes
+returned by this command **change over time** when `--version` is left empty
+-- do not hard-code a version in a script that calls it without also pinning
+one. When a dependency's version cannot be resolved even after walking its
+full parent POM chain, the command falls back to that one artifact's latest
+stable release and reports it under "fallback" so you can see what was
+guessed rather than have it happen silently.
+
+### Image-aware omission
+
+The connector image already ships most of a resolved closure's dependencies,
+because `mq-jms-spring-boot-starter` (which declares
+`com.ibm.mq.jakarta.client`) is in the image while the IBM MQ jar itself is
+stripped out for licensing -- that gap is exactly what this command and the
+`libs` mount exist to fill. Downloading the whole closure regardless would
+duplicate jars already on the classpath, so each Maven-resolved artifact is
+compared against the image's own jar list:
+
+- **Omitted** (never fetched) when the image already has that jar, by
+  **artifact base name**, at a version **greater than or equal to** the
+  version this command resolved for it.
+- **Downloaded** when the image does not have that jar at all, or has it at
+  an **older** version than what was resolved.
+
+Version comparison follows Maven's own ordering, which matters because most of
+the image classpath is spelled with a qualifier:
+
+| Spelling | Ranks as | Examples in the image |
+|----------|----------|-----------------------|
+| `Final`, `GA`, `RELEASE` | **the release itself** -- `4.1.135.Final` *is* `4.1.135`, neither newer nor older | netty, hibernate-validator, jboss-logging |
+| `SP<n>` | **above** the plain release | -- |
+| `rc`, `alpha`, `beta`, `M<n>`, `SNAPSHOT`, ... | **below** the plain release | -- |
+
+A jar filename's trailing classifier is not part of its version and is dropped
+before comparing, so `netty-transport-native-epoll-4.1.135.Final-linux-x86_64.jar`
+is read as `netty-transport-native-epoll` at `4.1.135.Final`.
+
+An entry whose version fits none of those shapes cannot be ordered safely, so
+it is **treated as not provided** -- the safe direction, since it means the jar
+downloads rather than being wrongly skipped. That is reported only if the
+closure being downloaded actually asked about that artifact: a rejected entry
+no download ever consults changed nothing, and is not worth reporting on every
+run.
+
+**The seed jar is never omitted, no matter what the jar list says.** Omission
+applies only to the seed's *dependencies*. The seed -- the IBM MQ client for
+the `mq` set, the logstash encoder for `syslog` -- is the jar you ran the
+command to get in the first place, so skipping it would defeat the command's
+own purpose; it also keeps `download jar syslog` useful against an *older*
+image that never shipped the encoder at all, since the same command has to
+work there too; and it means a stale, wrong, or hostile jar list cannot omit
+the one jar that matters most -- a crafted line such as
+`com.ibm.mq.jakarta.client-99999.jar` in a jar list omits nothing, because the
+seed was never a candidate for omission to begin with.
+
+**A jar list is a declaration by the operator about their image, not
+something this command verifies independently.** Every non-seed entry in it
+is trusted exactly as written: a jar list that is wrong about what an image
+ships produces wrong omissions for dependencies, by design. This is the
+sharpest edge in the feature: using a list while deploying an image it does
+not describe can omit a jar that image does not really have.
+
+**The built-in default describes a range of releases, not one tag.** It was
+captured from `solace/solace-pubsub-connector-ibmmq:2.13.0`, but the
+connector's classpath does not move between releases -- a capture from 2.14.1
+is byte-for-byte identical -- so the same list judges omission correctly for
+**2.10.0 and later**. The filename records where the bytes came from; the
+range is what the tool checks against, and it is printed on every run:
+
+```
+omit list: solace-pubsub-connector-ibmmq-2.13.0 (built in; describes 2.10.0 and later)
+```
+
+**The command tells you when your image falls outside that range.**
+`download jar` reads `-e env.yaml` (default `env.yaml`) for exactly one thing
+-- the `image` block -- and warns when the jar list cannot speak for the image
+you deploy: a release older than the floor, a different image entirely, or a
+digest pin naming no release at all.
+
+```
+omit list warning: env.yaml deploys solace/solace-pubsub-connector-ibmmq:2.9.0,
+  which predates 2.10.0 -- the built-in jar list is only known to describe
+  2.10.0 and later, so every omission above may name a jar that image does not
+  ship.
+```
+
+Deploying anything from 2.10.0 up is silent: the list does describe it, and a
+warning on every correct run is noise you would learn to skip past. Note there
+is no upper bound -- a future release that *did* change its classpath would go
+unnoticed until someone recaptures and raises the floor, so recapture when you
+adopt a major version bump (the probe command is in the next section).
+
+It reads nothing else from the file -- no credentials, no platform, no
+workflows -- and a missing `env.yaml` is not an error, because `download` is the
+command you run *before* you have a deployment. Passing `--omit-lib-file`
+silences the check: you named a list, so the tool does not second-guess it.
+Every run still prints which jar list it used either way. Two remedies:
+
+- Capture your own list from the image you actually deploy (see the probe
+  command in the next section) and pass it with `--omit-lib-file`.
+- Or pass `--include-provided` to skip the omission check entirely and
+  download everything, if you would rather not maintain a list at all.
+
+Every omission is reported -- as `guessed version` lines are for a fallback,
+an omission line names the jar and the version the image has, so a skipped
+jar is never silent. This is why `download jar mq` typically fetches only one
+or two jars instead of the whole six-or-so-jar closure: the image already
+covers the rest. For example, against the jar list captured from
+`solace/solace-pubsub-connector-ibmmq:2.13.0` (the embedded default, see
+below):
+
+| command | seed | result |
+|---------|------|--------|
+| `download jar mq` | latest stable (e.g. `10.0.0.0`) | `com.ibm.mq.jakarta.client` downloads (absent from the image); `org.json:json` downloads (the image's `20250517` is older than the `20251224` this release's POM needs); the BouncyCastle trio and `jakarta.jms-api` are omitted (the image already has each at an equal-or-newer version) |
+| `download jar mq --version 9.4.2.0` | pinned `9.4.2.0` | only `com.ibm.mq.jakarta.client-9.4.2.0.jar` downloads -- that release's POM needs BouncyCastle `1.80`, `jakarta.jms-api` `3.0.0` and `org.json:json` `20250107`, and the image satisfies every one of those at an equal-or-newer version |
+| `download jar syslog` | latest stable (e.g. `9.0`) | `logstash-logback-encoder` downloads anyway (the image's `8.0` is older -- see the caveat below); `jackson-databind`/`jackson-core` (groupId `tools.jackson.core`, Jackson 3) download because the image has no such jars at all; `jackson-annotations` is omitted (the image's `2.22` satisfies the `2.20` required) |
+
+Exact version numbers above are illustrative -- "latest stable" moves, so
+re-run the command to see what your seed actually resolves today.
+
+### The image jar list: built-in, `--omit-lib-file`, and `--include-provided`
+
+The list this command compares against is a flat file of jar filenames, one
+per line -- the format
+[`internal/libs/imagelibs/solace-pubsub-connector-ibmmq-2.13.0.list`](internal/libs/imagelibs/solace-pubsub-connector-ibmmq-2.13.0.list)
+(the tracked source of the **embedded default**, captured from
+`solace/solace-pubsub-connector-ibmmq:2.13.0` and describing every release from
+2.10.0 on) shows firsthand. Its header records both the probe command and the
+evidence for that range.
+
+`--omit-lib-file <file>` **replaces the embedded default completely** -- it
+never merges with it. An empty file omits nothing at all, which is itself a
+valid way to get the whole closure without reaching for `--include-provided`.
+
+Running a different (custom or slimmed) image, or one older than 2.10.0? Point
+`--omit-lib-file` at a list captured from *that* image instead, or the omission
+check will be comparing against a classpath you do not actually have (see the
+hazard above).
+Probe a running image directly for its jar list:
+
+```sh
+docker run --rm --entrypoint sh solace/solace-pubsub-connector-ibmmq:2.13.0 -c 'find / -name "*.jar" -not -path "/proc/*" 2>/dev/null | xargs -n1 basename | sort'
+```
+
+Redirect that output to a file and pass it with `--omit-lib-file`:
+
+```sh
+docker run --rm --entrypoint sh <your-image> -c 'find / -name "*.jar" -not -path "/proc/*" 2>/dev/null | xargs -n1 basename | sort' > omit-lib-file.txt
+solmq-conn-util download jar mq --omit-lib-file omit-lib-file.txt
+```
+
+`--include-provided` bypasses the omission check entirely and downloads the
+whole resolved closure regardless of what the image list says -- use it when
+you want every dependency on disk yourself (an air-gapped mirror build, or a
+classpath you do not trust to already have the right versions).
+
+**Matching is by jar filename, not groupId.** A downloaded jar's filename
+carries no groupId, so the omission check can only compare artifact base
+name plus version -- it has no way to tell `com.fasterxml.jackson.core` from
+`tools.jackson.core`. This is harmless in practice and is exactly why Jackson
+3 still downloads for the `syslog` set even though the image already ships
+Jackson 2: `tools.jackson.core:jackson-databind` and
+`com.fasterxml.jackson.core:jackson-databind` share the same base name
+(`jackson-databind`), but the syslog closure's Jackson 3 version (e.g.
+`3.0.1`) compares higher than the image's Jackson 2 copy (`2.22.0`), so the
+version comparison still gets the right answer -- the jar downloads because
+it looks newer, not because the tool knows it is a different library.
+
+### `logstash-logback-encoder` and Jackson: verify before relying on tcp syslog
+
+The `syslog` set's dependency versions come from its own POM chain the same
+way `mq`'s do -- but unlike `mq`, a major bump in
+`logstash-logback-encoder`'s latest release can change which Jackson
+**generation** it needs. At the time of writing, the image ships
+`logstash-logback-encoder 8.0` against Jackson 2, while the latest encoder
+(`9.0`) needs Jackson 3 at a different groupId (`tools.jackson.core`) --
+the owner chose to fetch the newer encoder anyway rather than pin it down,
+which is why the closure downloads it even though the image's copy is only
+older, not missing. The practical effect: **two `logstash-logback-encoder`
+versions now exist across the image classpath and the `libs` mount** (the
+image's bundled `8.0`, plus whatever `download jar syslog` just fetched).
+Nothing in this tool confirms the resulting classpath actually loads with
+`logging.syslog.protocol: tcp` at runtime. If you rely on tcp syslog in
+production, verify the deployed classpath yourself, or pin a known-good
+combination with `--version` (a specific `logstash-logback-encoder` release)
+or `--url` (an exact, pre-verified set of jars).
+
+### `--url` overrides all resolution
+
+Passing one or more `--url` skips Maven Central entirely: exactly the URLs
+given are downloaded, and the set's own dependency closure and the
+image-aware omission check are not consulted at all. **Omission applies only
+to the Maven-resolved `mq`/`syslog` sets** -- an explicit `--url` is always
+downloaded verbatim, because naming it yourself means the tool does not
+second-guess your choice. `--url` is repeatable. Point it at your own
+artifact mirror when you need a pinned, verified jar set (see the integrity
+verification note below) -- note that a `--url` artifact whose `.sha1`
+sidecar 404s is still written, but reported **unverified** rather than
+silently trusted.
+
+Relatedly: the `mq`/`syslog` sets always contact Maven Central to resolve the
+closure (and check it against the image list) before writing anything, even
+when every target file is already on disk -- unlike `--url`, which checks for
+an existing file *before* making any request. Re-running `download jar mq`
+with nothing missing still needs network access; `--url` does not.
+
+### Flags and defaults
+
+- `[dir]` -- destination directory, created if missing; default `./libs`.
+- `--version <v>` -- pin the seed artifact to this release; empty (the
+  default) resolves latest stable, same as before this flag existed.
+- `--omit-lib-file <file>` -- compare against a jar list that REPLACES the
+  embedded default entirely instead of merging with it; see above.
+- `--include-provided` -- skip the omission check and download the whole
+  resolved closure regardless of what the image already has.
+- `-f` / `--force` -- overwrite a file that already exists; without it an
+  existing file is left alone and reported skipped, the same as `examples`.
+  This never reaches an artifact the image-aware omission check already
+  dropped -- that jar was never queued to write in the first place, so `-f`
+  has nothing to overwrite; use `--include-provided` if you want it anyway.
+- **https is mandatory**, on the initial URL and on every redirect hop --
+  see the note below on why.
+
+### Integrity verification (sha1)
+
+Maven Central publishes a `.sha1` sidecar beside every jar (the same URL with
+`.sha1` appended). Before a downloaded jar is renamed into place, this
+command fetches that sidecar, computes the sha1 of the bytes actually
+written, and compares the two -- a mismatch, a missing sidecar on a
+Maven-resolved artifact, or a malformed digest is a per-artifact failure with
+an actionable message, never a silent pass. This closes the gap where a 200
+response with no `Content-Length` that closes early used to be reported as a
+successful write: when the byte count cannot be cross-checked against a
+truthful `Content-Length` *and* the sha1 was not verified either, the
+artifact fails rather than landing on disk unchecked.
+
+**Be clear about what this does and does not prove.** The digest is served by
+the same host as the jar itself, so this catches truncation, corruption, and
+a connection that drops mid-transfer -- **integrity, not authenticity**. It
+is not proof the jar came from an uncompromised repository; it only proves
+the bytes on disk are the bytes Maven Central is currently serving under that
+name.
+
+The two ways this command fetches jars are verified differently:
+
+- **A Maven-resolved artifact** (the `mq`/`syslog` sets) always requires its
+  sidecar to be fetched and to match. Missing, unfetchable, malformed, or
+  mismatched is a per-artifact failure -- the download loop moves on to the
+  next artifact rather than aborting the whole run.
+- **An explicit `--url`** attempts `<url>.sha1` and verifies it when present.
+  When the sidecar 404s, the jar is still written, but the report marks it
+  **unverified** rather than silently trusting it -- unverified is not a
+  failure, but it is never invisible either. The one case this does not
+  cover: a mirror that also omits `Content-Length` on a jar whose sidecar
+  404s has neither check available, and that combination is still a
+  per-artifact failure rather than an unverified write, since nothing at all
+  would otherwise vouch for how much of the body actually arrived.
+
+The report distinguishes three things that must not blur together: an
+omitted jar (the image already has it, nothing was fetched), a fallback jar
+(a version had to be guessed), and an unverified jar (written, but its
+integrity could not be confirmed). Each prints as its own group, alongside
+what was written, skipped, and failed, so an operator reading the output
+never has to guess which bucket a given jar landed in.
+
+If you need a pinned, verified jar set for a regulated or air-gapped
+environment, sha1 alone may not be enough -- vendor the jars yourself, or
+point `--url` at your own mirror you have already verified out of band.
+
+---
+
+## 13. Notes and gotchas
 
 - **Deterministic, byte-for-byte output.** Regenerating from unchanged inputs
   produces identical bytes (an ordered emitter, not generic YAML marshaling), so

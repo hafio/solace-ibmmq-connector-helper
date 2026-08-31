@@ -9,8 +9,10 @@ import (
 )
 
 // -update regenerates the committed docs from the model instead of asserting.
-// Run: go test ./cmd/solmq-conn-util -run TestCommandsDocInSync -update
-var updateDoc = flag.Bool("update", false, "regenerate generated docs (docs/commands.md)")
+// One registration for the whole package: TestAbbreviationDocInSync reads the
+// same flag, and a second flag.Bool("update", ...) would panic before any test
+// runs. Run: go generate ./cmd/solmq-conn-util
+var updateDoc = flag.Bool("update", false, "regenerate generated docs (docs/commands.md, docs/abbreviation.md)")
 
 // normLF collapses CRLF to LF so the byte comparison is independent of the
 // checkout's line-ending setting (Windows-first repo; output contract is LF).
@@ -40,73 +42,174 @@ func TestCommandsDocInSync(t *testing.T) {
 	}
 }
 
-// TestCommandsModelMatchesUsage anchors the model to the authoritative in-binary
-// help, in both directions: every documented command/flag appears in usage(),
-// and usage() lists no command the model omits.
+// TestCommandsModelMatchesUsage anchors the summary page to the model and to
+// its own promises: one line per command carrying the model's description,
+// detail deferred to the per-command pages, no aliases (md-only, by decision),
+// and no line past the 100-column budget the page is designed never to wrap
+// in. The full flag/argument coverage that used to be asserted against this
+// page moved with the content to TestVerbUsagePages.
 func TestCommandsModelMatchesUsage(t *testing.T) {
 	u := usageText()
-	collapsed := strings.Join(strings.Fields(u), " ") // fold the help's alignment padding
+	lines := strings.Split(strings.TrimRight(u, "\n"), "\n")
 
-	// usageName is how a verb heads its usage line: bare when it has no alias,
-	// and <name|alias> when it does, so -h shows both spellings. Building the
-	// expectation from the model is also what makes the alias genuinely
-	// asserted here -- a bare strings.Contains(u, "gen") would pass on the
-	// "generate" already in the text without the alias appearing at all.
-	usageName := func(v cliVerb) string {
-		if len(v.Aliases) == 0 {
-			return v.Name
+	var commands []string
+	in := false
+	for _, ln := range lines {
+		switch {
+		case ln == "Commands:":
+			in = true
+		case in && strings.HasPrefix(ln, "  "):
+			commands = append(commands, ln)
+		case in:
+			in = false
 		}
-		return "<" + strings.Join(append([]string{v.Name}, v.Aliases...), "|") + ">"
+	}
+	if len(commands) != len(cliVerbs) {
+		t.Fatalf("usage() lists %d command lines but the model has %d verbs:\n%s", len(commands), len(cliVerbs), u)
+	}
+	for i, v := range cliVerbs {
+		ln := commands[i]
+		if !strings.HasPrefix(ln, "  "+v.Name+" ") {
+			t.Errorf("command line %d = %q, want it to start with %q", i, ln, v.Name)
+		}
+		if desc := plainText(verbBlurb(v)); !strings.Contains(ln, desc) {
+			t.Errorf("command %q line is missing its description %q", v.Name, desc)
+		}
 	}
 
-	leaves := 0
+	assertNoAliases(t, "usage()", u)
+	assertHelpWidth(t, "usage()", u)
+
+	if !strings.Contains(u, "help <command>") {
+		t.Errorf("usage() should point at the per-command pages, got:\n%s", u)
+	}
+}
+
+// TestVerbUsagePages is the drift gate for the per-command pages: every verb
+// renders one, it carries the synopsis, every target word and its summary,
+// every modeled flag the verb takes with its terse Usage text, and an example
+// -- with no alias anywhere and no line past the page's width budget. This is
+// where the detail deferred from the summary lives, so this is where its
+// coverage is asserted.
+func TestVerbUsagePages(t *testing.T) {
+	byShort := make(map[string]cliFlag, len(cliFlags))
+	for _, f := range cliFlags {
+		byShort[f.Short] = f
+	}
 	for _, v := range cliVerbs {
-		if !v.InUsage {
-			continue
-		}
-		if len(v.Targets) == 0 {
-			leaves++
-			if want := "solmq-conn-util " + usageName(v); !strings.Contains(collapsed, want) {
-				t.Errorf("usage() is missing command %q", want)
+		t.Run(v.Name, func(t *testing.T) {
+			page := verbUsage(v.Name)
+			if page == "" {
+				t.Fatalf("verbUsage(%q) rendered nothing", v.Name)
 			}
-			continue
+			if v.Synopsis == "" {
+				t.Fatalf("verb %q has no Synopsis for its help page", v.Name)
+			}
+			// Folded for the Contains checks: a wrapped Usage text spans lines.
+			folded := strings.Join(strings.Fields(page), " ")
+
+			if !strings.Contains(page, "Usage:\n  solmq-conn-util "+v.Synopsis+"\n") {
+				t.Errorf("page is missing the synopsis %q:\n%s", v.Synopsis, page)
+			}
+			if desc := plainText(verbBlurb(v)); !strings.Contains(folded, desc) {
+				t.Errorf("page is missing the description %q", desc)
+			}
+			for _, tg := range v.Targets {
+				if !strings.Contains(folded, tg.Name+" "+plainText(tg.Summary)) {
+					t.Errorf("page is missing target %q with its summary", tg.Name)
+				}
+				for _, st := range tg.Sets {
+					if !strings.Contains(folded, st.Name+" "+plainText(st.Summary)) {
+						t.Errorf("page is missing set %q with its summary", st.Name)
+					}
+				}
+			}
+			for _, sh := range v.Flags {
+				f, ok := byShort[sh]
+				if !ok {
+					continue // TestCompletionModelMetadataComplete reports the broken key
+				}
+				if f.Usage == "" {
+					t.Errorf("flag %s has no terse Usage text, so the %q page cannot describe it", f.Long, v.Name)
+					continue
+				}
+				for _, spelling := range flagOffered(f) {
+					if !strings.Contains(page, spelling) {
+						t.Errorf("page is missing flag spelling %q", spelling)
+					}
+				}
+				if !strings.Contains(folded, f.Usage) {
+					t.Errorf("page is missing %s's usage text %q", f.Long, f.Usage)
+				}
+			}
+			if ex := verbExample(v); ex != "" && !strings.Contains(page, "\nExample:\n  "+ex+"\n") {
+				t.Errorf("page is missing the example %q", ex)
+			}
+			assertNoAliases(t, "verbUsage("+v.Name+")", page)
+			assertHelpWidth(t, "verbUsage("+v.Name+")", page)
+		})
+	}
+
+	// A flag no verb lists would appear on no page at all -- unreachable from
+	// every help surface, which is how documentation quietly rots.
+	used := map[string]bool{}
+	for _, v := range cliVerbs {
+		for _, sh := range v.Flags {
+			used[sh] = true
+		}
+	}
+	for _, f := range cliFlags {
+		if !used[f.Short] {
+			t.Errorf("flag %s is listed by no verb, so no help page shows it", f.Long)
+		}
+	}
+
+	// The platform short spellings must survive somewhere in terminal help;
+	// they used to be asserted against the summary's flag table, which is gone.
+	platform := byShort[platformFlagName]
+	for _, e := range platformAliasList {
+		if !strings.Contains(platform.Usage, e.Alias) {
+			t.Errorf("--platform's Usage text should name the short spelling %q, got %q", e.Alias, platform.Usage)
+		}
+	}
+}
+
+// assertNoAliases fails when any verb or target alias appears as a standalone
+// word in text: the short spellings keep working, but by decision they are
+// documented only in docs/commands.md and the user guide, never in terminal
+// help.
+func assertNoAliases(t *testing.T, where, text string) {
+	t.Helper()
+	words := map[string]bool{}
+	for _, w := range strings.FieldsFunc(text, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-')
+	}) {
+		words[w] = true
+	}
+	for _, v := range cliVerbs {
+		for _, a := range v.Aliases {
+			if words[a] {
+				t.Errorf("%s shows alias %q; aliases are documented only in the markdown docs", where, a)
+			}
 		}
 		for _, tg := range v.Targets {
-			leaves++
-			inv := "solmq-conn-util " + usageName(v) + " " + tg.Name
-			if !strings.Contains(collapsed, inv) {
-				t.Errorf("usage() is missing command %q", inv)
+			for _, a := range tg.Aliases {
+				if words[a] {
+					t.Errorf("%s shows target alias %q; aliases are documented only in the markdown docs", where, a)
+				}
 			}
 		}
 	}
+}
 
-	got := 0
-	for _, ln := range strings.Split(u, "\n") {
-		if strings.HasPrefix(ln, "  solmq-conn-util ") {
-			got++
+// assertHelpWidth fails on any line past the width budget: the pages are
+// designed never to wrap in a 100-column terminal, which is the failure mode
+// the old 200-column summary page had.
+func assertHelpWidth(t *testing.T, where, text string) {
+	t.Helper()
+	for _, ln := range strings.Split(text, "\n") {
+		if len(ln) > helpPageWidth {
+			t.Errorf("%s has a %d-column line (budget %d): %q", where, len(ln), helpPageWidth, ln)
 		}
-	}
-	if got != leaves {
-		t.Errorf("usage() lists %d command lines but the model has %d InUsage commands", got, leaves)
-	}
-
-	for _, f := range cliFlags {
-		if !strings.Contains(u, f.Short) || !strings.Contains(u, f.Long) {
-			t.Errorf("usage() is missing flag %s/%s", f.Short, f.Long)
-		}
-	}
-
-	// --platform accepts short spellings too, and -h is where someone looks
-	// first: the docs carried them while usage() did not, so this keeps the two
-	// from diverging again as the table changes. Asserted as the pipe-joined
-	// list rather than one alias at a time, because "kube" on its own is a
-	// substring of "kubernetes" and would pass against usage text that never
-	// mentions a short spelling at all.
-	shorts := make([]string, 0, len(platformAliasList))
-	for _, e := range platformAliasList {
-		shorts = append(shorts, e.Alias)
-	}
-	if want := strings.Join(shorts, "|"); !strings.Contains(u, want) {
-		t.Errorf("usage() should list the platform short spellings as %q", want)
 	}
 }
