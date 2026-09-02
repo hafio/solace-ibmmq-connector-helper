@@ -1025,7 +1025,7 @@
       "node_kind": "heading",
       "norm_label": "14.1 one instance per run",
       "source_file": "userguide.md",
-      "source_location": "L2428"
+      "source_location": "L2414"
     },
     {
       "id": "userguide_14_2_the_shell_is_sh",
@@ -1037,7 +1037,7 @@
       "node_kind": "heading",
       "norm_label": "14.2 the shell is `sh`",
       "source_file": "userguide.md",
-      "source_location": "L2463"
+      "source_location": "L2449"
     },
     {
       "id": "userguide_14_3_the_one_shot_form_and_when_it_is_the_only_form",
@@ -1049,7 +1049,7 @@
       "node_kind": "heading",
       "norm_label": "14.3 the one-shot form, and when it is the only form",
       "source_file": "userguide.md",
-      "source_location": "L2479"
+      "source_location": "L2465"
     },
     {
       "id": "userguide_14_4_exit_status",
@@ -1061,7 +1061,7 @@
       "node_kind": "heading",
       "norm_label": "14.4 exit status",
       "source_file": "userguide.md",
-      "source_location": "L2498"
+      "source_location": "L2484"
     },
     {
       "id": "userguide_14_5_which_container_it_enters",
@@ -1073,7 +1073,7 @@
       "node_kind": "heading",
       "norm_label": "14.5 which container it enters",
       "source_file": "userguide.md",
-      "source_location": "L2513"
+      "source_location": "L2499"
     },
     {
       "id": "userguide_14_cli_a_shell_inside_the_instance",
@@ -1085,7 +1085,7 @@
       "node_kind": "heading",
       "norm_label": "14. cli: a shell inside the instance",
       "source_file": "userguide.md",
-      "source_location": "L2403"
+      "source_location": "L2389"
     },
     {
       "id": "docs_test_cli",
@@ -1097,7 +1097,7 @@
       "node_kind": "heading",
       "norm_label": "cli",
       "source_file": "docs/test.md",
-      "source_location": "L1218"
+      "source_location": "L1215"
     },
     {
       "id": "docs_test_cmd_solmq_conn_util",
@@ -1109,7 +1109,7 @@
       "node_kind": "heading",
       "norm_label": "cmd/solmq-conn-util",
       "source_file": "docs/test.md",
-      "source_location": "L1018"
+      "source_location": "L1015"
     },
     {
       "id": "docs_test_logs",
@@ -1121,7 +1121,7 @@
       "node_kind": "heading",
       "norm_label": "logs",
       "source_file": "docs/test.md",
-      "source_location": "L1167"
+      "source_location": "L1164"
     },
     {
       "id": "docs_test_remove_instance_resolution",
@@ -1133,7 +1133,7 @@
       "node_kind": "heading",
       "norm_label": "remove / instance resolution",
       "source_file": "docs/test.md",
-      "source_location": "L1237"
+      "source_location": "L1234"
     },
     {
       "id": "internal_statusreport_parse_mergeservice",
@@ -3158,7 +3158,7 @@
       "node_kind": "heading",
       "norm_label": "11. what gets generated",
       "source_file": "userguide.md",
-      "source_location": "L1766"
+      "source_location": "L1753"
     },
     {
       "id": "userguide_15_notes_and_gotchas",
@@ -3170,7 +3170,7 @@
       "node_kind": "heading",
       "norm_label": "15. notes and gotchas",
       "source_file": "userguide.md",
-      "source_location": "L2528"
+      "source_location": "L2514"
     },
     {
       "id": "userguide_1_1_shell_completion",
@@ -16311,7 +16311,7 @@
       "node_kind": "heading",
       "norm_label": "internal/dockergen",
       "source_file": "docs/test.md",
-      "source_location": "L422"
+      "source_location": "L420"
     },
     {
       "id": "docs_test_internal_examples",
@@ -16323,7 +16323,7 @@
       "node_kind": "heading",
       "norm_label": "internal/examples",
       "source_file": "docs/test.md",
-      "source_location": "L781"
+      "source_location": "L778"
     },
     {
       "id": "docs_test_internal_gen",
@@ -16335,7 +16335,7 @@
       "node_kind": "heading",
       "norm_label": "internal/gen",
       "source_file": "docs/test.md",
-      "source_location": "L795"
+      "source_location": "L792"
     },
     {
       "id": "docs_test_internal_libs",
@@ -16347,7 +16347,7 @@
       "node_kind": "heading",
       "norm_label": "internal/libs",
       "source_file": "docs/test.md",
-      "source_location": "L858"
+      "source_location": "L855"
     },
     {
       "id": "docs_test_internal_logback",
@@ -16371,7 +16371,7 @@
       "node_kind": "heading",
       "norm_label": "internal/podmangen",
       "source_file": "docs/test.md",
-      "source_location": "L454"
+      "source_location": "L452"
     },
     {
       "id": "docs_test_internal_render",
@@ -16395,7 +16395,7 @@
       "node_kind": "heading",
       "norm_label": "internal/runner",
       "source_file": "docs/test.md",
-      "source_location": "L483"
+      "source_location": "L481"
     },
     {
       "id": "docs_test_internal_scan",
@@ -16431,7 +16431,7 @@
       "node_kind": "heading",
       "norm_label": "internal/statusreport",
       "source_file": "docs/test.md",
-      "source_location": "L962"
+      "source_location": "L959"
     },
     {
       "id": "docs_test_internal_statusscript",
@@ -16467,7 +16467,7 @@
       "node_kind": "heading",
       "norm_label": "internal/validate",
       "source_file": "docs/test.md",
-      "source_location": "L588"
+      "source_location": "L586"
     },
     {
       "id": "docs_test_internal_yamlwriter",
@@ -17119,7 +17119,7 @@
       "node_kind": "heading",
       "norm_label": "12.10 instances this tool did not deploy",
       "source_file": "userguide.md",
-      "source_location": "L2211"
+      "source_location": "L2197"
     },
     {
       "id": "userguide_12_1_status_container_the_engine_s_view",
@@ -17131,7 +17131,7 @@
       "node_kind": "heading",
       "norm_label": "12.1 `status container` -- the engine's view",
       "source_file": "userguide.md",
-      "source_location": "L1868"
+      "source_location": "L1854"
     },
     {
       "id": "userguide_12_2_status_application_the_connector_s_view",
@@ -17143,7 +17143,7 @@
       "node_kind": "heading",
       "norm_label": "12.2 `status application` -- the connector's view",
       "source_file": "userguide.md",
-      "source_location": "L1908"
+      "source_location": "L1894"
     },
     {
       "id": "userguide_12_3_first_run_installing_the_script",
@@ -17155,7 +17155,7 @@
       "node_kind": "heading",
       "norm_label": "12.3 first run: installing the script",
       "source_file": "userguide.md",
-      "source_location": "L1969"
+      "source_location": "L1955"
     },
     {
       "id": "userguide_12_4_d_details",
@@ -17167,7 +17167,7 @@
       "node_kind": "heading",
       "norm_label": "12.4 `-d` / `--details`",
       "source_file": "userguide.md",
-      "source_location": "L1996"
+      "source_location": "L1982"
     },
     {
       "id": "userguide_12_5_all_find_every_instance_by_image",
@@ -17179,7 +17179,7 @@
       "node_kind": "heading",
       "norm_label": "12.5 `--all`: find every instance by image",
       "source_file": "userguide.md",
-      "source_location": "L2074"
+      "source_location": "L2060"
     },
     {
       "id": "userguide_12_6_w_watch",
@@ -17191,7 +17191,7 @@
       "node_kind": "heading",
       "norm_label": "12.6 `-w` / `--watch`",
       "source_file": "userguide.md",
-      "source_location": "L2098"
+      "source_location": "L2084"
     },
     {
       "id": "userguide_12_7_output_json",
@@ -17203,7 +17203,7 @@
       "node_kind": "heading",
       "norm_label": "12.7 `--output json`",
       "source_file": "userguide.md",
-      "source_location": "L2108"
+      "source_location": "L2094"
     },
     {
       "id": "userguide_12_8_what_the_exit_code_means_and_what_each_view_costs",
@@ -17215,7 +17215,7 @@
       "node_kind": "heading",
       "norm_label": "12.8 what the exit code means, and what each view costs",
       "source_file": "userguide.md",
-      "source_location": "L2142"
+      "source_location": "L2128"
     },
     {
       "id": "userguide_12_9_the_manual_alternative",
@@ -17227,7 +17227,7 @@
       "node_kind": "heading",
       "norm_label": "12.9 the manual alternative",
       "source_file": "userguide.md",
-      "source_location": "L2174"
+      "source_location": "L2160"
     },
     {
       "id": "userguide_12_status_the_container_the_connector_or_both",
@@ -17239,7 +17239,7 @@
       "node_kind": "heading",
       "norm_label": "12. status: the container, the connector, or both",
       "source_file": "userguide.md",
-      "source_location": "L1839"
+      "source_location": "L1825"
     },
     {
       "id": "internal_runner_runner_test_testdockerrejectsunsafecommand",
@@ -17729,7 +17729,7 @@
       "node_kind": "heading",
       "norm_label": "10.1 the two sets",
       "source_file": "userguide.md",
-      "source_location": "L1464"
+      "source_location": "L1451"
     },
     {
       "id": "userguide_10_2_version_resolution",
@@ -17741,7 +17741,7 @@
       "node_kind": "heading",
       "norm_label": "10.2 version resolution",
       "source_file": "userguide.md",
-      "source_location": "L1484"
+      "source_location": "L1471"
     },
     {
       "id": "userguide_10_3_image_aware_omission",
@@ -17753,7 +17753,7 @@
       "node_kind": "heading",
       "norm_label": "10.3 image-aware omission",
       "source_file": "userguide.md",
-      "source_location": "L1502"
+      "source_location": "L1489"
     },
     {
       "id": "userguide_10_4_the_image_jar_list_built_in_omit_lib_file_and_include_provided",
@@ -17765,7 +17765,7 @@
       "node_kind": "heading",
       "norm_label": "10.4 the image jar list: built-in, `--omit-lib-file`, and `--include-provided`",
       "source_file": "userguide.md",
-      "source_location": "L1614"
+      "source_location": "L1601"
     },
     {
       "id": "userguide_10_5_logstash_logback_encoder_and_jackson_verify_before_relying_on_tcp_syslog",
@@ -17777,7 +17777,7 @@
       "node_kind": "heading",
       "norm_label": "10.5 `logstash-logback-encoder` and jackson: verify before relying on tcp syslog",
       "source_file": "userguide.md",
-      "source_location": "L1661"
+      "source_location": "L1648"
     },
     {
       "id": "userguide_10_6_url_overrides_all_resolution",
@@ -17789,7 +17789,7 @@
       "node_kind": "heading",
       "norm_label": "10.6 `--url` overrides all resolution",
       "source_file": "userguide.md",
-      "source_location": "L1680"
+      "source_location": "L1667"
     },
     {
       "id": "userguide_10_7_flags_and_defaults",
@@ -17801,7 +17801,7 @@
       "node_kind": "heading",
       "norm_label": "10.7 flags and defaults",
       "source_file": "userguide.md",
-      "source_location": "L1699"
+      "source_location": "L1686"
     },
     {
       "id": "userguide_10_8_integrity_verification_sha1",
@@ -17813,7 +17813,7 @@
       "node_kind": "heading",
       "norm_label": "10.8 integrity verification (sha1)",
       "source_file": "userguide.md",
-      "source_location": "L1718"
+      "source_location": "L1705"
     },
     {
       "id": "userguide_10_download_jar",
@@ -17825,7 +17825,7 @@
       "node_kind": "heading",
       "norm_label": "10. `download jar`",
       "source_file": "userguide.md",
-      "source_location": "L1449"
+      "source_location": "L1436"
     },
     {
       "id": "userguide_6_1_top_level",
@@ -19774,7 +19774,7 @@
       "node_kind": "heading",
       "norm_label": "8.2 docker",
       "source_file": "userguide.md",
-      "source_location": "L1091"
+      "source_location": "L1078"
     },
     {
       "id": "userguide_8_3_podman",
@@ -19786,7 +19786,7 @@
       "node_kind": "heading",
       "norm_label": "8.3 podman",
       "source_file": "userguide.md",
-      "source_location": "L1168"
+      "source_location": "L1155"
     },
     {
       "id": "userguide_8_platform_sections_kubernetes_docker_podman",
@@ -20261,7 +20261,7 @@
       "node_kind": "heading",
       "norm_label": "13.1 `--previous` -- why a restarting instance died",
       "source_file": "userguide.md",
-      "source_location": "L2287"
+      "source_location": "L2273"
     },
     {
       "id": "userguide_13_2_follow_keeping_one_open",
@@ -20273,7 +20273,7 @@
       "node_kind": "heading",
       "norm_label": "13.2 `--follow` -- keeping one open",
       "source_file": "userguide.md",
-      "source_location": "L2302"
+      "source_location": "L2288"
     },
     {
       "id": "userguide_13_3_how_much_to_read",
@@ -20285,7 +20285,7 @@
       "node_kind": "heading",
       "norm_label": "13.3 how much to read",
       "source_file": "userguide.md",
-      "source_location": "L2314"
+      "source_location": "L2300"
     },
     {
       "id": "userguide_13_4_choosing_the_instance",
@@ -20297,7 +20297,7 @@
       "node_kind": "heading",
       "norm_label": "13.4 choosing the instance",
       "source_file": "userguide.md",
-      "source_location": "L2326"
+      "source_location": "L2312"
     },
     {
       "id": "userguide_13_5_output_shape_and_exit_code",
@@ -20309,7 +20309,7 @@
       "node_kind": "heading",
       "norm_label": "13.5 output shape and exit code",
       "source_file": "userguide.md",
-      "source_location": "L2369"
+      "source_location": "L2355"
     },
     {
       "id": "userguide_13_6_the_manual_alternative",
@@ -20321,7 +20321,7 @@
       "node_kind": "heading",
       "norm_label": "13.6 the manual alternative",
       "source_file": "userguide.md",
-      "source_location": "L2384"
+      "source_location": "L2370"
     },
     {
       "id": "userguide_13_logs_the_lines_behind_the_state",
@@ -20333,7 +20333,7 @@
       "node_kind": "heading",
       "norm_label": "13. logs: the lines behind the state",
       "source_file": "userguide.md",
-      "source_location": "L2254"
+      "source_location": "L2240"
     },
     {
       "id": "userguide_9_1_declaring_a_credential",
@@ -20345,7 +20345,7 @@
       "node_kind": "heading",
       "norm_label": "9.1 declaring a credential",
       "source_file": "userguide.md",
-      "source_location": "L1245"
+      "source_location": "L1232"
     },
     {
       "id": "userguide_9_2_mount_names",
@@ -20357,7 +20357,7 @@
       "node_kind": "heading",
       "norm_label": "9.2 mount names",
       "source_file": "userguide.md",
-      "source_location": "L1273"
+      "source_location": "L1260"
     },
     {
       "id": "userguide_9_3_how_each_platform_delivers_them",
@@ -20369,7 +20369,7 @@
       "node_kind": "heading",
       "norm_label": "9.3 how each platform delivers them",
       "source_file": "userguide.md",
-      "source_location": "L1342"
+      "source_location": "L1329"
     },
     {
       "id": "userguide_9_4_registry_credentials_pulling_the_image",
@@ -20381,7 +20381,7 @@
       "node_kind": "heading",
       "norm_label": "9.4 registry credentials (pulling the image)",
       "source_file": "userguide.md",
-      "source_location": "L1409"
+      "source_location": "L1396"
     },
     {
       "id": "userguide_9_secrets_model",
@@ -20393,7 +20393,7 @@
       "node_kind": "heading",
       "norm_label": "9. secrets model",
       "source_file": "userguide.md",
-      "source_location": "L1234"
+      "source_location": "L1221"
     },
     {
       "id": "internal_runner_runner",
@@ -63985,7 +63985,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/test.md",
-      "source_location": "L1167",
+      "source_location": "L1164",
       "weight": 1.0
     },
     {
@@ -63996,7 +63996,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/test.md",
-      "source_location": "L1218",
+      "source_location": "L1215",
       "weight": 1.0
     },
     {
@@ -64007,7 +64007,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/test.md",
-      "source_location": "L1237",
+      "source_location": "L1234",
       "weight": 1.0
     },
     {
@@ -64018,7 +64018,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/test.md",
-      "source_location": "L1018",
+      "source_location": "L1015",
       "weight": 1.0
     },
     {
@@ -64128,7 +64128,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/test.md",
-      "source_location": "L422",
+      "source_location": "L420",
       "weight": 1.0
     },
     {
@@ -64139,7 +64139,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/test.md",
-      "source_location": "L454",
+      "source_location": "L452",
       "weight": 1.0
     },
     {
@@ -64150,7 +64150,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/test.md",
-      "source_location": "L483",
+      "source_location": "L481",
       "weight": 1.0
     },
     {
@@ -64172,7 +64172,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/test.md",
-      "source_location": "L588",
+      "source_location": "L586",
       "weight": 1.0
     },
     {
@@ -64183,7 +64183,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/test.md",
-      "source_location": "L781",
+      "source_location": "L778",
       "weight": 1.0
     },
     {
@@ -64194,7 +64194,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/test.md",
-      "source_location": "L795",
+      "source_location": "L792",
       "weight": 1.0
     },
     {
@@ -64205,7 +64205,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/test.md",
-      "source_location": "L858",
+      "source_location": "L855",
       "weight": 1.0
     },
     {
@@ -64227,7 +64227,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/test.md",
-      "source_location": "L962",
+      "source_location": "L959",
       "weight": 1.0
     },
     {
@@ -76360,7 +76360,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1464",
+      "source_location": "L1451",
       "weight": 1.0
     },
     {
@@ -76371,7 +76371,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1484",
+      "source_location": "L1471",
       "weight": 1.0
     },
     {
@@ -76382,7 +76382,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1502",
+      "source_location": "L1489",
       "weight": 1.0
     },
     {
@@ -76393,7 +76393,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1614",
+      "source_location": "L1601",
       "weight": 1.0
     },
     {
@@ -76404,7 +76404,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1661",
+      "source_location": "L1648",
       "weight": 1.0
     },
     {
@@ -76415,7 +76415,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1680",
+      "source_location": "L1667",
       "weight": 1.0
     },
     {
@@ -76426,7 +76426,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1699",
+      "source_location": "L1686",
       "weight": 1.0
     },
     {
@@ -76437,7 +76437,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1718",
+      "source_location": "L1705",
       "weight": 1.0
     },
     {
@@ -76448,7 +76448,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1868",
+      "source_location": "L1854",
       "weight": 1.0
     },
     {
@@ -76459,7 +76459,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1908",
+      "source_location": "L1894",
       "weight": 1.0
     },
     {
@@ -76470,7 +76470,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1969",
+      "source_location": "L1955",
       "weight": 1.0
     },
     {
@@ -76481,7 +76481,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1996",
+      "source_location": "L1982",
       "weight": 1.0
     },
     {
@@ -76492,7 +76492,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2074",
+      "source_location": "L2060",
       "weight": 1.0
     },
     {
@@ -76503,7 +76503,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2098",
+      "source_location": "L2084",
       "weight": 1.0
     },
     {
@@ -76514,7 +76514,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2108",
+      "source_location": "L2094",
       "weight": 1.0
     },
     {
@@ -76525,7 +76525,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2142",
+      "source_location": "L2128",
       "weight": 1.0
     },
     {
@@ -76536,7 +76536,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2174",
+      "source_location": "L2160",
       "weight": 1.0
     },
     {
@@ -76547,7 +76547,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2211",
+      "source_location": "L2197",
       "weight": 1.0
     },
     {
@@ -76558,7 +76558,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2287",
+      "source_location": "L2273",
       "weight": 1.0
     },
     {
@@ -76569,7 +76569,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2302",
+      "source_location": "L2288",
       "weight": 1.0
     },
     {
@@ -76580,7 +76580,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2314",
+      "source_location": "L2300",
       "weight": 1.0
     },
     {
@@ -76591,7 +76591,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2326",
+      "source_location": "L2312",
       "weight": 1.0
     },
     {
@@ -76602,7 +76602,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2369",
+      "source_location": "L2355",
       "weight": 1.0
     },
     {
@@ -76613,7 +76613,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2384",
+      "source_location": "L2370",
       "weight": 1.0
     },
     {
@@ -76624,7 +76624,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2428",
+      "source_location": "L2414",
       "weight": 1.0
     },
     {
@@ -76635,7 +76635,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2463",
+      "source_location": "L2449",
       "weight": 1.0
     },
     {
@@ -76646,7 +76646,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2479",
+      "source_location": "L2465",
       "weight": 1.0
     },
     {
@@ -76657,7 +76657,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2498",
+      "source_location": "L2484",
       "weight": 1.0
     },
     {
@@ -76668,7 +76668,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2513",
+      "source_location": "L2499",
       "weight": 1.0
     },
     {
@@ -76789,7 +76789,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1091",
+      "source_location": "L1078",
       "weight": 1.0
     },
     {
@@ -76800,7 +76800,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1168",
+      "source_location": "L1155",
       "weight": 1.0
     },
     {
@@ -76833,7 +76833,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1245",
+      "source_location": "L1232",
       "weight": 1.0
     },
     {
@@ -76844,7 +76844,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1273",
+      "source_location": "L1260",
       "weight": 1.0
     },
     {
@@ -76855,7 +76855,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1342",
+      "source_location": "L1329",
       "weight": 1.0
     },
     {
@@ -76866,7 +76866,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1409",
+      "source_location": "L1396",
       "weight": 1.0
     },
     {
@@ -76877,7 +76877,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1234",
+      "source_location": "L1221",
       "weight": 1.0
     },
     {
@@ -76888,7 +76888,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1449",
+      "source_location": "L1436",
       "weight": 1.0
     },
     {
@@ -76910,7 +76910,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1766",
+      "source_location": "L1753",
       "weight": 1.0
     },
     {
@@ -76921,7 +76921,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L1839",
+      "source_location": "L1825",
       "weight": 1.0
     },
     {
@@ -76954,7 +76954,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2254",
+      "source_location": "L2240",
       "weight": 1.0
     },
     {
@@ -76965,7 +76965,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2403",
+      "source_location": "L2389",
       "weight": 1.0
     },
     {
@@ -76976,7 +76976,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "userguide.md",
-      "source_location": "L2528",
+      "source_location": "L2514",
       "weight": 1.0
     },
     {

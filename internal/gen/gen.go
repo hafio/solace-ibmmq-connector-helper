@@ -141,10 +141,10 @@ const statusPasswordPlaceholder = "validate-only-placeholder"
 // KubeOpts steers the kubernetes render, mirroring PodmanOpts rather than
 // widening the signature every time a caller needs a variant.
 type KubeOpts struct {
-	// OmitNamespace drops the Namespace document. Set it for a teardown: a
+	// Teardown renders the set for `delete -f -`: no Namespace document, and the
 	// manifest carrying a Namespace, piped to `kubectl delete -f -`, takes the
 	// namespace and everything else living in it.
-	OmitNamespace bool
+	Teardown bool
 }
 
 func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...string) (out string, errs, warns []Issue) {
@@ -179,7 +179,7 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
 
-	in := deploy.Input{Kube: k, Defaults: &e.Defaults, Syslog: e.Defaults.Syslog, OmitNamespace: opts.OmitNamespace}
+	in := deploy.Input{Kube: k, Defaults: &e.Defaults, Syslog: e.Defaults.Syslog, Teardown: opts.Teardown}
 	if c := k.Secrets.Credentials; c != nil && c.Create != nil {
 		kvs, err := ResolveCredentials(b.model.Secrets, res)
 		if err != nil {

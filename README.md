@@ -9,57 +9,63 @@ one connector instance, holding up to 20 workflows; a folder with more is reject
 so splitting them across connectors stays your decision.
 
 - **One config file.** `env.yaml` holds the connector defaults, workflow
-  discovery, and a per-target (`kubernetes:` / `docker:` / `podman:`) deploy section.
+  discovery, and a per-platform (`kubernetes:` / `docker:` / `podman:`) deploy
+  section ([section 8](userguide.md#8-platform-sections-kubernetes-docker-podman)).
 - **Reusable connections**: define `connections.<name>` once in `env.yaml`,
-  reference it with `conn-ref`; identical connections dedup into shared **binders**.
+  reference it with `conn-ref`; identical connections dedup into shared
+  **[binders](userguide.md#66-reusable-connections-conn-ref)**.
 - Auto-numbers workflows by sorted filename, derives destination-types from
-  `queue:`/`topic:`, and auto-names a **durable subscription** for every MQ topic
-  source.
-- Implements **leader-election** (`standalone` / `active_active` / `active_standby`).
-- Wires **TLS + mTLS** for both Solace and MQ from one shared truststore/keystore.
-- **One secrets model everywhere**: each credential is declared as a literal or an
-  `-env` variable name, and is mounted as a file under `/run/secrets/` -- a
-  Kubernetes Secret volume, a compose environment-provider secret, or a podman
-  secret. No credential *value* reaches any generated file, and nothing secret is
-  written to disk. An `-env` credential keeps its own variable name as the mount
-  name, so the keys of a Secret you build yourself (`secrets.credentials.existing`)
-  are exactly the `-env` names in your spec; a literal takes a tool-derived name
-  instead, always prefixed `_GEN_` so the two can never collide by accident.
-- **`status` reports each instance from either side**: `status container` reads
-  the engine from outside (state, restarts, age, the image actually running),
-  `status application` execs into each instance and reads its own actuator (which
-  one is active, health, workflows), and `status all` reports both. `-d` adds
-  node, CPU/memory, digest and referenced objects; `--all` finds every connector
-  instance by image name; `--output json` emits the same facts as one document.
-  `version` prints the build's own version plus its Go/OS/arch, for bug reports.
-- **`download jar` fetches the IBM MQ client jars (or the syslog encoder jar)**
-  from Maven Central over HTTPS into a local directory, so the `libs.dir` bind
-  mount and the `libs.pvc`/`libs.download` deploy sections have something to
-  point at. Each jar's sha1 is checked against Maven Central's own published
-  digest before it lands on disk. It is **image-aware**: a jar the connector
+  `queue:`/`topic:`, and auto-names a
+  **[durable subscription](userguide.md#64-destinations-durable-names-passthrough)**
+  for every MQ topic source.
+- Implements **[leader-election](userguide.md#7-connector-defaults-envyaml-top-level)**
+  (`standalone` / `active_active` / `active_standby`).
+- Wires **[TLS + mTLS](userguide.md#7-connector-defaults-envyaml-top-level)**
+  for both Solace and MQ from one shared truststore/keystore.
+- **[One secrets model](userguide.md#9-secrets-model) everywhere**: each
+  credential is declared as a literal or an `-env` variable name and mounted
+  as a file under `/app/external/var/secrets/` -- a Kubernetes Secret volume,
+  a compose environment-provider secret, or a podman secret, never an
+  environment variable and never written to disk as a value. The one
+  exception is the tool's own reserved `solmq-status` account, whose password
+  is rendered as a literal by design
+  ([section 7.1](userguide.md#71-the-reserved-status-account-solmq-status)).
+- **[`status`](userguide.md#12-status-the-container-the-connector-or-both)
+  reports each instance from either side**: `status container` reads the
+  engine from outside (state, restarts, age, the image actually running),
+  `status application` execs into each instance and reads its own actuator
+  (which one is active, health, workflows), and `status all` reports both.
+  `-d` adds node, CPU/memory, digest and referenced objects; `--all` finds
+  every connector instance by image name; `--output json` emits the same
+  facts as one document.
+- **[`download jar`](userguide.md#10-download-jar) fetches the IBM MQ client
+  jars (or the syslog encoder jar)** from Maven Central over HTTPS,
+  sha1-verified, into a local directory for the `libs.dir`/`libs.pvc`/
+  `libs.download` deploy options. It is image-aware: a jar the connector
   image already ships at an equal-or-newer version is skipped and reported
-  rather than re-fetched -- but the built-in image jar list is a snapshot of
-  one specific image, so deploying to a different one needs its own list (see
-  [userguide.md](userguide.md) section 12).
+  rather than re-fetched, against a snapshot of one specific image --
+  deploying to a different one needs its own list.
 
-Every term above -- binders, durable subscriptions, leader-election, the secrets
-model -- is explained in depth in [userguide.md](userguide.md).
+Every term above links straight through to where
+[userguide.md](userguide.md) explains it in full.
 
 ## Quick start
 
 Grab the release binary for your platform (`solmq-conn-util-linux-amd64`,
-`solmq-conn-util-darwin-arm64`, `solmq-conn-util-windows-amd64.exe`, ...) or build from
-source (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)), then:
+`solmq-conn-util-darwin-arm64`, `solmq-conn-util-windows-amd64.exe`, ...) -- no
+install, nothing else to run -- or build from source (Go 1.24+; see
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)), then:
 
 ```sh
-solmq-conn-util examples specs                     # write a ready-to-edit sample set into ./specs
-solmq-conn-util generate config -e specs/env.yaml  # print the application.yml those samples produce
+solmq-conn-util examples examples                     # write a ready-to-edit sample set into ./examples
+solmq-conn-util generate config -e examples/env.yaml  # print the application.yml those samples produce
 ```
 
 The sample set is four cross-platform (MQ/Solace) workflows that together cover
 every connection style -- referenced vs. inline, reused vs. single-use -- across
 mTLS, TLS-only, and plaintext transports, plus an MQ topic source exercising the
-auto-named durable subscription. Full breakdown: [userguide.md](userguide.md) section 11.
+auto-named durable subscription. Full breakdown:
+[section 4](userguide.md#4-examples).
 
 Prefer a form to a text editor? Open
 [solmq-conn-util-generator.html](solmq-conn-util-generator.html) in a browser (no server, no
@@ -69,8 +75,11 @@ set as a zip.
 
 ## Minimal working example
 
-One `env.yaml` plus one workflow file in a folder (`specs/` here) are a complete
-spec. `specs/env.yaml` sets the workflow discovery and a reusable connection:
+One `env.yaml` plus one workflow file in a folder (`specs/` here -- any name
+works; this is a hand-written pair, not the four-workflow set `examples`
+writes into `./examples`, [section 4](userguide.md#4-examples))
+are a complete spec. `specs/env.yaml` sets the workflow discovery and a
+reusable connection:
 
 ```yaml
 workflows:
@@ -107,111 +116,94 @@ solmq-conn-util generate config -e specs/env.yaml                     # applicat
 solmq-conn-util generate config -e specs/env.yaml -o application.yml  # ...or written to a file
 ```
 
-Add a `kubernetes:` section ([userguide.md](userguide.md) section 7) and
-`solmq-conn-util generate --platform kubernetes -e specs/env.yaml` emits the full
-manifest set (Namespace, ConfigMap, Deployment, Service, Secrets).
-`solmq-conn-util deploy --platform kubernetes -e specs/env.yaml` then applies it by
-piping the manifest to `kubectl`/`oc`.
+Add a `kubernetes:` section
+([section 8](userguide.md#8-platform-sections-kubernetes-docker-podman)) and
+`solmq-conn-util generate --platform kubernetes -e
+specs/env.yaml` emits the full manifest set (Namespace, ConfigMap, Deployment,
+Service, Secrets). `solmq-conn-util deploy --platform kubernetes -e
+specs/env.yaml` then applies it by piping the manifest to `kubectl`/`oc`.
 
 ## Commands
 
-> **Breaking change:** the platform used to be a second positional argument
-> (`deploy kubernetes`); it is now `--platform kubernetes`, or just `deploy` when
-> `env.yaml` has exactly one platform section. See [userguide.md](userguide.md)
-> for the full resolution order (flag, single section, interactive menu, or a
-> loud error) and why CI must pass `--platform` explicitly.
->
-> **Breaking change:** the teardown verb `delete` (alias `del`) is now `remove`
-> (alias `rm`). The old spellings are not accepted -- update any script that ran
-> `solmq-conn-util delete ...`. Only the verb changed: a kubernetes teardown
-> still issues `kubectl delete -f -`.
+> [!IMPORTANT]
+> The platform is a flag, not a positional argument (`--platform kubernetes`),
+> resolved from `env.yaml` when it has exactly one platform section, or from an
+> interactive menu otherwise -- see
+> [userguide.md section 3](userguide.md#3-commands). CI and scripts must pass
+> `--platform` explicitly: the menu refuses to block when stdin is not a TTY.
 
-```text
-solmq-conn-util generate [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
-                                                                   Emit application.yml, or the resolved platform's artifacts
-solmq-conn-util deploy  [--platform kubernetes|docker|podman] [-e env.yaml]  Generate for the resolved platform, then apply it
-solmq-conn-util remove  [--no-prompt] [--platform kubernetes|docker|podman] [-e env.yaml]
-                                                                   Tear the same platform down, after confirming
-solmq-conn-util status  <container|application|all> [-d] [-w] [--all] [--output table|json]
-                        [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
-                                                                   Report each instance: the engine's view, the connector's own, or both
-solmq-conn-util logs    [--follow] [--previous] [--tail N] [--since d] [--timestamps]
-                        [--pod name|index] [--container name|index]
-                        [--platform kubernetes|docker|podman] [-e env.yaml]
-                                                                   Print one instance log -- what status says happened, and why
-solmq-conn-util cli     [--pod name|index] [--container name|index]
-                        [--platform kubernetes|docker|podman] [-e env.yaml] [-- command ...]
-                                                                   Open a shell inside one instance, or run one command in it
-solmq-conn-util version                                           Print the utility name, version, Go version and OS/arch
-solmq-conn-util validate            [-e env.yaml]                 Lint the whole env.yaml + workflows
-solmq-conn-util examples [dir] [-f]                               Write a starter env.yaml + workflows
-solmq-conn-util auto-complete bash|zsh|fish|powershell            Print a shell completion script
-solmq-conn-util download jar mq|syslog [dir] [-e env.yaml] [--version v] [--omit-lib-file file]
-                                       [--include-provided] [--url u] [-f]
-                                                                   Fetch IBM MQ or syslog jars from Maven Central into a local directory
+| Verb | Aliases | What it does |
+| --- | --- | --- |
+| `generate` | `gen` | Render application.yml, or the deploy artifacts for the resolved platform |
+| `deploy` | `dp` | Generate for a platform, then apply it |
+| `remove` | `rm` | Tear down what deploy created for a platform |
+| `status` | `sts` | Report each instance: container (engine), application (connector), or all |
+| `logs` | `lg` | Print one instance log, where status says what but not why |
+| `cli` | _(none)_ | Open a shell inside one instance, or run one command in it |
+| `version` | `ver` | Print the utility name, version, Go version and OS/arch |
+| `validate` | `vld` | Lint the whole env.yaml + workflows |
+| `examples` | `eg` | Write a starter env.yaml + workflows |
+| `download` | `dl` | Download IBM MQ or syslog encoder jars and their dependencies |
+| `auto-complete` | _(none)_ | Print a completion script for one shell |
+| `help` | _(none)_ | Print this summary, or the help page of one command |
 
-# The in-binary help is shorter than this table: `solmq-conn-util -h` lists the
-# commands, and `solmq-conn-util help <command>` (or `<command> -h`) prints that
-# command's arguments, flags, and examples.
+Full flag reference and synopses: [docs/commands.md](docs/commands.md); every
+alias, target word, and platform short form: [docs/abbreviation.md](docs/abbreviation.md).
 
--e, --env     Config file, relative or absolute path (default: env.yaml)
--o, --out     generate output file (default: stdout)
--f, --force   examples/download jar: overwrite existing files
---version     download jar: pin the seed release instead of resolving latest stable
---omit-lib-file  download jar: jar list that REPLACES the embedded default (default: embedded list)
---include-provided  download jar: download the whole closure even where the image already provides it
---url         download jar: repeatable; exact URLs to fetch, skipping Maven resolution and image-aware omission
---follow      logs: keep the log open and print new lines until interrupted (one instance)
---previous    logs: read the previous container's log -- why a restarting pod died (kubernetes only)
---tail        logs: read only the last N lines, or all (default: all)
---since       logs: read only lines newer than this duration, e.g. 10m
---timestamps  logs: prefix every line with the time the platform recorded
---            cli: everything after it runs in the instance instead of a shell, non-interactively
-```
+`generate` fails fast: it stops at the first error and writes nothing, and its
+output is buffered so a failed run never leaves a half-written `-o` file;
+`validate` instead reports every finding it can.
 
-Every verb above except `cli`, `auto-complete` and `help` also has a short alias
-(`gen`, `dp`, `rm`, `sts`, `lg`, `ver`, `vld`, `eg`, `dl`) -- `cli` is already three
-characters -- and `--platform` accepts
-`kube`, `dk` and `pm` -- see [userguide.md](userguide.md) section 3 for both
-tables.
-
-`generate` fails fast (stops at the first error, writes nothing); `validate`
-reports every finding; generate output is buffered and only written on full
-success -- never a half-written `-o`. `deploy`/`remove`/`status`/`logs`/`cli` run the CLI
-named by each section's `command:` through an argv slice -- never a shell --
-with every token checked against a safe charset, argv[0] checked against a
+`deploy`, `remove`, `status`, `logs`, and `cli` all run the platform CLI named
+by each section's `command:` through an argv slice -- never a shell. Every
+token is checked against a safe charset, `argv[0]` is checked against a
 per-platform binary allowlist (escape hatch: `--allow-command`), and a
-read-only login/daemon preflight before anything is written, applied, or
-queried. `remove` additionally confirms first, naming what it will tear down;
-`--no-prompt` skips that, and is required for a non-TTY run. On kubernetes the
-namespace is a separate, checked step: a namespace holding anything the release
-does not own is listed and kept, and only an empty one is offered for removal.
+read-only login/daemon preflight must succeed before anything is written,
+applied, or queried.
 
-`cli` is the one verb whose exit code can leave the 0/1/2 contract: once a session
-or command is running inside the instance, its own status is passed straight back.
-The engines give no way to be more precise -- `kubectl exec` reports an unreachable
-pod and a command that exited non-zero with the same status -- so a non-zero `cli`
-exit means one of the two, and the message the engine printed on stderr says which.
-Every kubernetes `exec` and `logs` this tool runs names its container explicitly
-(`-c connector`), so a pod carrying a sidecar cannot be entered or read by mistake;
-docker and podman default to the same name. Details and exit codes: [userguide.md](userguide.md) section 3; the
-full generated command reference: [docs/commands.md](docs/commands.md).
+`remove` additionally confirms first, naming what it will tear down;
+`--no-prompt` skips that prompt and is required for a non-TTY run. On
+kubernetes the namespace is a separate, checked step: a namespace holding
+anything the release does not own is listed and kept, and only an empty one is
+offered for removal.
 
-Tab completion for all of the above: `solmq-conn-util auto-complete bash|zsh|fish|powershell`
-prints a script for your shell, rendered from the binary's own command model so it
-never drifts from the commands that binary accepts
-([userguide.md](userguide.md) section 1.1).
+`cli` is the one verb whose exit code can leave the 0/1/2 contract: once a
+session or command is running inside the instance, its own status is passed
+straight back. The engines give no way to be more precise -- `kubectl exec`
+reports an unreachable pod and a command that exited non-zero with the same
+status -- so a non-zero `cli` exit means one of the two, and the message the
+engine printed on stderr says which.
+
+Every kubernetes `exec` and `logs` this tool runs names its container
+explicitly (`-c connector`), so a pod carrying a sidecar cannot be entered or
+read by mistake; docker and podman default to the same name. Details and exit
+codes: [section 3](userguide.md#3-commands); the full generated command
+reference: [docs/commands.md](docs/commands.md).
+
+Tab completion for all of the above: `solmq-conn-util auto-complete
+bash|zsh|fish|powershell` prints a script for your shell, rendered from the
+binary's own command model so it never drifts from the commands that binary
+accepts ([section 1.1](userguide.md#11-shell-completion)).
 
 ## Documentation
 
-- [userguide.md](userguide.md) -- the complete user reference: commands (section
-  3), the config file and workflow discovery (section 4), workflow files (section
-  5), the `env.yaml` connector defaults (section 6), the deploy targets --
-  kubernetes/docker/podman (section 7), the secrets model (section 8), what gets
-  generated (section 9), determining which instance is active (section 10), the
-  sample set (section 11), fetching the IBM MQ and syslog jars (section 12),
-  reading instance logs (section 13), opening a shell inside an instance
-  (section 14), and gotchas (section 15).
+- [userguide.md](userguide.md) -- the complete user reference: commands
+  ([section 3](userguide.md#3-commands)), the sample set
+  ([section 4](userguide.md#4-examples)), the config file and workflow
+  discovery ([section 5](userguide.md#5-the-config-file-and-workflow-discovery)),
+  workflow files ([section 6](userguide.md#6-workflow-file)), the `env.yaml`
+  connector defaults ([section 7](userguide.md#7-connector-defaults-envyaml-top-level)),
+  the platform sections -- kubernetes/docker/podman
+  ([section 8](userguide.md#8-platform-sections-kubernetes-docker-podman)),
+  the secrets model ([section 9](userguide.md#9-secrets-model)),
+  `download jar` ([section 10](userguide.md#10-download-jar)), what gets
+  generated ([section 11](userguide.md#11-what-gets-generated)), status
+  ([section 12](userguide.md#12-status-the-container-the-connector-or-both)),
+  reading instance logs
+  ([section 13](userguide.md#13-logs-the-lines-behind-the-state)), opening a
+  shell inside an instance
+  ([section 14](userguide.md#14-cli-a-shell-inside-the-instance)), and
+  gotchas ([section 15](userguide.md#15-notes-and-gotchas)).
 - [docs/commands.md](docs/commands.md) -- the full command tree / reference,
   generated from the command model and gated against drift.
 - [docs/abbreviation.md](docs/abbreviation.md) -- every short spelling the CLI
@@ -219,11 +211,8 @@ never drifts from the commands that binary accepts
   abbreviation; generated from the same model and gated the same way.
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) -- building, dev-script tasks, tests
   and golden fixtures, CI release, design notes.
-- [solmq-conn-util-generator.html](solmq-conn-util-generator.html) -- a standalone browser
-  page (no install, no server) that generates the `env.yaml` + workflow files,
-  reports the same findings as `validate`, and previews the `application.yml`.
-- [doc.md](doc.md) -- a configuration reference for the underlying connector's own
-  `application.yml` (the raw `solace.connector.*` and Spring keys), for hand-tuning
-  or debugging generated output beyond what `env.yaml` exposes. Parts are still
-  marked unverified -- check a key against the connector's official docs before
-  relying on it.
+- [docs/test.md](docs/test.md) -- the test catalogue: every test grouped by
+  package, so you can see what behavior is covered and jump to the test that
+  covers it.
+- [solmq-conn-util-generator.html](solmq-conn-util-generator.html) -- the
+  browser-based spec generator described in [Quick start](#quick-start) above.

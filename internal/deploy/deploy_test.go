@@ -311,8 +311,13 @@ func TestRenderLibsPVCCreate(t *testing.T) {
 	}}}
 	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	for _, want := range []string{
-		"kind: PersistentVolume", "name: jar-libs-pv", "server: nfs1", "path: /libs", "readOnly: true",
-		"kind: PersistentVolumeClaim", `storageClassName: ""`, "volumeName: jar-libs-pv",
+		// The PV name carries the namespace; the claim's does not, because the
+		// claim is already namespaced. Both must agree on volumeName.
+		"kind: PersistentVolume", "name: " + spec.LibsPVName(k.Deployment.Namespace, "jar-libs"),
+		"persistentVolumeReclaimPolicy: Retain",
+		"server: nfs1", "path: /libs", "readOnly: true",
+		"kind: PersistentVolumeClaim", `storageClassName: ""`,
+		"volumeName: " + spec.LibsPVName(k.Deployment.Namespace, "jar-libs"),
 		"storage: 2Gi", "claimName: jar-libs",
 	} {
 		if !strings.Contains(out, want) {
@@ -501,11 +506,12 @@ func TestRenderServicePort(t *testing.T) {
 	}
 }
 
-// TestOmitNamespaceIsWhatMakesTeardownSafe pins the reason OmitNamespace exists.
-// A manifest carrying a Namespace, piped to `kubectl delete -f -`, deletes the
-// namespace and cascades to every object inside it -- including workloads this
-// tool never deployed. apply needs the document; delete must not have it.
-func TestOmitNamespaceIsWhatMakesTeardownSafe(t *testing.T) {
+// TestTeardownDropsTheNamespaceDocument pins half the reason Input.Teardown
+// exists. A manifest carrying a Namespace, piped to `kubectl delete -f -`,
+// deletes the namespace and cascades to every object inside it -- including
+// workloads this tool never deployed. apply needs the document; delete must not
+// have it.
+func TestTeardownDropsTheNamespaceDocument(t *testing.T) {
 	k := baseKube()
 	inst := one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})
 
@@ -514,7 +520,7 @@ func TestOmitNamespaceIsWhatMakesTeardownSafe(t *testing.T) {
 		t.Errorf("apply still needs the Namespace document, got:\n%s", applyManifest)
 	}
 
-	deleteManifest := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst, OmitNamespace: true})
+	deleteManifest := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst, Teardown: true})
 	if strings.Contains(deleteManifest, "kind: Namespace") {
 		t.Fatalf("a teardown manifest must carry no Namespace, got:\n%s", deleteManifest)
 	}
@@ -539,5 +545,67 @@ func TestNamespaceManifestMatchesWhatRenderEmits(t *testing.T) {
 	solo := NamespaceManifest(k.Deployment.Namespace)
 	if !strings.HasPrefix(full, solo) {
 		t.Errorf("Render should start with exactly NamespaceManifest, got:\n%s\nwant prefix:\n%s", full, solo)
+	}
+}
+
+// TestTeardownReversesTheDocumentOrder pins the other half of Input.Teardown,
+// and the bug behind it: kubectl deletes documents in file order and waits for
+// each one to actually go. In creation order the PVC is emitted before the
+// Deployment, so a teardown blocks forever -- kubernetes.io/pvc-protection
+// holds the claim while a pod still mounts it, and the Deployment that owns
+// that pod is queued behind it. Reversed, the workload goes first.
+func TestTeardownReversesTheDocumentOrder(t *testing.T) {
+	k := baseKube()
+	k.Libs = &spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{
+		Name: "jar-libs", Storage: "2Gi", NFS: spec.NFS{Server: "nfs1", Path: "/libs"},
+	}}}
+	inst := one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})
+
+	apply := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
+	if !before(apply, "kind: PersistentVolumeClaim", "kind: Deployment") {
+		t.Fatalf("apply must create the claim before the workload that mounts it:\n%s", apply)
+	}
+
+	del := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst, Teardown: true})
+	if !before(del, "kind: Deployment", "kind: PersistentVolumeClaim") {
+		t.Errorf("a teardown must delete the workload before the claim it holds:\n%s", del)
+	}
+	// The whole set is reversed, not just those two: the ConfigMap led the apply
+	// and must trail the teardown.
+	if !before(del, "kind: Service", "kind: ConfigMap") {
+		t.Errorf("the teardown set must be fully reversed:\n%s", del)
+	}
+	// Reversing must not disturb the separators.
+	if strings.HasPrefix(del, "---") || strings.Contains(del, "------") {
+		t.Errorf("document separators are malformed:\n%s", del)
+	}
+	if got, want := strings.Count(del, "\n---\n"), strings.Count(apply, "\n---\n")-1; got != want {
+		t.Errorf("separator count = %d, want %d (apply minus the dropped Namespace)", got, want)
+	}
+}
+
+// before reports whether a appears ahead of b in s. Both must be present.
+func before(s, a, b string) bool {
+	i, j := strings.Index(s, a), strings.Index(s, b)
+	return i >= 0 && j >= 0 && i < j
+}
+
+// TestLibsPVNameIsNamespaced is the root-cause test: a PersistentVolume is
+// cluster-scoped, so two releases that pick the same libs.pvc.create.name in
+// different namespaces must not derive the same PV name. They did, and the
+// second apply rebound the volume out from under the first.
+func TestLibsPVNameIsNamespaced(t *testing.T) {
+	a := spec.LibsPVName("team-a", "jar-libs-pvc")
+	b := spec.LibsPVName("team-b", "jar-libs-pvc")
+	if a == b {
+		t.Fatalf("two namespaces must not share a PV name, both got %q", a)
+	}
+	for _, n := range []string{a, b} {
+		if !strings.HasSuffix(n, "-pv") {
+			t.Errorf("%q should be suffixed -pv", n)
+		}
+	}
+	if !strings.Contains(a, "team-a") {
+		t.Errorf("%q should carry the namespace", a)
 	}
 }

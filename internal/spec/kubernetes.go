@@ -145,6 +145,19 @@ type Libs struct {
 	Download *LibsDownload `yaml:"download"`
 }
 
+// LibsPVName is the name of the PersistentVolume backing a created libs PVC.
+//
+// It carries the namespace because a PersistentVolume is cluster-scoped while
+// the claim naming it is not: libs.pvc.create.name only has to be unique within
+// a namespace to make a valid PVC, so deriving the PV name from it alone meant
+// two releases in different namespaces silently fought over one PV object --
+// the second apply rebound it, and the first release's pods were then left
+// unable to schedule on a claim that would never bind.
+//
+// The result is a single DNS-1123 label, so validate caps the combined length
+// rather than letting the API server reject it mid-apply.
+func LibsPVName(namespace, claim string) string { return namespace + "-" + claim + "-pv" }
+
 // DefaultKubeCommand is the CLI used to apply/delete manifests when the
 // kubernetes.command key is unset.
 const DefaultKubeCommand = "kubectl"

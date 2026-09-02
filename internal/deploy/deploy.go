@@ -61,20 +61,27 @@ type Input struct {
 	// as its own field rather than being read off Kube because it is no longer a
 	// kubernetes key: the same value drives the docker and podman renderers.
 	Syslog *spec.Syslog
-	// OmitNamespace drops the Namespace document from the rendered set.
+	// Teardown renders the set for `kubectl delete -f -` rather than `apply -f -`,
+	// which changes two things.
 	//
-	// It exists for teardown. Piping a manifest that contains a Namespace to
-	// `kubectl delete -f -` deletes the namespace and cascades to everything
-	// inside it, including workloads this tool never deployed -- so remove
-	// renders without it and handles the namespace as its own, separately
-	// confirmed step. apply always wants it: creating a namespace that already
-	// exists is a no-op, and the objects below need it to exist in the same
-	// apply.
-	OmitNamespace bool
-	CredKVs       []KV        // resolved credential values (only when credentials.create)
-	Stores        []StoreFile // resolved .jks files (only when stores.create)
-	ImagePull     *PullSecret // nil when no image-pull block is configured
-	Instance      Instance
+	// The Namespace document is dropped. Piping one to delete removes the
+	// namespace and cascades to everything inside it, including workloads this
+	// tool never deployed -- so remove renders without it and handles the
+	// namespace as its own, separately confirmed step. apply always wants it:
+	// creating a namespace that already exists is a no-op, and the objects below
+	// need it to exist in the same apply.
+	//
+	// And the documents come out in reverse. kubectl deletes them in file order
+	// and waits for each one to go, so creation order deadlocks: the PVC is
+	// emitted before the Deployment, kubectl blocks on it because
+	// kubernetes.io/pvc-protection holds it while a pod still mounts it, and the
+	// Deployment that owns that pod is never reached. Reversed, the workload goes
+	// first and everything it holds is free by the time its turn comes.
+	Teardown  bool
+	CredKVs   []KV        // resolved credential values (only when credentials.create)
+	Stores    []StoreFile // resolved .jks files (only when stores.create)
+	ImagePull *PullSecret // nil when no image-pull block is configured
+	Instance  Instance
 }
 
 // yw is the indentation-aware line writer used by every renderer here.
@@ -102,7 +109,8 @@ func leaderMode(d *spec.Defaults) string {
 }
 
 // Render produces the full multi-doc manifest set, in the order Namespace,
-// ConfigMap, Secrets, libs PV/PVC, Deployment, Service.
+// ConfigMap, Secrets, libs PV/PVC, Deployment, Service -- reversed when
+// in.Teardown, for the reason recorded there.
 func Render(in Input) string {
 	dep := in.Kube.Deployment
 	ns := dep.Namespace
@@ -127,19 +135,27 @@ func Render(in Input) string {
 	hasStores := storeRef != ""
 	mgmtPort := ManagementPort(in)
 
-	w := &yw{}
-	docs := 0
+	// Each document is rendered into its own buffer rather than appended to one
+	// stream, so the set can be emitted in either order at the end. The writer
+	// below is rebound per document; nothing else in this function changes.
+	var docs []string
+	var w *yw
 	sep := func() {
-		if docs > 0 {
-			w.Raw("---\n")
+		if w != nil {
+			docs = append(docs, w.String())
 		}
-		docs++
+		w = &yw{}
+	}
+	flush := func() {
+		if w != nil {
+			docs = append(docs, w.String())
+		}
 	}
 
 	// 0. Namespace: emitted first so the objects below land in a namespace that
 	// exists in the same apply (applying it when it already exists is a no-op).
 	// Omitted for a teardown -- see Input.OmitNamespace for why that matters.
-	if !in.OmitNamespace {
+	if !in.Teardown {
 		sep()
 		w.Raw(NamespaceManifest(ns))
 	}
@@ -200,8 +216,13 @@ func Render(in Input) string {
 		w.Line(0, "apiVersion: v1")
 		w.Line(0, "kind: PersistentVolume")
 		w.Line(0, "metadata:")
-		w.Line(2, "name: "+c.Name+"-pv")
+		w.Line(2, "name: "+spec.LibsPVName(ns, c.Name))
 		w.Line(0, "spec:")
+		// Stated rather than left to the default, which is the same value: a
+		// Retain PV outlives its claim and comes back as Released, which never
+		// rebinds, so the operator reading this manifest should not have to know
+		// the default to see that.
+		w.Line(2, "persistentVolumeReclaimPolicy: Retain")
 		w.Line(2, "capacity:")
 		w.Line(4, "storage: "+c.Storage)
 		w.Line(2, "accessModes:")
@@ -218,7 +239,7 @@ func Render(in Input) string {
 		w.Line(2, "namespace: "+ns)
 		w.Line(0, "spec:")
 		w.Line(2, `storageClassName: ""`)
-		w.Line(2, "volumeName: "+c.Name+"-pv")
+		w.Line(2, "volumeName: "+spec.LibsPVName(ns, c.Name))
 		w.Line(2, "accessModes:")
 		w.Line(4, "- ReadWriteMany")
 		w.Line(2, "resources:")
@@ -236,8 +257,14 @@ func Render(in Input) string {
 		sep()
 		renderService(w, in.Instance.Name, ns, in.Kube.Service.Port)
 	}
+	flush()
 
-	return w.String()
+	if in.Teardown {
+		for i, j := 0, len(docs)-1; i < j; i, j = i+1, j-1 {
+			docs[i], docs[j] = docs[j], docs[i]
+		}
+	}
+	return strings.Join(docs, "---\n")
 }
 
 // renderConfigMap emits the ConfigMap embedding the application.yml, the

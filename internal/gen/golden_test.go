@@ -294,8 +294,9 @@ data:
 const pvDoc = `apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: jar-libs-pvc-pv
+  name: solace-connectors-jar-libs-pvc-pv
 spec:
+  persistentVolumeReclaimPolicy: Retain
   capacity:
     storage: 1Gi
   accessModes:
@@ -313,7 +314,7 @@ metadata:
   namespace: solace-connectors
 spec:
   storageClassName: ""
-  volumeName: jar-libs-pvc-pv
+  volumeName: solace-connectors-jar-libs-pvc-pv
   accessModes:
     - ReadWriteMany
   resources:

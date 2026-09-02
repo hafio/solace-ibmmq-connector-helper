@@ -186,9 +186,9 @@
     "semantic_hash": "8a6643a420fdad6bfb583523bc6cef16"
   },
   "README.md": {
-    "mtime": 1788363352.0505314,
-    "seen": 1788365104.011909,
-    "ast_hash": "39ddb328dd66c1b19b61d84489d552e2",
+    "mtime": 1788343808.9973729,
+    "seen": 1788345310.122514,
+    "ast_hash": "b132bafda6f818c3a7f20616c97770cc",
     "semantic_hash": ""
   },
   "internal/examples/files/workflow-0.yaml": {
@@ -210,9 +210,9 @@
     "semantic_hash": ""
   },
   "userguide.md": {
-    "mtime": 1788363354.2760503,
-    "seen": 1788365104.0119307,
-    "ast_hash": "032c24997549360f2ed29521c94e6275",
+    "mtime": 1788358984.2419343,
+    "seen": 1788360687.8940296,
+    "ast_hash": "ac7d656e2a750b0252513a9e961a0118",
     "semantic_hash": ""
   },
   "internal/examples/files/workflow-2.yaml": {
@@ -252,9 +252,9 @@
     "semantic_hash": ""
   },
   "docs/DEVELOPMENT.md": {
-    "mtime": 1788361019.26851,
-    "seen": 1788365104.0119112,
-    "ast_hash": "5f7a69ebecb775be87b37ee3f0eedcce",
+    "mtime": 1788343833.7816577,
+    "seen": 1788345310.1225164,
+    "ast_hash": "2c31f40ea5228ef09460ede9458ae305",
     "semantic_hash": ""
   },
   ".github/dependabot.yml": {
@@ -324,15 +324,15 @@
     "semantic_hash": ""
   },
   "internal/examples/files/env.yaml": {
-    "mtime": 1788362102.4707675,
-    "seen": 1788365104.0119164,
-    "ast_hash": "93a641ee7535dc75063d2b94029a4342",
+    "mtime": 1788342368.5575628,
+    "seen": 1788345310.122521,
+    "ast_hash": "c21c395b173e06fa86e98d6bfb642019",
     "semantic_hash": ""
   },
   "testdata/golden/specs/env.yaml": {
-    "mtime": 1788361005.923664,
-    "seen": 1788365104.0119247,
-    "ast_hash": "b8cca731b519bbd6376327e2d277b3ab",
+    "mtime": 1788342371.8315828,
+    "seen": 1788345310.1225293,
+    "ast_hash": "c6c17ec514ec95f17da8505f3579d98c",
     "semantic_hash": ""
   },
   "internal/spec/env_test.go": {
@@ -348,9 +348,9 @@
     "semantic_hash": ""
   },
   "docs/test.md": {
-    "mtime": 1788362100.4999413,
-    "seen": 1788365104.011915,
-    "ast_hash": "4fa8136e086663fec32886e3b6e7b5d8",
+    "mtime": 1788358878.9307985,
+    "seen": 1788360687.8940108,
+    "ast_hash": "d56c25d6e10735aa5556c85f62d8fbe3",
     "semantic_hash": ""
   },
   "docs/commands.md": {

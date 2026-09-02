@@ -31,7 +31,7 @@ measure coverage with the `cov` task.
 - [cmd/solmq-conn-util](#cmdsolmq-conn-util)
   - [logs](#logs)
   - [cli](#cli)
-  - [remove / instance resolution](#remove-instance-resolution)
+  - [remove / instance resolution](#remove--instance-resolution)
 
 ## How the suite is built
 
@@ -47,7 +47,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 735 test functions, 997 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 738 test functions, 1010 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -90,7 +90,7 @@ Tests: [scan_test.go](../internal/scan/scan_test.go)
 
 ## internal/spec
 
-Parse env.yaml into the typed model -- workflows, defaults, named connections, the kubernetes/docker/podman target sections, and ports -- and apply section defaults.
+Parse env.yaml into the typed model -- workflows, defaults, named connections, the kubernetes/docker/podman platform sections, and ports -- and apply section defaults.
 
 Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/spec/env_test.go), [targets_test.go](../internal/spec/targets_test.go), [expand_test.go](../internal/spec/expand_test.go), [defaults_test.go](../internal/spec/defaults_test.go)
 
@@ -104,8 +104,8 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestWorkflowFileLess | 7 vs 007 / x vs x | equal value with different zero padding is ordered by the raw text, and no name is less than itself -- the strict order sort.Slice requires |
 | TestConnRefSideMayTuneBinding | - | consumer block parses on a conn-ref side, SetsConnFields ignores it, and Resolve keeps it alongside the referenced tuple and destination |
 | TestParseDefaultsConnectionsAndLeaderElection | - | parses 2 named connections and leader-election active_standby with fail-over |
-| TestParseDefaultsLeaderSession | - | an inline `session:` block parses the full solace tuple, api-properties included, and leaves the retired-key marker unset |
-| TestParseDefaultsLeaderSolaceKeyRetired | mapping / scalar / list | the retired `solace:` key parses whatever shape it holds, sets SolaceKey and never populates Session, so validate answers with the rename |
+| TestParseDefaultsLeaderSession | - | an inline `session:` block parses the full solace tuple, api-properties included, and leaves the SolaceKey marker unset |
+| TestParseDefaultsLeaderSolaceKeyRetired | mapping / scalar / list | a `solace:` key under leader-election parses whatever shape it holds, sets SolaceKey and never populates Session, so validate can error naming `session:` |
 | TestSideBindingFields | bare tuple | no destination and no tuning means no binding fields |
 | TestSideBindingFields | queue / topic | the destination kind is reported |
 | TestSideBindingFields | consumer / producer / both | per-binding tuning is reported, in schema order |
@@ -115,13 +115,13 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestParseWorkflowAmbiguousSystemAndDest | solace and mq both set | HasSystem returns false when both systems present |
 | TestParseWorkflowAmbiguousSystemAndDest | queue and topic both set | DestKind is empty string when queue+topic ambiguous |
 | TestParseWorkflowSyntaxError | - | malformed yaml returns non-nil error |
-| TestParseDefaultsFull | - | parses tls stores, management port 8090 with exposure health (a removed key, still parsed), security enabled false with 1 user, leader-election standalone, logging/solace-defaults nodes captured |
+| TestParseDefaultsFull | - | parses tls stores, management port 8090 with exposure health (not a configurable key, but still parsed so validate can reject it), security enabled false with 1 user, leader-election standalone, logging/solace-defaults nodes captured |
 | TestParseSecurityUserRoles | absent / one / several | security.users[].roles parses to no roles (the connector's read-only default), a single role, and several in authored order |
-| TestParseDefaultsSecurityEnabledKeyOmittedStaysNil | - | security.enabled is a removed key: an omitted key parses to Security.Enabled nil rather than being defaulted |
+| TestParseDefaultsSecurityEnabledKeyOmittedStaysNil | - | security.enabled is not a configurable key: an omitted key parses to Security.Enabled nil rather than being defaulted |
 | TestParseDefaultsEmpty | - | empty input yields a zero-valued Management (Management{}), Security.Enabled nil with no users, and TLS.Truststore nil |
 | TestParseDefaultsError | - | malformed tls yaml returns non-nil error |
 | TestParseKubernetesReplicasDefault | - | deployment without replicas defaults Replicas to 1 |
-| TestParseKubernetesFull | - | parses replicas 2, service enabled port 8090, credentials create name, stores create present; the removed source/variables keys still parse so RemovedKeys can report them |
+| TestParseKubernetesFull | - | parses replicas 2, service enabled port 8090, credentials create name, stores create present; source and variables set on credentials.create still parse structurally so RemovedKeys can report them |
 | TestParseKubernetesError | - | deployment as sequence instead of map returns non-nil error |
 | TestParseKubernetesResources | - | parses deployment resources CPU '1' and Memory 1Gi |
 | TestParseKubernetesLoggingLibsDefaults | syslog and libs download present | syslog Protocol defaults to udp and libs download Image defaults to busybox:1.37 |
@@ -169,7 +169,7 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestSideUsernameSecretBothSystems | - | Side.Username/Secret dispatch by System, not by whichever credential pair is non-empty: solace returns client-user/-pass, mq returns user/password |
 | TestStoreSecretNilSafe | - | nil *Store yields an empty Cred; literal and -env stores yield the matching Cred side |
 | TestUserSecretLiteralAndEnv | - | a security user's Secret() carries the literal or the -env variable, matching what was set |
-| TestCredCreateRemovedKeys | - | RemovedKeys reports each removed key (source, variables, values-file) alone and all three in order; a nil receiver and a bare create.name report none |
+| TestCredCreateRemovedKeys | - | RemovedKeys reports each of source, variables, values-file alone and all three in order; a nil receiver and a bare create.name report none |
 
 | Test | Case | Verifies |
 |------|------|----------|
@@ -213,7 +213,7 @@ Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [cons
 | TestNodeToProps | nil node | nodeToProps returns nil |
 | TestBuildMQmTLSBundle | mq TLS side with cipher and keyAlias plus solace target | MQTLS true, 1 bundle, HasKeystore true, KeyAlias mc, KeystoreTyp PKCS12, TruststoreTyp JKS |
 | TestBuildCipherConflictWarning | two mq sources with different ciphers C1/C2 | warnings contain conflicting cipher |
-| TestBuildMessageLoopWarning | same side used as source and target dest SAME | warnings contain message loop |
+| TestBuildMessageLoopWarning | same side used as source and target dest *same* | warnings contain message loop |
 | TestBuildSolaceTopicSourceEmitsConsumerTopic | solace topic source -> mq queue target | input-0 solace binding is consumer with DestType topic |
 | TestBuildStorePathsRawVsMount | mount=false (config) | TruststoreLoc reflects env.yaml path verbatim ./certs/t.jks |
 | TestBuildStorePathsRawVsMount | mount=true (deploy) | TruststoreLoc rewritten to /app/external/classpath/truststores/t.jks |
@@ -311,7 +311,7 @@ Tests: [render_test.go](../internal/render/render_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
-| TestRetiredPerPlatformImageRejected | kubernetes / docker / podman | each retired per-platform image key errors, and the message names the top-level image: block that replaced it |
+| TestRetiredPerPlatformImageRejected | kubernetes / docker / podman | each per-platform image key errors, and the message names the top-level image: block to use instead |
 | TestImageBlockRequired | absent / no name / no tag / unsafe repo, name, tag | the top-level block is required once a platform is in play, tag included (an untagged image resolves to :latest and pins nothing), and the fields that reach an argv are charset-checked |
 | TestImageBlockRequired | bad pass-env name / either credential set both ways | the registry account (`user`/`pass`) goes through the shared checkCred, so it gets the same literal-xor-env rule and variable-name check as every other credential |
 | TestImageNotRequiredWithoutAPlatform | - | `generate config` renders application.yml alone and pulls nothing, so no image is demanded |
@@ -319,7 +319,7 @@ Tests: [render_test.go](../internal/render/render_test.go)
 | TestImagePullSecretChecks | name required / DNS-1123 | the Secret name is required and held to the label rule the cluster would apply |
 | TestImagePullSecretChecks | create without credentials | create errors unless the registry account is set, in either the literal or the -env form |
 | TestImagePullSecretChecks | create, variable unset / set | an unset variable warns rather than errors, so a config can be linted without the deploy secrets |
-| TestRetiredPerPlatformTimezoneRejected | kubernetes / docker / podman | each retired per-platform timezone key errors and names the top-level timezone: key |
+| TestRetiredPerPlatformTimezoneRejected | kubernetes / docker / podman | each per-platform timezone key errors and names the top-level timezone: key |
 | TestTopLevelTimezoneUnsafe | unsafe / realistic | the top-level timezone keeps the charset gate the per-platform key had, and an empty value is not an error |
 
 ## internal/logback
@@ -348,7 +348,7 @@ Tests: [statusscript_test.go](../internal/statusscript/statusscript_test.go)
 | TestRenderSubstitution | non-default port and user | Render substitutes PORT=19090 and USER_NAME=custom-mgmt-user |
 | TestRenderIsPureASCIINoCRLF | - | output has no carriage return, no byte over 127, and ends with a trailing newline |
 | TestRenderHeaderHasExecOneLiners | - | the header pins the kubectl/docker/podman exec one-liners, each built from ContainerPath |
-| TestRenderPasswordResolution | - | the password-lookup chain references ContainerPath, /run/secrets and the from_configs account lookup, and no credential is embedded |
+| TestRenderPasswordResolution | - | the password-lookup chain references ContainerPath, SecretsDir and the from_configs account lookup, and no credential is embedded |
 | TestRenderAlwaysExitsZero | - | every exit in the script is `exit 0`, `set -e` is absent while `set -u` stays, the EXIT trap holds the contract, and active/standby are both quiet outcomes |
 | TestRenderSendsStatusToStdoutAndProblemsToStderr | - | the mode/state/health/workflow report lines go to stdout unredirected, and every `status:` diagnostic ends in `>&2` |
 | TestRenderAlignsWorkflowColumn | - | the workflows block is a bare header plus one indented row per workflow, with the ids right-aligned to the widest id present so every colon sits in the same column |
@@ -416,6 +416,8 @@ Tests: [deploy_test.go](../internal/deploy/deploy_test.go)
 | TestRenderServicePort | host:container distinct ports | Render emits port: 8081 / targetPort: 9000 verbatim from the given spec.Port |
 | TestRenderServicePort | resolved to the default management port | Render emits port/targetPort 8090 for a Port already resolved to the connector default |
 | TestRenderServicePort | resolved to a non-default management port | Render emits port/targetPort 9500 for a Port already resolved to defaults.management.port 9500 |
+| TestTeardownReversesTheDocumentOrder | - | with a libs PVC present, apply orders the claim before the Deployment that mounts it; teardown fully reverses the set -- Deployment before the claim, Service before ConfigMap -- with separators intact and one fewer than apply's (the dropped Namespace) |
+| TestLibsPVNameIsNamespaced | - | the same `libs.pvc.create.name` in two different namespaces derives two different PV names, each suffixed `-pv` and carrying its own namespace |
 
 ## internal/dockergen
 
@@ -576,10 +578,16 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestRunStatusScriptArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | RunStatusScript execs `sh <path>` through each platform's exec form |
 | TestRunStatusScriptReturnsOutputAlongsideNonZeroExit | - | a non-zero script exit (the status script's own 1/2 convention) is returned alongside its output, never swallowed |
 | TestRunStatusScriptUnknownPlatform | - | an unknown platform is rejected, zero runner calls |
+| TestOSRunSplitKeepsTheStreamsApart | - | RunSplit keeps stdout and stderr separate where Run merges them, so a stderr deprecation warning from `oc get -o json` cannot land ahead of the JSON and break the parse |
+| TestOSRunSplitWiresStdinAndEnv | - | the split path wires stdin and env exactly as Run does, so a helper's choice between them is invisible to its caller |
+| TestOSRunSplitRejectsEmptyAndUnresolvableArgv | - | RunSplit refuses an empty or unresolvable argv[0] through the same resolveArgv0 seam as Run, Stream and Attach |
+| TestParsingHelpersIgnoreAWarningOnStderr | KubernetesPodsJSON / KubernetesGetJSON / KubernetesListJSON / KubernetesTop / EngineInspectJSON / EngineImageInspectJSON / EngineStats / EngineList / SystemctlNRestarts | every helper that parses rather than scans its output returns the payload alone when a warning sits on stderr, via the Splitter path |
+| TestParsingHelpersFallBackToRun | - | a Runner with no Splitter still works, on exactly the combined output Run has always returned |
+| TestParsedFailureCarriesBothStreams | - | a failed command still reports what it said, on whichever stream it said it on, so splitting the streams did not cost the error context |
 
 ## internal/validate
 
-Validate the parsed model -- per-side rules, connection refs, leader election, the docker/podman/kubernetes target sections, ports, container names, TLS/stores wiring, and the safe-token charset.
+Validate the parsed model -- per-side rules, connection refs, leader election, the docker/podman/kubernetes platform sections, ports, container names, TLS/stores wiring, and the safe-token charset.
 
 Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extra_test.go](../internal/validate/validate_extra_test.go), [validate_deploycommand_test.go](../internal/validate/validate_deploycommand_test.go)
 
@@ -603,7 +611,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestLeaderElectionActiveMissingQueueAndSession | - | active_active mode missing queue/conn-ref errors requires a 'queue' and requires a solace session |
 | TestLeaderElectionConnRefMustBeSolace | - | leader-election conn-ref pointing to mq connection errors must be a solace connection |
 | TestLeaderElectionInvalidMode | - | unknown leader-election mode 'bogus' errors is invalid |
-| TestLeaderElectionSolaceKeyRenamed | active_standby / standalone | the retired `leader-election.solace` key errors with the rename message in every mode, not only the active ones |
+| TestLeaderElectionSolaceKeyRenamed | active_standby / standalone | a `leader-election.solace` key errors, naming `leader-election.session` as the key to use, in every mode, not only the active ones |
 | TestLeaderElectionConnRefAndInlineSession | - | conn-ref set alongside an inline session errors sets both conn-ref |
 | TestLeaderElectionSessionRejectsBindingFields | queue / topic / consumer / producer | each binding key inside `session:` errors may not set queue/topic/consumer/producer |
 | TestLeaderElectionInlineSessionValid | - | a bare solace tuple under `session:` passes clean |
@@ -621,9 +629,9 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestMQKeyAliasRequiresKeystore | - | mq key-alias without keystore errors no keystore defined |
 | TestCheckKubeRequiredAndReplicas | - | kube deployment missing name/namespace and replicas 3 errors each field plus replicas: 1 message |
 | TestCheckKubeServicePort | - | kubernetes.service.port is range-checked like docker/podman ports: a scalar or distinct host:container pair both pass, and an out-of-range host or container side each error independently naming the offending side |
-| TestCheckKubeCredentialCreateRemovedKeys | source/variables/values-file set | credentials.create still carrying the removed keys errors naming all three and telling the operator to remove them |
-| TestCheckKubeCredentialCreateRemovedKeys | source alone | credentials.create carrying only the removed `source` key errors naming it alone |
-| TestCheckKubeCredentialCreateRemovedKeys | bare name | a bare create.name (the new shape) trips no removed-keys error |
+| TestCheckKubeCredentialCreateRemovedKeys | source/variables/values-file set | credentials.create carrying `source`, `variables`, and `values-file` errors naming all three and telling the operator to remove them |
+| TestCheckKubeCredentialCreateRemovedKeys | source alone | credentials.create carrying only `source` errors naming it alone |
+| TestCheckKubeCredentialCreateRemovedKeys | bare name | a bare create.name trips no removed-keys error |
 | TestCheckKubeStoresRequireTruststore | - | kube stores create without tls.truststore errors requires tls.truststore |
 | TestStoresNotWiredWarning | - | TLS workflow with kube deploy and no stores wiring warns secrets.stores is omitted |
 | TestStoresWiredExistingNoWarning | - | stores wired via existing secret produces no stores-omitted warning |
@@ -671,9 +679,9 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckDockerProjectName | underscore / trailing hyphen | rejected even though docker compose would accept both -- one name grammar across the spec |
 | TestCheckDockerProjectName | empty | rejected: the check is unconditional, so an empty value means ParseEnv's defaults never ran |
 | TestCheckPodmanHasNoProjectName | - | a podman section is never checked for a project name; the key is docker-only |
-| TestCheckDockerPodmanSecretsRemoved | docker.secrets set | a docker section still carrying a `.secrets` block errors docker.secrets is no longer configured |
-| TestCheckDockerPodmanSecretsRemoved | podman.secrets set | a podman section still carrying a `.secrets` block errors podman.secrets is no longer configured |
-| TestCheckDockerPodmanSecretsRemoved | nil secrets | the new default (no `.secrets` block) trips no such error |
+| TestCheckDockerPodmanSecretsRemoved | docker.secrets set | a docker section with a `.secrets` block errors naming docker.secrets as not a configurable section |
+| TestCheckDockerPodmanSecretsRemoved | podman.secrets set | a podman section with a `.secrets` block errors naming podman.secrets as not a configurable section |
+| TestCheckDockerPodmanSecretsRemoved | nil secrets | omitting `.secrets` trips no such error |
 | TestCheckPodmanModeAndScope | valid-podman | valid podman section passes with no errors |
 | TestCheckPodmanModeAndScope | bad-mode | podman mode 'swarm' errors podman.mode must be |
 | TestCheckPodmanModeAndScope | bad-scope | podman quadlet scope 'root' errors scope must be auto, user, or system |
@@ -683,7 +691,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckDeployCommandAcceptReject | curl / absolute path / relative path / bare positional arg / sudo podman without extraAllowed / bare "--" / empty command | reject matrix: unlisted binary, path argv[0], a bare positional argument, an unapproved chained binary, a bare end-of-flags marker, and an empty command all error |
 | TestCheckDeployCommandEndOfFlagsMarkerMidCommand | - | "kubectl --" errors token "--": end-of-flags marker is not accepted, distinct from the argv[0] allowlist rejection |
 | TestCheckDeployCommandErrorTexts | - | pins the canonical wording verbatim for the path, allowlist, end-of-flags, flag-shape, and empty-command errors |
-| TestCheckKubeCommandNowValidated | - | kubernetes.command "kubectl; rm -rf /" now errors (previously skipped entirely for k8s); a safe kubectl command produces no such error |
+| TestCheckKubeCommandNowValidated | - | an unsafe kubernetes.command such as "kubectl; rm -rf /" errors; a safe kubectl command produces no such error |
 | TestCheckKubeCommandDefaultKubectlUnvalidated | - | the zero-value default (spec.DefaultKubeCommand) validates clean |
 | TestContextAllowCommandsHonored | - | Context.AllowCommands threads into checkKube and checkContainerTarget: "sudo docker"/"sudo podman"/"sudo kubectl" reject with AllowCommands nil, accept with AllowCommands=[sudo] |
 | TestCheckContainerCommandUnlistedBinaryRejected | - | docker.command "curl" and podman.command "/tmp/evil" are rejected by the platform allowlist, not merely the charset check |
@@ -735,7 +743,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestUsesTLS | plain-tcp-mq-false | plain tcp solace and mq tls false returns usesTLS false |
 | TestMQOnlyTLSStoresOmittedWarning | - | mq-only TLS workflow with docker stores omitted still warns store files missing at runtime |
 | TestPlainTCPStoresOmittedNoWarning | - | plain-tcp workflow with stores omitted has no store-files-missing warning |
-| TestCheckContainerRestartUnsafe | newline in restart | docker.restart is rejected; image and timezone moved to top-level keys and are covered by their own retirement and charset tests |
+| TestCheckContainerRestartUnsafe | newline in restart | docker.restart is rejected; image and timezone are top-level keys, covered by their own per-platform-rejection and charset tests |
 | TestCheckContainerRestartUnsafe | realistic value | on-failure:5 is accepted |
 | TestCheckContainerHostPathsUnsafe | newline in tls.truststore.file | bind-mounted store path rejected once docker.stores opts in |
 | TestCheckContainerHostPathsUnsafe | space in libs.dir | podman.libs.dir rejected |
@@ -747,7 +755,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckKubeSecretNames | stores existing bad | non-DNS-1123 stores existing rejected |
 | TestCheckKubeSecretNames | valid names | solmq-credentials and solmq-tls produce no name error |
 | TestCheckKubeSecretsCreateXorExisting | credentials both set | rejected: Render would take the create branch and emit a Secret doc over the object existing names |
-| TestCheckKubeSecretsCreateXorExisting | credentials neither set | rejected: a present block must choose, or the /run/secrets mount silently disappears |
+| TestCheckKubeSecretsCreateXorExisting | credentials neither set | rejected: a present block must choose, or the SecretsDir mount silently disappears |
 | TestCheckKubeSecretsCreateXorExisting | stores both / neither set | same rule enforced for the stores Secret |
 | TestCheckKubeSecretsCreateXorExisting | create only / existing only / blocks omitted | all three accepted -- omitting a block stays the way to say "none" |
 | TestCheckLibsNFSFields | newline in nfs.server | rejected against the host charset |
@@ -757,13 +765,18 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestPasswordConflictOnSameBinder | identical passwords | same tuple sharing one password passes |
 | TestPasswordConflictOnSameBinder | distinct tuples | different queue-manager means different binders, so passwords may differ |
 | TestPasswordConflictSolaceSide | - | the solace branch keys on client-password and errors on a conflict |
-| TestRemovedDefaultsKeysRejected | - | a security.enabled value (true or false) errors security.enabled is no longer configurable, a management.exposure value errors management.exposure is no longer configurable, and neither key set validates clean (the third retired key, leader-election.solace, is covered by TestLeaderElectionSolaceKeyRenamed) |
+| TestRemovedDefaultsKeysRejected | - | a security.enabled value (true or false) errors naming security.enabled as not configurable, a management.exposure value errors naming management.exposure as not configurable, and neither key set validates clean (the third such key, leader-election.solace, is covered by TestLeaderElectionSolaceKeyRenamed) |
 | TestStatusUserReservedName | - | a security.users entry named spec.StatusUserName errors reserved, naming security.users[1].name; a differently-named user does not collide |
 | TestSecurityUserRoles | admin / unknown-but-well-formed / several / empty / whitespace-only / shell metacharacter / embedded space / no roles | roles are checked for usability, not against an allowlist: a well-formed unrecognized role passes, an empty or whitespace-only entry errors naming both indices, an unsafe-charset entry errors, and omitting roles entirely stays clean. Also pins both error texts verbatim, since the generator page's JS validator mirrors them word for word |
 | TestStatusUserPasswordEnvCharset | nil Env / unset / empty / valid value | none trip the SECURITY_USER_SOLMQ_STATUS_PASSWORD charset error |
 | TestStatusUserPasswordEnvCharset | space / double quote / single quote / backslash / dollar-brace / control char / non-ASCII byte | each errors the charset check, and the error text never echoes the secret value |
-| TestCheckSyslogRunsForEveryPlatform | docker / podman / config only | syslog is a top-level key now, so it is validated whichever platform is generated -- under the old checkKube placement it went unchecked everywhere it had just started applying |
-| TestKubernetesLoggingIsRetired | - | a leftover kubernetes.logging block is rejected by name and the error says where it moved to; ParseEnv decodes non-strict, so without this it would be dropped in silence and the instance would come up with no syslog and no diagnostic |
+| TestCheckSyslogRunsForEveryPlatform | docker / podman / config only | syslog is a top-level key, so it is validated whichever platform is generated |
+| TestKubernetesLoggingIsRetired | - | a `kubernetes.logging` block is rejected by name, and the error names the top-level `logging:` block to use instead; ParseEnv decodes non-strict, so without this check it would be dropped in silence and the instance would come up with no syslog and no diagnostic |
+| TestCredentialsNotWiredWarning | - | a config referencing credentials with kubernetes.secrets.credentials omitted warns kubernetes.secrets.credentials is omitted, naming the mount path they would have used |
+| TestCredentialsWiredNoWarning | create / existing | either way of wiring kubernetes.secrets.credentials suppresses the warning |
+| TestNoCredentialsNoWarning | - | a config whose connections need no authentication is not warned about a Secret it does not need |
+| TestCredentialsFoundOutsideAWorkflowSide | a management account / a truststore password | a management account password and a store password are credentials too, and each trips the same warning as a missing binder credential |
+| TestLibsPVNameLengthIsCapped | - | a 40-char namespace and a 40-char `libs.pvc.create.name` derive a PV name that exceeds the 63-char DNS-1123 limit, which errors; shortening both to fit is not flagged, so the check cannot simply always fire |
 
 ## internal/examples
 
@@ -935,7 +948,7 @@ Tests: [libs_test.go](../internal/libs/libs_test.go), [maven_test.go](../interna
 | TestSplitJarBasename | classifier stripped (netty native, sources) | a trailing classifier is not part of the version and is dropped, so the entry parses instead of being rejected whole |
 | TestValidateImageVersionQualifiers | accepted / rejected | Final/RELEASE/GA/SP join numerics and pre-release qualifiers as orderable, while genuine garbage (9zzzzzzzzzzz, a bare classifier, an unknown word) stays rejected -- the gate exists so a stale entry cannot compare as newer than a real release |
 | TestImageNameTag | hub / no namespace / registry with a port / no tag / digest / empty | an image reference splits into name and tag; the tag separator is found in the last path element so a registry port is not mistaken for it |
-| TestImageMismatchNote | silent: none / captured tag / newer tag / the floor itself / past every capture / registry mirror. warns: below the floor / different image / digest / no tag | the embedded list describes a RANGE, so any release at or above `EmbeddedListMinVersion` is silent -- a differing tag is not itself a mismatch; below the floor, a different image, or a reference with no comparable tag warns and names both the reference and what it was judged against |
+| TestImageMismatchNote | silent: none / captured tag / newer tag / the floor itself / past every capture / registry mirror. warns: below the floor / different image / digest / no tag | the embedded list describes a *range*, so any release at or above `EmbeddedListMinVersion` is silent -- a differing tag is not itself a mismatch; below the floor, a different image, or a reference with no comparable tag warns and names both the reference and what it was judged against |
 | TestDownloadImageMismatchReported | uncovered (2.9.0) / covered (2.13.0, 2.14.1) / none / --omit-lib-file | the check end to end: only an image the embedded list cannot speak for warns, both ends of the covered range stay silent, and a named omit list suppresses it -- the operator declared that list, as with an explicit --url. Every suppression case uses the uncovered reference, so it cannot pass vacuously |
 | TestEmbeddedOmitListFullyParses | - | every line of the shipped image list either is not a jar reference or parses to an orderable version, so a future capture that reintroduces an unparseable shape fails the build instead of printing warnings on every run |
 | TestSplitJarBasenameRejectsNonJar | - | a non-.jar name is rejected outright |
@@ -1024,9 +1037,9 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestExitCodeContract | invalid spec | run returns exit code 1 for structurally invalid workflow |
 | TestExitCodeContract | auto-complete no shell | run([auto-complete]) returns exit code 2 |
 | TestExitCodeContract | auto-complete bogus shell | run([auto-complete, bogus]) returns exit code 2 |
-| TestExitCodeContract | completion is no longer a command | run([completion, bash]) returns exit code 2 -- the rename to `auto-complete` is a clean break with no compatibility alias, pinned so it cannot silently regress |
+| TestExitCodeContract | completion is no longer a command | run([completion, bash]) returns exit code 2: `completion` is rejected as an unknown command, with no alias to fall back on |
 | TestExitCodeContract | 8 near misses | d / v / s / g / comp / h / hlp / stat each exit 2: none was picked as an alias, so none may resolve |
-| TestExitCodeContract | dep is no longer deploy | run([dep]) returns exit code 2 -- deploy's short form was aligned with solace-util's `dp`, a clean break with no compatibility alias, pinned the same way the `completion` rename is |
+| TestExitCodeContract | dep is no longer deploy | run([dep]) returns exit code 2: `dep` is not a recognized command; `deploy`'s alias is `dp`, matching solace-util's convention, and there is no `dep` alias |
 | TestVerbAliasesDispatchLikeCanonical | gen / dp / rm / sts / ver / vld / eg / dl | each alias reaches the same handler as its canonical verb, so the alias table and the dispatch map cannot drift apart |
 | TestGenerateConfigStdoutAndFileMatch | stdout run | exit 0 and stdout contains 'spring:' |
 | TestGenerateConfigStdoutAndFileMatch | file run | exit 0 and written file content equals prior stdout exactly |
@@ -1058,7 +1071,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestDownloadDirDefaultAndPositionalOverride | default dir / explicit dir | the trailing [dir] positional defaults to ./libs and threads an explicit value through to Input.Dir unchanged |
 | TestDownloadSetReachesInput | mq / syslog | both modeled sets thread through to libs.Input.Set unchanged |
 | TestDownloadURLFlagRepeatable | - | repeated --url collects every occurrence, in order, into Input.URLs |
-| TestDownloadJMSFlagIsGone | mq / syslog, either value | the removed --jms flag is an unknown flag: exit 2 and downloadFn never runs, so a script still passing it fails loudly instead of being silently ignored |
+| TestDownloadJMSFlagIsGone | mq / syslog, either value | `--jms` is an unknown flag: exit 2 and downloadFn never runs, so a script still passing it fails loudly instead of being silently ignored |
 | TestDownloadForceFlagReachesInput | default false / -f short / --force long | both -f and --force spellings reach Input.Force, defaulting to false |
 | TestDownloadVersionFlagReachesInput | default empty / explicit pin | --version defaults to "" (latest stable) and an explicit pin reaches Input.Version unchanged |
 | TestDownloadOmitLibFileFlagReachesInput | default empty / explicit path | --omit-lib-file defaults to "" (the embedded list) and an explicit path reaches Input.OmitLibFile unchanged |
@@ -1090,8 +1103,8 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestPlatformMenuOnMultipleSections | - | with no --platform and more than one section, the interactive menu (via the injected promptLine seam) picks the platform |
 | TestPlatformMenuNonTTYRefusesWithPlatformHint | - | the menu refuses to block when stdin is not a TTY, failing with an error naming --platform instead of hanging |
 | TestPlatformZeroSectionsIsLoudError | - | with no --platform and no section present at all, the error names all three section keys |
-| TestOldPositionalFormsRejectedWithPlatformHint | deploy kubernetes / remove docker / generate podman | the pre-rework positional grammar is a usage error (exit 2) that points at --platform, not resolved as a target |
-| TestStatusTargetWordIsRequired | - | a bare `status` prints the target words and the verb's own help page, exits 2, and runs nothing -- the deliberate breaking change, since neither view is a safe default; the short spellings (cnt, app) are deliberately absent, since aliases are documented only in the markdown docs |
+| TestOldPositionalFormsRejectedWithPlatformHint | deploy kubernetes / remove docker / generate podman | passing the platform as a second positional argument is a usage error (exit 2) that points at --platform, not resolved as a target |
+| TestStatusTargetWordIsRequired | - | a bare `status` prints the target words and the verb's own help page, exits 2, and runs nothing, since neither view is a safe default; the short spellings (cnt, app) are deliberately absent, since aliases are documented only in the markdown docs |
 | TestStatusUnknownAndExtraTargetWords | unknown word / a second word | each is a usage error (exit 2) naming the problem, with nothing run |
 | TestStatusTargetsMatchModel | - | the drift gate between the modeled target words, the constants the views switch on, and statusTargetArgBracket (which cannot be built from the model, since cliVerbs' own initialiser uses it) |
 | TestStatusTargetAliasesResolve | cnt / app / container / all / unknown | resolveTarget maps each alias to its canonical word and passes an unknown one through; `sts cnt` really drives the container view, which costs one preflight and one get |
@@ -1130,7 +1143,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestAbbreviationDocCoversModel | - | every verb alias, target alias, platformAliasList short spelling and short flag form has a row on the page, and the page renders no more rows than the model declares -- the check the byte comparison cannot make, since a regenerated file agrees with a renderer that forgot a whole class of abbreviation |
 | TestAbbreviationDocTableShape | - | every table row has its header's cell count, counted honouring the `\|` escape tableCell writes, so an unescaped delimiter in a flag Meaning fails instead of silently rendering a broken table |
 | TestVerbUsagePages | one subtest per verb | every per-command page carries its Synopsis, description, every target word (and set) with its summary, every modeled flag the verb takes -- each spelling plus its terse Usage text, wrap-tolerantly asserted -- and its example; no alias appears and no line exceeds the width budget |
-| TestVerbUsagePages | orphans and platform shorts | every modeled flag is listed by at least one verb (a flag no verb lists would appear on no help page at all), and `--platform`'s Usage text names each short spelling from platformAliasList -- the assertion that used to point at the summary's flag table, which is gone |
+| TestVerbUsagePages | orphans and platform shorts | every modeled flag is listed by at least one verb (a flag no verb lists would appear on no help page at all), and `--platform`'s Usage text names each short spelling from platformAliasList |
 | TestAutoCompleteDispatchPrintsScript | bash / zsh / fish / powershell | `auto-complete <shell>` exits 0, writes the script to stdout, and never reaches the runner |
 | TestCompletionGoldenInSync | bash / zsh / fish / powershell | each rendered script equals its snapshot under cmd/solmq-conn-util/testdata/completions; -update rewrites them |
 | TestCompletionCoversModel | bash / zsh / fish / powershell | every modeled verb, target, flag spelling and verb alias reaches every shell (fish exempts a verb with no targets/posarg/flags, e.g. version, which has nothing beyond word 1 to normalize), with descriptions in the three shells that show them |
@@ -1194,7 +1207,7 @@ The `logs` verb shares status's platform resolution and instance discovery (inst
 | TestLogsIndexWithNothingToIndexInto | - | an index given where discovery has no list says that is the problem, rather than reporting a missing pod named 0 |
 | TestStatusAcceptsAnIndexToo | - | status resolves --pod 1 to a real name before querying, so the two verbs share one vocabulary and no index ever reaches an argv |
 | TestStatusKeepsPodRepeatable | - | the one-entry limit is a logs rule: status reports many instances by design and still accepts --pod twice |
-| TestStatusAllSkipsAnUnsafeNameOutLoud | - | under --all the names come from ps, so one that could not go into an argv is skipped with a note naming it, never reaches any argv, and the instances around it are still reported (moved here from logs, which no longer has --all) |
+| TestStatusAllSkipsAnUnsafeNameOutLoud | - | under --all the names come from ps, so one that could not go into an argv is skipped with a note naming it, never reaches any argv, and the instances around it are still reported |
 | TestStatusAllSortsRowsAlphabetically | - | docker ps returns creation order, so the rows are sorted by name; without it an index would select a different instance than the row an operator counted to |
 | TestIsIndex | 0 / 12 / empty / 0-abc / abc / -1 / 1.0 / leading space | only a bare run of digits is an index, so an instance named 0-abc is still reachable by name |
 | TestResolveOneIndexRules | plain name / name that is digits / in-range index / unknown name / past the end | an exact name always wins over the index reading, a digit run in range selects positionally, an unknown name passes through for discovery to judge, and one past the end names how many matched and the valid range |
@@ -1242,14 +1255,14 @@ manifest-parity cases)
 | TestRemoveNamespaceOccupiedLeavesItAlone | - | anything living in the namespace that the release does not own is listed as kind/name and the namespace is kept, with no fourth call |
 | TestRemoveNamespaceEmptyPromptsSeparately | y / n / blank | an empty namespace asks its own question, because saying yes to removing a deployment is not saying yes to removing the namespace around it; declining leaves it |
 | TestRemoveNoPromptNeverRemovesAnOccupiedNamespace | - | the invariant: no flag removes a namespace still holding someone else's work. --no-prompt approves the questions, never a cascade -- the occupancy check runs first and an occupant of any kind ends it, silently or not |
-| TestRemovePlainRunChecksTheNamespace | - | the regression this change exists for: a plain remove with no flags probes the namespace and asks both questions (teardown, then namespace), where it used to skip the step entirely |
+| TestRemovePlainRunChecksTheNamespace | - | a plain remove with no flags probes the namespace and asks both questions -- teardown, then namespace |
 | TestRemoveNamespaceRefusesClusterNamespaces | default / kube-system / kube-public / kube-node-lease | refused before the occupancy probe even runs, so no emptiness result can authorise deleting one |
 | TestRemoveNamespaceProbeFailureLeavesItAlone | - | a failed occupancy query leaves the namespace in place and says so; a namespace is not worth deleting on a guess |
 | TestRemoveFailedTeardownSkipsTheNamespace | - | a failed teardown never probes or deletes the namespace: whatever did not come down is still in there |
 | TestNamespaceOccupantsRules | foreign deployment/statefulset/pvc/service; our own; owned pod; terminating; the three cluster defaults | the exclusion table -- each non-occupant would otherwise keep a namespace alive forever, the likeliest being the release deleted moments ago and still terminating |
 | TestNamespaceOccupantsAreSortedAndLabelled | - | kind/name, lower-cased and sorted, so the list is stable between runs |
 | TestNamespaceOccupantsRejectsUnreadableOutput | - | a parse failure is an error, never an empty list: unreadable output must not read as "empty" and authorise the delete |
-| TestOmitNamespaceIsWhatMakesTeardownSafe | - | apply keeps the Namespace document, delete drops it, dropping doc 0 leaves no leading separator, and everything else still renders |
+| TestTeardownDropsTheNamespaceDocument | - | apply keeps the Namespace document, a teardown drops it, dropping the first document leaves no leading separator, and the ConfigMap and Deployment still render |
 | TestNamespaceManifestMatchesWhatRenderEmits | - | the standalone document the namespace delete pipes is exactly the one Render emits, so the two cannot drift |
 | TestOwnedNamesCoversEverythingThisReleaseCreates | created secrets/PVC / referenced ones / nil section | the safety net behind the occupancy check: everything this release creates counts as ours, an empty name never does, and objects merely referenced (existing:) are *not* ours -- the operator manages them and their presence is a real reason to keep the namespace |
 | TestRemoveNamespaceWithoutANamespaceSaysSo | - | a kubernetes section with no namespace has nothing to remove, and says so rather than acting on an empty name |

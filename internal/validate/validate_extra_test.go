@@ -1240,3 +1240,30 @@ func TestCredentialsFoundOutsideAWorkflowSide(t *testing.T) {
 		})
 	}
 }
+
+// TestLibsPVNameLengthIsCapped covers what namespacing the PersistentVolume
+// name costs: the derived name is still a single DNS-1123 label, so a long
+// namespace plus a long claim name can exceed 63 characters. Caught at the gate
+// with both fields named, rather than by the API server part-way through an
+// apply that has already created other objects.
+func TestLibsPVNameLengthIsCapped(t *testing.T) {
+	long := strings.Repeat("a", 40)
+	k := &spec.Kubernetes{
+		Deployment: spec.Deployment{Name: "c", Namespace: strings.Repeat("n", 40), Replicas: 1},
+		Libs: &spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{
+			Name: long, Storage: "1Gi", NFS: spec.NFS{Server: "nfs1", Path: "/libs"},
+		}}},
+	}
+	errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
+	if !hasErr(errs, "exceeds the 63-char DNS-1123 limit") {
+		t.Errorf("an over-long derived PV name must be refused, got %v", errs)
+	}
+
+	// A name that fits is not flagged, so the check cannot simply always fire.
+	k.Libs.PVC.Create.Name = "jar-libs"
+	k.Deployment.Namespace = "solconnector-tps-sit"
+	errs, _ = Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
+	if hasErr(errs, "exceeds the 63-char DNS-1123 limit") {
+		t.Errorf("a name that fits must not be flagged, got %v", errs)
+	}
+}

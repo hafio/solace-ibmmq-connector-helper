@@ -534,12 +534,11 @@ func actKubernetes(o actionOpts, r runner.Runner) int {
 	if e.Kubernetes == nil {
 		return errExit(fmt.Errorf("env.yaml has no kubernetes: section to %s", action))
 	}
-	// A teardown renders without the Namespace document: piping one to
-	// `kubectl delete -f -` deletes the namespace and cascades to everything in
-	// it, including workloads this tool never deployed. The namespace is its own
-	// step below, opted into and confirmed separately.
+	// A teardown renders differently in two ways -- no Namespace document, and
+	// the documents reversed so kubectl does not block deleting a PVC a running
+	// pod still holds. See deploy.Input.Teardown.
 	manifest, errs, warns := gen.GenerateKubernetes(req, resolver(envDir),
-		gen.KubeOpts{OmitNamespace: action == runner.ActionRemove}, extraAllowed...)
+		gen.KubeOpts{Teardown: action == runner.ActionRemove}, extraAllowed...)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
@@ -548,6 +547,7 @@ func actKubernetes(o actionOpts, r runner.Runner) int {
 		return code
 	}
 	out, rerr := runner.Kubernetes(r, e.Kubernetes.Command, action, manifest, extraAllowed)
+	warnIfPVUnchanged(action, out)
 	if code := report(action, tgtKubernetes, out, rerr); code != 0 {
 		// A failed teardown leaves the namespace alone: whatever did not come
 		// down is still in there.
@@ -1364,6 +1364,30 @@ func report(action, platform, out string, err error) int {
 	}
 	fmt.Fprintf(os.Stderr, "ok: %s %s\n", action, platform)
 	return 0
+}
+
+// warnIfPVUnchanged says so when a deploy re-applied a PersistentVolume that
+// already existed.
+//
+// A PV's capacity and its nfs server/path are immutable once the object is
+// there: kubectl answers "configured" and changes nothing, so raising
+// libs.pvc.create.storage and re-deploying looks like it worked and leaves the
+// claim asking for more than the volume has -- which surfaces much later as a
+// pod that cannot schedule on an unbound claim.
+//
+// Read off the apply output rather than queried, because the only fact needed
+// is one kubectl has already reported. Advisory only: nothing is refused, since
+// an unchanged PV is the normal case for every redeploy that did not touch it.
+func warnIfPVUnchanged(action, out string) {
+	if action != runner.ActionDeploy {
+		return
+	}
+	for _, ln := range strings.Split(out, "\n") {
+		ln = strings.TrimSpace(ln)
+		if strings.HasPrefix(ln, "persistentvolume/") && strings.HasSuffix(ln, " configured") {
+			fmt.Fprintf(os.Stderr, "warning: %s already existed; a PersistentVolume's capacity and nfs server/path cannot be changed by re-applying it, so any change to libs.pvc.create is not in effect. Delete the volume and deploy again to change them\n", strings.TrimSuffix(ln, " configured"))
+		}
+	}
 }
 
 func errExit(err error) int {

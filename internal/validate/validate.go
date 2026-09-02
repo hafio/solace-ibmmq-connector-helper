@@ -790,6 +790,14 @@ func checkLibs(add func(string, string, ...any), k *spec.Kubernetes) {
 			if !isDNS1123(c.Name) {
 				add(fileEnv, "libs.pvc.create.name %q is not a valid DNS-1123 label", c.Name)
 			}
+			// The PersistentVolume is cluster-scoped, so its name carries the
+			// namespace to stop two releases fighting over one object -- and the
+			// result is still a single DNS-1123 label. Caught here rather than by
+			// the API server mid-apply, the same way the ConfigMap name is
+			// checked against deployment.name above.
+			if pv := spec.LibsPVName(k.Deployment.Namespace, c.Name); len(pv) > 63 {
+				add(fileEnv, "libs.pvc.create.name %q derives the PersistentVolume name %q, which exceeds the 63-char DNS-1123 limit: shorten it or deployment.namespace", c.Name, pv)
+			}
 			if c.NFS.Server == "" || c.NFS.Path == "" {
 				add(fileEnv, "libs.pvc.create requires nfs.server and nfs.path")
 			} else {

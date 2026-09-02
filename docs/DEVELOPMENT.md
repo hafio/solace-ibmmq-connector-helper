@@ -187,6 +187,13 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
   which reports it. Credential
   env-files are written `0600` and never logged. Kubernetes manifests are piped on
   **stdin** (`apply -f -`), not argv.
+- **Teardown reverses the manifest order.** `remove` pipes the same document set
+  `deploy` renders, reversed, to `<command> delete -f -`. kubectl deletes documents
+  in file order and waits for each one to go, so creation order deadlocks whenever a
+  `libs.pvc.create` PVC precedes the Deployment that mounts it: `kubernetes.io/pvc-protection`
+  holds the claim while a pod still mounts it, and the Deployment that owns that pod
+  is queued behind it in the file. Reversed, the workload goes first and everything
+  it holds is free by the time its turn comes.
 - **Streaming seam.** `runner.Runner` is one method (`Run`) and fully buffered: it returns
   only once the process has exited, with stdout and stderr merged into one string for error
   context. `runner.Streamer` is the optional second capability for the case that cannot
@@ -235,18 +242,17 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
   anything discovery returned. A pod carrying a sidecar therefore cannot have the wrong half of it
   read, and a pod with no such container fails loudly instead of being guessed at -- the same
   judgement `statusreport.connectorIndex` records for the reporting side. The accepted cost is
-  that a pod this tool did not deploy, whose container is called something else, is no longer
-  reachable. `statusreport.Instance.ContainerName` still exists, but it is reported (it is a field
-  of the `--output json` document) rather than used to address anything.
+  that a pod this tool did not deploy, whose container is called something else, is not
+  reachable this way. `statusreport.Instance.ContainerName` still exists, but it is reported (it
+  is a field of the `--output json` document) rather than used to address anything.
 - **Shared instance resolution.** `cmd/solmq-conn-util/instances.go` holds what every verb
   that reaches into running instances needs: platform resolution, namespace resolution, the
   `SafeToken` checks on every operator-supplied name, `ParseCommand`, the pod/container
   discovery branches, and -- for the single-instance verbs -- `resolveOneInstance` and the
   paste-back picker. `status`, `logs` and `cli` all call it rather than each carrying a copy --
   a debugging set of verbs that disagreed about which instances it meant would be worse than any
-  one of them alone. Because `-c` is a constant, naming an instance outright now costs no query at
-  all: the `get pods <name>` call that used to precede a named read existed only to learn the
-  container name.
+  one of them alone. Because `-c` is a constant, naming an instance outright costs no query at
+  all: no `get pods <name>` call is needed first just to learn the container name.
 - **Durable names** use UUIDv5 (namespace `6ba7f4e2-9c1d-5a3b-8e47-2f9a0c7d13e5`, key =
   `conn-name || queue-manager || topic || file-basename` joined by `0x1F`). Renaming a workflow
   file changes its durable name and orphans the old subscription -- rename deliberately.
