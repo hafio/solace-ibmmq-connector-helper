@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/scan"
@@ -336,8 +337,8 @@ spec:
 
 // deploymentDoc builds the expected Deployment manifest. hasCreds controls
 // the credentials Secret's volume + mount: no envFrom exists any more --
-// credentials are mounted as files under /run/secrets (matching the
-// connector's spring.config.import configtree, S3: no secret in an env var a
+// credentials are mounted as files under deploy.SecretsMountPath (one of the
+// two directories the connector's spring.config.import configtree names, S3: no secret in an env var a
 // child process or crash dump could see) -- and automountServiceAccountToken
 // is always false regardless of hasCreds (the connector never calls the
 // Kubernetes API).
@@ -383,7 +384,7 @@ spec:
 	}
 	b.WriteString("          volumeMounts:\n")
 	if hasCreds {
-		b.WriteString("            - name: secrets\n              mountPath: /run/secrets\n              readOnly: true\n")
+		b.WriteString("            - name: secrets\n              mountPath: " + deploy.SecretsMountPath + "\n              readOnly: true\n")
 	}
 	b.WriteString(`            - name: config
               mountPath: /app/external/spring/config/application.yml

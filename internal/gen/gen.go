@@ -518,9 +518,15 @@ type built struct {
 }
 
 // ConfigImport is the Spring config-data import every generated application.yml
-// carries. Credentials are mounted one-file-per-name under this directory on all
-// three platforms, so a single line makes the same config resolve everywhere.
-const ConfigImport = "optional:configtree:/run/secrets/"
+// carries. Credentials are mounted one file per name under spec.SecretsMountPath
+// on all three platforms, so a single line makes the same config resolve
+// everywhere -- which it must, since `generate config` takes no platform.
+//
+// It stays `optional:` because a config with no credentials mounts no such
+// directory. The cost of that is worth knowing: a secrets directory that is
+// missing, shadowed, or unreadable is not a startup failure either, so the
+// connector comes up with placeholders unresolved and fails later instead.
+const ConfigImport = "optional:configtree:" + spec.SecretsMountPath + "/"
 
 // build consolidates the workflows and renders the application.yml.
 // statusPassword is the already-resolved password for the reserved status

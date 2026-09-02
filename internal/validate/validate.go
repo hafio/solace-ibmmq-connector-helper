@@ -212,6 +212,15 @@ func checkWorkflowSides(add, warn func(string, string, ...any), env func(string)
 func checkTargets(add, warn func(string, string, ...any), ctx Context, resolved []spec.Workflow) {
 	if ctx.CheckKubernetes && ctx.Kube != nil {
 		checkKube(add, warn, ctx)
+		// Warn: credentials are referenced but the credentials Secret is not
+		// wired. Without the block there is no volume and no mount, so every
+		// ${...} the config carries stays unresolved -- and because the
+		// configtree import is optional, the connector starts anyway and fails
+		// later against whatever it could not authenticate to. Nothing else
+		// says so, which is the whole reason this warning exists.
+		if usesCredentials(resolved, ctx.Defaults) && !credentialsWired(ctx.Kube) {
+			warn(fileEnv, "credentials are referenced but kubernetes.secrets.credentials is omitted; they will not be mounted at "+secretsMountPath+" and every ${...} in the generated config will stay unresolved at runtime")
+		}
 		// Warn: TLS/mTLS in use but the stores Secret is not wired.
 		if usesTLS(resolved) && !storesWired(ctx.Kube) {
 			warn(fileEnv, "a TLS/mTLS connection exists but secrets.stores is omitted; the store files will be missing at runtime")
@@ -877,6 +886,49 @@ func storesWired(k *spec.Kubernetes) bool {
 	return k.Secrets.Stores.Create != nil || k.Secrets.Stores.Existing != ""
 }
 
+// credentialsWired reports whether the kubernetes section actually asks for a
+// credentials Secret. An omitted block is legal -- a config with no credentials
+// at all needs none -- so this is only half the question; usesCredentials
+// answers the other half.
+func credentialsWired(k *spec.Kubernetes) bool {
+	if k == nil || k.Secrets.Credentials == nil {
+		return false
+	}
+	return k.Secrets.Credentials.Create != nil || k.Secrets.Credentials.Existing != ""
+}
+
+// usesCredentials reports whether anything in the config resolves to a mounted
+// credential, which is what makes an omitted credentials block a problem rather
+// than a choice.
+//
+// It walks the same positions consolidate collects from -- both sides of every
+// workflow, the management session, the management accounts, and the two store
+// passwords -- because a name that reaches the config as ${...} has to be
+// readable from the mount, wherever in the spec it was written.
+func usesCredentials(wfs []spec.Workflow, d *spec.Defaults) bool {
+	for _, wf := range wfs {
+		for _, s := range []spec.Side{wf.Source, wf.Target} {
+			if !s.Username().Empty() || !s.Secret().Empty() {
+				return true
+			}
+		}
+	}
+	if d == nil {
+		return false
+	}
+	if s := d.LeaderElection.Session; s != nil {
+		if !s.Username().Empty() || !s.Secret().Empty() {
+			return true
+		}
+	}
+	for _, u := range d.Security.Users {
+		if !u.Secret().Empty() {
+			return true
+		}
+	}
+	return !d.TLS.Truststore.Secret().Empty() || !d.TLS.Keystore.Secret().Empty()
+}
+
 func isDNS1123(s string) bool { return len(s) <= 63 && dns1123RE.MatchString(s) }
 
 // checkSecretName gates a Secret name that is emitted verbatim into the manifest
@@ -1097,9 +1149,9 @@ type containerTarget struct {
 	Libs     *spec.LibsMount
 }
 
-// secretsMountPath is where credentials are mounted on every platform. It is
-// named here for error messages; internal/deploy owns the manifest-side constant.
-const secretsMountPath = "/run/secrets"
+// secretsMountPath is where credentials are mounted on every platform, named
+// here for error messages; spec.SecretsMountPath is the definition.
+const secretsMountPath = spec.SecretsMountPath
 
 // checkContainerTarget runs the checks common to the docker and podman sections:
 // a DNS-1123 name (it flows into filesystem paths and a systemctl unit token), a

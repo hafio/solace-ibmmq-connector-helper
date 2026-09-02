@@ -84,9 +84,10 @@ func Render(in Input) string {
 
 // renderSecrets emits the top-level secrets map. Each entry uses compose's
 // environment provider, so the value is read from the environment `docker
-// compose` itself runs with and mounted at /run/secrets/<name> -- it is never
-// written to a file by this tool, and never appears in the compose document.
-// Requires Docker Compose v2.23.1 or newer.
+// compose` itself runs with -- it is never written to a file by this tool, and
+// never appears in the compose document. Requires Docker Compose v2.23.1 or
+// newer. Where each one lands in the container is the service's business; see
+// renderService.
 func renderSecrets(w *yw, names []string) {
 	if len(names) == 0 {
 		return
@@ -146,12 +147,18 @@ func renderService(w *yw, in Input, inst Instance) {
 			w.Line(6, `LOGGING_SYSLOG_PORT: "`+strconv.Itoa(s.Port)+`"`)
 		}
 	}
-	// secrets: each is mounted at /run/secrets/<name>, where the connector's
-	// configtree import reads it as a property.
+	// secrets: each is mounted at spec.SecretsMountPath/<name>, where the
+	// connector's configtree import reads it as a property.
+	//
+	// Long syntax, not the one-line `- name` form, because the short form mounts
+	// at compose's own /run/secrets/<name> with no way to say otherwise, and
+	// /run/secrets is exactly the directory this tool had to move off (see
+	// spec.SecretsMountPath). An absolute target is what compose takes instead.
 	if len(in.Secrets) > 0 {
 		w.Line(4, "secrets:")
 		for _, n := range in.Secrets {
-			w.Line(6, "- "+n)
+			w.Line(6, "- source: "+n)
+			w.Line(8, "target: "+spec.SecretsMountPath+"/"+n)
 		}
 	}
 	// configs: the inlined application.yml and status script, plus the logback
@@ -213,7 +220,7 @@ func renderContentConfig(w *yw, name, payload string) {
 //     replaced with blanks, and compose refuses the document outright on the
 //     first $( -- command substitution is not valid interpolation syntax.
 //   - application.yml's ${...} placeholders are Spring's, resolved from the
-//     configtree import of /run/secrets. Compose resolves them first, from the
+//     configtree import of the secrets directory. Compose resolves them first, from the
 //     environment the CLI hands the compose child (runner.Cmd.Env), inlining
 //     the credential values as plaintext into the document and bypassing the
 //     secrets model entirely.

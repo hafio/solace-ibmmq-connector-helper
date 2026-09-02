@@ -349,7 +349,7 @@ details[open]>summary::before{content:"- "}
       <div id="dk-ports"></div>
       <button type="button" class="add" onclick="addPort('dk-ports');gen()">+ Add port</button>
       <div class="sub-h">Credentials</div>
-      <div class="h">Derived automatically from the connection fields above and mounted at /run/secrets; nothing to configure here.</div>
+      <div class="h">Derived automatically from the connection fields above and mounted at /app/external/var/secrets; nothing to configure here.</div>
       <div class="sub-h">Mounts</div>
       <div class="tgl"><input type="checkbox" id="i-dk-stores"><label for="i-dk-stores">Bind-mount the TLS stores</label></div>
       <div class="tgl"><input type="checkbox" id="i-dk-libs-on" onchange="togOpt('i-dk-libs-on','dk-libs-f')"><label for="i-dk-libs-on">Bind-mount an IBM MQ jar directory</label></div>
@@ -377,7 +377,7 @@ details[open]>summary::before{content:"- "}
       <div id="pd-ports"></div>
       <button type="button" class="add" onclick="addPort('pd-ports');gen()">+ Add port</button>
       <div class="sub-h">Credentials</div>
-      <div class="h">Derived automatically from the connection fields above and mounted at /run/secrets; nothing to configure here.</div>
+      <div class="h">Derived automatically from the connection fields above and mounted at /app/external/var/secrets; nothing to configure here.</div>
       <div class="sub-h">Mounts</div>
       <div class="tgl"><input type="checkbox" id="i-pd-stores"><label for="i-pd-stores">Bind-mount the TLS stores</label></div>
       <div class="tgl"><input type="checkbox" id="i-pd-libs-on" onchange="togOpt('i-pd-libs-on','pd-libs-f')"><label for="i-pd-libs-on">Bind-mount an IBM MQ jar directory</label></div>
@@ -412,7 +412,7 @@ details[open]>summary::before{content:"- "}
      copy whenever the golden file changes. -->
 <script type="text/plain" id="golden">spring:
   config:
-    import: optional:configtree:/run/secrets/
+    import: optional:configtree:/app/external/var/secrets/
   ssl:
     bundle:
       jks:
@@ -1100,6 +1100,7 @@ function readCtr(p, section){
 
 // ===== env.yaml =====
 const STORES_MOUNT = '/app/external/classpath/truststores';
+const SECRETS_MOUNT = '/app/external/var/secrets';   // mirrors spec.SecretsMountPath
 
 function sideBody(s, ind, withDest){
   let o = '';
@@ -1260,7 +1261,7 @@ function emitCtr(c){
   y += klist('ports', c.ports, '  ');
   // No secrets: block at all -- credentials are derived from the connection's
   // own client-username/-password (or user/password) fields and mounted at
-  // /run/secrets by the deploy step.
+  // SECRETS_MOUNT by the deploy step.
   if(c.stores) y += '  stores:\n' + kv('mount-path', STORES_MOUNT, '    ');
   if(c.libsDir) y += '  libs:\n' + kv('dir', c.libsDir, '    ');
   return y;
@@ -1902,11 +1903,11 @@ function safeHostPath(s){
 
 // checkContainerTarget runs the checks common to the docker and podman
 // sections. Change 1 removes the secrets: block entirely (credentials are now
-// derived from the connection fields and mounted at /run/secrets), so any
+// derived from the connection fields and mounted at SECRETS_MOUNT), so any
 // leftover cred configuration is rejected outright rather than validated.
 function checkContainerTarget(add, warn, m, c){
   if(c.cred){
-    add(ENV_FILE, `${c.section}.secrets is no longer configured: credentials come from the connection fields themselves (client-password / client-password-env, password / password-env, ...) and are mounted at /run/secrets. Remove the ${c.section}.secrets section`);
+    add(ENV_FILE, `${c.section}.secrets is no longer configured: credentials come from the connection fields themselves (client-password / client-password-env, password / password-env, ...) and are mounted at ${SECRETS_MOUNT}. Remove the ${c.section}.secrets section`);
   }
   if(!isDNS1123(c.name)) add(ENV_FILE, `${c.section}.name "${c.name}" is not a valid DNS-1123 label`);
   checkExpansion(warn, ENV_FILE, `${c.section}.name`, c.name);
@@ -2038,9 +2039,9 @@ const KEYSTORE_PASSWORD_NAME = GEN_PREFIX + 'KEYSTORE_PASSWORD';
 const LEADER_USERNAME_NAME = GEN_PREFIX + 'LEADER_ELECTION_CLIENT_USERNAME';
 const LEADER_PASSWORD_NAME = GEN_PREFIX + 'LEADER_ELECTION_CLIENT_PASSWORD';
 // ConfigImport is the Spring config-data import every generated application.yml
-// carries; credentials are mounted one-file-per-name under this directory on all
+// carries; credentials are mounted one file per name under SECRETS_MOUNT on all
 // three platforms. Mirrors gen.ConfigImport.
-const CONFIG_IMPORT = 'optional:configtree:/run/secrets/';
+const CONFIG_IMPORT = 'optional:configtree:' + SECRETS_MOUNT + '/';
 // STATUS_USER_NAME is the tool-reserved, read-only actuator account the
 // generated status script authenticates as. Mirrors spec.StatusUserName.
 const STATUS_USER_NAME = 'solmq-status';

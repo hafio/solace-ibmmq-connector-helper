@@ -66,6 +66,24 @@ const (
 const (
 	DefaultStoresMountPath = "/app/external/classpath/truststores"
 	DefaultLibsMountPath   = "/app/external/libs"
+
+	// SecretsMountPath is where the credentials Secret is mounted, one file per
+	// name, on every platform. The connector's configtree import reads exactly
+	// this directory, so one value keeps the generated application.yml
+	// platform-independent -- which it has to be, since `generate config` takes
+	// no platform at all.
+	//
+	// It is deliberately NOT /run/secrets, the conventional place and where this
+	// tool used to put it. On RHEL and OpenShift, CRI-O bind-mounts host
+	// subscription data over /run/secrets in every container by default, which
+	// silently shadows a kubelet volume mounted at the same path: `oc describe
+	// pod` reports the mount, /proc/mounts inside the container shows CRI-O's
+	// tmpfs instead, the directory holds only rhsm, and the connector starts
+	// with every credential placeholder unresolved because the import is
+	// optional. Nothing owns /app/external, so nothing can take it away, and
+	// keeping docker and podman on the same path costs one flag each and leaves
+	// one path to know rather than two.
+	SecretsMountPath = "/app/external/var/secrets"
 )
 
 // BaseName returns the final element of a path, splitting on both '/' and '\'

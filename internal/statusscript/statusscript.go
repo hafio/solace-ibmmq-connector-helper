@@ -10,6 +10,8 @@ package statusscript
 import (
 	"strconv"
 	"strings"
+
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
 // Filename is the script's name inside the container. The leading dot keeps it
@@ -28,6 +30,12 @@ const ContainerDir = "/app/external"
 
 // ContainerPath is the script's full path inside the container.
 const ContainerPath = ContainerDir + "/" + Filename
+
+// SecretsDir is where credentials are mounted, one file per name. The script
+// reads a ${...} password back out of it, so it has to be the same directory
+// the connector's own configtree import names -- hence the shared constant
+// rather than a literal here.
+const SecretsDir = spec.SecretsMountPath
 
 // ConfigDir is where this tool mounts the connector's application.yml, and is
 // also what the image's own entrypoint passes as
@@ -183,8 +191,8 @@ PASS=$(printf %s "$PASS" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
 case "$PASS" in
   '${'*'}')
     SECRET_NAME=$(printf %s "$PASS" | sed -e 's/^\${//' -e 's/}$//')
-    if [ -f "/run/secrets/$SECRET_NAME" ]; then
-      PASS=$(cat "/run/secrets/$SECRET_NAME")
+    if [ -f "` + SecretsDir + `/$SECRET_NAME" ]; then
+      PASS=$(cat "` + SecretsDir + `/$SECRET_NAME")
     else
       PASS=""
     fi

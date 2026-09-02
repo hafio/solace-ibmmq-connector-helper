@@ -210,9 +210,9 @@
     "semantic_hash": ""
   },
   "userguide.md": {
-    "mtime": 1788324106.3567548,
-    "seen": 1788324543.1604269,
-    "ast_hash": "1f93d42cad31945f7091a8d20d9808e8",
+    "mtime": 1788325314.8494105,
+    "seen": 1788325412.0247364,
+    "ast_hash": "28283a6ea8b149b55a60ea2054b22ffc",
     "semantic_hash": ""
   },
   "doc.md": {
@@ -330,9 +330,9 @@
     "semantic_hash": ""
   },
   "internal/examples/files/env.yaml": {
-    "mtime": 1788321752.1813526,
-    "seen": 1788323377.4065745,
-    "ast_hash": "7b51a766608dceb6f99500748921620a",
+    "mtime": 1788325338.4776533,
+    "seen": 1788325412.0247252,
+    "ast_hash": "1f41510eeba75c7dc21173fd4b04472e",
     "semantic_hash": ""
   },
   "testdata/golden/specs/env.yaml": {

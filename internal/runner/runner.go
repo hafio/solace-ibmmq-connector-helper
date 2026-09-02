@@ -89,6 +89,30 @@ type Streamer interface {
 	Stream(ctx context.Context, cmd Cmd, stdout, stderr io.Writer) error
 }
 
+// Splitter is the optional capability a Runner may have of returning a
+// process's stdout and stderr apart from each other, both fully buffered.
+//
+// It exists because Run deliberately merges them, and that merge is wrong for
+// every caller that has to *parse* the output. A platform CLI writes warnings
+// to stderr whenever it feels like it -- OpenShift greets `oc get` with
+// "Warning: apps.openshift.io/v1 DeploymentConfig is deprecated", kubectl warns
+// on deprecated APIs -- and merged into stdout that line lands in front of the
+// JSON, where it fails to parse on its first character. Nothing is wrong with
+// the command, the cluster, or the request; the answer was simply concatenated
+// with a diagnostic about it.
+//
+// stderr is returned rather than discarded because it is still the best error
+// context there is when the command fails, which is what Run was merging it in
+// for. Callers put it in the error and parse only stdout.
+//
+// A Runner that does not implement this falls back to Run, which is what the
+// helpers below do: that is today's behaviour, and it keeps every fake that
+// only records argv working unchanged. OS implements it, pinned below, so
+// production always splits.
+type Splitter interface {
+	RunSplit(cmd Cmd) (stdout, stderr string, err error)
+}
+
 // Attacher is the optional third capability a Runner may have: run one process
 // with the operator's own terminal handed straight to it, and report the status
 // it exited with.
@@ -124,6 +148,7 @@ type Attacher interface {
 var (
 	_ Streamer = OS{}
 	_ Attacher = OS{}
+	_ Splitter = OS{}
 )
 
 // OS is the production Runner: it runs argv via os/exec with no shell.
@@ -150,6 +175,42 @@ func (OS) Run(c Cmd) (string, error) {
 	cmd.Stderr = &buf
 	runErr := cmd.Run()
 	return buf.String(), runErr
+}
+
+// RunSplit runs argv the way Run does -- same PATH resolution, same refusal of
+// a current-directory hit, no shell, same Stdin and Env wiring -- but keeps the
+// two output streams apart instead of merging them.
+func (OS) RunSplit(c Cmd) (string, string, error) {
+	resolved, err := resolveArgv0(c)
+	if err != nil {
+		return "", "", err
+	}
+	cmd := exec.Command(resolved, c.Argv[1:]...) //nolint:gosec // argv tokens are SafeToken-validated upstream; no shell is involved
+	applyCmdInput(cmd, c)
+	var out, errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	runErr := cmd.Run()
+	return out.String(), errOut.String(), runErr
+}
+
+// runParsed is how every helper that parses a command's output runs it: through
+// Splitter when the Runner has it, so a warning on stderr cannot corrupt the
+// answer, and through Run otherwise.
+//
+// The returned string is what the caller parses. On failure the error carries
+// whatever the command said, from whichever stream it said it on, so a failure
+// message is no less useful than it was when the two were merged.
+func runParsed(r Runner, c Cmd) (string, error) {
+	sp, ok := r.(Splitter)
+	if !ok {
+		return r.Run(c)
+	}
+	out, errOut, err := sp.RunSplit(c)
+	if err != nil {
+		return strings.TrimSpace(out + "\n" + errOut), err
+	}
+	return out, nil
 }
 
 // streamWaitDelay bounds how long a cancelled Stream waits for the child to
@@ -623,7 +684,7 @@ func KubernetesPodsJSON(r Runner, cmd []string, namespace, selector string, name
 		argv = append(argv, "-l", selector)
 	}
 	argv = append(argv, "-o", "json")
-	out, err := r.Run(Cmd{Argv: argv})
+	out, err := runParsed(r, Cmd{Argv: argv})
 	if err != nil {
 		return out, fmt.Errorf("listing pods: %w\n%s", err, out)
 	}
@@ -644,7 +705,7 @@ func KubernetesGetJSON(r Runner, cmd []string, namespace, kind, name string) (st
 		argv = append(argv, "-n", namespace)
 	}
 	argv = append(argv, "-o", "json")
-	out, err := r.Run(Cmd{Argv: argv})
+	out, err := runParsed(r, Cmd{Argv: argv})
 	if err != nil {
 		return out, fmt.Errorf("reading %s/%s: %w\n%s", kind, name, err, out)
 	}
@@ -664,7 +725,7 @@ func KubernetesListJSON(r Runner, cmd []string, namespace, types string) (string
 		argv = append(argv, "-n", namespace)
 	}
 	argv = append(argv, "-o", "json")
-	out, err := r.Run(Cmd{Argv: argv})
+	out, err := runParsed(r, Cmd{Argv: argv})
 	if err != nil {
 		return out, fmt.Errorf("listing %s in namespace %q: %w\n%s", types, namespace, err, out)
 	}
@@ -692,7 +753,7 @@ func KubernetesTop(r Runner, cmd []string, namespace, selector string, names []s
 		argv = append(argv, "-l", selector)
 	}
 	argv = append(argv, "--containers", "--no-headers")
-	out, err := r.Run(Cmd{Argv: argv})
+	out, err := runParsed(r, Cmd{Argv: argv})
 	if err != nil {
 		return out, fmt.Errorf("sampling pod resource usage: %w\n%s", err, out)
 	}
@@ -711,7 +772,7 @@ func EngineInspectJSON(r Runner, cmd []string, names []string) (string, error) {
 		return "", fmt.Errorf("no container named to inspect")
 	}
 	argv := append(append([]string(nil), cmd...), "inspect")
-	out, err := r.Run(Cmd{Argv: append(argv, names...)})
+	out, err := runParsed(r, Cmd{Argv: append(argv, names...)})
 	if err != nil {
 		return out, fmt.Errorf("inspecting %s: %w\n%s", strings.Join(names, ", "), err, out)
 	}
@@ -726,7 +787,7 @@ func EngineInspectJSON(r Runner, cmd []string, names []string) (string, error) {
 // operator, so the caller re-validates it before it reaches this argv.
 func EngineImageInspectJSON(r Runner, cmd []string, ref string) (string, error) {
 	argv := append(append([]string(nil), cmd...), "image", "inspect", ref)
-	out, err := r.Run(Cmd{Argv: argv})
+	out, err := runParsed(r, Cmd{Argv: argv})
 	if err != nil {
 		return out, fmt.Errorf("inspecting image %s: %w\n%s", ref, err, out)
 	}
@@ -749,7 +810,7 @@ const engineStatsFormat = "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"
 // one query the details level pays for rather than the default.
 func EngineStats(r Runner, cmd []string, names []string) (string, error) {
 	argv := append(append([]string(nil), cmd...), "stats", "--no-stream", "--format", engineStatsFormat)
-	out, err := r.Run(Cmd{Argv: append(argv, names...)})
+	out, err := runParsed(r, Cmd{Argv: append(argv, names...)})
 	if err != nil {
 		return out, fmt.Errorf("sampling container resource usage: %w\n%s", err, out)
 	}
@@ -769,7 +830,7 @@ const engineListFormat = "{{.Names}}\t{{.Image}}"
 // what a search like this is for.
 func EngineList(r Runner, cmd []string) (string, error) {
 	argv := append(append([]string(nil), cmd...), "ps", "--all", "--no-trunc", "--format", engineListFormat)
-	out, err := r.Run(Cmd{Argv: argv})
+	out, err := runParsed(r, Cmd{Argv: argv})
 	if err != nil {
 		return out, fmt.Errorf("listing containers: %w\n%s", err, out)
 	}
@@ -788,7 +849,7 @@ func EngineList(r Runner, cmd []string) (string, error) {
 // must already be validated by the caller. An empty or unparseable answer is an
 // error, so the caller can fall back to the container's own counter.
 func SystemctlNRestarts(r Runner, sc QuadletScope, unit string) (int, error) {
-	out, err := r.Run(Cmd{Argv: sc.systemctlArgs("show", unit, "-p", "NRestarts", "--value")})
+	out, err := runParsed(r, Cmd{Argv: sc.systemctlArgs("show", unit, "-p", "NRestarts", "--value")})
 	if err != nil {
 		return 0, fmt.Errorf("reading %s restart count from systemd: %w\n%s", unit, err, out)
 	}

@@ -71,9 +71,12 @@ services:
       TZ: Asia/Singapore
       JAVA_TOOL_OPTIONS: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"
     secrets:
-      - SOLACE_CLIENT_USERNAME
-      - SOLACE_CLIENT_PASSWORD
-      - TRUSTSTORE_PASSWORD
+      - source: SOLACE_CLIENT_USERNAME
+        target: /app/external/var/secrets/SOLACE_CLIENT_USERNAME
+      - source: SOLACE_CLIENT_PASSWORD
+        target: /app/external/var/secrets/SOLACE_CLIENT_PASSWORD
+      - source: TRUSTSTORE_PASSWORD
+        target: /app/external/var/secrets/TRUSTSTORE_PASSWORD
     configs:
       - source: solmq-connector-app
         target: /app/external/spring/config/application.yml
@@ -172,8 +175,11 @@ func TestSecretsBranches(t *testing.T) {
 		Instance: Instance{Name: "s", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 		Secrets:  []string{"MQ_USER"},
 	})
-	if !strings.Contains(withSecret, "    secrets:\n      - MQ_USER\n") {
-		t.Errorf("per-service secrets list missing:\n%s", withSecret)
+	// Long syntax with an absolute target: the short `- MQ_USER` form would put
+	// the file in compose's own /run/secrets, which is the directory
+	// spec.SecretsMountPath exists to stay off.
+	if !strings.Contains(withSecret, "    secrets:\n      - source: MQ_USER\n        target: "+spec.SecretsMountPath+"/MQ_USER\n") {
+		t.Errorf("per-service secrets list missing or not absolute-targeted:\n%s", withSecret)
 	}
 	if !strings.Contains(withSecret, "secrets:\n  MQ_USER:\n    environment: MQ_USER\n") {
 		t.Errorf("top-level environment-provider secrets block missing:\n%s", withSecret)
@@ -378,7 +384,7 @@ func TestContentEscapesDollarsForCompose(t *testing.T) {
 
 // TestAppYAMLSecretPlaceholdersAreNotInterpolated pins the security half of the
 // escape. The ${...} placeholders in application.yml are Spring's, resolved
-// from the configtree import of /run/secrets. The CLI hands the compose child
+// from the configtree import of the secrets mount. The CLI hands the compose child
 // those same names as environment entries so the secrets: environment provider
 // can mount them, which means an unescaped placeholder is not merely blanked --
 // compose substitutes the real credential and the plaintext lands in the

@@ -1834,3 +1834,185 @@ func TestOSAttachRejectsEmptyAndUnresolvableArgv(t *testing.T) {
 		t.Error("an unresolvable argv[0] must be refused")
 	}
 }
+
+// ---- OS.RunSplit and runParsed (the parse-safety boundary) ---------------------
+
+// TestOSRunSplitKeepsTheStreamsApart is the regression test for the bug this
+// seam exists to fix: `oc get -o json` on OpenShift prints "Warning: ... is
+// deprecated" on stderr, and Run merges that into stdout ahead of the JSON,
+// where it fails to parse on its first character. Split, the answer is clean.
+func TestOSRunSplitKeepsTheStreamsApart(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	out, errOut, err := (OS{}).RunSplit(Cmd{Argv: helperProcessArgv(os.Args[0], "both")})
+	if err != nil {
+		t.Fatalf("RunSplit returned error: %v", err)
+	}
+	if out != "stdout-line\n" {
+		t.Errorf("stdout = %q, want only the stdout line", out)
+	}
+	if errOut != "stderr-line\n" {
+		t.Errorf("stderr = %q, want only the stderr line", errOut)
+	}
+}
+
+// TestOSRunSplitWiresStdinAndEnv pins that the split path is otherwise Run: the
+// credential channel and stdin behave identically, so a caller does not have to
+// know which one a helper used.
+func TestOSRunSplitWiresStdinAndEnv(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	out, _, err := (OS{}).RunSplit(Cmd{Argv: helperProcessArgv(os.Args[0], "stdin"), Stdin: "hello-split\n"})
+	if err != nil || out != "hello-split\n" {
+		t.Fatalf("stdin: out=%q err=%v", out, err)
+	}
+
+	t.Setenv("RUNNER_TEST_AMBIENT_ONLY", "ambient")
+	t.Setenv("RUNNER_TEST_OVERRIDE", "ambient")
+	out, _, err = (OS{}).RunSplit(Cmd{
+		Argv: helperProcessArgv(os.Args[0], "env"),
+		Env:  []string{"RUNNER_TEST_OVERRIDE=supplied", "RUNNER_TEST_EXTRA_ONLY=extra"},
+	})
+	if err != nil {
+		t.Fatalf("env: %v", err)
+	}
+	if want := "AMBIENT_ONLY=ambient OVERRIDE=supplied EXTRA_ONLY=extra\n"; out != want {
+		t.Errorf("env: out = %q, want %q", out, want)
+	}
+}
+
+// TestOSRunSplitRejectsEmptyAndUnresolvableArgv mirrors Run, Stream and Attach:
+// all four go through resolveArgv0, so the refusals cannot drift apart.
+func TestOSRunSplitRejectsEmptyAndUnresolvableArgv(t *testing.T) {
+	if _, _, err := (OS{}).RunSplit(Cmd{}); err == nil {
+		t.Error("an empty argv must be refused")
+	}
+	if _, _, err := (OS{}).RunSplit(Cmd{Argv: []string{"solmq-no-such-binary-xyz"}}); err == nil {
+		t.Error("an unresolvable argv[0] must be refused")
+	}
+}
+
+// splitRunner is a fake that satisfies Splitter as well as Runner, so the
+// helpers can be tested on the path production actually takes. Run is left
+// deliberately wrong -- it returns the two streams merged, the way OS.Run does
+// -- so a helper that failed to use the split path produces unparseable output
+// and the test says so.
+type splitRunner struct {
+	calls  []call
+	stdout string
+	stderr string
+	err    error
+}
+
+func (s *splitRunner) Run(c Cmd) (string, error) {
+	s.calls = append(s.calls, call{argv: c.Argv, stdin: c.Stdin, env: c.Env})
+	return s.stderr + s.stdout, s.err
+}
+
+func (s *splitRunner) RunSplit(c Cmd) (string, string, error) {
+	s.calls = append(s.calls, call{argv: c.Argv, stdin: c.Stdin, env: c.Env})
+	return s.stdout, s.stderr, s.err
+}
+
+// TestParsingHelpersIgnoreAWarningOnStderr walks every helper whose output is
+// parsed rather than scanned, with a warning waiting on stderr. Each must
+// return the payload alone.
+//
+// The list is the point of the test as much as the assertion is: a new helper
+// that parses output and forgets runParsed is a bug that only shows up against
+// a cluster that warns, which is the one place it is hardest to notice.
+func TestParsingHelpersIgnoreAWarningOnStderr(t *testing.T) {
+	const warning = "Warning: apps.openshift.io/v1 DeploymentConfig is deprecated in v4.14+\n"
+	const payload = `{"items":[]}`
+	sc := QuadletScope{UserMode: false}
+
+	for _, c := range []struct {
+		name string
+		call func(r Runner) (string, error)
+	}{
+		{"KubernetesPodsJSON", func(r Runner) (string, error) {
+			return KubernetesPodsJSON(r, []string{"oc"}, "ns", "", nil, false)
+		}},
+		{"KubernetesGetJSON", func(r Runner) (string, error) {
+			return KubernetesGetJSON(r, []string{"oc"}, "ns", "deployment", "d")
+		}},
+		{"KubernetesListJSON", func(r Runner) (string, error) {
+			return KubernetesListJSON(r, []string{"oc"}, "ns", "all")
+		}},
+		{"KubernetesTop", func(r Runner) (string, error) {
+			return KubernetesTop(r, []string{"oc"}, "ns", "", nil, false)
+		}},
+		{"EngineInspectJSON", func(r Runner) (string, error) {
+			return EngineInspectJSON(r, []string{"docker"}, []string{"c"})
+		}},
+		{"EngineImageInspectJSON", func(r Runner) (string, error) {
+			return EngineImageInspectJSON(r, []string{"docker"}, "img:1")
+		}},
+		{"EngineStats", func(r Runner) (string, error) {
+			return EngineStats(r, []string{"docker"}, []string{"c"})
+		}},
+		{"EngineList", func(r Runner) (string, error) {
+			return EngineList(r, []string{"docker"})
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := &splitRunner{stdout: payload, stderr: warning}
+			got, err := c.call(r)
+			if err != nil {
+				t.Fatalf("%s: %v", c.name, err)
+			}
+			if got != payload {
+				t.Errorf("output = %q, want the payload alone -- a warning on stderr must not reach the parser", got)
+			}
+		})
+	}
+
+	// SystemctlNRestarts parses an integer, so the same warning would turn a
+	// restart count into an error. It answers a number rather than a string,
+	// hence its own case.
+	t.Run("SystemctlNRestarts", func(t *testing.T) {
+		r := &splitRunner{stdout: "3\n", stderr: warning}
+		n, err := SystemctlNRestarts(r, sc, "x.service")
+		if err != nil {
+			t.Fatalf("SystemctlNRestarts: %v", err)
+		}
+		if n != 3 {
+			t.Errorf("restarts = %d, want 3", n)
+		}
+	})
+}
+
+// TestParsingHelpersFallBackToRun pins the other half of runParsed: a Runner
+// with no Splitter still works, on exactly the combined output Run has always
+// returned. Every argv-recording fake in the suite depends on that.
+func TestParsingHelpersFallBackToRun(t *testing.T) {
+	f := &fakeRunner{out: `{"items":[]}`}
+	got, err := KubernetesListJSON(f, []string{"kubectl"}, "ns", "all")
+	if err != nil {
+		t.Fatalf("KubernetesListJSON: %v", err)
+	}
+	if got != `{"items":[]}` {
+		t.Errorf("output = %q, want what Run returned", got)
+	}
+	if len(f.calls) != 1 {
+		t.Errorf("want 1 call through Run, got %d", len(f.calls))
+	}
+}
+
+// TestParsedFailureCarriesBothStreams pins that splitting did not cost the
+// error context Run was merging stderr in for: a failed command still reports
+// whatever it said, on whichever stream it said it on.
+func TestParsedFailureCarriesBothStreams(t *testing.T) {
+	r := &splitRunner{
+		stdout: "partial-output",
+		stderr: "Error from server (Forbidden): pods is forbidden",
+		err:    fmt.Errorf("exit status 1"),
+	}
+	_, err := KubernetesListJSON(r, []string{"oc"}, "ns", "all")
+	if err == nil {
+		t.Fatal("a failed command must be reported")
+	}
+	for _, want := range []string{"Forbidden", "partial-output"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error should carry %q, got %v", want, err)
+		}
+	}
+}

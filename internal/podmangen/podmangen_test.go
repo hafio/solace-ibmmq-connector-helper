@@ -67,8 +67,8 @@ podman run -d \
   -p 8080:8091 \
   -e TZ=Asia/Singapore \
   -e JAVA_TOOL_OPTIONS=-Dcom.ibm.mq.cfg.useIBMCipherMappings=false \
-  --secret solmq-connector-MQ_CONN_1_USER,type=mount,target=MQ_CONN_1_USER \
-  --secret solmq-connector-MQ_CONN_1_PASSWORD,type=mount,target=MQ_CONN_1_PASSWORD \
+  --secret solmq-connector-MQ_CONN_1_USER,type=mount,target=/app/external/var/secrets/MQ_CONN_1_USER \
+  --secret solmq-connector-MQ_CONN_1_PASSWORD,type=mount,target=/app/external/var/secrets/MQ_CONN_1_PASSWORD \
   -v ./solmq-connector-application.yml:/app/external/spring/config/application.yml:ro \
   -v /abs/certs/truststore.jks:/app/external/classpath/truststores/truststore.jks:ro \
   -v /abs/libs:/app/external/libs:ro \
@@ -160,8 +160,8 @@ PublishPort=8090:8090
 PublishPort=8080:8091
 Environment=TZ=Asia/Singapore
 Environment=JAVA_TOOL_OPTIONS=-Dcom.ibm.mq.cfg.useIBMCipherMappings=false
-Secret=solmq-connector-MQ_CONN_1_USER,type=mount,target=MQ_CONN_1_USER
-Secret=solmq-connector-MQ_CONN_1_PASSWORD,type=mount,target=MQ_CONN_1_PASSWORD
+Secret=solmq-connector-MQ_CONN_1_USER,type=mount,target=/app/external/var/secrets/MQ_CONN_1_USER
+Secret=solmq-connector-MQ_CONN_1_PASSWORD,type=mount,target=/app/external/var/secrets/MQ_CONN_1_PASSWORD
 Volume=./solmq-connector-application.yml:/app/external/spring/config/application.yml:ro
 Volume=/abs/certs/truststore.jks:/app/external/classpath/truststores/truststore.jks:ro
 Volume=/abs/libs:/app/external/libs:ro

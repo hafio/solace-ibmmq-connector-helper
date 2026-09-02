@@ -16,10 +16,11 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/yamlwriter"
 )
 
-// SecretsMountPath is where the credentials Secret is mounted, one file per key.
-// It matches the docker/podman mount point and the connector's configtree import,
-// so one application.yml resolves its credentials identically on every platform.
-const SecretsMountPath = "/run/secrets"
+// SecretsMountPath is where the credentials Secret is mounted, one file per
+// key. Named here because the manifest reads better for it; spec.SecretsMountPath
+// is the definition, and it is shared with docker, podman and the configtree
+// import so one application.yml resolves everywhere.
+const SecretsMountPath = spec.SecretsMountPath
 
 // KV is one resolved credential entry (plaintext; K8s base64-encodes stringData).
 type KV struct{ Key, Val string }
@@ -311,8 +312,8 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 	}
 	w.Line(4, "spec:")
 	// The connector never calls the Kubernetes API, and an automounted service
-	// account token would land under the same /run/secrets tree the configtree
-	// import reads -- turning the token into stray connector properties.
+	// account token would land under a /run/secrets tree the configtree import
+	// also reads -- turning the token into stray connector properties.
 	w.Line(6, "automountServiceAccountToken: false")
 	// The kubelet, not the connector, consumes this -- it is how the image is
 	// pulled at all from a registry that needs credentials. Emitted for a

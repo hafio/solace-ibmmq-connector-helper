@@ -55,8 +55,8 @@ type Mount struct {
 // SecretRef is one credential from podman's secret store, mounted into the
 // container. StoreName is how podman knows it (namespaced by container name,
 // since the store is shared across every project on the host); Target is the
-// file name it appears under in /run/secrets, which is the stable name the
-// connector's config references.
+// stable name the connector's config references, which is also the file name it
+// appears under in spec.SecretsMountPath.
 type SecretRef struct {
 	StoreName string
 	Target    string
@@ -176,7 +176,11 @@ func runArgs(in Input, p *spec.Podman, inst Instance) []string {
 		args = append(args, "-e LOGGING_SYSLOG_PORT="+strconv.Itoa(sl.Port))
 	}
 	for _, s := range in.Secrets {
-		args = append(args, "--secret "+s.StoreName+",type=mount,target="+s.Target)
+		// An absolute target rather than a bare file name: bare would leave the
+		// secret in podman's default /run/secrets, the directory
+		// spec.SecretsMountPath exists to avoid. Needs podman 4.x or newer,
+		// where target= accepts a path.
+		args = append(args, "--secret "+s.StoreName+",type=mount,target="+spec.SecretsMountPath+"/"+s.Target)
 	}
 	args = append(args, "-v "+inst.AppYAMLPath+":"+appYAMLTarget+":ro")
 	for _, m := range in.Stores {
@@ -235,7 +239,9 @@ func RenderQuadlet(in Input) Unit {
 		w.Line(0, "Environment=LOGGING_SYSLOG_PORT="+strconv.Itoa(sl.Port))
 	}
 	for _, s := range in.Secrets {
-		w.Line(0, "Secret="+s.StoreName+",type=mount,target="+s.Target)
+		// Absolute target, for the reason runArgs records: a bare name would land
+		// in podman's default /run/secrets.
+		w.Line(0, "Secret="+s.StoreName+",type=mount,target="+spec.SecretsMountPath+"/"+s.Target)
 	}
 	w.Line(0, "Volume="+inst.AppYAMLPath+":"+appYAMLTarget+":ro")
 	for _, m := range in.Stores {

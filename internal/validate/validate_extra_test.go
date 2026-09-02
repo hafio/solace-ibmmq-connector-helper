@@ -806,7 +806,7 @@ func TestCheckCredRejectsReservedPrefix(t *testing.T) {
 // TestCheckKubeSecretsCreateXorExisting pins the create/existing exclusivity for
 // both Secret kinds, the same rule libs.pvc already enforces. Both set is the
 // dangerous one: deploy.Render takes the create branch, so it would emit a Secret
-// doc over the very object 'existing' names. Neither set leaves the /run/secrets
+// doc over the very object 'existing' names. Neither set leaves the secrets
 // mount out of the pod with nothing to say why.
 func TestCheckKubeSecretsCreateXorExisting(t *testing.T) {
 	base := spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}
@@ -1146,5 +1146,97 @@ func TestKubernetesLoggingIsRetired(t *testing.T) {
 	}
 	if !hasErr(errs, "top-level logging:") {
 		t.Errorf("the error must name where it moved to, got %v", errs)
+	}
+}
+
+// ---- the credentials Secret has to be wired if anything needs it ---------------
+
+// kubeNoSecrets is a valid kubernetes section with no secrets block at all,
+// which is the shape that used to deploy a pod with no secrets mount and say
+// nothing about it.
+func kubeNoSecrets() *spec.Kubernetes {
+	return &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}}
+}
+
+// TestCredentialsNotWiredWarning is the gate for the failure that cost an
+// afternoon on OpenShift: the config references credentials, the kubernetes
+// section omits secrets.credentials, so nothing is mounted and every ${...}
+// stays unresolved -- and because the configtree import is optional, the
+// connector starts anyway and only fails later, against the broker.
+func TestCredentialsNotWiredWarning(t *testing.T) {
+	_, warns := Run(Context{
+		Workflows: []spec.Workflow{wf("x.yaml", vSolacePlainTCP("Q", spec.DestQueue), vMQ("M", spec.DestQueue, false))},
+		Defaults:  &spec.Defaults{}, Image: imageOK(), Kube: kubeNoSecrets(), CheckKubernetes: true,
+	})
+	if !hasErr(warns, "kubernetes.secrets.credentials is omitted") {
+		t.Errorf("want credentials-omitted warning, got %v", warns)
+	}
+	// The message has to name where they were going to be mounted.
+	if !hasErr(warns, secretsMountPath) {
+		t.Errorf("the warning should name %s, got %v", secretsMountPath, warns)
+	}
+}
+
+// TestCredentialsWiredNoWarning covers both ways of wiring it: neither should
+// warn, and the create/existing distinction is not this check's business.
+func TestCredentialsWiredNoWarning(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		sec  spec.Secrets
+	}{
+		{"create", spec.Secrets{Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "s"}}}},
+		{"existing", spec.Secrets{Credentials: &spec.CredentialsSecret{Existing: "my-creds"}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			k := kubeNoSecrets()
+			k.Secrets = c.sec
+			_, warns := Run(Context{
+				Workflows: []spec.Workflow{wf("x.yaml", vSolacePlainTCP("Q", spec.DestQueue), vMQ("M", spec.DestQueue, false))},
+				Defaults:  &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true,
+			})
+			if hasErr(warns, "kubernetes.secrets.credentials is omitted") {
+				t.Errorf("credentials wired via %s should not warn: %v", c.name, warns)
+			}
+		})
+	}
+}
+
+// TestNoCredentialsNoWarning is the other half, and the reason this is a
+// warning about a mismatch rather than a rule that the block is mandatory: a
+// config whose connections need no authentication needs no Secret either, and
+// must not be nagged about one.
+func TestNoCredentialsNoWarning(t *testing.T) {
+	anon := spec.Side{System: spec.SystemSolace, Host: "tcp://b:55555", MsgVPN: "prod", DestKind: spec.DestQueue, Dest: "Q"}
+	mq := spec.Side{System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM", Channel: "CH", DestKind: spec.DestQueue, Dest: "M"}
+	_, warns := Run(Context{
+		Workflows: []spec.Workflow{wf("x.yaml", anon, mq)},
+		Defaults:  &spec.Defaults{}, Image: imageOK(), Kube: kubeNoSecrets(), CheckKubernetes: true,
+	})
+	if hasErr(warns, "kubernetes.secrets.credentials is omitted") {
+		t.Errorf("a config with no credentials must not be warned about a Secret it does not need: %v", warns)
+	}
+}
+
+// TestCredentialsFoundOutsideAWorkflowSide walks the positions that are easy to
+// forget: the management session, a management account, and a store password
+// all mount through the same Secret as a binder credential does.
+func TestCredentialsFoundOutsideAWorkflowSide(t *testing.T) {
+	anon := spec.Side{System: spec.SystemSolace, Host: "tcp://b:55555", MsgVPN: "prod", DestKind: spec.DestQueue, Dest: "Q"}
+	mq := spec.Side{System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM", Channel: "CH", DestKind: spec.DestQueue, Dest: "M"}
+	wfs := []spec.Workflow{wf("x.yaml", anon, mq)}
+
+	for _, c := range []struct {
+		name string
+		defs *spec.Defaults
+	}{
+		{"a management account", &spec.Defaults{Security: spec.Security{Users: []spec.User{{Name: "ops", PasswordEnv: "OPS_PASSWORD"}}}}},
+		{"a truststore password", &spec.Defaults{TLS: spec.TLSConfig{Truststore: &spec.Store{File: "t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD", Type: "JKS"}}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, warns := Run(Context{Workflows: wfs, Defaults: c.defs, Image: imageOK(), Kube: kubeNoSecrets(), CheckKubernetes: true})
+			if !hasErr(warns, "kubernetes.secrets.credentials is omitted") {
+				t.Errorf("%s is a credential too, and must trip the warning: %v", c.name, warns)
+			}
+		})
 	}
 }

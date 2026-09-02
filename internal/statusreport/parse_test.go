@@ -27,7 +27,7 @@ const podListJSON = `{
           "resources": {"limits": {"cpu": "1", "memory": "1Gi"}},
           "volumeMounts": [
             {"name": "config", "mountPath": "/app/external/spring/config/application.yml"},
-            {"name": "secrets", "mountPath": "/run/secrets"},
+            {"name": "secrets", "mountPath": "/app/external/var/secrets"},
             {"name": "libs", "mountPath": "/app/external/libs"}
           ],
           "envFrom": [{"secretRef": {"name": "solmq-connector-extra-env"}}]

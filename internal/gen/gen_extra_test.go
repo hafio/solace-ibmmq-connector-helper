@@ -502,7 +502,7 @@ docker:
 			t.Errorf("compose must never carry a secret value inline (%q):\n%s", s.Stable, plan.Compose)
 		}
 		// The ${STABLE} placeholder application.yml carries is Spring's, resolved
-		// from the configtree import of /run/secrets. It reaches the container only
+		// from the configtree import of the secrets mount. It reaches the container only
 		// if it is escaped for compose's interpolation pass: left bare, compose
 		// substitutes it from the environment the CLI hands the compose child, and
 		// the plaintext credential is written into the document after all.
@@ -552,7 +552,7 @@ podman:
 		if !strings.Contains(plan.RunScript, "podman secret create "+store) {
 			t.Errorf("run script missing secret-create for %q:\n%s", store, plan.RunScript)
 		}
-		if !strings.Contains(plan.RunScript, "--secret "+store+",type=mount,target="+s.Stable) {
+		if !strings.Contains(plan.RunScript, "--secret "+store+",type=mount,target="+spec.SecretsMountPath+"/"+s.Stable) {
 			t.Errorf("run script missing --secret mount for %q:\n%s", store, plan.RunScript)
 		}
 	}

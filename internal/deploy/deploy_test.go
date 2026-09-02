@@ -49,7 +49,7 @@ func TestRenderFull(t *testing.T) {
 		"name: tls", "truststore.jks: QUJD",
 		"kind: Deployment", "automountServiceAccountToken: false", "name: JAVA_TOOL_OPTIONS", "useIBMCipherMappings=false",
 		"solace-connector/le-mode: standalone", "solace-connector/role: active",
-		"- name: secrets", "mountPath: /run/secrets", "defaultMode: 0400",
+		"- name: secrets", "mountPath: " + SecretsMountPath, "defaultMode: 0400",
 		"mountPath: /app/external/classpath/truststores", "livenessProbe:", "tcpSocket:", "readinessProbe:",
 		"mountPath: /app/external/.status-script", "subPath: status",
 		"requests:", "limits:", `cpu: "1"`, "memory: 1Gi",
@@ -146,7 +146,7 @@ spec:
               value: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"
           volumeMounts:
             - name: secrets
-              mountPath: /run/secrets
+              mountPath: /app/external/var/secrets
               readOnly: true
             - name: config
               mountPath: /app/external/spring/config/application.yml
@@ -243,7 +243,7 @@ func TestRenderNoSecretsNoServiceNoTLS(t *testing.T) {
 	k.Service.Enabled = false
 	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{MQTLS: false})})
 	for _, no := range []string{
-		"JAVA_TOOL_OPTIONS", "- name: secrets", "mountPath: /run/secrets", "kind: Secret", "kind: Service", "- name: stores",
+		"JAVA_TOOL_OPTIONS", "- name: secrets", "mountPath: " + SecretsMountPath, "kind: Secret", "kind: Service", "- name: stores",
 		"logback-spring.xml", "LOGGING_SYSLOG_HOST", "- name: libs", "initContainers:",
 	} {
 		if strings.Contains(out, no) {

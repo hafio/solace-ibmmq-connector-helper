@@ -90,7 +90,7 @@ func TestRenderHeaderHasExecOneLiners(t *testing.T) {
 func TestRenderPasswordResolution(t *testing.T) {
 	out := Render(8090, "solmq-status")
 
-	for _, want := range []string{ContainerPath, "/run/secrets", `from_configs "/^[[:space:]]*-[[:space:]]*name:`} {
+	for _, want := range []string{ContainerPath, SecretsDir, `from_configs "/^[[:space:]]*-[[:space:]]*name:`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in password-resolution logic:\n%s", want, out)
 		}

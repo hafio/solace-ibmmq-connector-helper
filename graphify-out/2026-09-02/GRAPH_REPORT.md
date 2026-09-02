@@ -1,7 +1,7 @@
 # Graph Report - solace-ibmmq-connector-helper  (2026-09-02)
 
 ## Corpus Check
-- 97 files · ~298,129 words
+- 97 files · ~298,126 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary

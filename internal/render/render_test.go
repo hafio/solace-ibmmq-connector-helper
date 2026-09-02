@@ -714,7 +714,7 @@ target:
 
 // TestApplicationConfigImport verifies Application() leads with
 // spring.config.import when Model.ConfigImport is set (so the mounted secret
-// files under /run/secrets are read back as properties), and omits the block
+// files under the secrets mount are read back as properties), and omits the block
 // entirely when it is empty (matches gen.ConfigImport, the constant every
 // production caller passes through consolidate.Opts.ConfigImport).
 func TestApplicationConfigImport(t *testing.T) {
@@ -730,7 +730,7 @@ target:
     msg-vpn: v
     queue: OUT
 `
-	const configImport = "optional:configtree:/run/secrets/"
+	const configImport = "optional:configtree:/app/external/var/secrets/"
 
 	withImport, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{},
 		consolidate.Opts{MountStores: true, ConfigImport: configImport})

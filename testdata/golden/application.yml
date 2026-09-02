@@ -1,6 +1,6 @@
 spring:
   config:
-    import: optional:configtree:/run/secrets/
+    import: optional:configtree:/app/external/var/secrets/
   ssl:
     bundle:
       jks:

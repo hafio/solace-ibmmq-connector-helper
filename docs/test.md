@@ -3,12 +3,35 @@
 Every test in the suite, grouped by package and expanded to individual cases, so you can
 see what behavior is covered and jump to the test that covers it. This is a living
 document: when a test or case is added, removed, or renamed, update the matching row in
-the same change (S5/S6). For build and release details see the
-[development guide](../docs/DEVELOPMENT.md); for using the tool, the
-[user guide](../userguide.md).
+the same change (S5/S6). For build and release details see [DEVELOPMENT.md](DEVELOPMENT.md);
+for using the tool, see [userguide.md](../userguide.md).
 
 Run the suite with `./scripts/dev.sh test` (`.\scripts\dev.ps1 test` on Windows);
 measure coverage with the `cov` task.
+
+## Contents
+
+- [internal/scan](#internalscan)
+- [internal/spec](#internalspec)
+- [internal/consolidate](#internalconsolidate)
+- [internal/tls](#internaltls)
+- [internal/yamlwriter](#internalyamlwriter)
+- [internal/render](#internalrender)
+- [internal/logback](#internallogback)
+- [internal/statusscript](#internalstatusscript)
+- [internal/deploy](#internaldeploy)
+- [internal/dockergen](#internaldockergen)
+- [internal/podmangen](#internalpodmangen)
+- [internal/runner](#internalrunner)
+- [internal/validate](#internalvalidate)
+- [internal/examples](#internalexamples)
+- [internal/gen](#internalgen)
+- [internal/libs](#internallibs)
+- [internal/statusreport](#internalstatusreport)
+- [cmd/solmq-conn-util](#cmdsolmq-conn-util)
+  - [logs](#logs)
+  - [cli](#cli)
+  - [remove / instance resolution](#remove-instance-resolution)
 
 ## How the suite is built
 
@@ -19,10 +42,51 @@ measure coverage with the `cov` task.
 - **The exec seam** (`internal/runner`) is faked by `fakeRunner`, which records the argv
   and stdin crossing the boundary instead of starting a process; the real `os/exec` path
   is exercised through the `TestHelperProcess` child-process pattern.
+- **Columns**: a `-` in the Case column means the test is not table-driven and runs once;
+  otherwise Case lists the test's subtest names in table order.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 724 test functions, 995 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 735 test functions, 997 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+
+## internal/scan
+
+Discover workflow files -- YAML-only, env-file exclusion, wildcard matching, and metacharacter rejection.
+
+Tests: [scan_test.go](../internal/scan/scan_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestScanSortsYAMLOnly | - | result sorted to [10.yml, 20.yaml], non-yaml and dirs ignored, Dir set to input dir |
+| TestScanSortsNumericallyNotLexically | - | 19/2/10/9.yaml come back as [2, 9, 10, 19], the numbering order, not the lexical [10, 19, 2, 9] |
+| TestScanSortsPrefixedNamesNumerically | - | the same ordering when the digits follow a shared prefix, as in the workflow-N.yaml names the examples verb writes |
+| TestScanExcludesEnvFile | - | env.yaml excluded even with pattern '*', only workflow-0.yaml returned |
+| TestScanEnvFileExcludedRegardlessOfPattern | - | pattern 'env*' still excludes env.yaml, only envoy.yaml remains |
+| TestScanEmptyPatternDefaultsToStar | - | empty pattern behaves as '*', matches a.yaml |
+| TestScanErrorMissingDir | - | scanning nonexistent directory returns an error |
+| TestScanPatternWildcards | workflow-* | trailing star matches workflow-0.yaml and workflow-1.yaml only |
+| TestScanPatternWildcards | *hoc* | mid-string star matches only adhoc.yaml |
+| TestScanPatternWildcards | *-1.yaml | leading star matches only workflow-1.yaml |
+| TestScanPatternNoMatchIsEmptyNotError | - | non-matching pattern 'nope*' yields empty results, no error |
+| TestScanRejectsNonStarMetachars | [bad | pattern with bracket metachar is rejected with error |
+| TestScanRejectsNonStarMetachars | wf?.yaml | pattern with '?' metachar is rejected with error |
+| TestScanRejectsNonStarMetachars | a]b | pattern with ']' metachar is rejected with error |
+| TestScanRejectsNonStarMetachars | a\b | pattern with backslash metachar is rejected with error |
+| TestMatchStar | *,anything.yaml | bare star matches any name -> true |
+| TestMatchStar | exact.yaml,exact.yaml | identical literal pattern and name match -> true |
+| TestMatchStar | exact.yaml,other.yaml | literal pattern mismatch -> false |
+| TestMatchStar | pre*,prefix.yaml | trailing star prefix match -> true |
+| TestMatchStar | *.yaml,x.yaml | leading star suffix match -> true |
+| TestMatchStar | *.yaml,x.yml | leading star suffix mismatch -> false |
+| TestMatchStar | a*b*c,axxbyyc | multiple stars match interspersed segments -> true |
+| TestMatchStar | a*b*c,axxc | multiple stars but missing required segment -> false |
+| TestMatchStar | **,anything | consecutive stars still match any name -> true |
+| TestIsYAML | a.yaml | isYAML true for .yaml extension |
+| TestIsYAML | a.yml | isYAML true for .yml extension |
+| TestIsYAML | A.YAML | isYAML true case-insensitively |
+| TestIsYAML | a.txt | isYAML false for .txt extension |
+| TestIsYAML | yaml | isYAML false when no extension present |
+| TestIsYAML | a.yamlx | isYAML false for non-exact extension match |
 
 ## internal/spec
 
@@ -107,11 +171,411 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestUserSecretLiteralAndEnv | - | a security user's Secret() carries the literal or the -env variable, matching what was set |
 | TestCredCreateRemovedKeys | - | RemovedKeys reports each removed key (source, variables, values-file) alone and all three in order; a nil receiver and a bare create.name report none |
 
+| Test | Case | Verifies |
+|------|------|----------|
 | TestImageRef | hub / private registry / digest / trailing slash / no tag / no name / nil | Ref() assembles repo/name:tag, drops an unset repo, and joins a sha256: tag with `@` so a digest pin is a reference an engine accepts |
 | TestImageRegistry | hub fallback / private / nil / trailing slash | the auths key is the registry host, falling back to Docker Hub's v1 URL -- a Hub namespace lives in name and never reaches the lookup |
 | TestRetiredPerPlatformImageStillParses | - | kubernetes.deployment.image, docker.image and podman.image still parse into their retained fields, which is what lets validate reject them instead of yaml dropping them silently |
 | TestImagePullSecretCreateDefaultsFalse | absent / explicit true | create defaults to false so naming a Secret only references it; an explicit true is honoured |
 | TestParseEnvTopLevelSyslog | present / absent | logging.syslog parses beside logging.level at the top level, protocol defaults to udp, and an absent block stays nil (presence is what turns syslog on) |
+
+## internal/consolidate
+
+Build the consolidated binder model from the workflows -- dedup connections, TLS bundles, destination roles, store-path rewriting, leader election, and durable-name UUIDs.
+
+Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [consolidate_extra_test.go](../internal/consolidate/consolidate_extra_test.go), [names_test.go](../internal/consolidate/names_test.go), [uuid_test.go](../internal/consolidate/uuid_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestBinderDedupAcrossWorkflows | two workflows, inline sides | binders = [sol-conn-1, mq-conn-1, undefined], numbered per system |
+| TestSolaceToSolaceSingleBinder | solace->solace | binders = [sol-conn-1, undefined]; input-0 and output-0 both reference sol-conn-1 |
+| TestMQToMQSingleBinder | mq->mq | binders = [mq-conn-1, undefined]; input-0 and output-0 both reference mq-conn-1 |
+| TestConnRefNamingAndClashSuffix | svc.a vs svc/a conn-refs sanitize to same base | binders = [svc-a, svc-a-2, undefined], second disambiguated |
+| TestConnRefDedupCollapsesToOneBinder | two workflows share edge/qm conn-refs | binders = [edge, qm, undefined], collapse to one binder each |
+| TestDerivedDestinationTypes | mq topic consumer durable -> solace topic producer | input-0 jms is consumer/topic with non-empty Durable |
+| TestDerivedDestinationTypes | solace producer to topic | output-0 emits no solace binding |
+| TestDerivedDestinationTypes | solace queue -> mq queue producer | output-1 jms is producer/queue |
+| TestFormatScalarQuoting | plain passthrough | FormatScalar returns plain |
+| TestFormatScalarQuoting | double-quoted requoting | FormatScalar returns "dq" |
+| TestFormatScalarQuoting | single-quote-doubling escape | FormatScalar returns 'a''b' |
+| TestFormatScalarQuoting | depth>=2 nested quoted passthrough from parsed YAML | FormatScalar preserves quoting, returns "R1" |
+| TestSanitizeAndIsTCPS | sanitize A_b.2-x/y | returns A-b-2-x-y |
+| TestSanitizeAndIsTCPS | isTCPS tcps:// and tcp:// | tcps:// true, tcp:// false |
+| TestDisplayName | acc with name set | returns the name |
+| TestDisplayName | acc with only connName | falls back to connection name |
+| TestDisplayName | acc solace kind with vpn | returns solace:myvpn |
+| TestDisplayName | acc mq kind with qm | returns mq:QM1 |
+| TestMergeProp | append new key b | list grows to 2 entries, no warnings |
+| TestMergeProp | overwrite existing key a with new value | value updated to 9, one warning emitted |
+| TestMergeProp | overwrite key a with same value again | no additional warning |
+| TestAppendPassthroughCollision | passthrough T collides with existing T | output has 2 props and 1 collision warning reading `binder "bndr": passthrough overrides tool-managed key "T"; tool value kept` byte for byte, since the owner label is caller-supplied now |
+| TestNodeToProps | mapping with scalar and nested keys | 2 props, first key k1/val v1, second has Sub set |
+| TestNodeToProps | nil node | nodeToProps returns nil |
+| TestBuildMQmTLSBundle | mq TLS side with cipher and keyAlias plus solace target | MQTLS true, 1 bundle, HasKeystore true, KeyAlias mc, KeystoreTyp PKCS12, TruststoreTyp JKS |
+| TestBuildCipherConflictWarning | two mq sources with different ciphers C1/C2 | warnings contain conflicting cipher |
+| TestBuildMessageLoopWarning | same side used as source and target dest SAME | warnings contain message loop |
+| TestBuildSolaceTopicSourceEmitsConsumerTopic | solace topic source -> mq queue target | input-0 solace binding is consumer with DestType topic |
+| TestBuildStorePathsRawVsMount | mount=false (config) | TruststoreLoc reflects env.yaml path verbatim ./certs/t.jks |
+| TestBuildStorePathsRawVsMount | mount=true (deploy) | TruststoreLoc rewritten to /app/external/classpath/truststores/t.jks |
+| TestBuildLeaderElection | dangling conn-ref missing | le non-nil with Mode/Queue set but Session nil, no guard warning |
+| TestBuildLeaderElection | conn-ref happy path tcps host | Session host/vpn set and APIProps has SSL_TRUST_STORE, SSL_KEY_STORE, SSL_PRIVATE_KEY_ALIAS mounted paths and alias sc; Extras carry solace-defaults in authored order and the connection api-properties land last, after the tool TLS keys |
+| TestBuildLeaderElection | inline session non-tcps host | Session set from inline fields with no TLS APIProps, but the inline api-properties and solace-defaults still come through |
+| TestBuildLeaderElection | mount rewrite raw vs mnt for leader election truststore | raw keeps ./certs/truststore.jks verbatim, mnt rewrites to /app/external/classpath/truststores/truststore.jks |
+| TestBuildLeaderElectionSessionPassthroughCollision | - | a session passthrough key colliding with a tool TLS key keeps the tool value and warns as `leader-election session`, never as a binder |
+| TestBuildLeaderElectionWarningsReachBuild | - | the session collision warning escapes Build, proving the warns slice is threaded into buildLeaderElection |
+| TestBuildLeaderElectionSharesBinderSecretNames | shared connection | a session resolving to a workflow binder carries that binder CLIENT_USERNAME/PASSWORD and mounts no second secret |
+| TestBuildLeaderElectionSharesBinderSecretNames | management-only broker | a session no workflow binds falls back to the fixed LEADER_ELECTION_* pair |
+| TestApplyStatusAccessNoOperatorUsers | - | with no configured security.users, Build synthesizes the reserved account as the only user, carrying the literal status password, never entering Model.Secrets |
+| TestApplyStatusAccessAppendsAfterExistingUsers | - | operator-configured users get the reserved account appended last; existing users still resolve to secretRef placeholders |
+| TestApplyStatusAccessCarriesOperatorRoles | - | an operator's roles reach the model verbatim (only the password is rewritten), the reserved account is appended with none so it stays read-only, and the caller's own Defaults are left unmutated despite sharing the roles backing array |
+| TestApplyStatusAccessExposureIsFixed | - | applyStatusAccess always sets Management.Exposure to health,info,metrics,leaderelection,workflows, ignoring whatever spec.Management.Exposure carries |
+| TestDurableNameGolden | - | DurableName of fixed inputs equals pinned solmq-3631c883-c0c4-5bc8-985e-ea2842831ad6 |
+| TestDurableNameDeterministic | same inputs called twice | DurableName returns identical value both times |
+| TestDurableNameDeterministic | different file name g.yaml vs f.yaml | DurableName differs when file name changes |
+| TestGeneratedSecretNamesStayOutOfChildEnvDanger | literal credentials | every derived SecretRef.Stable Build() can produce (binder creds, security-user passwords, TLS stores, leader-election) carries spec.GeneratedNamePrefix and matches a fixed-suffix pattern, so adversarial conn-ref/security-user names (e.g. "path", "ld-preload", "LD") can never fold to a bare dangerous docker-compose child-env name like PATH or LD_PRELOAD |
+| TestGeneratedSecretNamesStayOutOfChildEnvDanger | -env credentials | Stable equals EnvVar, so the pair injected into the compose child only restates the variable it was read from -- an operator-chosen name like PATH overwrites it with its own value |
+| TestGeneratedSecretNamesStayOutOfChildEnvDanger | fixture coverage | the fixture yields at least one of each naming path, so neither half of the guarantee can silently stop being exercised |
+| TestStableTokenFolding | mq-conn-1 / svc.a / punctuation runs / leading digit / empty / underscore runs | stableToken folds to upper-snake, collapses non-alphanumeric runs to one `_`, trims edge `_`, prefixes a leading digit with X, and returns X for an unfoldable input |
+| TestBinderFieldsCarryStablePlaceholders | - | no credential value reaches a rendered binder field -- only ${NAME} placeholders -- and Model.Secrets records the real literal/env source under each name; an -env credential is keyed by its own variable name, a literal by the derived stableName for its position |
+| TestEnvCredentialsShareOneMountName | two binders, one -env variable | two positions naming the same host variable dedup to a single SecretRef and record no conflict |
+| TestSecretNameConflictIsRecorded | security.users "ops.1" and "ops-1" | two derived names folding to one via stableToken -- the collision that survives the reserved prefix; Model.SecretConflicts records the key plus both positions, and the first credential still wins the name so the model stays deterministic |
+
+## internal/tls
+
+Resolve TLS store paths -- host source vs the fixed in-container mount dir, separator-agnostic base names, and the Solace api-property store keys.
+
+Tests: [tls_test.go](../internal/tls/tls_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestMountPathSeparatorAgnostic | truststore.jks | unrooted plain name -> MountDir/truststore.jks |
+| TestMountPathSeparatorAgnostic | ./certs/truststore.jks | unix relative path -> MountDir/truststore.jks |
+| TestMountPathSeparatorAgnostic | .\certs\truststore.jks | windows relative backslash path -> MountDir/truststore.jks |
+| TestMountPathSeparatorAgnostic | C:\app\certs\keystore.jks | windows absolute path -> MountDir/keystore.jks |
+| TestMountPathSeparatorAgnostic | /abs/unix/path/keystore.jks | unix absolute path -> MountDir/keystore.jks |
+| TestMountPathSeparatorAgnostic | mixed/dir\store.jks | mixed slash and backslash path -> MountDir/store.jks |
+| TestSolacePropsUseMountedBaseName | - | mount=true rewrites SSL_TRUST_STORE and SSL_KEY_STORE to MountDir base names, not raw backslash paths |
+| TestStorePathConfigVsDeploy | mount=false | StorePath returns raw defaults path ./certs/t.jks unchanged |
+| TestStorePathConfigVsDeploy | mount=true | StorePath returns MountDir/t.jks base name from backslash input |
+| TestSolacePropsRawPathWhenNotMounted | - | mount=false keeps SSL_TRUST_STORE as raw ./certs/truststore.jks path |
+| TestSolacePropsStorePasswordIsStablePlaceholderNeverLiteral | - | store passwords reach api-properties only as ${TRUSTSTORE_PASSWORD}/${KEYSTORE_PASSWORD} placeholders; secretRef gets each store's own credential and no literal or env-var name leaks into any value |
+| TestSolacePropsSkipsSecretRefWhenStoreMissing | - | with no truststore/keystore SolaceProps emits nothing and never calls secretRef |
+
+## internal/yamlwriter
+
+The indentation-aware line writer every generated artifact is built from. Four packages carried private copies that drifted; one definition keeps their indentation identical.
+
+Tests: [yamlwriter_test.go](../internal/yamlwriter/yamlwriter_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestWriterLineIndent | - | Line indents by the given level across several nesting depths |
+| TestWriterRawPassthrough | - | Raw writes pre-formatted text between Line calls without indenting it |
+| TestSplitLines | trailing newline | a terminating newline does not yield a trailing empty element |
+| TestSplitLines | no trailing newline | the final line is kept |
+| TestSplitLines | empty string | yields no lines |
+| TestSplitLines | blank line inside | interior blank lines are preserved |
+
+## internal/render
+
+Render application.yml from the consolidated model via the deterministic ordered emitter.
+
+Tests: [render_test.go](../internal/render/render_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestApplicationRich | - | rendered output contains all expected substrings for rich MQ->Solace workflow (ssl bundle, binders, jms/solace bindings, defaults blocks) |
+| TestApplicationRichExact | - | generated application.yml matches richApplicationWant golden fixture byte-for-byte |
+| TestApplicationMinimalNoOptionalBlocks | ssl: / logging: | ssl: and logging: blocks stay absent when defaults are empty |
+| TestApplicationMinimalNoOptionalBlocks | management: / security: | management: and security: are unconditional now: the fixed exposure list and the reserved solmq-status account render even with empty defaults |
+| TestApplicationMinimalNoOptionalBlocks | type: undefined | undefined binder is always emitted even with minimal config |
+| TestApplicationLeaderElection | - | leader-election, fail-over, queue and management render for active_standby, and the whole session block matches exactly: binder-shared credential names, solace-defaults between the credentials and api-properties, verbatim passthrough last |
+| TestApplicationLeaderElectionSessionMatchesBinderKeySet | - | rendered from one connection, the session key sequence equals the binder solace.java key sequence -- the guard against the two renderers drifting apart again |
+| TestApplicationLeaderElectionSessionPlaintext | - | a non-tcps session emits no SSL_ keys but still carries solace-defaults and its own api-properties, and falls back to the LEADER_ELECTION_* names |
+| TestApplicationOmitsEmptyCredentials | conn-name: h(1414) | binder identity fields still rendered when credentials absent |
+| TestApplicationOmitsEmptyCredentials | queue-manager: QM1 | binder identity fields still rendered when credentials absent |
+| TestApplicationOmitsEmptyCredentials | host: tcp://b:55555 | binder identity fields still rendered when credentials absent |
+| TestApplicationOmitsEmptyCredentials | msg-vpn: v | binder identity fields still rendered when credentials absent |
+| TestApplicationOmitsEmptyCredentials | user: | empty user credential line omitted, no null value emitted |
+| TestApplicationOmitsEmptyCredentials | password: | empty password credential line omitted, no null value emitted |
+| TestApplicationOmitsEmptyCredentials | client-username: | empty client-username credential line omitted, no null value emitted |
+| TestApplicationOmitsEmptyCredentials | client-password: | empty client-password credential line omitted, no null value emitted |
+| TestApplicationQuotesRiskyScalars | password: "p@ss #1" | a value containing " #" is double-quoted so it is not read as a comment |
+| TestApplicationQuotesRiskyScalars | client-username: "no" | a bool-lookalike is double-quoted so it stays a string |
+| TestApplicationQuotesRiskyScalars | client-password: "key: value" | a value containing ": " is double-quoted so it does not open a nested mapping |
+| TestApplicationQuotesRiskyScalars | plain values | ordinary hosts, conn-names, users and destinations stay unquoted |
+| TestApplicationBlockScalarPassthrough | - | a literal (\|) passthrough value is re-emitted as an indented block scalar, never flattened onto the key line |
+| TestApplicationSkipsBundleWithoutTruststore | - | tls: true with no tls.truststore emits no ssl bundle or ssl-bundle reference, keeps MQTLS set, and warns |
+| TestApplicationConfigImport | ConfigImport set / empty | Application() leads with spring.config.import when Model.ConfigImport is set, and omits the block entirely when it is empty |
+| TestApplicationSecurityUserRoles | - | a roles-bearing user renders a block-style roles sequence under its password; a role-less user and the reserved solmq-status account emit no roles key at all, keeping pre-roles output byte-identical |
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestRetiredPerPlatformImageRejected | kubernetes / docker / podman | each retired per-platform image key errors, and the message names the top-level image: block that replaced it |
+| TestImageBlockRequired | absent / no name / no tag / unsafe repo, name, tag | the top-level block is required once a platform is in play, tag included (an untagged image resolves to :latest and pins nothing), and the fields that reach an argv are charset-checked |
+| TestImageBlockRequired | bad pass-env name / either credential set both ways | the registry account (`user`/`pass`) goes through the shared checkCred, so it gets the same literal-xor-env rule and variable-name check as every other credential |
+| TestImageNotRequiredWithoutAPlatform | - | `generate config` renders application.yml alone and pulls nothing, so no image is demanded |
+| TestImagePullSecretChecks | name alone | referencing a Secret requires no registry credentials at all |
+| TestImagePullSecretChecks | name required / DNS-1123 | the Secret name is required and held to the label rule the cluster would apply |
+| TestImagePullSecretChecks | create without credentials | create errors unless the registry account is set, in either the literal or the -env form |
+| TestImagePullSecretChecks | create, variable unset / set | an unset variable warns rather than errors, so a config can be linted without the deploy secrets |
+| TestRetiredPerPlatformTimezoneRejected | kubernetes / docker / podman | each retired per-platform timezone key errors and names the top-level timezone: key |
+| TestTopLevelTimezoneUnsafe | unsafe / realistic | the top-level timezone keeps the charset gate the per-platform key had, and an empty value is not an error |
+
+## internal/logback
+
+Render the logback-spring.xml the connector reads for syslog output, and the
+in-container path every platform mounts it at.
+
+Tests: [logback_test.go](../internal/logback/logback_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestXMLPicksTheAppenderTheProtocolNames | udp / tcp | udp uses Logback's built-in SyslogAppender and never references the logstash one; tcp uses LogstashTcpSocketAppender and never falls back. The two are not interchangeable: tcp needs a jar udp does not |
+| TestXMLDefaultsToUDP | empty / unknown | an unset or unrecognised protocol renders the udp config, the safe choice because it needs nothing on the classpath; validate rejects an unknown value long before this |
+| TestBothConfigsReadTheSameThreeProperties | udp / tcp | both bind host, port and appname via springProperty, which is why all three platforms set the same LOGGING_SYSLOG_* env vars rather than templating values into the file, and both keep the console appender (syslog is in addition to stdout, not instead of it) |
+| TestContainerPathAndFileNameAgree | - | ContainerPath ends in /FileName, so a platform that writes the file to disk and mounts it cannot land it where the connector does not read |
+
+## internal/statusscript
+
+Render the POSIX status script the generated deploy artifacts embed and `solmq-conn-util status` execs inside each running instance -- a pure renderer with no os/exec, filesystem, or network access.
+
+Tests: [statusscript_test.go](../internal/statusscript/statusscript_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestRenderSubstitution | defaults | Render substitutes PORT=8090 and USER_NAME=solmq-status; BASE and the leaderelection/workflows endpoints are built from $PORT at run time, not by Render |
+| TestRenderSubstitution | non-default port and user | Render substitutes PORT=19090 and USER_NAME=custom-mgmt-user |
+| TestRenderIsPureASCIINoCRLF | - | output has no carriage return, no byte over 127, and ends with a trailing newline |
+| TestRenderHeaderHasExecOneLiners | - | the header pins the kubectl/docker/podman exec one-liners, each built from ContainerPath |
+| TestRenderPasswordResolution | - | the password-lookup chain references ContainerPath, /run/secrets and the from_configs account lookup, and no credential is embedded |
+| TestRenderAlwaysExitsZero | - | every exit in the script is `exit 0`, `set -e` is absent while `set -u` stays, the EXIT trap holds the contract, and active/standby are both quiet outcomes |
+| TestRenderSendsStatusToStdoutAndProblemsToStderr | - | the mode/state/health/workflow report lines go to stdout unredirected, and every `status:` diagnostic ends in `>&2` |
+| TestRenderAlignsWorkflowColumn | - | the workflows block is a bare header plus one indented row per workflow, with the ids right-aligned to the widest id present so every colon sits in the same column |
+| TestRenderReportsHealthUptimeAndVersion | endpoints | health, /actuator/metrics/process.uptime and /actuator/info are each read and rendered as their own report line |
+| TestRenderReportsHealthUptimeAndVersion | dropped when silent | each enrichment line sits behind a non-empty guard, so an endpoint that answers nothing drops its line instead of printing an empty value |
+| TestRenderReportsHealthUptimeAndVersion | first status wins | the health match is anchored at the opening brace, so a component's status is never reported as the whole instance's |
+| TestRenderReportsEveryWorkflowInNumericOrder | ordering | each workflow line carries the id as a leading tab-separated sort key, goes through `sort -n`, and has the key cut off, so the report reads 1..9..10..19 instead of the actuator's map order |
+| TestRenderReportsEveryWorkflowInNumericOrder | completeness | the workflows response is fed to the read loop with a terminating newline, and the bare `printf %s "$WF"` form is absent -- without it `read` skips the unterminated final line and the last workflow is dropped from every report |
+| TestRenderReportsOnlyConfiguredWorkflows | filter | a chunk is reported only when it carries an id and a state, so nested JSON fragments with an id of their own stay out, and the `${st:-unknown}` padding is gone |
+| TestRenderReportsOnlyConfiguredWorkflows | N/A slots | a state of `N/A` is dropped case-insensitively -- the connector marks every unconfigured slot that way, turning one real workflow into twenty report lines |
+| TestRenderReportsOnlyConfiguredWorkflows | no allowlist | real states are not matched against a fixed list, so a state the script has never seen still reaches the operator |
+| TestRenderReportsOnlyConfiguredWorkflows | nothing left | filtering every entry away is reported on stderr rather than leaving the workflow half of the report silently blank -- on an active instance only |
+| TestRenderWarnsOnEmptyWorkflowsOnlyWhenActive | gated | the empty-workflow warning sits behind `elif [ "$STATE" = "active" ]`, so a standby (which runs no workflow) reports nothing rather than looking broken -- at `replicas: 2` that is half of every report |
+| TestRenderWarnsOnEmptyWorkflowsOnlyWhenActive | not ungated | the bare `else` form that warned on every standby cannot come back |
+| TestRenderVerifiesExposure | - | the has_entry membership check and the leaderelection/workflows exposure gate run before the first actuator request; an unexposed leaderelection stops the run on stderr (still exit 0), an unlocatable config only warns |
+| TestRenderSearchesSpringConfigLocations | - | the config search covers SPRING_CONFIG_LOCATION, SPRING_CONFIG_ADDITIONAL_LOCATION and SPRING_CONFIG_NAME, ConfigDir and its wildcard form, the ./ and ./config/ defaults, both YAML extensions, comma splitting with optional:/file: stripping, the classpath: skip, and runs before the exposure check and password lookup |
+| TestRenderEscapesUserForSedAddress | 7 names | USER_MATCH is regex-escaped for the sed address (dot, slash, brackets, star, backslash, anchors) while USER_NAME stays raw for the Authorization header |
+| TestFilenameAndPathConstants | - | the script's name and directory, and that ContainerPath is not nested inside the libs, spring/config or classpath mounts -- the nesting that made the libs mount shadow it |
+| TestRenderReportsHealthComponents | - | the per-component health breakdown: a newline before every `{"status"` puts each component's status at the start of a line and its name at the end of the line above, so the name is carried forward in $pending (guarded with `${pending:-}` for set -u); the block prints only when something parsed |
+| TestRenderReportsJavaConfigAndHeap | - | the three details-level lines from outside the report endpoints: `java -version` (stderr redirected, folded to "openjdk 17.0.9" or passed through raw), the config the report was read from, and heap used/max tagged `area:heap`; each guarded so an absent source drops its line, a negative maximum is left out, and the byte arithmetic is deliberately *not done* here (busybox would read Jackson's 4.32013312E8 as 4) |
+| TestRenderHeaderNamesEveryReportedFact | - | the script's own header names what it reports, since it is the first thing someone running the script by hand reads |
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestOSStreamDeliversOutputBeforeExitAndCancelIsCleanEnd | - | the child prints one line then blocks far longer than the test waits, so seeing that line proves output is not buffered until exit; cancelling then ends the run and reports nil, because a follow the operator stopped did not fail |
+| TestOSStreamKeepsStdoutAndStderrApart | - | Stream's two writers stay separate where Run merges into one, so `logs > app.log` captures the log and leaves the platform's diagnostics on the terminal |
+| TestOSStreamReportsAFailureThatWasNotCancelled | - | an uncancelled non-zero exit is still an error, and output written before it still reaches the writer |
+| TestOSStreamRejectsEmptyAndUnresolvableArgv | - | Stream refuses exactly what Run refuses (both go through resolveArgv0), naming the binary it could not resolve |
+| TestLogsArgvPerPlatform | kubernetes bare / kubernetes without a namespace or container / kubernetes with every option / docker bare / docker with every option it has / podman reads the container, never the journal / tail zero is not tail all | kubectl takes the pod positionally with the namespace and container as flags; docker and podman take options first and the container name last; TailAll adds no flag while an explicit 0 does |
+| TestLogsArgvRefusesPreviousOffKubernetes | docker / podman | --previous is refused by name rather than dropped, so a caller asking for the previous log is never handed the current one |
+| TestLogsArgvUnknownPlatform | - | an unrecognised platform names all three that exist rather than producing a half-built argv |
+
+## internal/deploy
+
+Render the Kubernetes manifests -- Namespace/ConfigMap/Secret/Deployment/Service, syslog, libs (PVC or download), and multi-instance layout.
+
+Tests: [deploy_test.go](../internal/deploy/deploy_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestRenderFull | - | rendered output contains all expected fragments: configmap, secrets, deployment env/mounts/probes/resources, service; blank line preserved in block scalar |
+| TestRenderFull_ExactDocument | - | Render output matches wantRenderFull golden document byte-for-byte |
+| TestRenderNoSecretsNoServiceNoTLS | - | output omits JAVA_TOOL_OPTIONS, envFrom, Secret, Service, stores volume, logback-spring.xml, syslog host, libs volume, initContainers |
+| TestRenderSyslogUDP | - | UDP syslog config emits SyslogAppender, appname/host/port env vars, logback mount; no LogstashTcpSocketAppender |
+| TestRenderSyslogTCP | - | TCP syslog config emits LogstashTcpSocketAppender and destination tag; no SyslogAppender or AsyncAppender |
+| TestRenderLibsPVCExisting | - | existing libs PVC yields claimName and mount, no initContainers or PersistentVolume |
+| TestRenderLibsPVCCreate | - | created libs PVC emits PV/PVC docs with NFS server/path, storage size, claim name, PV/PVC precede Deployment |
+| TestRenderLibsDownload | emptyDir | init container wgets each jar url into /libs, mounted via emptyDir |
+| TestRenderLibsDownload | existing PVC download | download target uses claimName dl-pvc instead of emptyDir |
+| TestRenderNamespaceAlwaysFirst | - | Namespace doc is first in output and precedes ConfigMap |
+| TestRenderExistingSecrets | - | existing creds/tls secrets produce no Secret doc, referencing my-creds and secretName my-tls |
+| TestRenderConfigMapStatusScript | - | the ConfigMap always carries the status script under its own `status` key, alongside application.yml |
+| TestRenderStatusScriptMountAfterLibs | - | the single-file status mount is declared after the libs directory mount, so it is not shadowed, and carries `subPath: status` |
+| TestManagementPort | Defaults.Management.Port 9999 | ManagementPort returns 9999, ignoring Kube.Service.Port entirely |
+| TestManagementPort | empty Defaults | ManagementPort returns 8090 (the connector default) |
+| TestManagementPort | nil Defaults | ManagementPort returns 8090 (the connector default) |
+| TestRenderLeaderModeLabels | nil Defaults / standalone | the le-mode label is standalone and role: active is present |
+| TestRenderLeaderModeLabels | active_active | le-mode is active_active and role: active is present |
+| TestRenderLeaderModeLabels | active_standby | le-mode is active_standby and role: active is withheld (only the actuator knows the live role) |
+| TestRenderSelectorMatchLabelsAppOnly | - | spec.selector.matchLabels stays app-only even when the pod template carries le-mode/role, since a selector must stay immutable for the Deployment's life |
+| TestQuoteRes | 1 | quoteRes("1") returns quoted "1" |
+| TestQuoteRes | 250m | quoteRes("250m") returns unquoted 250m |
+| TestQuoteRes | 512Mi | quoteRes("512Mi") returns unquoted 512Mi |
+| TestRenderNoResources | - | empty Resources produces no resources: block in output |
+| TestRenderServicePort | host:container distinct ports | Render emits port: 8081 / targetPort: 9000 verbatim from the given spec.Port |
+| TestRenderServicePort | resolved to the default management port | Render emits port/targetPort 8090 for a Port already resolved to the connector default |
+| TestRenderServicePort | resolved to a non-default management port | Render emits port/targetPort 9500 for a Port already resolved to defaults.management.port 9500 |
+
+## internal/dockergen
+
+Render the docker compose file from the target model.
+
+Tests: [dockergen_test.go](../internal/dockergen/dockergen_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestRenderFull_WithEverything | - | full golden output with project-name, creds, store, libs, MQTLS, ports, timezone matches exactly; the compose project is the document's first line |
+| TestRenderFull_Minimal | - | minimal golden output omits the leading name: line along with restart, ports, environment, env_file, volumes blocks |
+| TestEnvironmentBranches | TZ only, MQTLS false | environment block contains only TZ: UTC, no JAVA_TOOL_OPTIONS |
+| TestEnvironmentBranches | MQTLS only, no timezone | environment block contains only JAVA_TOOL_OPTIONS line, no TZ |
+| TestSecretsBranches | at least one secret | the per-service secrets list and the top-level environment-provider secrets block are both emitted |
+| TestSecretsBranches | no secrets | neither block, nor any env_file line, is ever emitted |
+| TestLabelsPerMode | empty defaults to standalone | le-mode label defaults to standalone and role: active is present |
+| TestLabelsPerMode | standalone / active_active | le-mode matches the mode and role: active is present |
+| TestLabelsPerMode | active_standby | le-mode is active_standby and role: active is withheld |
+| TestContentIndentationAndBlankLines | nested key indentation | nested line gets extra indent on top of 6-space block indent |
+| TestContentIndentationAndBlankLines | blank line preserved | blank line stays empty with no spaces between content lines |
+| TestContentIndentationAndBlankLines | no trailing spaces | no rendered line has trailing spaces |
+| TestStoresOnlyAndLibsOnly | stores only | volumes block contains only the store mount line |
+| TestStoresOnlyAndLibsOnly | libs only | volumes block contains only the libs mount line |
+| TestSplitLinesNoTrailingNewline | - | app.yml lacking trailing newline still renders content line with no dropped element |
+| TestStatusScriptConfigSourceAndTarget | - | the service references a second `<name>-status` config and mounts it at /app/external/.status-script |
+| TestStatusScriptContentIsEscaped | - | the status script body is inlined under the status config's content: block, indented 6 spaces, blank line preserved as truly empty, and its shell `$` doubled |
+| TestContentEscapesDollarsForCompose | $VAR / ${VAR} / ${VAR:-default} / $(cmd) / $$ | each shape reaches the content block with every `$` doubled, so compose's interpolation pass delivers it unchanged instead of blanking it or rejecting the document |
+| TestContentEscapesDollarsForCompose | no lone `$` | dropping every `$$` pair from the rendered document leaves no `$` behind anywhere |
+| TestAppYAMLSecretPlaceholdersAreNotInterpolated | - | application.yml's ${...} credential placeholders render doubled so compose cannot substitute the values the CLI passes it, while the `secrets:` provider entries -- compose's own -- stay unescaped |
+| TestRenderSyslogAddsConfigAndEnv | - | compose inlines the logback config as a third configs entry targeted at logback.ContainerPath, and sets the three LOGGING_SYSLOG_* env vars the config reads at runtime |
+| TestRenderSyslogTCPUsesTheLogstashAppender | - | the protocol reaches the inlined config: tcp renders the logstash appender, since the two have different classpath requirements and the wrong one fails at runtime rather than at generate time |
+| TestRenderWithoutSyslogEmitsNeither | - | no block, no config entry, no env vars |
+
+## internal/podmangen
+
+Render the podman run script and the quadlet units from the target model.
+
+Tests: [podmangen_test.go](../internal/podmangen/podmangen_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestRenderRunScriptFull | - | full input renders run script matching exact golden string byte-for-byte |
+| TestRenderRunScriptSecretPreamble | - | the secret-loading preamble carries no credential value, only ${NAME:?...} referencing the stable name |
+| TestRenderRunScriptNoSecretsOmitsPreamble | - | no Secrets in Input emits no `podman secret` lines at all |
+| TestRenderRunScriptMinimal | - | minimal input renders run script matching exact golden string byte-for-byte |
+| TestRenderQuadletFull | - | full input yields 1 unit named solmq-connector.container with content matching golden string |
+| TestRenderQuadletMinimal | - | minimal input yields 1 unit with content matching golden string (no Service section, no restart) |
+| TestLeaderLabelsPerMode | empty defaults to standalone / standalone / active_active | RenderRunScript and RenderQuadlet both carry the le-mode label and role: active |
+| TestLeaderLabelsPerMode | active_standby | both renderers carry le-mode active_standby and withhold role: active |
+| TestStatusScriptMountNestsAfterLibs | - | in both renderers, the status script mount/volume is declared after the libs mount, so it nests rather than being shadowed |
+| TestStatusScriptMountOmittedWhenPathEmpty | - | an empty StatusScriptPath omits the status mount entirely in both renderers, rather than mounting an empty source |
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestImagePullSecretStates | no block / name alone / created | imagePullSecrets is absent, rendered without a Secret, or rendered with one -- the middle case is what stops an apply overwriting a Secret the operator built |
+| TestImagePullSecretPayloadIsOpaqueToDeploy | - | deploy places the already-encoded payload verbatim and the registry password appears nowhere outside it |
+| TestEnvBlockOmittedWhenEmpty | nothing to emit | env: is omitted entirely rather than rendered with nothing beneath it, now that the timezone is one optional top-level key |
+| TestEnvBlockOmittedWhenEmpty | TZ only / MQTLS only | either entry alone opens the block, and no timezone means no TZ entry |
+| TestRunScriptSyslogMountsAndSetsEnv | - | podman cannot inline file content, so the run script bind-mounts the logback file read-only and sets the three LOGGING_SYSLOG_* vars |
+| TestQuadletSyslogMountsAndSetsEnv | - | the same for the quadlet unit, which spells Volume=/Environment= differently but has to carry both |
+| TestSyslogAbsentEmitsNoMountOrEnv | run / quadlet | no block, no mount, no env, in either mode |
+
+## internal/runner
+
+The os/exec seam -- ParseCommand safe-tokenizing, kubectl/docker/podman deploy and remove argv, the status verb's read-only queries, the logs verb's streaming seam and per-platform argv, the cli verb's terminal-attach seam and the shared exec argv builder, quadlet scope resolution, and WriteFile modes.
+
+Tests: [runner_test.go](../internal/runner/runner_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestHelperProcess | - | helper child-process entry point guarded by GO_WANT_HELPER_PROCESS; dispatches stdin/both/fail/drip/env/stdiokind/unknown modes |
+| TestExecArgvPerPlatform | kubernetes bare / with a namespace / with stdin / with a terminal / docker / podman | the shape each engine's flag parser actually accepts: kubectl takes -n and -c after the pod and needs the `--` terminator, docker and podman stop parsing at the container name so their flags come first and no `--` is added; the container is a constant on every kubernetes row |
+| TestExecArgvRefusesATTYWithoutStdin | - | a terminal the child cannot read from can only be a caller mistake, so it is refused rather than quietly produced |
+| TestExecArgvUnknownPlatform | - | an unrecognised platform names the three that exist rather than producing a half-built argv |
+| TestOSAttachHandsTheChildTheCallersFilesNotPipes | - | the child reports that all three standard files are the caller's own regular files; os/exec substitutes a pipe for any writer that is not an *os.File, and a pipe would make the engine refuse the tty |
+| TestOSAttachStdinIsTheHandedFile | - | what the caller passes as stdin is what the child reads, with nothing copied through this process |
+| TestOSAttachReportsTheChildExitStatus | - | a session that ran and exited 3 is reported as 3 with no error, which is what the cli verb's exit-code contract rests on |
+| TestOSAttachEnvReachesChild | - | the third call site of the applyCmdEnv split: supplied values win over ambient ones here exactly as under Run |
+| TestOSAttachRefusesACmdCarryingStdinText | - | "write this string to the child" and "give the child the terminal" are contradictory, so the Cmd is refused by name rather than one of them silently honoured |
+| TestOSAttachRefusesANilFile | no stdin / no stdout / no stderr | refused here rather than at the child's first write, where os/exec panics on a typed-nil *os.File |
+| TestOSAttachRejectsEmptyAndUnresolvableArgv | - | mirrors the Run and Stream refusals; all three go through resolveArgv0 so the rules cannot drift apart |
+| TestOSRunWiresStdinToChild | - | OS.Run passes stdin through to child, output equals hello-stdin |
+| TestOSRunCombinesStdoutAndStderr | - | combined output contains both stdout-line and stderr-line |
+| TestOSRunNonZeroExitReturnsErrorWithOutput | - | non-zero exit returns non-nil error and output still contains before-exit |
+| TestOSRunAcceptsAbsolutePathArgv0 | - | absolute path as argv0 runs successfully, output equals abs-argv0-ok |
+| TestOSRunEnvReachesChildAndAmbientInherited | - | Cmd.Env entries reach the child and override an ambient var of the same name, while an ambient-only var still passes through |
+| TestParseCommand | kubectl | parses to [kubectl], ok |
+| TestParseCommand | kubectl --context prod -n solace | parses to [kubectl --context prod -n solace] tokens, ok |
+| TestParseCommand | oc | trims whitespace to [oc], ok |
+| TestParseCommand | empty string | returns error, nil result |
+| TestParseCommand | whitespace only | returns error, nil result |
+| TestParseCommand | kubectl; rm -rf / | semicolon rejected as unsafe, error |
+| TestParseCommand | kubectl $(evil) | $ and ( rejected as unsafe, error |
+| TestParseCommand | kubectl \`id\` | backtick rejected as unsafe, error |
+| TestParseCommand | kubectl --kubeconfig "a b" | quote+space rejected as unsafe, error |
+| TestParseCommand | curl | not on the kubernetes allowlist, error |
+| TestParseCommand | /tmp/evil | path, not a bare name, error |
+| TestParseCommandExtraAllowed | sudo podman without extraAllowed | rejected, error |
+| TestParseCommandExtraAllowed | sudo podman with extraAllowed=[sudo] | accepted, argv [sudo podman] with the platform binary unmodified |
+| TestKubernetesDeployApplyOnStdin | - | deploy issues one call kubectl --context prod apply -f - with manifest on stdin |
+| TestKubernetesRemoveUsesDeleteVerb | - | the remove action issues argv [oc delete -f -] |
+| TestKubernetesRejectsUnsafeCommand | - | unsafe command rejected, error returned, zero calls made |
+| TestKubernetesUnknownAction | - | unknown action rejected, error returned, zero calls made |
+| TestDockerUpAndDown | - | deploy runs compose up -d, remove runs compose down, correct argv each |
+| TestDockerRejectsUnsafeCommand | - | unsafe command rejected, error returned, zero calls made |
+| TestResolveQuadletScope | system scope | UserMode false and Dir equals quadletSystem |
+| TestResolveQuadletScope | user scope | UserMode true and Dir has quadletUserSub suffix |
+| TestResolveQuadletScope | user scope with dir override | Dir equals override /custom/dir |
+| TestResolveQuadletScope | bogus scope | unknown scope returns error |
+| TestPodmanDeployReloadThenStart | - | user mode issues daemon-reload then start with --user flag in order |
+| TestPodmanDeploySystemModeNoUserFlag | - | system mode issues systemctl daemon-reload without --user flag |
+| TestPodmanRemoveStopsRemovesReloads | - | stop then daemon-reload called and unit file removed from disk |
+| TestPodmanDeployStartFailureIsReported | - | start failure on call 1 surfaces error containing 'start a.service', 2 calls made |
+| TestDockerUnknownAction | - | unknown action rejected, error returned, zero calls made |
+| TestPodmanRemoveStopFailureIsReported | - | stop failure surfaces error containing 'stop solmq-connector.service' |
+| TestPodmanSecretCreateRemovesThenCreatesValueOnStdin | - | PodmanSecretCreate issues rm --ignore then create with the value on stdin, never in argv |
+| TestPodmanSecretCreateSkipsCreateWhenRmFails | - | a failed rm surfaces an error naming it, and create never runs |
+| TestPodmanSecretCreateReportsCreateFailure | - | a failed create surfaces an error naming it, after rm still ran |
+| TestPodmanSecretCreateRejectsUnsafeCommand | - | an unsafe command is rejected before anything runs |
+| TestPodmanSecretRemoveBatchesNames | - | PodmanSecretRemove issues one batched `secret rm --ignore` call naming every secret |
+| TestPodmanSecretRemoveNoNamesIsNoop | - | an empty name list invokes the runner zero times and returns no error |
+| TestPodmanSecretRemoveRejectsUnsafeCommand | - | an unsafe command is rejected before anything runs |
+| TestPodmanSecretRemoveReportsFailure | - | a failed rm surfaces an error naming the operation |
+| TestWriteFileCreatesDirsAndMode | - | creates nested dirs, writes content, sets mode 0600 (non-windows) |
+| TestWriteFileDoesNotTightenExistingFileMode | - | content replaced but existing 0644 mode left unchanged (non-windows) |
+| TestWriteFileParentIsFileReturnsError | - | parent path is a file: MkdirAll error surfaces naming the blocker path |
+| TestWriteFileTargetIsDirectoryReturnsError | - | target path is a directory: write error surfaces naming the target path |
+| TestOSRunWritesNothingToStderr | - | OS.Run writes nothing to stderr of its own; the child's output reaches the caller only through the returned combined output |
+| TestOSRunRejectsUnresolvableArgv0 | - | a binary LookPath cannot find on PATH is a Run error, not a deferred exec.Start failure |
+| TestPreflightKubernetesArgvDeployNoNamespace | - | kubernetes deploy preflight issues <argv> auth can-i create deployment with no --namespace when namespace is empty |
+| TestPreflightKubernetesArgvRemoveWithNamespace | - | kubernetes remove preflight issues <argv> auth can-i delete deployment --namespace <ns> |
+| TestPreflightDockerArgvIsInfo | - | docker preflight issues <argv> info |
+| TestPreflightPodmanArgvIsInfo | - | podman preflight issues <argv> info |
+| TestPreflightFailureWrapsPlatformHint | kubernetes / docker / podman | a failing probe's error contains "preflight failed for <platform>", preserves the underlying cause, and carries the platform's login/daemon hint |
+| TestPreflightRejectsDisallowedBinaryBeforeRunning | - | a command outside the platform allowlist (curl) is rejected before the probe ever runs, zero runner calls |
+| TestPreflightExtraAllowedThreadsThrough | - | "sudo podman" is rejected without extraAllowed and accepted with it, running argv [sudo podman info] |
+| TestPreflightUnknownAction | - | an action other than deploy/remove is rejected, zero runner calls |
+| TestKubernetesPodsJSONArgv | by selector, no namespace / by selector in a namespace / explicit names / every namespace | `get pods ... -o json` in each of its three scopings; `--all-namespaces` outranks a namespace resolved from env.yaml, so a cluster-wide search is never narrowed back down |
+| TestKubernetesPodsJSONRunFailureWraps | - | a run failure surfaces as an error naming the "listing pods" operation |
+| TestKubernetesGetJSONArgv | deployment in a namespace / no namespace / a referenced object | `get <kind> <name> [-n ns] -o json` for the workload summary and for each object a pod references |
+| TestKubernetesGetJSONMissingObjectIsAnError | - | a missing object exits non-zero and the error names it, which is the answer the components check asks for -- reported as MISSING rather than as a failed run |
+| TestKubernetesTopArgv | by selector / explicit names / every namespace | `top pod --containers --no-headers`, attributing the sample to one container so it is comparable with that container's limits |
+| TestKubernetesTopWithoutMetricsAPIWraps | - | a cluster with no metrics API fails here, naming the operation, so the caller can degrade to a note |
+| TestEngineInspectJSONArgv | - | one `inspect a b c` covers every target, and a chained command keeps its own tokens ahead of the subcommand |
+| TestEngineInspectJSONNoNamesIsAnErrorAndRunsNothing | - | inspecting nothing is an error and starts no process |
+| TestEngineInspectJSONFailureNamesTheTargets | - | a failure names the containers it was asked about |
+| TestEngineImageInspectJSONArgv | - | `image inspect <ref>`, where the registry digest lives (the container's own inspect does not carry it) |
+| TestEngineStatsArgv | - | `stats --no-stream --format <template>`: the four tab-separated template fields docker and podman render identically, and --no-stream so the call cannot stream forever |
+| TestEngineListArgv | - | `ps --all --no-trunc --format <template>` for --all discovery, including stopped containers -- an instance that died is what such a search is for |
+| TestSystemctlNRestarts | user scope / system scope / unknown unit answers nothing / no systemd on this host | `systemctl [--user] show <unit> -p NRestarts --value`, the only truthful restart count under quadlet; an empty or unreadable answer is an error so the caller can fall back to the container's own counter |
+| TestScriptInstalledArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | ScriptInstalled execs the marker-echoing probe through each platform's exec form, `-n <namespace>` only for kubernetes when given |
+| TestScriptInstalledReadsMarkers | present / absent / marker among engine chatter / present despite a non-zero exit | the answer comes from the marker on stdout, so a marker is believed even when the engine also reported a non-zero exit |
+| TestScriptInstalledUnreachableTargetIsError | engine error with no marker / clean exit with no marker | no marker at all means the probe never ran, so it errors rather than silently reporting absent |
+| TestScriptInstalledUnknownPlatform | - | an unknown platform is rejected, zero runner calls |
+| TestInstallScriptArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | InstallScript execs `mkdir -p <dir> && cat > <path>` through each platform's exec form (`-i` for stdin, `-n <namespace>` only for kubernetes when given) |
+| TestInstallScriptPassesScriptOnStdinNotArgv | - | the script body travels on stdin, never appearing in any argv token |
+| TestInstallScriptUnknownPlatform | - | an unknown platform is rejected, zero runner calls |
+| TestRunStatusScriptArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | RunStatusScript execs `sh <path>` through each platform's exec form |
+| TestRunStatusScriptReturnsOutputAlongsideNonZeroExit | - | a non-zero script exit (the status script's own 1/2 convention) is returned alongside its output, never swallowed |
+| TestRunStatusScriptUnknownPlatform | - | an unknown platform is rejected, zero runner calls |
 
 ## internal/validate
 
@@ -301,130 +765,186 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckSyslogRunsForEveryPlatform | docker / podman / config only | syslog is a top-level key now, so it is validated whichever platform is generated -- under the old checkKube placement it went unchecked everywhere it had just started applying |
 | TestKubernetesLoggingIsRetired | - | a leftover kubernetes.logging block is rejected by name and the error says where it moved to; ParseEnv decodes non-strict, so without this it would be dropped in silence and the instance would come up with no syslog and no diagnostic |
 
-## internal/consolidate
+## internal/examples
 
-Build the consolidated binder model from the workflows -- dedup connections, TLS bundles, destination roles, store-path rewriting, leader election, and durable-name UUIDs.
+Write the shipped starter files (create/skip/force) and prove they generate config.
 
-Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [consolidate_extra_test.go](../internal/consolidate/consolidate_extra_test.go), [names_test.go](../internal/consolidate/names_test.go), [uuid_test.go](../internal/consolidate/uuid_test.go)
-
-| Test | Case | Verifies |
-|------|------|----------|
-| TestBinderDedupAcrossWorkflows | two workflows, inline sides | binders = [sol-conn-1, mq-conn-1, undefined], numbered per system |
-| TestSolaceToSolaceSingleBinder | solace->solace | binders = [sol-conn-1, undefined]; input-0 and output-0 both reference sol-conn-1 |
-| TestMQToMQSingleBinder | mq->mq | binders = [mq-conn-1, undefined]; input-0 and output-0 both reference mq-conn-1 |
-| TestConnRefNamingAndClashSuffix | svc.a vs svc/a conn-refs sanitize to same base | binders = [svc-a, svc-a-2, undefined], second disambiguated |
-| TestConnRefDedupCollapsesToOneBinder | two workflows share edge/qm conn-refs | binders = [edge, qm, undefined], collapse to one binder each |
-| TestDerivedDestinationTypes | mq topic consumer durable -> solace topic producer | input-0 jms is consumer/topic with non-empty Durable |
-| TestDerivedDestinationTypes | solace producer to topic | output-0 emits no solace binding |
-| TestDerivedDestinationTypes | solace queue -> mq queue producer | output-1 jms is producer/queue |
-| TestFormatScalarQuoting | plain passthrough | FormatScalar returns plain |
-| TestFormatScalarQuoting | double-quoted requoting | FormatScalar returns "dq" |
-| TestFormatScalarQuoting | single-quote-doubling escape | FormatScalar returns 'a''b' |
-| TestFormatScalarQuoting | depth>=2 nested quoted passthrough from parsed YAML | FormatScalar preserves quoting, returns "R1" |
-| TestSanitizeAndIsTCPS | sanitize A_b.2-x/y | returns A-b-2-x-y |
-| TestSanitizeAndIsTCPS | isTCPS tcps:// and tcp:// | tcps:// true, tcp:// false |
-| TestDisplayName | acc with name set | returns the name |
-| TestDisplayName | acc with only connName | falls back to connection name |
-| TestDisplayName | acc solace kind with vpn | returns solace:myvpn |
-| TestDisplayName | acc mq kind with qm | returns mq:QM1 |
-| TestMergeProp | append new key b | list grows to 2 entries, no warnings |
-| TestMergeProp | overwrite existing key a with new value | value updated to 9, one warning emitted |
-| TestMergeProp | overwrite key a with same value again | no additional warning |
-| TestAppendPassthroughCollision | passthrough T collides with existing T | output has 2 props and 1 collision warning reading `binder "bndr": passthrough overrides tool-managed key "T"; tool value kept` byte for byte, since the owner label is caller-supplied now |
-| TestNodeToProps | mapping with scalar and nested keys | 2 props, first key k1/val v1, second has Sub set |
-| TestNodeToProps | nil node | nodeToProps returns nil |
-| TestBuildMQmTLSBundle | mq TLS side with cipher and keyAlias plus solace target | MQTLS true, 1 bundle, HasKeystore true, KeyAlias mc, KeystoreTyp PKCS12, TruststoreTyp JKS |
-| TestBuildCipherConflictWarning | two mq sources with different ciphers C1/C2 | warnings contain conflicting cipher |
-| TestBuildMessageLoopWarning | same side used as source and target dest SAME | warnings contain message loop |
-| TestBuildSolaceTopicSourceEmitsConsumerTopic | solace topic source -> mq queue target | input-0 solace binding is consumer with DestType topic |
-| TestBuildStorePathsRawVsMount | mount=false (config) | TruststoreLoc reflects env.yaml path verbatim ./certs/t.jks |
-| TestBuildStorePathsRawVsMount | mount=true (deploy) | TruststoreLoc rewritten to /app/external/classpath/truststores/t.jks |
-| TestBuildLeaderElection | dangling conn-ref missing | le non-nil with Mode/Queue set but Session nil, no guard warning |
-| TestBuildLeaderElection | conn-ref happy path tcps host | Session host/vpn set and APIProps has SSL_TRUST_STORE, SSL_KEY_STORE, SSL_PRIVATE_KEY_ALIAS mounted paths and alias sc; Extras carry solace-defaults in authored order and the connection api-properties land last, after the tool TLS keys |
-| TestBuildLeaderElection | inline session non-tcps host | Session set from inline fields with no TLS APIProps, but the inline api-properties and solace-defaults still come through |
-| TestBuildLeaderElection | mount rewrite raw vs mnt for leader election truststore | raw keeps ./certs/truststore.jks verbatim, mnt rewrites to /app/external/classpath/truststores/truststore.jks |
-| TestBuildLeaderElectionSessionPassthroughCollision | - | a session passthrough key colliding with a tool TLS key keeps the tool value and warns as `leader-election session`, never as a binder |
-| TestBuildLeaderElectionWarningsReachBuild | - | the session collision warning escapes Build, proving the warns slice is threaded into buildLeaderElection |
-| TestBuildLeaderElectionSharesBinderSecretNames | shared connection | a session resolving to a workflow binder carries that binder CLIENT_USERNAME/PASSWORD and mounts no second secret |
-| TestBuildLeaderElectionSharesBinderSecretNames | management-only broker | a session no workflow binds falls back to the fixed LEADER_ELECTION_* pair |
-| TestApplyStatusAccessNoOperatorUsers | - | with no configured security.users, Build synthesizes the reserved account as the only user, carrying the literal status password, never entering Model.Secrets |
-| TestApplyStatusAccessAppendsAfterExistingUsers | - | operator-configured users get the reserved account appended last; existing users still resolve to secretRef placeholders |
-| TestApplyStatusAccessCarriesOperatorRoles | - | an operator's roles reach the model verbatim (only the password is rewritten), the reserved account is appended with none so it stays read-only, and the caller's own Defaults are left unmutated despite sharing the roles backing array |
-| TestApplyStatusAccessExposureIsFixed | - | applyStatusAccess always sets Management.Exposure to health,info,metrics,leaderelection,workflows, ignoring whatever spec.Management.Exposure carries |
-| TestDurableNameGolden | - | DurableName of fixed inputs equals pinned solmq-3631c883-c0c4-5bc8-985e-ea2842831ad6 |
-| TestDurableNameDeterministic | same inputs called twice | DurableName returns identical value both times |
-| TestDurableNameDeterministic | different file name g.yaml vs f.yaml | DurableName differs when file name changes |
-| TestGeneratedSecretNamesStayOutOfChildEnvDanger | literal credentials | every derived SecretRef.Stable Build() can produce (binder creds, security-user passwords, TLS stores, leader-election) carries spec.GeneratedNamePrefix and matches a fixed-suffix pattern, so adversarial conn-ref/security-user names (e.g. "path", "ld-preload", "LD") can never fold to a bare dangerous docker-compose child-env name like PATH or LD_PRELOAD |
-| TestGeneratedSecretNamesStayOutOfChildEnvDanger | -env credentials | Stable equals EnvVar, so the pair injected into the compose child only restates the variable it was read from -- an operator-chosen name like PATH overwrites it with its own value |
-| TestGeneratedSecretNamesStayOutOfChildEnvDanger | fixture coverage | the fixture yields at least one of each naming path, so neither half of the guarantee can silently stop being exercised |
-| TestStableTokenFolding | mq-conn-1 / svc.a / punctuation runs / leading digit / empty / underscore runs | stableToken folds to upper-snake, collapses non-alphanumeric runs to one `_`, trims edge `_`, prefixes a leading digit with X, and returns X for an unfoldable input |
-| TestBinderFieldsCarryStablePlaceholders | - | no credential value reaches a rendered binder field -- only ${NAME} placeholders -- and Model.Secrets records the real literal/env source under each name; an -env credential is keyed by its own variable name, a literal by the derived stableName for its position |
-| TestEnvCredentialsShareOneMountName | two binders, one -env variable | two positions naming the same host variable dedup to a single SecretRef and record no conflict |
-| TestSecretNameConflictIsRecorded | security.users "ops.1" and "ops-1" | two derived names folding to one via stableToken -- the collision that survives the reserved prefix; Model.SecretConflicts records the key plus both positions, and the first credential still wins the name so the model stays deterministic |
-
-## internal/tls
-
-Resolve TLS store paths -- host source vs the fixed in-container mount dir, separator-agnostic base names, and the Solace api-property store keys.
-
-Tests: [tls_test.go](../internal/tls/tls_test.go)
+Tests: [examples_test.go](../internal/examples/examples_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
-| TestMountPathSeparatorAgnostic | truststore.jks | unrooted plain name -> MountDir/truststore.jks |
-| TestMountPathSeparatorAgnostic | ./certs/truststore.jks | unix relative path -> MountDir/truststore.jks |
-| TestMountPathSeparatorAgnostic | .\certs\truststore.jks | windows relative backslash path -> MountDir/truststore.jks |
-| TestMountPathSeparatorAgnostic | C:\app\certs\keystore.jks | windows absolute path -> MountDir/keystore.jks |
-| TestMountPathSeparatorAgnostic | /abs/unix/path/keystore.jks | unix absolute path -> MountDir/keystore.jks |
-| TestMountPathSeparatorAgnostic | mixed/dir\store.jks | mixed slash and backslash path -> MountDir/store.jks |
-| TestSolacePropsUseMountedBaseName | - | mount=true rewrites SSL_TRUST_STORE and SSL_KEY_STORE to MountDir base names, not raw backslash paths |
-| TestStorePathConfigVsDeploy | mount=false | StorePath returns raw defaults path ./certs/t.jks unchanged |
-| TestStorePathConfigVsDeploy | mount=true | StorePath returns MountDir/t.jks base name from backslash input |
-| TestSolacePropsRawPathWhenNotMounted | - | mount=false keeps SSL_TRUST_STORE as raw ./certs/truststore.jks path |
-| TestSolacePropsStorePasswordIsStablePlaceholderNeverLiteral | - | store passwords reach api-properties only as ${TRUSTSTORE_PASSWORD}/${KEYSTORE_PASSWORD} placeholders; secretRef gets each store's own credential and no literal or env-var name leaks into any value |
-| TestSolacePropsSkipsSecretRefWhenStoreMissing | - | with no truststore/keystore SolaceProps emits nothing and never calls secretRef |
+| TestWriteCreatesSkipsForces | first-write | first write creates 5 files (4 workflows + env.yaml), 0 skipped |
+| TestWriteCreatesSkipsForces | second-write-no-force | second write with no force skips all previously written files |
+| TestWriteCreatesSkipsForces | force-rewrite | force write rewrites all files, restoring workflow-0.yaml to embedded original content over junk |
+| TestWriteMkdirError | - | Write returns error when target dir path is under a regular file |
+| TestShippedExamplesGenerateConfig | - | embedded example set written to disk generates config via gen.Config with no errors and at least one non-empty rendered application.yml |
 
-## internal/statusscript
+## internal/gen
 
-Render the POSIX status script the generated deploy artifacts embed and `solmq-conn-util status` execs inside each running instance -- a pure renderer with no os/exec, filesystem, or network access.
+Orchestrate parse -> validate -> consolidate -> render, resolve credentials/stores, and assert the byte-for-byte golden fixtures.
 
-Tests: [statusscript_test.go](../internal/statusscript/statusscript_test.go)
+Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](../internal/gen/golden_test.go), [htmlgolden_test.go](../internal/gen/htmlgolden_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
-| TestRenderSubstitution | defaults | Render substitutes PORT=8090 and USER_NAME=solmq-status; BASE and the leaderelection/workflows endpoints are built from $PORT at run time, not by Render |
-| TestRenderSubstitution | non-default port and user | Render substitutes PORT=19090 and USER_NAME=custom-mgmt-user |
-| TestRenderIsPureASCIINoCRLF | - | output has no carriage return, no byte over 127, and ends with a trailing newline |
-| TestRenderHeaderHasExecOneLiners | - | the header pins the kubectl/docker/podman exec one-liners, each built from ContainerPath |
-| TestRenderPasswordResolution | - | the password-lookup chain references ContainerPath, /run/secrets and the from_configs account lookup, and no credential is embedded |
-| TestRenderAlwaysExitsZero | - | every exit in the script is `exit 0`, `set -e` is absent while `set -u` stays, the EXIT trap holds the contract, and active/standby are both quiet outcomes |
-| TestRenderSendsStatusToStdoutAndProblemsToStderr | - | the mode/state/health/workflow report lines go to stdout unredirected, and every `status:` diagnostic ends in `>&2` |
-| TestRenderAlignsWorkflowColumn | - | the workflows block is a bare header plus one indented row per workflow, with the ids right-aligned to the widest id present so every colon sits in the same column |
-| TestRenderReportsHealthUptimeAndVersion | endpoints | health, /actuator/metrics/process.uptime and /actuator/info are each read and rendered as their own report line |
-| TestRenderReportsHealthUptimeAndVersion | dropped when silent | each enrichment line sits behind a non-empty guard, so an endpoint that answers nothing drops its line instead of printing an empty value |
-| TestRenderReportsHealthUptimeAndVersion | first status wins | the health match is anchored at the opening brace, so a component's status is never reported as the whole instance's |
-| TestRenderReportsEveryWorkflowInNumericOrder | ordering | each workflow line carries the id as a leading tab-separated sort key, goes through `sort -n`, and has the key cut off, so the report reads 1..9..10..19 instead of the actuator's map order |
-| TestRenderReportsEveryWorkflowInNumericOrder | completeness | the workflows response is fed to the read loop with a terminating newline, and the bare `printf %s "$WF"` form is absent -- without it `read` skips the unterminated final line and the last workflow is dropped from every report |
-| TestRenderReportsOnlyConfiguredWorkflows | filter | a chunk is reported only when it carries an id and a state, so nested JSON fragments with an id of their own stay out, and the `${st:-unknown}` padding is gone |
-| TestRenderReportsOnlyConfiguredWorkflows | N/A slots | a state of `N/A` is dropped case-insensitively -- the connector marks every unconfigured slot that way, turning one real workflow into twenty report lines |
-| TestRenderReportsOnlyConfiguredWorkflows | no allowlist | real states are not matched against a fixed list, so a state the script has never seen still reaches the operator |
-| TestRenderReportsOnlyConfiguredWorkflows | nothing left | filtering every entry away is reported on stderr rather than leaving the workflow half of the report silently blank -- on an active instance only |
-| TestRenderWarnsOnEmptyWorkflowsOnlyWhenActive | gated | the empty-workflow warning sits behind `elif [ "$STATE" = "active" ]`, so a standby (which runs no workflow) reports nothing rather than looking broken -- at `replicas: 2` that is half of every report |
-| TestRenderWarnsOnEmptyWorkflowsOnlyWhenActive | not ungated | the bare `else` form that warned on every standby cannot come back |
-| TestRenderVerifiesExposure | - | the has_entry membership check and the leaderelection/workflows exposure gate run before the first actuator request; an unexposed leaderelection stops the run on stderr (still exit 0), an unlocatable config only warns |
-| TestRenderSearchesSpringConfigLocations | - | the config search covers SPRING_CONFIG_LOCATION, SPRING_CONFIG_ADDITIONAL_LOCATION and SPRING_CONFIG_NAME, ConfigDir and its wildcard form, the ./ and ./config/ defaults, both YAML extensions, comma splitting with optional:/file: stripping, the classpath: skip, and runs before the exposure check and password lookup |
-| TestRenderEscapesUserForSedAddress | 7 names | USER_MATCH is regex-escaped for the sed address (dot, slash, brackets, star, backslash, anchors) while USER_NAME stays raw for the Authorization header |
-| TestFilenameAndPathConstants | - | the script's name and directory, and that ContainerPath is not nested inside the libs, spring/config or classpath mounts -- the nesting that made the libs mount shadow it |
-| TestRenderReportsHealthComponents | - | the per-component health breakdown: a newline before every `{"status"` puts each component's status at the start of a line and its name at the end of the line above, so the name is carried forward in $pending (guarded with `${pending:-}` for set -u); the block prints only when something parsed |
-| TestRenderReportsJavaConfigAndHeap | - | the three details-level lines from outside the report endpoints: `java -version` (stderr redirected, folded to "openjdk 17.0.9" or passed through raw), the config the report was read from, and heap used/max tagged `area:heap`; each guarded so an absent source drops its line, a negative maximum is left out, and the byte arithmetic is deliberately NOT done here (busybox would read Jackson's 4.32013312E8 as 4) |
-| TestRenderHeaderNamesEveryReportedFact | - | the script's own header names what it reports, since it is the first thing someone running the script by hand reads |
+| TestParseExpandsNonCredentialAndWarnsOnUnsetDefaultless | - | parse() expands host/msg-vpn from Lookup, leaves client-password-env verbatim, and returns exactly one warning naming TYPO for the unset defaultless conn-name variable |
+| TestResolveStores | truststore+keystore with ReadFile | resolves 2 store files, first named t.jks |
+| TestResolveStores | no ReadFile provided | missing ReadFile returns error |
+| TestResolveStores | ReadFile returns error | read error propagates |
+| TestResolveStores | no stores configured | empty Defaults yields 0 stores, no error |
+| TestToIssues | - | toIssues wraps each string into an Issue carrying it as Msg |
+| TestNamesAndPaths | pathIn base variants | empty base returns bare path; trailing/no-trailing slash both join to /base/a |
+| TestTargetMounts | tls+stores+libs configured | 2 store mounts at fixed default mount path (ignores custom MountPath), libs mount uses resolved abs source and given target |
+| TestTargetMounts | nil stores and libs | opt-in mounts yield nil,nil when sections absent |
+| TestResolveCredentials | nil refs | no kvs, no error |
+| TestResolveCredentials | literal + -env mix | literal ref passes through, -env ref reads from the resolver's environment |
+| TestResolveCredentials | unset -env variable | fails loud naming the stable secret and the variable, never a value |
+| TestResolveCredentials | no environment access | fails loud rather than silently resolving to empty |
+| TestConfigRejectsSecretNameConflict | security.users "ops.1" and "ops-1" | Config renders nothing and errors naming the contested key *and both claiming positions*, rather than emit a config where one credential silently takes the other's password |
+| TestConfigRejectsSecretNameConflict | same spec through Validate | the collision is caught while linting too, not only at generate/deploy -- names are assigned in consolidate, so Validate builds to see them |
+| TestValidateCleanSpecStillPasses | no collision | the build call Validate now makes adds no errors of its own, and consolidate's warnings do not leak into validate output |
+| TestConfigWorkflowCap | 21 workflows | Config produces no output and one error naming the count, the 20 cap, and the split-into-folders remedy |
+| TestConfigWorkflowCap | 20 workflows | exactly at the cap does not error |
+| TestGenerateKubernetesWorkflowCap | 21 workflows | GenerateKubernetes produces no manifest and the same workflow-cap error |
+| TestConfigCarriesSecurityUserRoles | - | end-to-end: a roles-bearing env.yaml validates clean and its role reaches the rendered application.yml, while the reserved account still renders none |
+| TestConfigNoSecretsLeak | - | every rendered password is a ${STABLE} placeholder except the one permitted literal: the reserved spec.StatusUserName account |
+| TestGenerateDockerBasics | - | generates non-empty compose opening with the defaulted `name: solace-ibmmq-connectors` project line and containing the image; all four credential positions render as top-level environment-provider secrets, never inlined as values, and each ${STABLE} placeholder in application.yml is doubled so compose cannot interpolate the value in |
+| TestGeneratePodmanRunAndQuadlet | mode: run | produces a run script (no unit) that loads each secret into podman's store before `podman run`, never carrying the value itself |
+| TestGeneratePodmanRunAndQuadlet | ForceQuadlet true | produces quadlet units, no run script |
+| TestResolveStatusPasswordFixedRand | - | a fixed Rand hook yields the exact 32-lowercase-hex-char literal (16 bytes hex-encoded) |
+| TestResolveStatusPasswordEnvOverride | - | a set, non-empty spec.StatusUserPasswordEnvVar is used verbatim and Rand is never consulted |
+| TestResolveStatusPasswordEmptyEnvFallsBackToRand | - | an empty override is treated as unset, falling back to Rand rather than returning "" |
+| TestResolveStatusPasswordRandError | - | a Rand failure surfaces as an actionable error naming the underlying cause, never a predictable fallback password |
+| TestConfigStatusPasswordRandErrorNoOutput | - | the same Rand failure through Config is a hard error with no output |
+| TestGenerateKubernetesCarriesStatusScript | - | the ConfigMap gets a "status: \|" key carrying the rendered script, addressed to spec.StatusUserName on the resolved management port |
+| TestGenerateDockerCarriesStatusScript | - | compose gets a second top-level config (`<name>-status`) inlining the rendered script, mounted at statusscript.ContainerPath |
+| TestGeneratePodmanCarriesStatusScript | - | PodmanPlan.StatusScript names `<name>-status` and its on-disk mount path is BaseDir-resolved exactly like AppYAML |
+| TestGenerateMissingTargetSection | kubernetes | error contains kubernetes target requires a 'kubernetes:' section in env.yaml |
+| TestGenerateMissingTargetSection | docker | error contains docker target requires a 'docker:' section in env.yaml |
+| TestGenerateMissingTargetSection | podman | error contains podman target requires a 'podman:' section in env.yaml |
+| TestGenValidateStoresWarning | - | kubernetes credentials.create (name-only) plus a TLS-without-stores config yields no errors and exactly one stores-omitted advisory warning |
+| TestGeneratorPageGoldenInSync | - | the golden embedded in solmq-conn-util-generator.html matches testdata/golden/application.yml (regenerate with -update-html-golden) |
+| TestGoldenConfig | - | generated config output matches testdata/golden/application.yml byte-for-byte, one instance |
+| TestGoldenKubernetesCreate | - | generated kubernetes manifests (namespace, configmap incl. status script, secret, stores, pv, pvc, deployment with secrets-volume/stores/syslog/libs mounts and le-mode/role labels, service) match golden fixture byte-for-byte |
+| TestGoldenKubernetesNoSecrets | - | generated manifests without secrets/syslog/libs (namespace, configmap incl. status script, deployment, service) match golden fixture byte-for-byte |
 
-| TestOSStreamDeliversOutputBeforeExitAndCancelIsCleanEnd | - | the child prints one line then blocks far longer than the test waits, so seeing that line proves output is not buffered until exit; cancelling then ends the run and reports nil, because a follow the operator stopped did not fail |
-| TestOSStreamKeepsStdoutAndStderrApart | - | Stream's two writers stay separate where Run merges into one, so `logs > app.log` captures the log and leaves the platform's diagnostics on the terminal |
-| TestOSStreamReportsAFailureThatWasNotCancelled | - | an uncancelled non-zero exit is still an error, and output written before it still reaches the writer |
-| TestOSStreamRejectsEmptyAndUnresolvableArgv | - | Stream refuses exactly what Run refuses (both go through resolveArgv0), naming the binary it could not resolve |
-| TestLogsArgvPerPlatform | kubernetes bare / kubernetes without a namespace or container / kubernetes with every option / docker bare / docker with every option it has / podman reads the container, never the journal / tail zero is not tail all | kubectl takes the pod positionally with the namespace and container as flags; docker and podman take options first and the container name last; TailAll adds no flag while an explicit 0 does |
-| TestLogsArgvRefusesPreviousOffKubernetes | docker / podman | --previous is refused by name rather than dropped, so a caller asking for the previous log is never handed the current one |
-| TestLogsArgvUnknownPlatform | - | an unrecognised platform names all three that exist rather than producing a half-built argv |
+| Test | Case | Verifies |
+|------|------|----------|
+| TestDockerConfigJSON | private registry / docker hub fallback | the payload is an auths map keyed by registry carrying the account plus the base64 user:password the engines send |
+| TestDockerConfigJSONEscapesAwkwardValues | - | a password carrying quotes, a backslash or JSON of its own round-trips as data rather than reshaping the document -- which is why it is marshalled, not concatenated |
+| TestResolvePullSecret | reference only | resolves to the name alone and never reads the registry password |
+| TestResolvePullSecret | create | builds the payload from the environment |
+| TestResolvePullSecret | both -env / both literal | all four halves resolve: the -env pair reads each variable, and a literal pair needs no environment access at all |
+| TestResolvePullSecret | unset user-env | an unset user variable fails naming that variable, not only the password one |
+| TestResolvePullSecret | variable unset / no environment access | both fail loudly, naming the variable |
+| TestResolvePullSecret | no image block / partial image block | the guard that exists so a caller who skipped validate gets an error rather than a nil dereference |
+| TestGenerateKubernetesImagePull | no block / reference / create | the wiring from config to rendered manifest: nothing, an imagePullSecrets entry alone, or the entry plus the dockerconfigjson Secret -- the integration point TestResolvePullSecret skips |
+| TestGenerateKubernetesImagePull | payload and leak check | the rendered payload decodes to the real account, and the registry password appears nowhere else in the manifest |
+| TestGenerateKubernetesImagePull | variable unset | create fails the generate with an issue naming the variable |
+
+## internal/libs
+
+Resolve the Maven dependency closure for the IBM MQ / syslog jar sets and download the jars to a local directory -- version resolution (including a pinned `--version`), image-aware omission against a connector image's jar list, and the safe download/redirect machinery.
+
+Tests: [libs_test.go](../internal/libs/libs_test.go), [maven_test.go](../internal/libs/maven_test.go), [image_test.go](../internal/libs/image_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestDownloadURLHappyPath | - | a single --url download writes the jar under its basename with no Failed/Skipped |
+| TestDownloadRejectsNonHTTPSURL | - | a plain http:// --url errors before any request or directory creation, Report stays zero-valued |
+| TestDownloadRedirectToHTTPRejected | - | a redirect Location that downgrades to http:// is rejected as a Failure, nothing written |
+| TestDownloadRedirectToHTTPSFollowed | - | an https redirect is followed and the file is written under the originally-requested URL's basename, not the redirect target's |
+| TestDownloadSkipsExistingWithoutForce | - | an existing file is reported Skipped and no HTTP request is made at all (skip before request) |
+| TestDownloadOverwritesWithForce | - | Force true overwrites an existing file with the newly fetched bytes |
+| TestDownloadPerArtifactFailureDoesNotBlockOthers | - | one URL 404ing still lets a second URL in the same call succeed and land in Written |
+| TestDownloadUncreatableDirIsSystemic | - | a destination directory that cannot be created (parent is a file) is a systemic error, zero Report |
+| TestDownloadUnknownSetIsSystemic | - | an unrecognized Set is a systemic error naming the bad value plus both valid names, and creates no directory |
+| TestResolveSeedPerSet | mq / syslog | each set maps to its seed coordinate, and the mq seed is asserted *not* to be the javax build (com.ibm.mq.allclient), which cannot satisfy the image's jakarta.jms binder |
+| TestValidateFilenameShapeRejections | empty / . / .. / a slash or backslash segment / absolute / non-.jar / control char | each shape is rejected |
+| TestValidateFilenameShapeAccepts | - | a plain versioned jar name passes |
+| TestFilenameFromEscapedPathRejectsEscapedTraversal | - | a percent-encoded ../ segment is caught after decoding, not waved through because the raw segment looked clean |
+| TestFilenameFromEscapedPathAcceptsPlainName | - | a plain path's final segment is returned as the filename |
+| TestDownloadByteCapTripLeavesNoTempFile | - | a body exceeding maxArtifactBytes is a Failure and leaves no temp file behind in the destination directory |
+| TestDownloadUserinfoNotInOutput | - | a URL carrying userinfo never leaks the username or password into Failure.Name or Failure.Err |
+| TestDownloadTooManyRedirectsFails | - | a chain past maxRedirectHops is a Failure naming "too many redirects", not an infinite follow |
+| TestDownloadEmptyBodyLeavesNoTempFile | - | a clean 200 OK with a zero-byte body is a Failure, not a silently-accepted empty jar; no temp file is left behind |
+| TestDownloadContentLengthMismatchLeavesNoTempFile | - | a body shorter than its own advertised Content-Length is a Failure naming the mismatch, not a truncated jar reported as written |
+| TestDownloadSHA1MatchSucceeds | - | a jar whose downloaded body matches its .sha1 sidecar writes normally and reports no Unverified entries |
+| TestDownloadSHA1MismatchFailsAndLeavesNoFile | - | a .sha1 sidecar that does not match the downloaded body is a Failure naming sha1, nothing written, no leftover temp file |
+| TestDownloadMalformedSHA1SidecarRejected | too short / non-hex / empty / html body | each malformed .sha1 sidecar body is a Failure and nothing is written |
+| TestDownloadURLUnverifiedOn404SidecarStillWrites | - | a --url download whose .sha1 sidecar 404s still writes the jar, reported in Unverified rather than Failed |
+| TestDownloadMavenResolved404SidecarFailsArtifact | - | unlike --url, a Maven-resolved artifact (mq/syslog Set) whose .sha1 sidecar 404s is a Failure, not Unverified -- a resolved closure is never written unverified |
+| TestDownloadContentLengthUnknownWithGoodSHA1Succeeds | - | a response with no Content-Length still succeeds when its .sha1 sidecar verifies the body |
+| TestDownloadContentLengthUnknownWithNoDigestFails | - | a response with neither a Content-Length nor a verifiable .sha1 (sidecar 404s) is a Failure, leaving no temp file |
+| TestDownloadOmitsDependencyImageProvidesAtNewerVersion | - | a dependency the image already has at an equal-or-newer version is never requested over HTTP and lands in Report.Omitted naming the jar and the image's version, while the seed itself still downloads |
+| TestDownloadEmptyOmitListFileOmitsNothing | - | a supplied --omit-lib-file that parses to no entries at all *replaces* the embedded default rather than merging with it, so the whole closure -- seed and dependency -- downloads and Report.Omitted stays empty; OmitListProvenance still names the supplied file |
+| TestDownloadCommentsOnlyOmitListFileOmitsNothing | - | an --omit-lib-file containing only comments and blank lines omits nothing, same as an empty file |
+| TestDownloadNeverOmitsSeedEvenWhenImageClaimsHugeVersion | - | an omit-list entry naming the seed's own artifact at an absurd version never omits the seed -- Download identifies the seed by Coord equality, not by trusting the omit list |
+| TestDownloadDownloadsArtifactImageHasOlderVersion | - | an artifact the image has only at an older version still downloads, with nothing in Report.Omitted |
+| TestDownloadDownloadsArtifactAbsentFromImage | - | an artifact absent from the image list entirely downloads |
+| TestDownloadIncludeProvidedDownloadsEverything | - | --include-provided (IncludeProvided true) downloads an artifact the image list would otherwise have satisfied, and Report.Omitted stays empty |
+| TestDownloadURLNeverOmittedEvenWhenImageHasIt | - | an explicit --url downloads even when the image list already has that exact jar -- omission never applies to --url |
+| TestDownloadBadOmitLibFilePathIsSystemic | - | an unreadable --omit-lib-file path is a systemic error naming the path, with nothing written |
+| TestDownloadEmbeddedDefaultListLoadFailureIsSystemic | - | a corrupted embedded default omit list (a line exceeding the scanner's token-size ceiling) is a systemic error naming "embedded default omit list", zero Report, nothing written |
+| TestDownloadReadsDeployedImageFromEnv | default present / no env.yaml / explicit -e unreadable / defaulted malformed / no image block | the advisory config read: the image reaches libs.Input, an absent default is silent and still downloads, and only a file the operator named is systemic |
+| TestDownloadReportsOmitListProvenance | - | Report.OmitListProvenance names the --omit-lib-file path used; a line that fails to split is skipped silently, and a rejected entry no closure artifact asks about produces *no* warning -- the noise fix |
+| TestDownloadWarnsWhenRejectedEntryAffectedThisClosure | - | a rejected entry naming an artifact the closure does resolve warns, names that artifact, and the jar is downloaded rather than omitted |
+| TestDownloadVersionPinsSeed | - | --version pins the seed to that release, and the resulting closure/filename reflect the pinned version, not latest stable |
+| TestDownloadVersionRejectsPathEscape | - | a --version value containing a path escape is rejected before any network access |
+| TestDownloadSetPathAlwaysResolvesEvenWhenFilesExist | - | unlike --url (TestDownloadSkipsExistingWithoutForce), the mq/syslog Set path always attempts Maven resolution first -- even with every plausible target file already on disk -- because it cannot know the target filenames without resolving the closure first |
+| TestSetNames | - | SetNames() returns the exact ordered [mq, syslog] list the CLI layer gates against |
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestCompareVersions | patch / lexical-trap / major / prerelease suffix / date-like / short segments / equal / empty | compareVersions orders numeric segments correctly, ranks a pre-release suffix lower, and is antisymmetric under argument swap |
+| TestCompareVersions | Final / RELEASE / GA equal the plain release | Maven treats those words as aliases of the empty qualifier, so 4.1.135.Final and 4.1.135 are the same version rather than one outranking the other |
+| TestCompareVersions | release qualifier below a number, above a prerelease; SP above the release | pins the aligned-segment case, where strings.Compare would otherwise make "Final" beat "1" and read 1.0.Final as newer than 1.0.1 |
+| TestIsPreRelease | SNAPSHOT / M1 / m2 / alpha / beta / cr / pr / ea / preview / plain release / date-like / empty | isPreRelease recognizes every qualifier convention Maven Central uses and accepts a bare numeric or date-like release |
+| TestIsPreRelease | Final / RELEASE / GA / SP | a release qualifier is *not* a pre-release -- counting it as one would skip every netty and hibernate release when picking a latest stable version |
+| TestValidateCoordPart | valid group/artifact/version/qualifier forms / empty / traversal / doubled dot / slash / backslash / NUL | validateCoordPart accepts safe coordinate segments and rejects every unsafe one before it can reach a URL |
+| TestLatestStablePrefersRelease | - | latestStable returns metadata's <release> when it is itself a stable version |
+| TestLatestStableSkipsPreReleaseCandidateInRelease | - | the verified jackson-annotations case: <release> names a candidate, so the highest surviving stable <version> is used instead |
+| TestLatestStableAllPreReleaseVersionsIsError | - | every listed version being a pre-release is an error, never a silent pre-release pick |
+| TestLatestStableUnreachableMetadataIsError | - | an unreachable maven-metadata.xml is an error |
+| TestResolveClosureMQJakarta | - | the verified com.ibm.mq.jakarta.client closure resolves to seed + BC trio + jakarta.jms-api + org.json:json at the versions the seed's POM declares |
+| TestResolveClosureMQJavax | - | the verified com.ibm.mq.allclient closure resolves to seed + BC trio + javax.jms-api + org.json:json |
+| TestResolveClosureSyslogResolvesParentProperties | - | the verified logstash-logback-encoder:9.0 -> jackson-databind:3.0.1 case: jackson-databind's own version-less dependencies are resolved through its parent jackson-base's <properties>, none marked Fallback |
+| TestResolveClosureAppliesScopeOptionalTypeFilter | - | test/provided/system/import scope, optional=true, and type=pom dependencies are all excluded from the closure; plain compile/runtime deps survive |
+| TestResolveClosureDependencyVersionFromDependencyManagement | - | a version-less dependency resolves from its parent's <dependencyManagement> |
+| TestResolveClosurePropertyDefinedTwoParentsUp | - | a `${property}` version defined only on the grandparent POM still resolves by walking the full parent chain |
+| TestResolveClosureUndefinedPropertyFallsBackToLatestStable | - | a `${property}` with no definition anywhere in the parent chain falls back to that dependency's own latest stable release, marked Fallback |
+| TestResolveClosureDependencyCycleTerminates | - | a dependency cycle (x -> y -> x) terminates and both artifacts appear exactly once |
+| TestResolveClosureArtifactCountCap | - | a closure past maxArtifacts is truncated to exactly maxArtifacts rather than growing unbounded |
+| TestResolveClosureHostileGroupIDIsDropped | - | a dependency with a path-traversal groupId is dropped from the closure and never reaches the HTTP layer, while a sibling good dependency still resolves |
+| TestResolveClosureUnreachableSeedMetadataIsError | - | the seed's own maven-metadata.xml being unreachable is an error |
+| TestResolveClosureUnreachableDependencyPomKeepsArtifact | - | a non-seed dependency whose POM 404s stays in the closure at its declared version rather than being dropped or erroring; libs.Download's own per-artifact Failure is where a real fetch problem surfaces |
+| TestResolveClosureDependencyVersionUsesProjectVersionProperty | - | resolveProperty's `${project.version}` case: a dependency version referring back to its declaring POM's own version resolves correctly |
+| TestResolveClosureDependencyVersionUsesProjectGroupIdProperty | - | resolveProperty's `${project.groupId}` case: the substitution fires and its result reaches the closure unchanged |
+| TestResolveClosureDependencyUnresolvableVersionAndUnreachableMetadataIsDropped | - | resolveDependencyVersion's ok=false path: a dependency with no version anywhere in the chain, whose own latest-stable fallback also 404s, is silently dropped from the closure like any other malformed item |
+| TestResolveClosureAtPinnedVersionNeverFetchesMetadata | - | resolveClosureAt with a pinned version never consults maven-metadata.xml at all, and the seed artifact is not marked Fallback |
+| TestResolveClosureAtPinnedVersionResolvesDependencyClosure | - | the verified com.ibm.mq.jakarta.client:9.4.2.0 pin still resolves its jakarta.jms-api:3.0.0 dependency through the normal parent/dependency chain |
+| TestResolveClosureAtPinnedVersionNotFoundIsActionableError | - | a pinned version that does not exist on Maven Central is an error naming both the version and the artifact |
+| TestResolveClosureAtPinnedVersionInvalidCharsetIsError | - | a pinned version outside the safe coordinate charset is rejected before it can reach the HTTP layer |
+| TestResolveParentChainDetectsCycle | - | a parent-POM cycle (a -> b -> a) is detected and errors rather than looping forever |
+| TestResolveParentChainExceedsMaxDepth | - | a parent chain past maxParentDepth (with no cycle) is capped with an error |
+| TestJarURL | - | jarURL assembles the Maven Central path from group/artifact/version exactly |
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestSplitJarBasename | hyphenated / dotted / short date-like / hyphen-in-version / Final qualifier / alpha qualifier / underscore in version / no digit-led hyphen / plain | splitJarBasename recovers (artifact, version) from a real jar filename across every naming convention lib-list actually contains, and refuses a name with no digit-led hyphen to split on |
+| TestSplitJarBasename | classifier stripped (netty native, sources) | a trailing classifier is not part of the version and is dropped, so the entry parses instead of being rejected whole |
+| TestValidateImageVersionQualifiers | accepted / rejected | Final/RELEASE/GA/SP join numerics and pre-release qualifiers as orderable, while genuine garbage (9zzzzzzzzzzz, a bare classifier, an unknown word) stays rejected -- the gate exists so a stale entry cannot compare as newer than a real release |
+| TestImageNameTag | hub / no namespace / registry with a port / no tag / digest / empty | an image reference splits into name and tag; the tag separator is found in the last path element so a registry port is not mistaken for it |
+| TestImageMismatchNote | silent: none / captured tag / newer tag / the floor itself / past every capture / registry mirror. warns: below the floor / different image / digest / no tag | the embedded list describes a RANGE, so any release at or above `EmbeddedListMinVersion` is silent -- a differing tag is not itself a mismatch; below the floor, a different image, or a reference with no comparable tag warns and names both the reference and what it was judged against |
+| TestDownloadImageMismatchReported | uncovered (2.9.0) / covered (2.13.0, 2.14.1) / none / --omit-lib-file | the check end to end: only an image the embedded list cannot speak for warns, both ends of the covered range stay silent, and a named omit list suppresses it -- the operator declared that list, as with an explicit --url. Every suppression case uses the uncovered reference, so it cannot pass vacuously |
+| TestEmbeddedOmitListFullyParses | - | every line of the shipped image list either is not a jar reference or parses to an orderable version, so a future capture that reintroduces an unparseable shape fails the build instead of printing warnings on every run |
+| TestSplitJarBasenameRejectsNonJar | - | a non-.jar name is rejected outright |
+| TestLoadImageLibsSkipsCommentsAndBlankLines | - | a `#`-commented header line and blank/whitespace-only lines are skipped, leaving only the real jar entry |
+| TestLoadImageLibsSkipsUnsplittableLineWithoutFailing | - | a line that does not split into artifact+version (e.g. jrt-fs.jar) is skipped rather than failing the whole load |
+| TestLoadImageLibsToleratesSurroundingWhitespace | - | leading/trailing whitespace and a trailing \r around a jar name do not stop it from loading |
+| TestLoadImageLibsBadPathIsError | - | a nonexistent --omit-lib-file path is an error |
+| TestLoadImageLibsEmbeddedDefault | - | an empty path loads the binary's embedded default (captured from solace/solace-pubsub-connector-ibmmq:2.13.0), which carries the BC/jakarta.jms-api/json/logstash-logback-encoder versions and deliberately omits com.ibm.mq.jakarta.client (the licensing carve-out) |
+| TestImageSatisfies | image has a newer version / equal version / older version / does not have it at all | imageSatisfies reports provided=true and the image's version for an equal-or-newer match, and provided=false (with the image's version, or none) otherwise |
 
 ## internal/statusreport
 
@@ -482,473 +1002,6 @@ Tests: [statusreport_test.go](../internal/statusreport/statusreport_test.go), [p
 | TestJSONIsTheSameModelTheTablesRender | - | the document round-trips, carries schemaVersion and the field spellings a consumer keys off (the compatibility contract), and omits an unset field entirely rather than emitting null |
 | TestJSONEmptyRunIsAnEmptyList | - | an empty run is `[]`, so a consumer can iterate without a nil check |
 
-## internal/yamlwriter
-
-The indentation-aware line writer every generated artifact is built from. Four packages carried private copies that drifted; one definition keeps their indentation identical.
-
-Tests: [yamlwriter_test.go](../internal/yamlwriter/yamlwriter_test.go)
-
-| Test | Case | Verifies |
-|------|------|----------|
-| TestWriterLineIndent | - | Line indents by the given level across several nesting depths |
-| TestWriterRawPassthrough | - | Raw writes pre-formatted text between Line calls without indenting it |
-| TestSplitLines | trailing newline | a terminating newline does not yield a trailing empty element |
-| TestSplitLines | no trailing newline | the final line is kept |
-| TestSplitLines | empty string | yields no lines |
-| TestSplitLines | blank line inside | interior blank lines are preserved |
-
-## internal/render
-
-Render application.yml from the consolidated model via the deterministic ordered emitter.
-
-Tests: [render_test.go](../internal/render/render_test.go)
-
-| Test | Case | Verifies |
-|------|------|----------|
-| TestApplicationRich | - | rendered output contains all expected substrings for rich MQ->Solace workflow (ssl bundle, binders, jms/solace bindings, defaults blocks) |
-| TestApplicationRichExact | - | generated application.yml matches richApplicationWant golden fixture byte-for-byte |
-| TestApplicationMinimalNoOptionalBlocks | ssl: / logging: | ssl: and logging: blocks stay absent when defaults are empty |
-| TestApplicationMinimalNoOptionalBlocks | management: / security: | management: and security: are unconditional now: the fixed exposure list and the reserved solmq-status account render even with empty defaults |
-| TestApplicationMinimalNoOptionalBlocks | type: undefined | undefined binder is always emitted even with minimal config |
-| TestApplicationLeaderElection | - | leader-election, fail-over, queue and management render for active_standby, and the whole session block matches exactly: binder-shared credential names, solace-defaults between the credentials and api-properties, verbatim passthrough last |
-| TestApplicationLeaderElectionSessionMatchesBinderKeySet | - | rendered from one connection, the session key sequence equals the binder solace.java key sequence -- the guard against the two renderers drifting apart again |
-| TestApplicationLeaderElectionSessionPlaintext | - | a non-tcps session emits no SSL_ keys but still carries solace-defaults and its own api-properties, and falls back to the LEADER_ELECTION_* names |
-| TestApplicationOmitsEmptyCredentials | conn-name: h(1414) | binder identity fields still rendered when credentials absent |
-| TestApplicationOmitsEmptyCredentials | queue-manager: QM1 | binder identity fields still rendered when credentials absent |
-| TestApplicationOmitsEmptyCredentials | host: tcp://b:55555 | binder identity fields still rendered when credentials absent |
-| TestApplicationOmitsEmptyCredentials | msg-vpn: v | binder identity fields still rendered when credentials absent |
-| TestApplicationOmitsEmptyCredentials | user: | empty user credential line omitted, no null value emitted |
-| TestApplicationOmitsEmptyCredentials | password: | empty password credential line omitted, no null value emitted |
-| TestApplicationOmitsEmptyCredentials | client-username: | empty client-username credential line omitted, no null value emitted |
-| TestApplicationOmitsEmptyCredentials | client-password: | empty client-password credential line omitted, no null value emitted |
-| TestApplicationQuotesRiskyScalars | password: "p@ss #1" | a value containing " #" is double-quoted so it is not read as a comment |
-| TestApplicationQuotesRiskyScalars | client-username: "no" | a bool-lookalike is double-quoted so it stays a string |
-| TestApplicationQuotesRiskyScalars | client-password: "key: value" | a value containing ": " is double-quoted so it does not open a nested mapping |
-| TestApplicationQuotesRiskyScalars | plain values | ordinary hosts, conn-names, users and destinations stay unquoted |
-| TestApplicationBlockScalarPassthrough | - | a literal (\|) passthrough value is re-emitted as an indented block scalar, never flattened onto the key line |
-| TestApplicationSkipsBundleWithoutTruststore | - | tls: true with no tls.truststore emits no ssl bundle or ssl-bundle reference, keeps MQTLS set, and warns |
-| TestApplicationConfigImport | ConfigImport set / empty | Application() leads with spring.config.import when Model.ConfigImport is set, and omits the block entirely when it is empty |
-| TestApplicationSecurityUserRoles | - | a roles-bearing user renders a block-style roles sequence under its password; a role-less user and the reserved solmq-status account emit no roles key at all, keeping pre-roles output byte-identical |
-
-| TestRetiredPerPlatformImageRejected | kubernetes / docker / podman | each retired per-platform image key errors, and the message names the top-level image: block that replaced it |
-| TestImageBlockRequired | absent / no name / no tag / unsafe repo, name, tag | the top-level block is required once a platform is in play, tag included (an untagged image resolves to :latest and pins nothing), and the fields that reach an argv are charset-checked |
-| TestImageBlockRequired | bad pass-env name / either credential set both ways | the registry account (`user`/`pass`) goes through the shared checkCred, so it gets the same literal-xor-env rule and variable-name check as every other credential |
-| TestImageNotRequiredWithoutAPlatform | - | `generate config` renders application.yml alone and pulls nothing, so no image is demanded |
-| TestImagePullSecretChecks | name alone | referencing a Secret requires no registry credentials at all |
-| TestImagePullSecretChecks | name required / DNS-1123 | the Secret name is required and held to the label rule the cluster would apply |
-| TestImagePullSecretChecks | create without credentials | create errors unless the registry account is set, in either the literal or the -env form |
-| TestImagePullSecretChecks | create, variable unset / set | an unset variable warns rather than errors, so a config can be linted without the deploy secrets |
-| TestRetiredPerPlatformTimezoneRejected | kubernetes / docker / podman | each retired per-platform timezone key errors and names the top-level timezone: key |
-| TestTopLevelTimezoneUnsafe | unsafe / realistic | the top-level timezone keeps the charset gate the per-platform key had, and an empty value is not an error |
-
-## internal/deploy
-
-Render the Kubernetes manifests -- Namespace/ConfigMap/Secret/Deployment/Service, syslog, libs (PVC or download), and multi-instance layout.
-
-Tests: [deploy_test.go](../internal/deploy/deploy_test.go)
-
-| Test | Case | Verifies |
-|------|------|----------|
-| TestRenderFull | - | rendered output contains all expected fragments: configmap, secrets, deployment env/mounts/probes/resources, service; blank line preserved in block scalar |
-| TestRenderFull_ExactDocument | - | Render output matches wantRenderFull golden document byte-for-byte |
-| TestRenderNoSecretsNoServiceNoTLS | - | output omits JAVA_TOOL_OPTIONS, envFrom, Secret, Service, stores volume, logback-spring.xml, syslog host, libs volume, initContainers |
-| TestRenderSyslogUDP | - | UDP syslog config emits SyslogAppender, appname/host/port env vars, logback mount; no LogstashTcpSocketAppender |
-| TestRenderSyslogTCP | - | TCP syslog config emits LogstashTcpSocketAppender and destination tag; no SyslogAppender or AsyncAppender |
-| TestRenderLibsPVCExisting | - | existing libs PVC yields claimName and mount, no initContainers or PersistentVolume |
-| TestRenderLibsPVCCreate | - | created libs PVC emits PV/PVC docs with NFS server/path, storage size, claim name, PV/PVC precede Deployment |
-| TestRenderLibsDownload | emptyDir | init container wgets each jar url into /libs, mounted via emptyDir |
-| TestRenderLibsDownload | existing PVC download | download target uses claimName dl-pvc instead of emptyDir |
-| TestRenderNamespaceAlwaysFirst | - | Namespace doc is first in output and precedes ConfigMap |
-| TestRenderExistingSecrets | - | existing creds/tls secrets produce no Secret doc, referencing my-creds and secretName my-tls |
-| TestRenderConfigMapStatusScript | - | the ConfigMap always carries the status script under its own `status` key, alongside application.yml |
-| TestRenderStatusScriptMountAfterLibs | - | the single-file status mount is declared after the libs directory mount, so it is not shadowed, and carries `subPath: status` |
-| TestManagementPort | Defaults.Management.Port 9999 | ManagementPort returns 9999, ignoring Kube.Service.Port entirely |
-| TestManagementPort | empty Defaults | ManagementPort returns 8090 (the connector default) |
-| TestManagementPort | nil Defaults | ManagementPort returns 8090 (the connector default) |
-| TestRenderLeaderModeLabels | nil Defaults / standalone | the le-mode label is standalone and role: active is present |
-| TestRenderLeaderModeLabels | active_active | le-mode is active_active and role: active is present |
-| TestRenderLeaderModeLabels | active_standby | le-mode is active_standby and role: active is withheld (only the actuator knows the live role) |
-| TestRenderSelectorMatchLabelsAppOnly | - | spec.selector.matchLabels stays app-only even when the pod template carries le-mode/role, since a selector must stay immutable for the Deployment's life |
-| TestQuoteRes | 1 | quoteRes("1") returns quoted "1" |
-| TestQuoteRes | 250m | quoteRes("250m") returns unquoted 250m |
-| TestQuoteRes | 512Mi | quoteRes("512Mi") returns unquoted 512Mi |
-| TestRenderNoResources | - | empty Resources produces no resources: block in output |
-| TestRenderServicePort | host:container distinct ports | Render emits port: 8081 / targetPort: 9000 verbatim from the given spec.Port |
-| TestRenderServicePort | resolved to the default management port | Render emits port/targetPort 8090 for a Port already resolved to the connector default |
-| TestRenderServicePort | resolved to a non-default management port | Render emits port/targetPort 9500 for a Port already resolved to defaults.management.port 9500 |
-
-## internal/dockergen
-
-Render the docker compose file from the target model.
-
-Tests: [dockergen_test.go](../internal/dockergen/dockergen_test.go)
-
-| Test | Case | Verifies |
-|------|------|----------|
-| TestRenderFull_WithEverything | - | full golden output with project-name, creds, store, libs, MQTLS, ports, timezone matches exactly; the compose project is the document's first line |
-| TestRenderFull_Minimal | - | minimal golden output omits the leading name: line along with restart, ports, environment, env_file, volumes blocks |
-| TestEnvironmentBranches | TZ only, MQTLS false | environment block contains only TZ: UTC, no JAVA_TOOL_OPTIONS |
-| TestEnvironmentBranches | MQTLS only, no timezone | environment block contains only JAVA_TOOL_OPTIONS line, no TZ |
-| TestSecretsBranches | at least one secret | the per-service secrets list and the top-level environment-provider secrets block are both emitted |
-| TestSecretsBranches | no secrets | neither block, nor any env_file line, is ever emitted |
-| TestLabelsPerMode | empty defaults to standalone | le-mode label defaults to standalone and role: active is present |
-| TestLabelsPerMode | standalone / active_active | le-mode matches the mode and role: active is present |
-| TestLabelsPerMode | active_standby | le-mode is active_standby and role: active is withheld |
-| TestContentIndentationAndBlankLines | nested key indentation | nested line gets extra indent on top of 6-space block indent |
-| TestContentIndentationAndBlankLines | blank line preserved | blank line stays empty with no spaces between content lines |
-| TestContentIndentationAndBlankLines | no trailing spaces | no rendered line has trailing spaces |
-| TestStoresOnlyAndLibsOnly | stores only | volumes block contains only the store mount line |
-| TestStoresOnlyAndLibsOnly | libs only | volumes block contains only the libs mount line |
-| TestSplitLinesNoTrailingNewline | - | app.yml lacking trailing newline still renders content line with no dropped element |
-| TestStatusScriptConfigSourceAndTarget | - | the service references a second `<name>-status` config and mounts it at /app/external/.status-script |
-| TestStatusScriptContentIsEscaped | - | the status script body is inlined under the status config's content: block, indented 6 spaces, blank line preserved as truly empty, and its shell `$` doubled |
-| TestContentEscapesDollarsForCompose | $VAR / ${VAR} / ${VAR:-default} / $(cmd) / $$ | each shape reaches the content block with every `$` doubled, so compose's interpolation pass delivers it unchanged instead of blanking it or rejecting the document |
-| TestContentEscapesDollarsForCompose | no lone `$` | dropping every `$$` pair from the rendered document leaves no `$` behind anywhere |
-| TestAppYAMLSecretPlaceholdersAreNotInterpolated | - | application.yml's ${...} credential placeholders render doubled so compose cannot substitute the values the CLI passes it, while the `secrets:` provider entries -- compose's own -- stay unescaped |
-| TestRenderSyslogAddsConfigAndEnv | - | compose inlines the logback config as a third configs entry targeted at logback.ContainerPath, and sets the three LOGGING_SYSLOG_* env vars the config reads at runtime |
-| TestRenderSyslogTCPUsesTheLogstashAppender | - | the protocol reaches the inlined config: tcp renders the logstash appender, since the two have different classpath requirements and the wrong one fails at runtime rather than at generate time |
-| TestRenderWithoutSyslogEmitsNeither | - | no block, no config entry, no env vars |
-
-## internal/podmangen
-
-Render the podman run script and the quadlet units from the target model.
-
-Tests: [podmangen_test.go](../internal/podmangen/podmangen_test.go)
-
-| Test | Case | Verifies |
-|------|------|----------|
-| TestRenderRunScriptFull | - | full input renders run script matching exact golden string byte-for-byte |
-| TestRenderRunScriptSecretPreamble | - | the secret-loading preamble carries no credential value, only ${NAME:?...} referencing the stable name |
-| TestRenderRunScriptNoSecretsOmitsPreamble | - | no Secrets in Input emits no `podman secret` lines at all |
-| TestRenderRunScriptMinimal | - | minimal input renders run script matching exact golden string byte-for-byte |
-| TestRenderQuadletFull | - | full input yields 1 unit named solmq-connector.container with content matching golden string |
-| TestRenderQuadletMinimal | - | minimal input yields 1 unit with content matching golden string (no Service section, no restart) |
-| TestLeaderLabelsPerMode | empty defaults to standalone / standalone / active_active | RenderRunScript and RenderQuadlet both carry the le-mode label and role: active |
-| TestLeaderLabelsPerMode | active_standby | both renderers carry le-mode active_standby and withhold role: active |
-| TestStatusScriptMountNestsAfterLibs | - | in both renderers, the status script mount/volume is declared after the libs mount, so it nests rather than being shadowed |
-| TestStatusScriptMountOmittedWhenPathEmpty | - | an empty StatusScriptPath omits the status mount entirely in both renderers, rather than mounting an empty source |
-
-| TestImagePullSecretStates | no block / name alone / created | imagePullSecrets is absent, rendered without a Secret, or rendered with one -- the middle case is what stops an apply overwriting a Secret the operator built |
-| TestImagePullSecretPayloadIsOpaqueToDeploy | - | deploy places the already-encoded payload verbatim and the registry password appears nowhere outside it |
-| TestEnvBlockOmittedWhenEmpty | nothing to emit | env: is omitted entirely rather than rendered with nothing beneath it, now that the timezone is one optional top-level key |
-| TestEnvBlockOmittedWhenEmpty | TZ only / MQTLS only | either entry alone opens the block, and no timezone means no TZ entry |
-| TestRunScriptSyslogMountsAndSetsEnv | - | podman cannot inline file content, so the run script bind-mounts the logback file read-only and sets the three LOGGING_SYSLOG_* vars |
-| TestQuadletSyslogMountsAndSetsEnv | - | the same for the quadlet unit, which spells Volume=/Environment= differently but has to carry both |
-| TestSyslogAbsentEmitsNoMountOrEnv | run / quadlet | no block, no mount, no env, in either mode |
-
-## internal/gen
-
-Orchestrate parse -> validate -> consolidate -> render, resolve credentials/stores, and assert the byte-for-byte golden fixtures.
-
-Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](../internal/gen/golden_test.go), [htmlgolden_test.go](../internal/gen/htmlgolden_test.go)
-
-| Test | Case | Verifies |
-|------|------|----------|
-| TestParseExpandsNonCredentialAndWarnsOnUnsetDefaultless | - | parse() expands host/msg-vpn from Lookup, leaves client-password-env verbatim, and returns exactly one warning naming TYPO for the unset defaultless conn-name variable |
-| TestResolveStores | truststore+keystore with ReadFile | resolves 2 store files, first named t.jks |
-| TestResolveStores | no ReadFile provided | missing ReadFile returns error |
-| TestResolveStores | ReadFile returns error | read error propagates |
-| TestResolveStores | no stores configured | empty Defaults yields 0 stores, no error |
-| TestToIssues | - | toIssues wraps each string into an Issue carrying it as Msg |
-| TestNamesAndPaths | pathIn base variants | empty base returns bare path; trailing/no-trailing slash both join to /base/a |
-| TestTargetMounts | tls+stores+libs configured | 2 store mounts at fixed default mount path (ignores custom MountPath), libs mount uses resolved abs source and given target |
-| TestTargetMounts | nil stores and libs | opt-in mounts yield nil,nil when sections absent |
-| TestResolveCredentials | nil refs | no kvs, no error |
-| TestResolveCredentials | literal + -env mix | literal ref passes through, -env ref reads from the resolver's environment |
-| TestResolveCredentials | unset -env variable | fails loud naming the stable secret and the variable, never a value |
-| TestResolveCredentials | no environment access | fails loud rather than silently resolving to empty |
-| TestConfigRejectsSecretNameConflict | security.users "ops.1" and "ops-1" | Config renders nothing and errors naming the contested key *and both claiming positions*, rather than emit a config where one credential silently takes the other's password |
-| TestConfigRejectsSecretNameConflict | same spec through Validate | the collision is caught while linting too, not only at generate/deploy -- names are assigned in consolidate, so Validate builds to see them |
-| TestValidateCleanSpecStillPasses | no collision | the build call Validate now makes adds no errors of its own, and consolidate's warnings do not leak into validate output |
-| TestConfigWorkflowCap | 21 workflows | Config produces no output and one error naming the count, the 20 cap, and the split-into-folders remedy |
-| TestConfigWorkflowCap | 20 workflows | exactly at the cap does not error |
-| TestGenerateKubernetesWorkflowCap | 21 workflows | GenerateKubernetes produces no manifest and the same workflow-cap error |
-| TestConfigCarriesSecurityUserRoles | - | end-to-end: a roles-bearing env.yaml validates clean and its role reaches the rendered application.yml, while the reserved account still renders none |
-| TestConfigNoSecretsLeak | - | every rendered password is a ${STABLE} placeholder except the one permitted literal: the reserved spec.StatusUserName account |
-| TestGenerateDockerBasics | - | generates non-empty compose opening with the defaulted `name: solace-ibmmq-connectors` project line and containing the image; all four credential positions render as top-level environment-provider secrets, never inlined as values, and each ${STABLE} placeholder in application.yml is doubled so compose cannot interpolate the value in |
-| TestGeneratePodmanRunAndQuadlet | mode: run | produces a run script (no unit) that loads each secret into podman's store before `podman run`, never carrying the value itself |
-| TestGeneratePodmanRunAndQuadlet | ForceQuadlet true | produces quadlet units, no run script |
-| TestResolveStatusPasswordFixedRand | - | a fixed Rand hook yields the exact 32-lowercase-hex-char literal (16 bytes hex-encoded) |
-| TestResolveStatusPasswordEnvOverride | - | a set, non-empty spec.StatusUserPasswordEnvVar is used verbatim and Rand is never consulted |
-| TestResolveStatusPasswordEmptyEnvFallsBackToRand | - | an empty override is treated as unset, falling back to Rand rather than returning "" |
-| TestResolveStatusPasswordRandError | - | a Rand failure surfaces as an actionable error naming the underlying cause, never a predictable fallback password |
-| TestConfigStatusPasswordRandErrorNoOutput | - | the same Rand failure through Config is a hard error with no output |
-| TestGenerateKubernetesCarriesStatusScript | - | the ConfigMap gets a "status: \|" key carrying the rendered script, addressed to spec.StatusUserName on the resolved management port |
-| TestGenerateDockerCarriesStatusScript | - | compose gets a second top-level config (`<name>-status`) inlining the rendered script, mounted at statusscript.ContainerPath |
-| TestGeneratePodmanCarriesStatusScript | - | PodmanPlan.StatusScript names `<name>-status` and its on-disk mount path is BaseDir-resolved exactly like AppYAML |
-| TestGenerateMissingTargetSection | kubernetes | error contains kubernetes target requires a 'kubernetes:' section in env.yaml |
-| TestGenerateMissingTargetSection | docker | error contains docker target requires a 'docker:' section in env.yaml |
-| TestGenerateMissingTargetSection | podman | error contains podman target requires a 'podman:' section in env.yaml |
-| TestGenValidateStoresWarning | - | kubernetes credentials.create (name-only) plus a TLS-without-stores config yields no errors and exactly one stores-omitted advisory warning |
-| TestGeneratorPageGoldenInSync | - | the golden embedded in solmq-conn-util-generator.html matches testdata/golden/application.yml (regenerate with -update-html-golden) |
-| TestGoldenConfig | - | generated config output matches testdata/golden/application.yml byte-for-byte, one instance |
-| TestGoldenKubernetesCreate | - | generated kubernetes manifests (namespace, configmap incl. status script, secret, stores, pv, pvc, deployment with secrets-volume/stores/syslog/libs mounts and le-mode/role labels, service) match golden fixture byte-for-byte |
-| TestGoldenKubernetesNoSecrets | - | generated manifests without secrets/syslog/libs (namespace, configmap incl. status script, deployment, service) match golden fixture byte-for-byte |
-
-| TestDockerConfigJSON | private registry / docker hub fallback | the payload is an auths map keyed by registry carrying the account plus the base64 user:password the engines send |
-| TestDockerConfigJSONEscapesAwkwardValues | - | a password carrying quotes, a backslash or JSON of its own round-trips as data rather than reshaping the document -- which is why it is marshalled, not concatenated |
-| TestResolvePullSecret | reference only | resolves to the name alone and never reads the registry password |
-| TestResolvePullSecret | create | builds the payload from the environment |
-| TestResolvePullSecret | both -env / both literal | all four halves resolve: the -env pair reads each variable, and a literal pair needs no environment access at all |
-| TestResolvePullSecret | unset user-env | an unset user variable fails naming that variable, not only the password one |
-| TestResolvePullSecret | variable unset / no environment access | both fail loudly, naming the variable |
-| TestResolvePullSecret | no image block / partial image block | the guard that exists so a caller who skipped validate gets an error rather than a nil dereference |
-| TestGenerateKubernetesImagePull | no block / reference / create | the wiring from config to rendered manifest: nothing, an imagePullSecrets entry alone, or the entry plus the dockerconfigjson Secret -- the integration point TestResolvePullSecret skips |
-| TestGenerateKubernetesImagePull | payload and leak check | the rendered payload decodes to the real account, and the registry password appears nowhere else in the manifest |
-| TestGenerateKubernetesImagePull | variable unset | create fails the generate with an issue naming the variable |
-
-## internal/runner
-
-The os/exec seam -- ParseCommand safe-tokenizing, kubectl/docker/podman deploy and remove argv, the status verb's read-only queries, the logs verb's streaming seam and per-platform argv, the cli verb's terminal-attach seam and the shared exec argv builder, quadlet scope resolution, and WriteFile modes.
-
-Tests: [runner_test.go](../internal/runner/runner_test.go)
-
-| Test | Case | Verifies |
-|------|------|----------|
-| TestHelperProcess | - | helper child-process entry point guarded by GO_WANT_HELPER_PROCESS; dispatches stdin/both/fail/drip/env/stdiokind/unknown modes |
-| TestExecArgvPerPlatform | kubernetes bare / with a namespace / with stdin / with a terminal / docker / podman | the shape each engine's flag parser actually accepts: kubectl takes -n and -c after the pod and needs the `--` terminator, docker and podman stop parsing at the container name so their flags come first and no `--` is added; the container is a constant on every kubernetes row |
-| TestExecArgvRefusesATTYWithoutStdin | - | a terminal the child cannot read from can only be a caller mistake, so it is refused rather than quietly produced |
-| TestExecArgvUnknownPlatform | - | an unrecognised platform names the three that exist rather than producing a half-built argv |
-| TestOSAttachHandsTheChildTheCallersFilesNotPipes | - | the child reports that all three standard files are the caller's own regular files; os/exec substitutes a pipe for any writer that is not an *os.File, and a pipe would make the engine refuse the tty |
-| TestOSAttachStdinIsTheHandedFile | - | what the caller passes as stdin is what the child reads, with nothing copied through this process |
-| TestOSAttachReportsTheChildExitStatus | - | a session that ran and exited 3 is reported as 3 with no error, which is what the cli verb's exit-code contract rests on |
-| TestOSAttachEnvReachesChild | - | the third call site of the applyCmdEnv split: supplied values win over ambient ones here exactly as under Run |
-| TestOSAttachRefusesACmdCarryingStdinText | - | "write this string to the child" and "give the child the terminal" are contradictory, so the Cmd is refused by name rather than one of them silently honoured |
-| TestOSAttachRefusesANilFile | no stdin / no stdout / no stderr | refused here rather than at the child's first write, where os/exec panics on a typed-nil *os.File |
-| TestOSAttachRejectsEmptyAndUnresolvableArgv | - | mirrors the Run and Stream refusals; all three go through resolveArgv0 so the rules cannot drift apart |
-| TestOSRunWiresStdinToChild | - | OS.Run passes stdin through to child, output equals hello-stdin |
-| TestOSRunCombinesStdoutAndStderr | - | combined output contains both stdout-line and stderr-line |
-| TestOSRunNonZeroExitReturnsErrorWithOutput | - | non-zero exit returns non-nil error and output still contains before-exit |
-| TestOSRunAcceptsAbsolutePathArgv0 | - | absolute path as argv0 runs successfully, output equals abs-argv0-ok |
-| TestOSRunEnvReachesChildAndAmbientInherited | - | Cmd.Env entries reach the child and override an ambient var of the same name, while an ambient-only var still passes through |
-| TestParseCommand | kubectl | parses to [kubectl], ok |
-| TestParseCommand | kubectl --context prod -n solace | parses to [kubectl --context prod -n solace] tokens, ok |
-| TestParseCommand | oc | trims whitespace to [oc], ok |
-| TestParseCommand | empty string | returns error, nil result |
-| TestParseCommand | whitespace only | returns error, nil result |
-| TestParseCommand | kubectl; rm -rf / | semicolon rejected as unsafe, error |
-| TestParseCommand | kubectl $(evil) | $ and ( rejected as unsafe, error |
-| TestParseCommand | kubectl \`id\` | backtick rejected as unsafe, error |
-| TestParseCommand | kubectl --kubeconfig "a b" | quote+space rejected as unsafe, error |
-| TestParseCommand | curl | not on the kubernetes allowlist, error |
-| TestParseCommand | /tmp/evil | path, not a bare name, error |
-| TestParseCommandExtraAllowed | sudo podman without extraAllowed | rejected, error |
-| TestParseCommandExtraAllowed | sudo podman with extraAllowed=[sudo] | accepted, argv [sudo podman] with the platform binary unmodified |
-| TestKubernetesDeployApplyOnStdin | - | deploy issues one call kubectl --context prod apply -f - with manifest on stdin |
-| TestKubernetesRemoveUsesDeleteVerb | - | the remove action issues argv [oc delete -f -] |
-| TestKubernetesRejectsUnsafeCommand | - | unsafe command rejected, error returned, zero calls made |
-| TestKubernetesUnknownAction | - | unknown action rejected, error returned, zero calls made |
-| TestDockerUpAndDown | - | deploy runs compose up -d, remove runs compose down, correct argv each |
-| TestDockerRejectsUnsafeCommand | - | unsafe command rejected, error returned, zero calls made |
-| TestResolveQuadletScope | system scope | UserMode false and Dir equals quadletSystem |
-| TestResolveQuadletScope | user scope | UserMode true and Dir has quadletUserSub suffix |
-| TestResolveQuadletScope | user scope with dir override | Dir equals override /custom/dir |
-| TestResolveQuadletScope | bogus scope | unknown scope returns error |
-| TestPodmanDeployReloadThenStart | - | user mode issues daemon-reload then start with --user flag in order |
-| TestPodmanDeploySystemModeNoUserFlag | - | system mode issues systemctl daemon-reload without --user flag |
-| TestPodmanRemoveStopsRemovesReloads | - | stop then daemon-reload called and unit file removed from disk |
-| TestPodmanDeployStartFailureIsReported | - | start failure on call 1 surfaces error containing 'start a.service', 2 calls made |
-| TestDockerUnknownAction | - | unknown action rejected, error returned, zero calls made |
-| TestPodmanRemoveStopFailureIsReported | - | stop failure surfaces error containing 'stop solmq-connector.service' |
-| TestPodmanSecretCreateRemovesThenCreatesValueOnStdin | - | PodmanSecretCreate issues rm --ignore then create with the value on stdin, never in argv |
-| TestPodmanSecretCreateSkipsCreateWhenRmFails | - | a failed rm surfaces an error naming it, and create never runs |
-| TestPodmanSecretCreateReportsCreateFailure | - | a failed create surfaces an error naming it, after rm still ran |
-| TestPodmanSecretCreateRejectsUnsafeCommand | - | an unsafe command is rejected before anything runs |
-| TestPodmanSecretRemoveBatchesNames | - | PodmanSecretRemove issues one batched `secret rm --ignore` call naming every secret |
-| TestPodmanSecretRemoveNoNamesIsNoop | - | an empty name list invokes the runner zero times and returns no error |
-| TestPodmanSecretRemoveRejectsUnsafeCommand | - | an unsafe command is rejected before anything runs |
-| TestPodmanSecretRemoveReportsFailure | - | a failed rm surfaces an error naming the operation |
-| TestWriteFileCreatesDirsAndMode | - | creates nested dirs, writes content, sets mode 0600 (non-windows) |
-| TestWriteFileDoesNotTightenExistingFileMode | - | content replaced but existing 0644 mode left unchanged (non-windows) |
-| TestWriteFileParentIsFileReturnsError | - | parent path is a file: MkdirAll error surfaces naming the blocker path |
-| TestWriteFileTargetIsDirectoryReturnsError | - | target path is a directory: write error surfaces naming the target path |
-| TestOSRunWritesNothingToStderr | - | OS.Run writes nothing to stderr of its own; the child's output reaches the caller only through the returned combined output |
-| TestOSRunRejectsUnresolvableArgv0 | - | a binary LookPath cannot find on PATH is a Run error, not a deferred exec.Start failure |
-| TestPreflightKubernetesArgvDeployNoNamespace | - | kubernetes deploy preflight issues <argv> auth can-i create deployment with no --namespace when namespace is empty |
-| TestPreflightKubernetesArgvRemoveWithNamespace | - | kubernetes remove preflight issues <argv> auth can-i delete deployment --namespace <ns> |
-| TestPreflightDockerArgvIsInfo | - | docker preflight issues <argv> info |
-| TestPreflightPodmanArgvIsInfo | - | podman preflight issues <argv> info |
-| TestPreflightFailureWrapsPlatformHint | kubernetes / docker / podman | a failing probe's error contains "preflight failed for <platform>", preserves the underlying cause, and carries the platform's login/daemon hint |
-| TestPreflightRejectsDisallowedBinaryBeforeRunning | - | a command outside the platform allowlist (curl) is rejected before the probe ever runs, zero runner calls |
-| TestPreflightExtraAllowedThreadsThrough | - | "sudo podman" is rejected without extraAllowed and accepted with it, running argv [sudo podman info] |
-| TestPreflightUnknownAction | - | an action other than deploy/remove is rejected, zero runner calls |
-| TestKubernetesPodsJSONArgv | by selector, no namespace / by selector in a namespace / explicit names / every namespace | `get pods ... -o json` in each of its three scopings; `--all-namespaces` outranks a namespace resolved from env.yaml, so a cluster-wide search is never narrowed back down |
-| TestKubernetesPodsJSONRunFailureWraps | - | a run failure surfaces as an error naming the "listing pods" operation |
-| TestKubernetesGetJSONArgv | deployment in a namespace / no namespace / a referenced object | `get <kind> <name> [-n ns] -o json` for the workload summary and for each object a pod references |
-| TestKubernetesGetJSONMissingObjectIsAnError | - | a missing object exits non-zero and the error names it, which is the answer the components check asks for -- reported as MISSING rather than as a failed run |
-| TestKubernetesTopArgv | by selector / explicit names / every namespace | `top pod --containers --no-headers`, attributing the sample to one container so it is comparable with that container's limits |
-| TestKubernetesTopWithoutMetricsAPIWraps | - | a cluster with no metrics API fails here, naming the operation, so the caller can degrade to a note |
-| TestEngineInspectJSONArgv | - | one `inspect a b c` covers every target, and a chained command keeps its own tokens ahead of the subcommand |
-| TestEngineInspectJSONNoNamesIsAnErrorAndRunsNothing | - | inspecting nothing is an error and starts no process |
-| TestEngineInspectJSONFailureNamesTheTargets | - | a failure names the containers it was asked about |
-| TestEngineImageInspectJSONArgv | - | `image inspect <ref>`, where the registry digest lives (the container's own inspect does not carry it) |
-| TestEngineStatsArgv | - | `stats --no-stream --format <template>`: the four tab-separated template fields docker and podman render identically, and --no-stream so the call cannot stream forever |
-| TestEngineListArgv | - | `ps --all --no-trunc --format <template>` for --all discovery, including stopped containers -- an instance that died is what such a search is for |
-| TestSystemctlNRestarts | user scope / system scope / unknown unit answers nothing / no systemd on this host | `systemctl [--user] show <unit> -p NRestarts --value`, the only truthful restart count under quadlet; an empty or unreadable answer is an error so the caller can fall back to the container's own counter |
-| TestScriptInstalledArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | ScriptInstalled execs the marker-echoing probe through each platform's exec form, `-n <namespace>` only for kubernetes when given |
-| TestScriptInstalledReadsMarkers | present / absent / marker among engine chatter / present despite a non-zero exit | the answer comes from the marker on stdout, so a marker is believed even when the engine also reported a non-zero exit |
-| TestScriptInstalledUnreachableTargetIsError | engine error with no marker / clean exit with no marker | no marker at all means the probe never ran, so it errors rather than silently reporting absent |
-| TestScriptInstalledUnknownPlatform | - | an unknown platform is rejected, zero runner calls |
-| TestInstallScriptArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | InstallScript execs `mkdir -p <dir> && cat > <path>` through each platform's exec form (`-i` for stdin, `-n <namespace>` only for kubernetes when given) |
-| TestInstallScriptPassesScriptOnStdinNotArgv | - | the script body travels on stdin, never appearing in any argv token |
-| TestInstallScriptUnknownPlatform | - | an unknown platform is rejected, zero runner calls |
-| TestRunStatusScriptArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | RunStatusScript execs `sh <path>` through each platform's exec form |
-| TestRunStatusScriptReturnsOutputAlongsideNonZeroExit | - | a non-zero script exit (the status script's own 1/2 convention) is returned alongside its output, never swallowed |
-| TestRunStatusScriptUnknownPlatform | - | an unknown platform is rejected, zero runner calls |
-
-## internal/scan
-
-Discover workflow files -- YAML-only, env-file exclusion, wildcard matching, and metacharacter rejection.
-
-Tests: [scan_test.go](../internal/scan/scan_test.go)
-
-| Test | Case | Verifies |
-|------|------|----------|
-| TestScanSortsYAMLOnly | - | result sorted to [10.yml, 20.yaml], non-yaml and dirs ignored, Dir set to input dir |
-| TestScanSortsNumericallyNotLexically | - | 19/2/10/9.yaml come back as [2, 9, 10, 19], the numbering order, not the lexical [10, 19, 2, 9] |
-| TestScanSortsPrefixedNamesNumerically | - | the same ordering when the digits follow a shared prefix, as in the workflow-N.yaml names the examples verb writes |
-| TestScanExcludesEnvFile | - | env.yaml excluded even with pattern '*', only workflow-0.yaml returned |
-| TestScanEnvFileExcludedRegardlessOfPattern | - | pattern 'env*' still excludes env.yaml, only envoy.yaml remains |
-| TestScanEmptyPatternDefaultsToStar | - | empty pattern behaves as '*', matches a.yaml |
-| TestScanErrorMissingDir | - | scanning nonexistent directory returns an error |
-| TestScanPatternWildcards | workflow-* | trailing star matches workflow-0.yaml and workflow-1.yaml only |
-| TestScanPatternWildcards | *hoc* | mid-string star matches only adhoc.yaml |
-| TestScanPatternWildcards | *-1.yaml | leading star matches only workflow-1.yaml |
-| TestScanPatternNoMatchIsEmptyNotError | - | non-matching pattern 'nope*' yields empty results, no error |
-| TestScanRejectsNonStarMetachars | [bad | pattern with bracket metachar is rejected with error |
-| TestScanRejectsNonStarMetachars | wf?.yaml | pattern with '?' metachar is rejected with error |
-| TestScanRejectsNonStarMetachars | a]b | pattern with ']' metachar is rejected with error |
-| TestScanRejectsNonStarMetachars | a\b | pattern with backslash metachar is rejected with error |
-| TestMatchStar | *,anything.yaml | bare star matches any name -> true |
-| TestMatchStar | exact.yaml,exact.yaml | identical literal pattern and name match -> true |
-| TestMatchStar | exact.yaml,other.yaml | literal pattern mismatch -> false |
-| TestMatchStar | pre*,prefix.yaml | trailing star prefix match -> true |
-| TestMatchStar | *.yaml,x.yaml | leading star suffix match -> true |
-| TestMatchStar | *.yaml,x.yml | leading star suffix mismatch -> false |
-| TestMatchStar | a*b*c,axxbyyc | multiple stars match interspersed segments -> true |
-| TestMatchStar | a*b*c,axxc | multiple stars but missing required segment -> false |
-| TestMatchStar | **,anything | consecutive stars still match any name -> true |
-| TestIsYAML | a.yaml | isYAML true for .yaml extension |
-| TestIsYAML | a.yml | isYAML true for .yml extension |
-| TestIsYAML | A.YAML | isYAML true case-insensitively |
-| TestIsYAML | a.txt | isYAML false for .txt extension |
-| TestIsYAML | yaml | isYAML false when no extension present |
-| TestIsYAML | a.yamlx | isYAML false for non-exact extension match |
-
-## internal/examples
-
-Write the shipped starter files (create/skip/force) and prove they generate config.
-
-Tests: [examples_test.go](../internal/examples/examples_test.go)
-
-| Test | Case | Verifies |
-|------|------|----------|
-| TestWriteCreatesSkipsForces | first-write | first write creates 5 files (4 workflows + env.yaml), 0 skipped |
-| TestWriteCreatesSkipsForces | second-write-no-force | second write with no force skips all previously written files |
-| TestWriteCreatesSkipsForces | force-rewrite | force write rewrites all files, restoring workflow-0.yaml to embedded original content over junk |
-| TestWriteMkdirError | - | Write returns error when target dir path is under a regular file |
-| TestShippedExamplesGenerateConfig | - | embedded example set written to disk generates config via gen.Config with no errors and at least one non-empty rendered application.yml |
-
-## internal/libs
-
-Resolve the Maven dependency closure for the IBM MQ / syslog jar sets and download the jars to a local directory -- version resolution (including a pinned `--version`), image-aware omission against a connector image's jar list, and the safe download/redirect machinery.
-
-Tests: [libs_test.go](../internal/libs/libs_test.go), [maven_test.go](../internal/libs/maven_test.go), [image_test.go](../internal/libs/image_test.go)
-
-| Test | Case | Verifies |
-|------|------|----------|
-| TestDownloadURLHappyPath | - | a single --url download writes the jar under its basename with no Failed/Skipped |
-| TestDownloadRejectsNonHTTPSURL | - | a plain http:// --url errors before any request or directory creation, Report stays zero-valued |
-| TestDownloadRedirectToHTTPRejected | - | a redirect Location that downgrades to http:// is rejected as a Failure, nothing written |
-| TestDownloadRedirectToHTTPSFollowed | - | an https redirect is followed and the file is written under the originally-requested URL's basename, not the redirect target's |
-| TestDownloadSkipsExistingWithoutForce | - | an existing file is reported Skipped and no HTTP request is made at all (skip before request) |
-| TestDownloadOverwritesWithForce | - | Force true overwrites an existing file with the newly fetched bytes |
-| TestDownloadPerArtifactFailureDoesNotBlockOthers | - | one URL 404ing still lets a second URL in the same call succeed and land in Written |
-| TestDownloadUncreatableDirIsSystemic | - | a destination directory that cannot be created (parent is a file) is a systemic error, zero Report |
-| TestDownloadUnknownSetIsSystemic | - | an unrecognized Set is a systemic error naming the bad value plus both valid names, and creates no directory |
-| TestResolveSeedPerSet | mq / syslog | each set maps to its seed coordinate, and the mq seed is asserted NOT to be the javax build (com.ibm.mq.allclient), which cannot satisfy the image's jakarta.jms binder |
-| TestValidateFilenameShapeRejections | empty / . / .. / a slash or backslash segment / absolute / non-.jar / control char | each shape is rejected |
-| TestValidateFilenameShapeAccepts | - | a plain versioned jar name passes |
-| TestFilenameFromEscapedPathRejectsEscapedTraversal | - | a percent-encoded ../ segment is caught after decoding, not waved through because the raw segment looked clean |
-| TestFilenameFromEscapedPathAcceptsPlainName | - | a plain path's final segment is returned as the filename |
-| TestDownloadByteCapTripLeavesNoTempFile | - | a body exceeding maxArtifactBytes is a Failure and leaves no temp file behind in the destination directory |
-| TestDownloadUserinfoNotInOutput | - | a URL carrying userinfo never leaks the username or password into Failure.Name or Failure.Err |
-| TestDownloadTooManyRedirectsFails | - | a chain past maxRedirectHops is a Failure naming "too many redirects", not an infinite follow |
-| TestDownloadEmptyBodyLeavesNoTempFile | - | a clean 200 OK with a zero-byte body is a Failure, not a silently-accepted empty jar; no temp file is left behind |
-| TestDownloadContentLengthMismatchLeavesNoTempFile | - | a body shorter than its own advertised Content-Length is a Failure naming the mismatch, not a truncated jar reported as written |
-| TestDownloadSHA1MatchSucceeds | - | a jar whose downloaded body matches its .sha1 sidecar writes normally and reports no Unverified entries |
-| TestDownloadSHA1MismatchFailsAndLeavesNoFile | - | a .sha1 sidecar that does not match the downloaded body is a Failure naming sha1, nothing written, no leftover temp file |
-| TestDownloadMalformedSHA1SidecarRejected | too short / non-hex / empty / html body | each malformed .sha1 sidecar body is a Failure and nothing is written |
-| TestDownloadURLUnverifiedOn404SidecarStillWrites | - | a --url download whose .sha1 sidecar 404s still writes the jar, reported in Unverified rather than Failed |
-| TestDownloadMavenResolved404SidecarFailsArtifact | - | unlike --url, a Maven-resolved artifact (mq/syslog Set) whose .sha1 sidecar 404s is a Failure, not Unverified -- a resolved closure is never written unverified |
-| TestDownloadContentLengthUnknownWithGoodSHA1Succeeds | - | a response with no Content-Length still succeeds when its .sha1 sidecar verifies the body |
-| TestDownloadContentLengthUnknownWithNoDigestFails | - | a response with neither a Content-Length nor a verifiable .sha1 (sidecar 404s) is a Failure, leaving no temp file |
-| TestDownloadOmitsDependencyImageProvidesAtNewerVersion | - | a dependency the image already has at an equal-or-newer version is never requested over HTTP and lands in Report.Omitted naming the jar and the image's version, while the seed itself still downloads |
-| TestDownloadEmptyOmitListFileOmitsNothing | - | a supplied --omit-lib-file that parses to no entries at all REPLACES the embedded default rather than merging with it, so the whole closure -- seed and dependency -- downloads and Report.Omitted stays empty; OmitListProvenance still names the supplied file |
-| TestDownloadCommentsOnlyOmitListFileOmitsNothing | - | an --omit-lib-file containing only comments and blank lines omits nothing, same as an empty file |
-| TestDownloadNeverOmitsSeedEvenWhenImageClaimsHugeVersion | - | an omit-list entry naming the seed's own artifact at an absurd version never omits the seed -- Download identifies the seed by Coord equality, not by trusting the omit list |
-| TestDownloadDownloadsArtifactImageHasOlderVersion | - | an artifact the image has only at an older version still downloads, with nothing in Report.Omitted |
-| TestDownloadDownloadsArtifactAbsentFromImage | - | an artifact absent from the image list entirely downloads |
-| TestDownloadIncludeProvidedDownloadsEverything | - | --include-provided (IncludeProvided true) downloads an artifact the image list would otherwise have satisfied, and Report.Omitted stays empty |
-| TestDownloadURLNeverOmittedEvenWhenImageHasIt | - | an explicit --url downloads even when the image list already has that exact jar -- omission never applies to --url |
-| TestDownloadBadOmitLibFilePathIsSystemic | - | an unreadable --omit-lib-file path is a systemic error naming the path, with nothing written |
-| TestDownloadEmbeddedDefaultListLoadFailureIsSystemic | - | a corrupted embedded default omit list (a line exceeding the scanner's token-size ceiling) is a systemic error naming "embedded default omit list", zero Report, nothing written |
-| TestDownloadReadsDeployedImageFromEnv | default present / no env.yaml / explicit -e unreadable / defaulted malformed / no image block | the advisory config read: the image reaches libs.Input, an absent default is silent and still downloads, and only a file the operator named is systemic |
-| TestDownloadReportsOmitListProvenance | - | Report.OmitListProvenance names the --omit-lib-file path used; a line that fails to split is skipped silently, and a rejected entry no closure artifact asks about produces NO warning -- the noise fix |
-| TestDownloadWarnsWhenRejectedEntryAffectedThisClosure | - | a rejected entry naming an artifact the closure does resolve warns, names that artifact, and the jar is downloaded rather than omitted |
-| TestDownloadVersionPinsSeed | - | --version pins the seed to that release, and the resulting closure/filename reflect the pinned version, not latest stable |
-| TestDownloadVersionRejectsPathEscape | - | a --version value containing a path escape is rejected before any network access |
-| TestDownloadSetPathAlwaysResolvesEvenWhenFilesExist | - | unlike --url (TestDownloadSkipsExistingWithoutForce), the mq/syslog Set path always attempts Maven resolution first -- even with every plausible target file already on disk -- because it cannot know the target filenames without resolving the closure first |
-| TestSetNames | - | SetNames() returns the exact ordered [mq, syslog] list the CLI layer gates against |
-
-| TestCompareVersions | patch / lexical-trap / major / prerelease suffix / date-like / short segments / equal / empty | compareVersions orders numeric segments correctly, ranks a pre-release suffix lower, and is antisymmetric under argument swap |
-| TestCompareVersions | Final / RELEASE / GA equal the plain release | Maven treats those words as aliases of the empty qualifier, so 4.1.135.Final and 4.1.135 are the same version rather than one outranking the other |
-| TestCompareVersions | release qualifier below a number, above a prerelease; SP above the release | pins the aligned-segment case, where strings.Compare would otherwise make "Final" beat "1" and read 1.0.Final as newer than 1.0.1 |
-| TestIsPreRelease | SNAPSHOT / M1 / m2 / alpha / beta / cr / pr / ea / preview / plain release / date-like / empty | isPreRelease recognizes every qualifier convention Maven Central uses and accepts a bare numeric or date-like release |
-| TestIsPreRelease | Final / RELEASE / GA / SP | a release qualifier is NOT a pre-release -- counting it as one would skip every netty and hibernate release when picking a latest stable version |
-| TestValidateCoordPart | valid group/artifact/version/qualifier forms / empty / traversal / doubled dot / slash / backslash / NUL | validateCoordPart accepts safe coordinate segments and rejects every unsafe one before it can reach a URL |
-| TestLatestStablePrefersRelease | - | latestStable returns metadata's <release> when it is itself a stable version |
-| TestLatestStableSkipsPreReleaseCandidateInRelease | - | the verified jackson-annotations case: <release> names a candidate, so the highest surviving stable <version> is used instead |
-| TestLatestStableAllPreReleaseVersionsIsError | - | every listed version being a pre-release is an error, never a silent pre-release pick |
-| TestLatestStableUnreachableMetadataIsError | - | an unreachable maven-metadata.xml is an error |
-| TestResolveClosureMQJakarta | - | the verified com.ibm.mq.jakarta.client closure resolves to seed + BC trio + jakarta.jms-api + org.json:json at the versions the seed's POM declares |
-| TestResolveClosureMQJavax | - | the verified com.ibm.mq.allclient closure resolves to seed + BC trio + javax.jms-api + org.json:json |
-| TestResolveClosureSyslogResolvesParentProperties | - | the verified logstash-logback-encoder:9.0 -> jackson-databind:3.0.1 case: jackson-databind's own version-less dependencies are resolved through its parent jackson-base's <properties>, none marked Fallback |
-| TestResolveClosureAppliesScopeOptionalTypeFilter | - | test/provided/system/import scope, optional=true, and type=pom dependencies are all excluded from the closure; plain compile/runtime deps survive |
-| TestResolveClosureDependencyVersionFromDependencyManagement | - | a version-less dependency resolves from its parent's <dependencyManagement> |
-| TestResolveClosurePropertyDefinedTwoParentsUp | - | a `${property}` version defined only on the grandparent POM still resolves by walking the full parent chain |
-| TestResolveClosureUndefinedPropertyFallsBackToLatestStable | - | a `${property}` with no definition anywhere in the parent chain falls back to that dependency's own latest stable release, marked Fallback |
-| TestResolveClosureDependencyCycleTerminates | - | a dependency cycle (x -> y -> x) terminates and both artifacts appear exactly once |
-| TestResolveClosureArtifactCountCap | - | a closure past maxArtifacts is truncated to exactly maxArtifacts rather than growing unbounded |
-| TestResolveClosureHostileGroupIDIsDropped | - | a dependency with a path-traversal groupId is dropped from the closure and never reaches the HTTP layer, while a sibling good dependency still resolves |
-| TestResolveClosureUnreachableSeedMetadataIsError | - | the seed's own maven-metadata.xml being unreachable is an error |
-| TestResolveClosureUnreachableDependencyPomKeepsArtifact | - | a non-seed dependency whose POM 404s stays in the closure at its declared version rather than being dropped or erroring; libs.Download's own per-artifact Failure is where a real fetch problem surfaces |
-| TestResolveClosureDependencyVersionUsesProjectVersionProperty | - | resolveProperty's `${project.version}` case: a dependency version referring back to its declaring POM's own version resolves correctly |
-| TestResolveClosureDependencyVersionUsesProjectGroupIdProperty | - | resolveProperty's `${project.groupId}` case: the substitution fires and its result reaches the closure unchanged |
-| TestResolveClosureDependencyUnresolvableVersionAndUnreachableMetadataIsDropped | - | resolveDependencyVersion's ok=false path: a dependency with no version anywhere in the chain, whose own latest-stable fallback also 404s, is silently dropped from the closure like any other malformed item |
-| TestResolveClosureAtPinnedVersionNeverFetchesMetadata | - | resolveClosureAt with a pinned version never consults maven-metadata.xml at all, and the seed artifact is not marked Fallback |
-| TestResolveClosureAtPinnedVersionResolvesDependencyClosure | - | the verified com.ibm.mq.jakarta.client:9.4.2.0 pin still resolves its jakarta.jms-api:3.0.0 dependency through the normal parent/dependency chain |
-| TestResolveClosureAtPinnedVersionNotFoundIsActionableError | - | a pinned version that does not exist on Maven Central is an error naming both the version and the artifact |
-| TestResolveClosureAtPinnedVersionInvalidCharsetIsError | - | a pinned version outside the safe coordinate charset is rejected before it can reach the HTTP layer |
-| TestResolveParentChainDetectsCycle | - | a parent-POM cycle (a -> b -> a) is detected and errors rather than looping forever |
-| TestResolveParentChainExceedsMaxDepth | - | a parent chain past maxParentDepth (with no cycle) is capped with an error |
-| TestJarURL | - | jarURL assembles the Maven Central path from group/artifact/version exactly |
-
-| TestSplitJarBasename | hyphenated / dotted / short date-like / hyphen-in-version / Final qualifier / alpha qualifier / underscore in version / no digit-led hyphen / plain | splitJarBasename recovers (artifact, version) from a real jar filename across every naming convention lib-list actually contains, and refuses a name with no digit-led hyphen to split on |
-| TestSplitJarBasename | classifier stripped (netty native, sources) | a trailing classifier is not part of the version and is dropped, so the entry parses instead of being rejected whole |
-| TestValidateImageVersionQualifiers | accepted / rejected | Final/RELEASE/GA/SP join numerics and pre-release qualifiers as orderable, while genuine garbage (9zzzzzzzzzzz, a bare classifier, an unknown word) stays rejected -- the gate exists so a stale entry cannot compare as newer than a real release |
-| TestImageNameTag | hub / no namespace / registry with a port / no tag / digest / empty | an image reference splits into name and tag; the tag separator is found in the last path element so a registry port is not mistaken for it |
-| TestImageMismatchNote | silent: none / captured tag / newer tag / the floor itself / past every capture / registry mirror. warns: below the floor / different image / digest / no tag | the embedded list describes a RANGE, so any release at or above `EmbeddedListMinVersion` is silent -- a differing tag is not itself a mismatch; below the floor, a different image, or a reference with no comparable tag warns and names both the reference and what it was judged against |
-| TestDownloadImageMismatchReported | uncovered (2.9.0) / covered (2.13.0, 2.14.1) / none / --omit-lib-file | the check end to end: only an image the embedded list cannot speak for warns, both ends of the covered range stay silent, and a named omit list suppresses it -- the operator declared that list, as with an explicit --url. Every suppression case uses the uncovered reference, so it cannot pass vacuously |
-| TestEmbeddedOmitListFullyParses | - | every line of the shipped image list either is not a jar reference or parses to an orderable version, so a future capture that reintroduces an unparseable shape fails the build instead of printing warnings on every run |
-| TestSplitJarBasenameRejectsNonJar | - | a non-.jar name is rejected outright |
-| TestLoadImageLibsSkipsCommentsAndBlankLines | - | a `#`-commented header line and blank/whitespace-only lines are skipped, leaving only the real jar entry |
-| TestLoadImageLibsSkipsUnsplittableLineWithoutFailing | - | a line that does not split into artifact+version (e.g. jrt-fs.jar) is skipped rather than failing the whole load |
-| TestLoadImageLibsToleratesSurroundingWhitespace | - | leading/trailing whitespace and a trailing \r around a jar name do not stop it from loading |
-| TestLoadImageLibsBadPathIsError | - | a nonexistent --omit-lib-file path is an error |
-| TestLoadImageLibsEmbeddedDefault | - | an empty path loads the binary's embedded default (captured from solace/solace-pubsub-connector-ibmmq:2.13.0), which carries the BC/jakarta.jms-api/json/logstash-logback-encoder versions and deliberately omits com.ibm.mq.jakarta.client (the licensing carve-out) |
-| TestImageSatisfies | image has a newer version / equal version / older version / does not have it at all | imageSatisfies reports provided=true and the image's version for an equal-or-newer match, and provided=false (with the image's version, or none) otherwise |
-
 ## cmd/solmq-conn-util
 
 The CLI shell -- flag parsing, the exit-code contract, the generate/validate/examples/auto-complete commands, verb aliases, and the deploy/remove/status/logs/cli seams for all three engines. The completion tests also gate the four generated shell scripts against the command model, and the doc tests gate the two generated markdown references against it.
@@ -957,7 +1010,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 
 | Test | Case | Verifies |
 |------|------|----------|
-| TestDispatchHandlersMatchModel | verbs / generate targets / deploy platforms / completion shells | the dispatch handler sets and cliVerbs agree in BOTH directions, so a command added to one cannot drift from the other |
+| TestDispatchHandlersMatchModel | verbs / generate targets / deploy platforms / completion shells | the dispatch handler sets and cliVerbs agree in *both* directions, so a command added to one cannot drift from the other |
 | TestPlatformMapsCoverThreeNames | - | platformNames, platformGenerators and actTargets agree in both directions -- a modeled platform with no handler, or a handler with no modeled entry, fails |
 | TestExitCodeContract | nil args | run(nil) returns exit code 2 |
 | TestExitCodeContract | unknown command | run([bogus]) returns exit code 2 |
@@ -1120,7 +1173,7 @@ The `logs` verb shares status's platform resolution and instance discovery (inst
 | TestLogsWithoutEnvFileNeedsAnExplicitPlatform | - | the explicit-target exception: instance plus --platform needs no env.yaml, while without --platform the missing file is reported by name and nothing runs |
 | TestLogsNoInstancesFoundNamesTheFix | - | an empty discovery result carries the selector and namespace it used, plus --pod, since those are what the operator would change |
 | TestLogsNeedsAStreamingRunner | - | logs reads through runner.Streamer and a Runner without it fails loudly, rather than silently falling back to a buffered read that would merge diagnostics into the log |
-| TestLogsWithoutASectionToDiscoverFrom | kubernetes / docker / podman | the discovery branch with nothing to work from, reached by naming an instance with the other platform's flag (--container on kubernetes, --pod on docker/podman); the error names the missing section and the way forward, and must NOT name --all, which logs does not have |
+| TestLogsWithoutASectionToDiscoverFrom | kubernetes / docker / podman | the discovery branch with nothing to work from, reached by naming an instance with the other platform's flag (--container on kubernetes, --pod on docker/podman); the error names the missing section and the way forward, and must *not* name --all, which logs does not have |
 | TestLogsPlatformWithNoSectionAtAllIsLoud | - | an env.yaml that parses but describes no platform cannot answer --platform either, and says so naming all three sections before discovery is attempted |
 | TestLogsNamedPodIsNotPreChecked | - | a name is taken at its word: no `get pods <name>` precedes the read, and a pod that is not there is reported by the platform on the read itself |
 | TestLogsUsesTheSectionCommandOverride | - | logs reaches for the binary env.yaml names (oc, not kubectl) on every call, through the shared instanceCommand resolution |
@@ -1168,15 +1221,19 @@ The `cli` verb reaches its instance through the same resolution `status` and `lo
 | TestCliIndexSelectsFromTheSortedList | - | an index selects out of the same sorted order status and logs print, so a number copied off one verb means the same instance in another |
 | TestCliPreflightFailureOpensNothing | - | an unreachable engine is reported once, up front, and no session is attempted |
 
+### remove / instance resolution
 
-## internal/logback
+The `remove` verb's namespace teardown safety -- the occupancy probe, the two
+confirmation questions, and what counts as this release's own object -- and the
+three-step instance/namespace/binary resolution that `status`, `logs` and `cli` all
+share through `instances.go`.
 
-| Test | Case | Asserts |
-| --- | --- | --- |
-| TestXMLPicksTheAppenderTheProtocolNames | udp / tcp | udp uses Logback's built-in SyslogAppender and never references the logstash one; tcp uses LogstashTcpSocketAppender and never falls back. The two are not interchangeable: tcp needs a jar udp does not |
-| TestXMLDefaultsToUDP | empty / unknown | an unset or unrecognised protocol renders the udp config, the safe choice because it needs nothing on the classpath; validate rejects an unknown value long before this |
-| TestBothConfigsReadTheSameThreeProperties | udp / tcp | both bind host, port and appname via springProperty, which is why all three platforms set the same LOGGING_SYSLOG_* env vars rather than templating values into the file, and both keep the console appender (syslog is in addition to stdout, not instead of it) |
-| TestContainerPathAndFileNameAgree | - | ContainerPath ends in /FileName, so a platform that writes the file to disk and mounts it cannot land it where the connector does not read |
+Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go) (most cases),
+[deploy_test.go](../internal/deploy/deploy_test.go) (the namespace-omission and
+manifest-parity cases)
+
+| Test | Case | Verifies |
+|------|------|----------|
 | TestInstanceCommandResolution | override / section / default x kubernetes, docker, podman / nil env / unknown platform | the three-step binary resolution both verbs share; the defaults matter because a run can happen with no section at all (explicit targets), where parse-time defaulting never ran |
 | TestInstanceNamespaceResolution | override / section / absent / nil env / docker / podman | the same three steps for the namespace, and that it stays empty on docker/podman, which have no such concept |
 | TestConfiguredInstanceName | docker / podman / each section absent / nil env | the single container name each engine section names, and that a missing-section error names the section that is absent rather than just reporting nothing found |
@@ -1184,7 +1241,7 @@ The `cli` verb reaches its instance through the same resolution `status` and `lo
 | TestRemoveTeardownManifestOmitsTheNamespace | - | the bug this exists for: the manifest piped to `kubectl delete -f -` carries no Namespace, since deleting one cascades to every object inside it including workloads this tool never deployed; the separate namespace step is the only place a Namespace document is piped, and deploy still emits it in the manifest or the objects have nowhere to land |
 | TestRemoveNamespaceOccupiedLeavesItAlone | - | anything living in the namespace that the release does not own is listed as kind/name and the namespace is kept, with no fourth call |
 | TestRemoveNamespaceEmptyPromptsSeparately | y / n / blank | an empty namespace asks its own question, because saying yes to removing a deployment is not saying yes to removing the namespace around it; declining leaves it |
-| TestRemoveNoPromptNeverRemovesAnOccupiedNamespace | - | **the invariant**: no flag removes a namespace still holding someone else's work. --no-prompt approves the questions, never a cascade -- the occupancy check runs first and an occupant of any kind ends it, silently or not |
+| TestRemoveNoPromptNeverRemovesAnOccupiedNamespace | - | the invariant: no flag removes a namespace still holding someone else's work. --no-prompt approves the questions, never a cascade -- the occupancy check runs first and an occupant of any kind ends it, silently or not |
 | TestRemovePlainRunChecksTheNamespace | - | the regression this change exists for: a plain remove with no flags probes the namespace and asks both questions (teardown, then namespace), where it used to skip the step entirely |
 | TestRemoveNamespaceRefusesClusterNamespaces | default / kube-system / kube-public / kube-node-lease | refused before the occupancy probe even runs, so no emptiness result can authorise deleting one |
 | TestRemoveNamespaceProbeFailureLeavesItAlone | - | a failed occupancy query leaves the namespace in place and says so; a namespace is not worth deleting on a guess |
@@ -1194,9 +1251,10 @@ The `cli` verb reaches its instance through the same resolution `status` and `lo
 | TestNamespaceOccupantsRejectsUnreadableOutput | - | a parse failure is an error, never an empty list: unreadable output must not read as "empty" and authorise the delete |
 | TestOmitNamespaceIsWhatMakesTeardownSafe | - | apply keeps the Namespace document, delete drops it, dropping doc 0 leaves no leading separator, and everything else still renders |
 | TestNamespaceManifestMatchesWhatRenderEmits | - | the standalone document the namespace delete pipes is exactly the one Render emits, so the two cannot drift |
-| TestOwnedNamesCoversEverythingThisReleaseCreates | created secrets/PVC / referenced ones / nil section | the safety net behind the occupancy check: everything this release creates counts as ours, an empty name never does, and objects merely referenced (existing:) are NOT ours -- the operator manages them and their presence is a real reason to keep the namespace |
+| TestOwnedNamesCoversEverythingThisReleaseCreates | created secrets/PVC / referenced ones / nil section | the safety net behind the occupancy check: everything this release creates counts as ours, an empty name never does, and objects merely referenced (existing:) are *not* ours -- the operator manages them and their presence is a real reason to keep the namespace |
 | TestRemoveNamespaceWithoutANamespaceSaysSo | - | a kubernetes section with no namespace has nothing to remove, and says so rather than acting on an empty name |
 | TestRemoveNamespaceRejectsAnUnsafeCommand | - | the namespace delete goes through the same binary allowlist as everything else, rather than being a second path around it |
 | TestRemoveNamespaceUnreadableProbeLeavesItAlone | - | output that cannot be parsed must not read as "empty" and authorise the delete |
 | TestRemoveNamespaceNonTTYFailsFastNamingTheFlag | - | the namespace question refuses a non-TTY naming --no-prompt, the same shape every other prompt uses; the namespace is not deleted |
 | TestRemoveNamespaceProbeArgvIsOneQuery | - | one call listing every kind whose loss would matter, in the namespace being considered |
+

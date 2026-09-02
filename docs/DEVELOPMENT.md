@@ -1,8 +1,7 @@
-# solmq-conn-util -- Development Guide
+# solmq-conn-util -- development guide
 
 Building, testing, releasing, and design notes for `solmq-conn-util`. For using the
-tool, see the [user guide](../userguide.md); for a quick start, the
-[README](../README.md).
+tool, see [userguide.md](../userguide.md); for a quick start, [README.md](../README.md).
 
 ## Build
 
@@ -25,27 +24,36 @@ Or use the mirrored task runner (`dev.sh` / `dev.ps1`, behaviorally identical):
 
 Tasks: `build vet test cov scan regen graphify`, plus aggregates `all` (= build vet test, run by CI
 as `all scan`) and `full` (= all + cov + scan + graphify, the pre-tag sweep). Gates
-build/vet/test/scan are fatal. `vet` is `go vet ./...` **plus a formatting check**: it fails when
-`gofmt -l .` lists anything, naming the files and the `gofmt -w` line that fixes them. The check
-only lists -- it never writes -- which is what lets it live inside an aggregate at all; a
-`gofmt -w` task would have to stay out of every aggregate for the same reason `regen` does
-(below), since a gate that repairs what it measures proves nothing. `go vet` and the format
-check both always run, so one pass reports both rather than hiding vet errors behind a
-formatting failure. `scan` is `go tool govulncheck ./...`, fatal on any finding — every
-Go vuln-DB finding is reachable-and-fixable, so there is nothing to warn-and-pass on. The scanner is
-pinned in `go.mod` as a tool dependency rather than invoked as `go run ...@latest`: that form ignores
-`go.mod` and builds the scanner on whatever toolchain its own module requires, which then cannot load
-packages from a module on a newer `go` directive. The Go toolchain itself is pinned exactly
-(`toolchain` directive in `go.mod`), so the laptop and both CI runners download and run the identical
-Go rather than whatever the runner image preinstalls -- bump the pin deliberately when upgrading
-locally. `build` honors `TARGET_OS`/`TARGET_ARCH` and writes
-`dist/solmq-conn-util-<os>-<arch>[.exe]` (host os/arch when unset), so one task serves the laptop and
-the CI matrix. `regen` runs every `go:generate` directive, rewriting the generated docs and
-completion goldens; like `graphify` it is local-only (warn-skips under CI) and belongs to no
-aggregate, because `test` is what fails on drift and a regen inside a sweep would rewrite the
-evidence instead of reporting it. `image`/`up`/`down` are omitted --
-the tool ships no Dockerfile or local stack (it generates artifacts for other engines; it is not
-itself containerized).
+build/vet/test/scan are fatal.
+
+`vet` is `go vet ./...` **plus a formatting check**: it fails when `gofmt -l .` lists anything,
+naming the files and the `gofmt -w` line that fixes them. The check only lists -- it never
+writes -- which is what lets it live inside an aggregate at all; a `gofmt -w` task would have to
+stay out of every aggregate for the same reason `regen` does (below), since a gate that repairs
+what it measures proves nothing. `go vet` and the format check both always run, so one pass
+reports both rather than hiding vet errors behind a formatting failure.
+
+`scan` is `go tool govulncheck ./...`, fatal on any finding -- every Go vuln-DB finding is
+reachable-and-fixable, so there is nothing to warn-and-pass on.
+
+The scanner is pinned in `go.mod` as a tool dependency rather than invoked as `go run ...@latest`:
+that form ignores `go.mod` and builds the scanner on whatever toolchain its own module requires,
+which then cannot load packages from a module on a newer `go` directive.
+
+The Go toolchain itself is pinned exactly (`toolchain` directive in `go.mod`), so the laptop and
+both CI runners download and run the identical Go rather than whatever the runner image
+preinstalls -- bump the pin deliberately when upgrading locally.
+
+`build` honors `TARGET_OS`/`TARGET_ARCH` and writes `dist/solmq-conn-util-<os>-<arch>[.exe]` (host
+os/arch when unset), so one task serves the laptop and the CI matrix.
+
+`regen` runs every `go:generate` directive, rewriting the generated docs and completion goldens;
+like `graphify` it is local-only (warn-skips under CI) and belongs to no aggregate, because `test`
+is what fails on drift and a regen inside a sweep would rewrite the evidence instead of reporting
+it.
+
+`image`/`up`/`down` are omitted -- the tool ships no Dockerfile or local stack (it generates
+artifacts for other engines; it is not itself containerized).
 
 ## Testing
 
@@ -71,7 +79,7 @@ go generate ./cmd/solmq-conn-util   # = go test . -run "TestCommandsDocInSync|Te
 
 ### Shell completion
 
-`solmq-conn-util completion bash|zsh|fish|powershell` prints a completion script, rendered by
+`solmq-conn-util auto-complete bash|zsh|fish|powershell` prints a completion script, rendered by
 [`cmd/solmq-conn-util/completion.go`](../cmd/solmq-conn-util/completion.go) from the same
 `cliVerbs`/`cliFlags` model as the help and `commands.md` -- so a verb, target or flag added
 to the model reaches all four shells with no second edit, and the script a binary prints
@@ -106,13 +114,13 @@ It carries a JavaScript port of `validate.Run`, `consolidate.Build`, `render.App
 the consolidated `application.yml` in the browser. That port is a second implementation and
 can drift, so the page embeds a copy of [`testdata/golden/application.yml`](../testdata/golden/application.yml)
 in a `<script type="text/plain" id="golden">` block and its **Self-test** button diffs the
-shipped sample set against it. Two rules follow:
+shipped sample set against it. Three rules follow:
 
 - Changing the golden file means refreshing the embedded copy in the same change.
 - Changing `consolidate`, `render`, `tls` or the durable-name derivation means re-running
   Self-test (open the page, **Load sample**, **Self-test**) and porting the change.
 - Changing the **env.yaml schema** -- adding, moving or retiring a key -- means porting it
-  to the page too: the form field, `buildModel`, `emitEnv` and the `validate` mirror, plus
+  to the page too: the form field, `readModel`, `emitEnv` and the `validate` mirror, plus
   `sampleModel` and the load path. Self-test only diffs `application.yml`, so it cannot
   catch a schema change on the deploy sections; a page left behind emits configs the CLI
   rejects. The image and timezone hoist is the worked example.
@@ -125,6 +133,13 @@ python -c "import re;print(re.findall(r'<script(?![^>]*text/plain)[^>]*>(.*?)</s
 node --check /tmp/page.js
 ```
 
+On Windows PowerShell, redirect to a Windows temp path instead:
+
+```powershell
+python -c "import re;print(re.findall(r'<script(?![^>]*text/plain)[^>]*>(.*?)</script>',open('solmq-conn-util-generator.html',encoding='utf-8').read(),re.S)[0])" > $env:TEMP\page.js
+node --check $env:TEMP\page.js
+```
+
 The page never ships secrets: every password field expects a `${VAR}` placeholder and a
 literal value is reported as a finding.
 
@@ -132,11 +147,11 @@ literal value is reported as a finding.
 
 Two workflows, both calling dev-script task names only (never build commands):
 
-- [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) — the gates. Runs `all scan` on
+- [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) -- the gates. Runs `all scan` on
   Ubuntu + Windows. Nothing runs on a normal push or PR; it fires when `tag.yml` calls it, on
   manual dispatch, and on PRs that touch CI config or the dev scripts (which gates Dependabot's
   action bumps).
-- [`.github/workflows/tag.yml`](../.github/workflows/tag.yml) — the only automatic pipeline.
+- [`.github/workflows/tag.yml`](../.github/workflows/tag.yml) -- the only automatic pipeline.
   Pushing a `v*` tag runs `plan -> gates -> binaries -> release`, cross-compiling the six
   platform binaries (per the `BUILD_TARGETS` repo variable) and publishing them with a
   `SHA256SUMS.txt` to a **GitHub Release**. A failure anywhere publishes nothing.
@@ -184,6 +199,21 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
   context is reported as success -- a follow the operator ended with Ctrl-C did not fail --
   and `cmd.Cancel` interrupts, falling back to `Kill` where a signal cannot be delivered
   (Windows), with `WaitDelay` as the backstop for a child that ignores it.
+- **Splitting seam.** `runner.Splitter` is the optional capability of returning a process's
+  stdout and stderr apart, both fully buffered, instead of `Run`'s single merged string --
+  asked for by the same type assertion as `Streamer` and `Attacher`. `runParsed` is how every
+  helper that parses output runs it: through `Splitter` when the Runner has it, falling back
+  to `Run` otherwise, so every fake Runner that only records argv keeps working unchanged. The
+  nine helpers that parse rather than scan their output go through it this way -- the five
+  JSON readers (`KubernetesPodsJSON`, `KubernetesGetJSON`, `KubernetesListJSON`,
+  `EngineInspectJSON`, `EngineImageInspectJSON`), plus `KubernetesTop`, `EngineList`,
+  `EngineStats` and `SystemctlNRestarts` -- because a platform CLI writes warnings to stderr
+  whenever it feels like it (OpenShift greets `oc get` with a DeploymentConfig deprecation
+  notice), and merged into stdout that line lands in front of the JSON, where it fails to
+  parse on its first character. `ScriptInstalled` and `RunStatusScript` deliberately still
+  call `Run` directly: they tolerate an extra line, and `RunStatusScript` wants the script's
+  own stderr advisories folded into what it returns. `OS` implements `Splitter` too, pinned
+  alongside `Streamer` and `Attacher`.
 - **Terminal attach seam.** `runner.Attacher` is the third capability beside `Runner` and
   `Streamer`, asked for by the same type assertion, and it exists for the one case neither can
   express: `cli`, where the child must be given the operator's real terminal. Its parameters are
@@ -218,5 +248,5 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
   all: the `get pods <name>` call that used to precede a named read existed only to learn the
   container name.
 - **Durable names** use UUIDv5 (namespace `6ba7f4e2-9c1d-5a3b-8e47-2f9a0c7d13e5`, key =
-  `conn-name ‖ queue-manager ‖ topic ‖ file-basename` joined by `0x1F`). Renaming a workflow
-  file changes its durable name and orphans the old subscription — rename deliberately.
+  `conn-name || queue-manager || topic || file-basename` joined by `0x1F`). Renaming a workflow
+  file changes its durable name and orphans the old subscription -- rename deliberately.
