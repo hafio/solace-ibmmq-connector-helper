@@ -36,12 +36,16 @@ func StorePath(storeFile string, mount bool) string {
 	return storeFile
 }
 
-// Stable secret names for the two shared store passwords. They are declared here
+// Derived mount names for the two shared store passwords. They are declared here
 // and re-exported by internal/consolidate so this package and the SSL-bundle
-// builder cannot drift into naming the same password two different things.
+// builder cannot drift into naming the same password two different things. Both
+// carry spec.GeneratedNamePrefix, since they are names the tool chose rather
+// than ones an operator wrote in a `-env` field. They apply only when the store
+// password is a literal: an `-env` store password is mounted under its own
+// variable name like any other.
 const (
-	TruststorePasswordName = "TRUSTSTORE_PASSWORD"
-	KeystorePasswordName   = "KEYSTORE_PASSWORD"
+	TruststorePasswordName = spec.GeneratedNamePrefix + "TRUSTSTORE_PASSWORD"
+	KeystorePasswordName   = spec.GeneratedNamePrefix + "KEYSTORE_PASSWORD"
 )
 
 // SolaceProps returns the ordered tool-managed Solace api-properties for a TLS

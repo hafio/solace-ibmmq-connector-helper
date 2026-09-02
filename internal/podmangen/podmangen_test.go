@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
@@ -281,5 +282,62 @@ func TestStatusScriptMountOmittedWhenPathEmpty(t *testing.T) {
 	unit := RenderQuadlet(in)
 	if strings.Contains(unit.Content, statusTarget) {
 		t.Errorf("RenderQuadlet with empty StatusScriptPath must omit the status mount, got:\n%s", unit.Content)
+	}
+}
+
+// syslogInput is minimalInput plus a syslog block and the logback file path the
+// CLI would have written beside application.yml. podman cannot inline file
+// content, so unlike compose the config has to exist on disk and be mounted.
+func syslogInput() Input {
+	in := minimalInput()
+	in.Syslog = &spec.Syslog{Host: "syslog.corp", Port: 514, Protocol: spec.SyslogUDP}
+	in.Instance.LogbackPath = "./solmq-connector-logback-spring.xml"
+	return in
+}
+
+// TestRunScriptSyslogMountsAndSetsEnv covers what the syslog hoist bought
+// podman: before it, logging.syslog was a kubernetes-only key and a podman
+// deployment got nothing at all.
+func TestRunScriptSyslogMountsAndSetsEnv(t *testing.T) {
+	out := RenderRunScript(syslogInput())
+	for _, want := range []string{
+		"-v ./solmq-connector-logback-spring.xml:" + logback.ContainerPath + ":ro",
+		"-e LOGGING_SYSLOG_APPNAME=solmq-connector",
+		"-e LOGGING_SYSLOG_HOST=syslog.corp",
+		"-e LOGGING_SYSLOG_PORT=514",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("run script is missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestQuadletSyslogMountsAndSetsEnv is the same for the quadlet unit, which
+// spells mounts and environment differently but has to carry both.
+func TestQuadletSyslogMountsAndSetsEnv(t *testing.T) {
+	out := RenderQuadlet(syslogInput()).Content
+	for _, want := range []string{
+		"Volume=./solmq-connector-logback-spring.xml:" + logback.ContainerPath + ":ro",
+		"Environment=LOGGING_SYSLOG_APPNAME=solmq-connector",
+		"Environment=LOGGING_SYSLOG_HOST=syslog.corp",
+		"Environment=LOGGING_SYSLOG_PORT=514",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("quadlet unit is missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestSyslogAbsentEmitsNoMountOrEnv is the negative, in both modes.
+func TestSyslogAbsentEmitsNoMountOrEnv(t *testing.T) {
+	for name, out := range map[string]string{
+		"run":     RenderRunScript(minimalInput()),
+		"quadlet": RenderQuadlet(minimalInput()).Content,
+	} {
+		for _, no := range []string{"logback", "LOGGING_SYSLOG"} {
+			if strings.Contains(out, no) {
+				t.Errorf("%s should not mention %q without a syslog block, got:\n%s", name, no, out)
+			}
+		}
 	}
 }

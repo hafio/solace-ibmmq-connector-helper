@@ -18,10 +18,13 @@ so splitting them across connectors stays your decision.
 - Implements **leader-election** (`standalone` / `active_active` / `active_standby`).
 - Wires **TLS + mTLS** for both Solace and MQ from one shared truststore/keystore.
 - **One secrets model everywhere**: each credential is declared as a literal or an
-  `-env` variable name, rendered into config only as a derived stable name, and
-  mounted as a file under `/run/secrets/` -- a Kubernetes Secret volume, a compose
-  environment-provider secret, or a podman secret. No credential value or host
-  variable name reaches any generated file, and nothing secret is written to disk.
+  `-env` variable name, and is mounted as a file under `/run/secrets/` -- a
+  Kubernetes Secret volume, a compose environment-provider secret, or a podman
+  secret. No credential *value* reaches any generated file, and nothing secret is
+  written to disk. An `-env` credential keeps its own variable name as the mount
+  name, so the keys of a Secret you build yourself (`secrets.credentials.existing`)
+  are exactly the `-env` names in your spec; a literal takes a tool-derived name
+  instead, always prefixed `_GEN_` so the two can never collide by accident.
 - **`status` reports each instance from either side**: `status container` reads
   the engine from outside (state, restarts, age, the image actually running),
   `status application` execs into each instance and reads its own actuator (which
@@ -127,13 +130,18 @@ piping the manifest to `kubectl`/`oc`.
 solmq-conn-util generate [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
                                                                    Emit application.yml, or the resolved platform's artifacts
 solmq-conn-util deploy  [--platform kubernetes|docker|podman] [-e env.yaml]  Generate for the resolved platform, then apply it
-solmq-conn-util remove  [--platform kubernetes|docker|podman] [-e env.yaml]  Tear the same platform down
+solmq-conn-util remove  [--no-prompt] [--platform kubernetes|docker|podman] [-e env.yaml]
+                                                                   Tear the same platform down, after confirming
 solmq-conn-util status  <container|application|all> [-d] [-w] [--all] [--output table|json]
                         [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
                                                                    Report each instance: the engine's view, the connector's own, or both
-solmq-conn-util logs    [--follow] [--previous] [--tail N] [--since d] [--timestamps] [--all]
+solmq-conn-util logs    [--follow] [--previous] [--tail N] [--since d] [--timestamps]
+                        [--pod name|index] [--container name|index]
                         [--platform kubernetes|docker|podman] [-e env.yaml]
-                                                                   Print each instance log -- what status says happened, and why
+                                                                   Print one instance log -- what status says happened, and why
+solmq-conn-util cli     [--pod name|index] [--container name|index]
+                        [--platform kubernetes|docker|podman] [-e env.yaml] [-- command ...]
+                                                                   Open a shell inside one instance, or run one command in it
 solmq-conn-util version                                           Print the utility name, version, Go version and OS/arch
 solmq-conn-util validate            [-e env.yaml]                 Lint the whole env.yaml + workflows
 solmq-conn-util examples [dir] [-f]                               Write a starter env.yaml + workflows
@@ -158,21 +166,35 @@ solmq-conn-util download jar mq|syslog [dir] [-e env.yaml] [--version v] [--omit
 --tail        logs: read only the last N lines, or all (default: all)
 --since       logs: read only lines newer than this duration, e.g. 10m
 --timestamps  logs: prefix every line with the time the platform recorded
+--            cli: everything after it runs in the instance instead of a shell, non-interactively
 ```
 
-Every verb above except `auto-complete` and `help` also has a short alias
-(`gen`, `dp`, `rm`, `sts`, `lg`, `ver`, `vld`, `eg`, `dl`), and `--platform` accepts
+Every verb above except `cli`, `auto-complete` and `help` also has a short alias
+(`gen`, `dp`, `rm`, `sts`, `lg`, `ver`, `vld`, `eg`, `dl`) -- `cli` is already three
+characters -- and `--platform` accepts
 `kube`, `dk` and `pm` -- see [userguide.md](userguide.md) section 3 for both
 tables.
 
 `generate` fails fast (stops at the first error, writes nothing); `validate`
 reports every finding; generate output is buffered and only written on full
-success -- never a half-written `-o`. `deploy`/`remove`/`status`/`logs` run the CLI
+success -- never a half-written `-o`. `deploy`/`remove`/`status`/`logs`/`cli` run the CLI
 named by each section's `command:` through an argv slice -- never a shell --
 with every token checked against a safe charset, argv[0] checked against a
 per-platform binary allowlist (escape hatch: `--allow-command`), and a
 read-only login/daemon preflight before anything is written, applied, or
-queried. Details and exit codes: [userguide.md](userguide.md) section 3; the
+queried. `remove` additionally confirms first, naming what it will tear down;
+`--no-prompt` skips that, and is required for a non-TTY run. On kubernetes the
+namespace is a separate, checked step: a namespace holding anything the release
+does not own is listed and kept, and only an empty one is offered for removal.
+
+`cli` is the one verb whose exit code can leave the 0/1/2 contract: once a session
+or command is running inside the instance, its own status is passed straight back.
+The engines give no way to be more precise -- `kubectl exec` reports an unreachable
+pod and a command that exited non-zero with the same status -- so a non-zero `cli`
+exit means one of the two, and the message the engine printed on stderr says which.
+Every kubernetes `exec` and `logs` this tool runs names its container explicitly
+(`-c connector`), so a pod carrying a sidecar cannot be entered or read by mistake;
+docker and podman default to the same name. Details and exit codes: [userguide.md](userguide.md) section 3; the
 full generated command reference: [docs/commands.md](docs/commands.md).
 
 Tab completion for all of the above: `solmq-conn-util auto-complete bash|zsh|fish|powershell`
@@ -188,7 +210,8 @@ never drifts from the commands that binary accepts
   kubernetes/docker/podman (section 7), the secrets model (section 8), what gets
   generated (section 9), determining which instance is active (section 10), the
   sample set (section 11), fetching the IBM MQ and syslog jars (section 12),
-  reading instance logs (section 13), and gotchas (section 14).
+  reading instance logs (section 13), opening a shell inside an instance
+  (section 14), and gotchas (section 15).
 - [docs/commands.md](docs/commands.md) -- the full command tree / reference,
   generated from the command model and gated against drift.
 - [docs/abbreviation.md](docs/abbreviation.md) -- every short spelling the CLI

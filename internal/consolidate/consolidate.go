@@ -71,26 +71,48 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 	var warns []string
 	warn := func(format string, a ...any) { warns = append(warns, fmt.Sprintf(format, a...)) }
 
-	// secretRef records one credential under its stable in-container name and
-	// returns the placeholder the config should carry. An unset credential
-	// contributes nothing and renders as "" so the caller's emptiness gate still
-	// omits the line. Repeated positions (a store password referenced by both an
-	// SSL bundle and the Solace api-properties) collapse onto one entry.
-	seenSecret := map[string]bool{}
-	secretRef := func(stable string, c spec.Cred) string {
+	// secretRef records one credential under the name it is mounted as and returns
+	// the placeholder the config should carry. An unset credential contributes
+	// nothing and renders as "" so the caller's emptiness gate still omits the
+	// line. Repeated positions (a store password referenced by both an SSL bundle
+	// and the Solace api-properties) collapse onto one entry.
+	//
+	// A credential that names a host variable is mounted under that very name:
+	// the operator writing `password-env: SOL_PASSWORD` gets the key SOL_PASSWORD
+	// in the Secret, in /run/secrets and in the rendered ${...}, so a
+	// hand-built `existing:` Secret needs no name derivation to reproduce. The
+	// caller's derived name (stableName) is the fallback for a literal, which has
+	// no name of its own.
+	type claim struct {
+		cred   spec.Cred
+		origin string
+	}
+	seenSecret := map[string]claim{}
+	conflicted := map[string]bool{}
+	secretRef := func(stable, origin string, c spec.Cred) string {
 		if c.Empty() {
 			return ""
 		}
-		// A name seen twice is the same credential reached from two places (a
-		// store password used by both an SSL bundle and the Solace
-		// api-properties), so it contributes one entry. Two *different* sources
-		// competing for one name is a conflict validate rejects upstream; keeping
-		// the first here stays deterministic either way.
-		if !seenSecret[stable] {
-			seenSecret[stable] = true
-			m.Secrets = append(m.Secrets, SecretRef{Stable: stable, Literal: c.Literal, EnvVar: c.EnvVar})
+		name := stable
+		if c.EnvVar != "" {
+			name = c.EnvVar
+			origin += "-env"
 		}
-		return "${" + stable + "}"
+		// A name seen twice carrying the same credential is one credential reached
+		// from two places (a store password used by both an SSL bundle and the
+		// Solace api-properties), so it contributes one entry. Two *different*
+		// credentials competing for one name can only be an -env variable colliding
+		// with another position's derived name: one mounted file cannot hold both
+		// values, so record both positions and let the caller refuse rather than
+		// silently drop one.
+		if prev, seen := seenSecret[name]; !seen {
+			seenSecret[name] = claim{cred: c, origin: origin}
+			m.Secrets = append(m.Secrets, SecretRef{Stable: name, Literal: c.Literal, EnvVar: c.EnvVar})
+		} else if prev.cred != c && !conflicted[name] {
+			conflicted[name] = true
+			m.SecretConflicts = append(m.SecretConflicts, SecretConflict{Name: name, First: prev.origin, Second: origin})
+		}
+		return "${" + name + "}"
 	}
 
 	// Materialise conn-ref sides once, up front, so conn-ref and inline sides that
@@ -170,8 +192,8 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 			sb := &SolaceBinder{
 				Host:       a.host,
 				MsgVPN:     a.vpn,
-				ClientUser: secretRef(stableName(a.name, "CLIENT_USERNAME"), a.user),
-				ClientPass: secretRef(stableName(a.name, "CLIENT_PASSWORD"), a.pass),
+				ClientUser: secretRef(stableName(a.name, "CLIENT_USERNAME"), binderOwner(a.name)+" client-username", a.user),
+				ClientPass: secretRef(stableName(a.name, "CLIENT_PASSWORD"), binderOwner(a.name)+" client-password", a.pass),
 			}
 			sb.Extras = nodeToProps(d.SolaceDefaults)
 			var props []Prop
@@ -188,8 +210,8 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 				QueueManager: a.qm,
 				Channel:      a.ch,
 				ConnName:     a.conn,
-				User:         secretRef(stableName(a.name, "USER"), a.mqUser),
-				Password:     secretRef(stableName(a.name, "PASSWORD"), a.mqPass),
+				User:         secretRef(stableName(a.name, "USER"), binderOwner(a.name)+" user", a.mqUser),
+				Password:     secretRef(stableName(a.name, "PASSWORD"), binderOwner(a.name)+" password", a.mqPass),
 			}
 			if a.tls {
 				m.MQTLS = true
@@ -349,13 +371,13 @@ func buildBundle(a *acc, d *spec.Defaults, mount bool, secretRef secretFn) *Bund
 	}
 	b := &Bundle{Name: a.name + "-bundle"}
 	b.TruststoreLoc = tls.StorePath(ts.File, mount)
-	b.TruststorePwd = secretRef(TruststorePasswordName, ts.Secret())
+	b.TruststorePwd = secretRef(TruststorePasswordName, storeOrigin(TruststorePasswordName), ts.Secret())
 	b.TruststoreTyp = ts.Type
 	if a.keyAlias != "" {
 		if ks := d.TLS.Keystore; ks != nil {
 			b.HasKeystore = true
 			b.KeystoreLoc = tls.StorePath(ks.File, mount)
-			b.KeystorePwd = secretRef(KeystorePasswordName, ks.Secret())
+			b.KeystorePwd = secretRef(KeystorePasswordName, storeOrigin(KeystorePasswordName), ks.Secret())
 			b.KeystoreTyp = ks.Type
 			b.KeyAlias = a.keyAlias
 		}
@@ -388,8 +410,8 @@ func buildLeaderElection(d *spec.Defaults, mount bool, secretRef secretFn, names
 		s := &Session{
 			Host:       sess.Host,
 			MsgVPN:     sess.MsgVPN,
-			ClientUser: secretRef(userName, sess.Username()),
-			ClientPass: secretRef(passName, sess.Secret()),
+			ClientUser: secretRef(userName, leaderSessionOwner+" client-username", sess.Username()),
+			ClientPass: secretRef(passName, leaderSessionOwner+" client-password", sess.Secret()),
 			Extras:     nodeToProps(d.SolaceDefaults),
 		}
 		var props []Prop
@@ -433,7 +455,7 @@ func applyStatusAccess(m *Model, d *spec.Defaults, statusPassword string, secret
 	users := make([]spec.User, len(d.Security.Users))
 	copy(users, d.Security.Users)
 	for i, u := range users {
-		users[i].Password = secretRef(securityUserPasswordName(u.Name), u.Secret())
+		users[i].Password = secretRef(securityUserPasswordName(u.Name), fmt.Sprintf("security.users[%s].password", u.Name), u.Secret())
 		users[i].PasswordEnv = ""
 	}
 

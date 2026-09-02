@@ -485,8 +485,14 @@ libs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if k.Logging.Syslog.Protocol != SyslogUDP {
-		t.Errorf("protocol default = %q want udp", k.Logging.Syslog.Protocol)
+	// kubernetes.logging still PARSES -- that is the precondition for validate
+	// rejecting it by name instead of it being silently dropped -- but nothing
+	// defaults it here any more: the live block is top-level.
+	if k.Logging == nil || k.Logging.Syslog == nil {
+		t.Fatal("the retired kubernetes.logging block must still parse, so validate can reject it")
+	}
+	if k.Logging.Syslog.Protocol != "" {
+		t.Errorf("the retired block must not be defaulted, got protocol %q", k.Logging.Syslog.Protocol)
 	}
 	if k.Libs.Download.Image != "busybox:1.37" {
 		t.Errorf("download image default = %q", k.Libs.Download.Image)
@@ -679,5 +685,42 @@ func TestWorkflowFileLess(t *testing.T) {
 	// sort.Slice needs to avoid an inconsistent comparator.
 	if WorkflowFileLess("10.yaml", "10.yaml") {
 		t.Error("WorkflowFileLess(x, x) must be false")
+	}
+}
+
+// TestParseEnvTopLevelSyslog pins the live location: logging.syslog sits beside
+// logging.level at the top level, and udp is filled in when protocol is unset.
+func TestParseEnvTopLevelSyslog(t *testing.T) {
+	e, err := ParseEnv([]byte(`
+logging:
+  level:
+    root: INFO
+  syslog:
+    host: syslog.corp
+    port: 514
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Syslog == nil {
+		t.Fatal("top-level logging.syslog did not parse")
+	}
+	if e.Syslog.Host != "syslog.corp" || e.Syslog.Port != 514 {
+		t.Errorf("syslog = %+v", e.Syslog)
+	}
+	if e.Syslog.Protocol != SyslogUDP {
+		t.Errorf("protocol default = %q, want udp", e.Syslog.Protocol)
+	}
+	if e.LoggingLevel == nil {
+		t.Error("logging.level must still parse alongside syslog")
+	}
+
+	// Absent block stays nil: presence is what turns syslog on.
+	e2, err := ParseEnv([]byte("logging:\n  level:\n    root: INFO\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e2.Syslog != nil {
+		t.Error("an absent syslog block must stay nil")
 	}
 }

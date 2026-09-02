@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusreport"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
 
@@ -79,7 +78,6 @@ type logsOpts struct {
 	ns       string
 	command  string
 	allow    []string
-	all      bool
 
 	follow     bool
 	previous   bool
@@ -88,29 +86,16 @@ type logsOpts struct {
 	since      string
 }
 
-// forRunner is the subset LogsArgv needs, per target: the container name is the
-// one thing that varies between them.
-func (o logsOpts) forRunner(container string) runner.LogsOpts {
+// forRunner is the subset LogsArgv needs. Which container to read is not among
+// it: LogsArgv names spec.ConnectorContainerName itself.
+func (o logsOpts) forRunner() runner.LogsOpts {
 	return runner.LogsOpts{
 		Follow:     o.follow,
 		Previous:   o.previous,
 		Timestamps: o.timestamps,
 		Tail:       o.tail,
 		Since:      o.since,
-		Container:  container,
 	}
-}
-
-// logTarget is one instance's log, already addressed: what to name on the
-// command line, and where.
-type logTarget struct {
-	name      string
-	namespace string
-	// container is which container inside a kubernetes pod to read, as
-	// statusreport picked it. Empty on docker/podman, and empty for a pod whose
-	// containers this tool cannot tell apart -- kubectl then says so itself,
-	// which is a better answer than guessing.
-	container string
 }
 
 // runLogs parses logs's flags and hands them to actLogs.
@@ -119,12 +104,11 @@ func runLogs(args []string, r runner.Runner) int {
 	env := envFlag(fs)
 	platform := platformFlag(fs)
 	var pods, containers []string
-	fs.Var(repeatableName{&pods}, "pod", "read this kubernetes pod's log (repeatable)")
-	fs.Var(repeatableName{&containers}, "container", "read this docker/podman container's log (repeatable)")
+	fs.Var(repeatableName{&pods}, "pod", "read this kubernetes pod log, by name or by index")
+	fs.Var(repeatableName{&containers}, "container", "read this docker/podman container log, by name or by index")
 	namespace := fs.String("namespace", "", "kubernetes namespace to query")
 	command := fs.String("command", "", "override the platform CLI binary used to reach each target")
 	allow := allowCommandFlag(fs)
-	all := fs.Bool("all", false, "read every connector instance on the platform, found by image name, instead of the ones env.yaml describes")
 	follow := fs.Bool("follow", false, "keep the log open and print new lines as they arrive, until interrupted")
 	previous := fs.Bool("previous", false, "read the previous container's log instead of the running one (kubernetes only)")
 	timestamps := fs.Bool("timestamps", false, "prefix every line with the time the platform recorded for it")
@@ -153,7 +137,6 @@ func runLogs(args []string, r runner.Runner) int {
 		ns:         *namespace,
 		command:    *command,
 		allow:      *allow,
-		all:        *all,
 		follow:     *follow,
 		previous:   *previous,
 		timestamps: *timestamps,
@@ -175,24 +158,31 @@ func checkLogsFlags(o logsOpts) int {
 		fmt.Fprintf(os.Stderr, "logs: %s reads a log that has already ended, so it cannot be combined with %s\n", previousFlagName, followFlagName)
 		return 2
 	}
-	if o.follow && o.all {
-		fmt.Fprintf(os.Stderr, "logs: %s searches for every instance by image name, and %s reads one; name a single instance with %s or %s instead\n",
-			allFlagName, followFlagName, podFlagName, containerFlagName)
-		return 2
-	}
-	if o.all && (len(o.pods) > 0 || len(o.conts) > 0) {
-		fmt.Fprintf(os.Stderr, "logs: %s searches for every instance by image name, so it cannot be combined with %s/%s\n", allFlagName, podFlagName, containerFlagName)
-		return 2
+	// logs reads one instance, so naming two is a question it cannot answer.
+	// Refused loudly rather than by quietly using the first: a repeated flag is
+	// far more often a slip than an intention, and the picker is the supported
+	// way to see what there is to choose from.
+	for _, f := range []struct {
+		vals []string
+		name string
+	}{
+		{o.pods, podFlagName},
+		{o.conts, containerFlagName},
+	} {
+		if len(f.vals) > 1 {
+			fmt.Fprintf(os.Stderr, "logs: %s may be given once -- logs reads one instance; run logs with no %s to list what matches\n", f.name, f.name)
+			return 2
+		}
 	}
 	return 0
 }
 
-// actLogs resolves the platform and its targets and reads each one's log.
-// Everything that can fail the whole run -- an unreadable env.yaml, an unsafe
-// name, a platform that cannot be resolved, a failed preflight -- fails here,
-// before any log is read.
+// actLogs resolves the platform, settles on exactly one instance, and reads its
+// log. Everything that can fail the whole run -- an unreadable env.yaml, an
+// unsafe name, a platform that cannot be resolved, a failed preflight -- fails
+// here, before anything is read.
 func actLogs(o logsOpts, r runner.Runner) int {
-	// Both paths stream: a one-shot read wants the platform's diagnostics on
+	// Both paths stream: a one-shot read wants the platform diagnostics on
 	// stderr just as much as a followed one does, because `logs > app.log` is
 	// the whole point of the verb and a redirect that swallowed them would be
 	// the first thing to confuse an operator.
@@ -202,6 +192,7 @@ func actLogs(o logsOpts, r runner.Runner) int {
 	}
 
 	sess, serr := resolveInstanceSession(instanceRequest{
+		verb:     verbLogs,
 		envPath:  o.envPath,
 		platform: o.platform,
 		ns:       o.ns,
@@ -209,7 +200,6 @@ func actLogs(o logsOpts, r runner.Runner) int {
 		pods:     o.pods,
 		conts:    o.conts,
 		allow:    o.allow,
-		all:      o.all,
 	})
 	if serr != nil {
 		return errExit(serr)
@@ -221,150 +211,90 @@ func actLogs(o logsOpts, r runner.Runner) int {
 	}
 
 	// The same read-only preflight probe status runs, for the same reason: fail
-	// on an unreachable engine once, up front, rather than once per target.
+	// on an unreachable engine once, up front, rather than at the point of read.
 	if code, ok := preflight(r, runner.ActionDeploy, sess.platform, sess.command, sess.ns, o.allow); !ok {
 		return code
 	}
 
-	targets, terr := logTargets(r, sess, o)
+	target, found, terr := resolveOneInstance(r, sess, namedInstance(sess.platform, o.pods, o.conts), logsInvocation(sess, o))
 	if terr != nil {
 		return errExit(terr)
 	}
-
-	if o.follow && len(targets) > 1 {
-		return errExit(fmt.Errorf("%s reads one instance, and %d match (%s); name one with %s",
-			followFlagName, len(targets), strings.Join(targetNamesOf(targets), ", "), podOrContainerFlag(sess.platform)))
+	if !found {
+		// The picker was printed: the run answered an ambiguous request with
+		// exactly what to type next, which is not a failure.
+		return 0
 	}
+	return readLog(s, sess, o, target)
+}
 
+// logsInvocation rebuilds the command that was run, minus the instance, so the
+// picker lines carry the flags the operator already typed instead of dropping
+// them. The resolved --platform is always included: a pasted line must not
+// re-open the interactive platform menu.
+//
+// Every flag logs has belongs in front of the instance, so the line needs no
+// suffix -- that half exists for cli, whose command has to stay behind its "--".
+func logsInvocation(sess instanceSession, o logsOpts) pickerLine {
+	parts := []string{"solmq-conn-util", "logs", platformFlagName, sess.platform}
+	if o.envPath != defaultEnvFile {
+		parts = append(parts, "-e", o.envPath)
+	}
+	if o.ns != "" {
+		parts = append(parts, namespaceFlagName, o.ns)
+	}
+	if o.command != "" {
+		parts = append(parts, commandFlagName, o.command)
+	}
+	for _, a := range o.allow {
+		parts = append(parts, allowCommandFlagName, a)
+	}
 	if o.follow {
-		return followLog(s, sess, o, targets[0])
+		parts = append(parts, followFlagName)
 	}
-	return readLogs(s, sess, o, targets)
+	if o.previous {
+		parts = append(parts, previousFlagName)
+	}
+	if o.timestamps {
+		parts = append(parts, timestampsFlagName)
+	}
+	if o.tail != runner.TailAll {
+		parts = append(parts, tailFlagName, strconv.Itoa(o.tail))
+	}
+	if o.since != "" {
+		parts = append(parts, sinceFlagName, o.since)
+	}
+	return pickerLine{prefix: strings.Join(parts, " ")}
 }
 
-// logTargets resolves which instances are meant, using the same discovery the
-// status verb does so the two verbs can never disagree about which pods a bare
-// invocation means.
-func logTargets(r runner.Runner, s instanceSession, o logsOpts) ([]logTarget, error) {
-	if s.platform == validate.PlatformKubernetes {
-		selector, match, _, derr := kubeDiscovery(s, o.pods, o.all)
-		if derr != nil {
-			return nil, derr
-		}
-		doc, err := runner.KubernetesPodsJSON(r, s.cmdArgv, s.ns, selector, o.pods, o.all)
-		if err != nil {
-			return nil, err
-		}
-		// ParsePods is asked only for names here, so the clock it measures ages
-		// against is never read; a zero time keeps the call honest about that.
-		insts, perr := statusreport.ParsePods(doc, time.Time{}, match)
-		if perr != nil {
-			return nil, fmt.Errorf("reading the pod list: %w", perr)
-		}
-		if len(insts) == 0 {
-			return nil, noPodsFound(selector, s.ns, o.all)
-		}
-		targets := make([]logTarget, 0, len(insts))
-		for _, inst := range insts {
-			ns := inst.Namespace
-			if ns == "" {
-				ns = s.ns
-			}
-			targets = append(targets, logTarget{name: inst.Name, namespace: ns, container: inst.ContainerName})
-		}
-		return targets, nil
-	}
-
-	names, notes, nerr := engineNames(r, s, o.conts, o.all)
-	for _, n := range notes {
-		fmt.Fprintln(os.Stderr, "logs:", n)
-	}
-	if nerr != nil {
-		return nil, nerr
-	}
-	targets := make([]logTarget, 0, len(names))
-	for _, n := range names {
-		targets = append(targets, logTarget{name: n})
-	}
-	return targets, nil
-}
-
-// readLogs prints each target's log once, in discovery order.
+// readLog reads the one resolved instance log, following it when asked.
 //
-// A target that cannot be read is reported against itself and the rest are
-// still read, the same rule status keeps: one unreachable instance must not
-// hide the others. The run then exits 1, because something the operator asked
-// for did not arrive.
-func readLogs(s runner.Streamer, sess instanceSession, o logsOpts, targets []logTarget) int {
-	failed := false
-	for i, t := range targets {
-		if len(targets) > 1 {
-			// A single target prints its log and nothing else, so the common case
-			// pipes into another tool cleanly; several need saying apart.
-			if i > 0 {
-				fmt.Fprintln(os.Stdout)
-			}
-			fmt.Fprintf(os.Stdout, "==> %s <==\n", t.name)
-		}
-		argv, err := runner.LogsArgv(sess.cmdArgv, sess.platform, t.name, t.namespace, o.forRunner(t.container))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "logs: %s: %v\n", t.name, err)
-			failed = true
-			continue
-		}
-		if err := s.Stream(context.Background(), runner.Cmd{Argv: argv}, os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintf(os.Stderr, "logs: could not read %s: %v\n", t.name, err)
-			failed = true
-		}
-	}
-	if failed {
-		return 1
-	}
-	return 0
-}
-
-// followLog keeps one target's log open until the operator interrupts it.
-//
+// Follow mode is the same read with a cancellable context and a signal handler:
 // Ctrl-C is how a follow is meant to end, so it exits 0 -- the same reasoning
 // watchStatus records for --watch. Stream reports a cancelled context as
 // success, so there is nothing here to unpick.
-func followLog(s runner.Streamer, sess instanceSession, o logsOpts, t logTarget) int {
-	argv, err := runner.LogsArgv(sess.cmdArgv, sess.platform, t.name, t.namespace, o.forRunner(t.container))
+func readLog(s runner.Streamer, sess instanceSession, o logsOpts, t instanceRef) int {
+	argv, err := runner.LogsArgv(sess.cmdArgv, sess.platform, t.name, t.namespace, o.forRunner())
 	if err != nil {
 		return errExit(err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt)
-	defer signal.Stop(stop)
-	go func() {
-		<-stop
-		cancel()
-	}()
+	ctx := context.Background()
+	if o.follow {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, os.Interrupt)
+		defer signal.Stop(stop)
+		go func() {
+			<-stop
+			cancel()
+		}()
+	}
 
 	if err := s.Stream(ctx, runner.Cmd{Argv: argv}, os.Stdout, os.Stderr); err != nil {
-		return errExit(fmt.Errorf("following %s: %w", t.name, err))
+		return errExit(fmt.Errorf("reading %s: %w", t.name, err))
 	}
 	return 0
-}
-
-// targetNamesOf lists the instance names, for a message that has to say which
-// ones it found.
-func targetNamesOf(targets []logTarget) []string {
-	names := make([]string, len(targets))
-	for i, t := range targets {
-		names[i] = t.name
-	}
-	return names
-}
-
-// podOrContainerFlag names the flag that narrows to one instance on this
-// platform, so the message points at the flag that exists rather than at both.
-func podOrContainerFlag(platform string) string {
-	if platform == validate.PlatformKubernetes {
-		return podFlagName
-	}
-	return containerFlagName
 }

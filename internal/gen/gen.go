@@ -17,6 +17,7 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/dockergen"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/podmangen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/render"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -83,8 +84,12 @@ func Config(r Request, res Resolver) (out string, errs, warns []Issue) {
 	if err != nil {
 		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
-	b, cw := build(wfs, &e.Defaults, false, statusPW)
-	return b.appYAML, nil, append(warns, toIssues(cw)...)
+	b, cw, err := build(wfs, &e.Defaults, false, statusPW)
+	warns = append(warns, toIssues(cw)...)
+	if err != nil {
+		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+	}
+	return b.appYAML, nil, warns
 }
 
 // Validate runs every check for every section present and returns all findings.
@@ -103,8 +108,28 @@ func Validate(r Request, res Resolver) (errs, warns []Issue) {
 		CheckPodman:     e.Podman != nil,
 		Env:             res.Env,
 	})
-	return append(pissues, verrs...), append(ewarns, w...)
+	errs, warns = append(pissues, verrs...), append(ewarns, w...)
+
+	// A mount-name collision is only visible once names are assigned, which
+	// happens in consolidate rather than in validate.Run -- so lint it here
+	// instead of leaving it to generate/deploy, matching the rule every other
+	// credential check follows: catch it while authoring, not mid-deploy.
+	//
+	// Only on an otherwise-clean spec: consolidate assumes validated input.
+	// The status password is a placeholder because it is rendered as a literal
+	// and never becomes a mount name, so it cannot affect the result, and the
+	// rendered document is discarded.
+	if len(errs) == 0 {
+		if _, _, berr := build(wfs, &e.Defaults, false, statusPasswordPlaceholder); berr != nil {
+			errs = append(errs, Issue{File: fileEnv, Msg: berr.Error()})
+		}
+	}
+	return errs, warns
 }
+
+// statusPasswordPlaceholder stands in for the reserved status account's password
+// on the validate path, which never emits the document it renders.
+const statusPasswordPlaceholder = "validate-only-placeholder"
 
 // GenerateKubernetes parses+validates and returns the manifest set on success.
 // Credentials/stores are resolved and embedded (stringData/base64), so this is
@@ -113,7 +138,16 @@ func Validate(r Request, res Resolver) (errs, warns []Issue) {
 // extraAllowed threads deploy/remove's --allow-command values into the
 // kubernetes.command allowlist check; plain `generate kubernetes` calls this
 // with none, so an exotic command validates clean only at deploy time.
-func GenerateKubernetes(r Request, res Resolver, extraAllowed ...string) (out string, errs, warns []Issue) {
+// KubeOpts steers the kubernetes render, mirroring PodmanOpts rather than
+// widening the signature every time a caller needs a variant.
+type KubeOpts struct {
+	// OmitNamespace drops the Namespace document. Set it for a teardown: a
+	// manifest carrying a Namespace, piped to `kubectl delete -f -`, takes the
+	// namespace and everything else living in it.
+	OmitNamespace bool
+}
+
+func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...string) (out string, errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
 	k := e.Kubernetes
 	if k == nil {
@@ -139,10 +173,13 @@ func GenerateKubernetes(r Request, res Resolver, extraAllowed ...string) (out st
 	if err != nil {
 		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
-	b, cw := build(wfs, &e.Defaults, true, statusPW)
+	b, cw, err := build(wfs, &e.Defaults, true, statusPW)
 	warns = append(warns, toIssues(cw)...)
+	if err != nil {
+		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+	}
 
-	in := deploy.Input{Kube: k, Defaults: &e.Defaults}
+	in := deploy.Input{Kube: k, Defaults: &e.Defaults, Syslog: e.Defaults.Syslog, OmitNamespace: opts.OmitNamespace}
 	if c := k.Secrets.Credentials; c != nil && c.Create != nil {
 		kvs, err := ResolveCredentials(b.model.Secrets, res)
 		if err != nil {
@@ -210,12 +247,16 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 	if err != nil {
 		return DockerPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
-	b, cw := build(wfs, &e.Defaults, true, statusPW)
+	b, cw, err := build(wfs, &e.Defaults, true, statusPW)
 	warns = append(warns, toIssues(cw)...)
+	if err != nil {
+		return DockerPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+	}
 
 	sm, lm := targetMounts(e.Defaults.TLS, d.Stores, d.Libs, res)
 	in := dockergen.Input{
 		Docker:  d,
+		Syslog:  e.Defaults.Syslog,
 		Secrets: stableNames(b.model.Secrets),
 		Stores:  toDockerMounts(sm),
 		Libs:    toDockerMount(lm),
@@ -329,8 +370,12 @@ type PodmanPlan struct {
 	// AppYAML, a container cannot inline file content, so it too has to be a
 	// bind-mounted file rather than embedded in the run script/quadlet unit.
 	StatusScript NamedDoc
-	Secrets      []consolidate.SecretRef // credentials to place in podman's secret store
-	Service      string                  // systemd service name (quadlet), e.g. name.service
+	// Logback is the rendered logback-spring.xml (write to disk), for the same
+	// reason. Zero when no syslog is configured, which is how callers know not
+	// to write or remove it.
+	Logback NamedDoc
+	Secrets []consolidate.SecretRef // credentials to place in podman's secret store
+	Service string                  // systemd service name (quadlet), e.g. name.service
 }
 
 // GeneratePodman parses+validates and renders either a `podman run` script
@@ -360,8 +405,11 @@ func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...st
 	if err != nil {
 		return PodmanPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
-	b, cw := build(wfs, &e.Defaults, true, statusPW)
+	b, cw, err := build(wfs, &e.Defaults, true, statusPW)
 	warns = append(warns, toIssues(cw)...)
+	if err != nil {
+		return PodmanPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+	}
 
 	plan.Mode = p.Mode
 	if opts.ForceQuadlet {
@@ -373,10 +421,17 @@ func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...st
 	appName := p.Name + "-application.yml"
 	statusName := p.Name + "-status"
 	plan.AppYAML = NamedDoc{Name: appName, Data: b.appYAML}
+	logbackPath := ""
+	if sl := e.Defaults.Syslog; sl != nil {
+		logbackName := p.Name + "-" + logback.FileName
+		plan.Logback = NamedDoc{Name: logbackName, Data: logback.XML(sl.Protocol)}
+		logbackPath = pathIn(opts.BaseDir, logbackName)
+	}
 	plan.StatusScript = NamedDoc{Name: statusName, Data: statusscript.Render(e.Defaults.EffectiveManagementPort(), spec.StatusUserName)}
 	plan.Service = PodmanServiceName(p.Name)
 	in := podmangen.Input{
 		Podman:  p,
+		Syslog:  e.Defaults.Syslog,
 		Secrets: podmanSecretRefs(p.Name, plan.Secrets),
 		Stores:  toPodmanMounts(sm),
 		Libs:    toPodmanMount(lm),
@@ -387,6 +442,7 @@ func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...st
 			AppYAMLPath:      pathIn(opts.BaseDir, appName),
 			MQTLS:            b.model.MQTLS,
 			StatusScriptPath: pathIn(opts.BaseDir, statusName),
+			LogbackPath:      logbackPath,
 			LeaderMode:       e.Defaults.LeaderElection.EffectiveMode(),
 		},
 	}
@@ -470,13 +526,42 @@ const ConfigImport = "optional:configtree:/run/secrets/"
 // statusPassword is the already-resolved password for the reserved status
 // account (see resolveStatusPassword); it flows straight into
 // consolidate.Opts so it is threaded through, never recomputed.
-func build(wfs []spec.Workflow, d *spec.Defaults, mountStores bool, statusPassword string) (built, []string) {
+func build(wfs []spec.Workflow, d *spec.Defaults, mountStores bool, statusPassword string) (built, []string, error) {
 	m, warns := consolidate.Build(wfs, d, consolidate.Opts{
 		MountStores:    mountStores,
 		ConfigImport:   ConfigImport,
 		StatusPassword: statusPassword,
 	})
-	return built{appYAML: render.Application(m), model: m}, warns
+	// One mounted name holds one value, so two different credentials landing on
+	// it means one of them would silently run with the other's value. Refuse
+	// before anything is rendered; the operator renames the -env variable or the
+	// connection it collides with.
+	if err := secretConflictError(m.SecretConflicts); err != nil {
+		return built{}, warns, err
+	}
+	return built{appYAML: render.Application(m), model: m}, warns, nil
+}
+
+// secretConflictError turns consolidate's collision records into the operator's
+// error, or nil when there are none. It names *both* claiming positions, since
+// the contested key alone does not say which field to edit -- a derived name
+// appears nowhere in the spec.
+//
+// With spec.GeneratedNamePrefix reserved (validate rejects an -env variable
+// inside it), a derived name and an operator's name can no longer meet. What is
+// left is two derived names folding together: stableToken maps every
+// non-alphanumeric run to one '_', so security.users "ops.1" and "ops-1" both
+// reach _GEN_SECURITY_USER_OPS_1_PASSWORD. Hence "rename one of them" rather
+// than advice about -env variables.
+func secretConflictError(cs []consolidate.SecretConflict) error {
+	if len(cs) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(cs))
+	for _, c := range cs {
+		parts = append(parts, fmt.Sprintf("%s (claimed by %s and %s)", c.Name, c.First, c.Second))
+	}
+	return fmt.Errorf("two different credentials are mounted under one name: %s. One mounted file holds one value, so rename one of them; names differing only in punctuation (\"ops.1\" vs \"ops-1\") fold to the same mount name", strings.Join(parts, "; "))
 }
 
 // ---- mount resolution --------------------------------------------------------

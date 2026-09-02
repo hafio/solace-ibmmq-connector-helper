@@ -66,14 +66,34 @@ const (
 	StatusUserPasswordEnvVar = "SECURITY_USER_SOLMQ_STATUS_PASSWORD"
 )
 
+// GeneratedNamePrefix marks every mount name the tool derives for itself, as
+// opposed to the ones operators supply through the `-env` fields. A credential
+// written as `-env` is mounted under the host variable it names, so the two
+// kinds of name share one namespace; this prefix keeps the derived half out of
+// the way of anything an operator would plausibly export, since a collision
+// would otherwise mean two credentials competing for one mounted file.
+//
+// The leading underscore is deliberate: it is legal in an environment-variable
+// identifier, a Kubernetes Secret data key, a file name, a Spring property
+// segment and a compose secret key alike, and is vanishingly rare in
+// hand-written variable names.
+const GeneratedNamePrefix = "_GEN_"
+
 // ConnectorContainerName is the name of the connector container inside a
 // generated kubernetes pod. It is a constant rather than a literal in the
 // renderer because the status verb has to find that container again in a pod's
 // containerStatuses to report its state, and a rename on one side without the
 // other would silently report a pod with no container facts at all.
 //
-// docker and podman need no equivalent: there the container *is* the instance
-// and its name is the operator's own (docker.name / podman.name in env.yaml).
+// Every kubernetes exec and log read names it outright (kubectl's -c), rather
+// than letting the engine pick a default container, so a pod carrying a sidecar
+// cannot be read as if the sidecar were the connector.
+//
+// docker and podman have no second container to disambiguate -- there the
+// container *is* the instance, and its name is the operator's own
+// (docker.name / podman.name in env.yaml) -- but DefaultConnectorName is this
+// same value, so an instance that does not override it is called the same thing
+// on all three platforms.
 const ConnectorContainerName = "connector"
 
 // Label keys/values emitted on Kubernetes pods, compose services and podman
@@ -129,6 +149,7 @@ func (le LeaderElection) EffectiveMode() string {
 type Defaults struct {
 	TLS            TLSConfig
 	LoggingLevel   *yaml.Node // ordered mapping under logging.level
+	Syslog         *Syslog    // logging.syslog, nil when the block is absent
 	Management     Management
 	Security       Security
 	LeaderElection LeaderElection
@@ -174,7 +195,8 @@ type rawTLS struct {
 }
 
 type rawLogging struct {
-	Level yaml.Node `yaml:"level"`
+	Level  yaml.Node `yaml:"level"`
+	Syslog *Syslog   `yaml:"syslog"`
 }
 
 type rawManagement struct {
@@ -221,6 +243,12 @@ func defaultsFromRaw(raw rawDefaults) *Defaults {
 	}
 	if raw.Logging != nil {
 		d.LoggingLevel = nodePtr(raw.Logging.Level)
+		d.Syslog = raw.Logging.Syslog
+		// udp is the default because it needs nothing on the classpath; tcp is
+		// the opt-in that costs a jar.
+		if d.Syslog != nil && d.Syslog.Protocol == "" {
+			d.Syslog.Protocol = SyslogUDP
+		}
 	}
 	if raw.Management != nil {
 		d.Management = Management{

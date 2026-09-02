@@ -69,9 +69,10 @@ _solmq_conn_util_flags() {
   case "$1" in
     generate) printf '--platform -e --env -o --out' ;;
     deploy) printf '--platform -e --env --allow-command' ;;
-    remove) printf '--platform -e --env --allow-command' ;;
+    remove) printf '--no-prompt --platform -e --env --allow-command' ;;
     status) printf '-d --details -w --watch --all --output --install --platform -e --env --pod --container --namespace --management-port --user --command --allow-command' ;;
-    logs) printf '--follow --previous --tail --since --timestamps --all --platform -e --env --pod --container --namespace --command --allow-command' ;;
+    logs) printf '--follow --previous --tail --since --timestamps --platform -e --env --pod --container --namespace --command --allow-command' ;;
+    cli) printf '--platform -e --env --pod --container --namespace --command --allow-command' ;;
     validate) printf '-e --env' ;;
     examples) printf '-f --force' ;;
     download) printf '-e --env --url --version --omit-lib-file --include-provided -f --force' ;;
@@ -162,7 +163,7 @@ _solmq_conn_util() {
   # Aliases are deliberately absent from this word list -- the TAB menu for
   # word 1 keeps showing only canonical verbs.
   if [ -z "$verb" ]; then
-    COMPREPLY=( $(compgen -W 'generate deploy remove status logs version validate examples download auto-complete help -h --help' -- "$cur") )
+    COMPREPLY=( $(compgen -W 'generate deploy remove status logs cli version validate examples download auto-complete help -h --help' -- "$cur") )
     return
   fi
 

@@ -15,11 +15,26 @@ const (
 )
 
 // Shared docker/podman container defaults.
+//
+// DefaultConnectorName is deliberately the same word as ConnectorContainerName,
+// the name this tool gives the container inside a generated kubernetes pod, so
+// that the connector is called one thing on every platform. It was
+// "solmq-connector" before, which meant an operator reading a `docker exec`
+// line and a `kubectl exec -c` line saw two different names for the same
+// process.
 const (
-	DefaultConnectorName = "solmq-connector"
+	DefaultConnectorName = ConnectorContainerName
 	DefaultRestart       = "unless-stopped"
 	DefaultMgmtPort      = 8090
 )
+
+// DefaultComposeProject is the compose project every generated compose file
+// declares, so a stack's grouping comes from the spec rather than from the
+// basename of whichever directory env.yaml happens to live in.
+//
+// Docker only, and deliberately not in the shared block above: podman has no
+// project or pod concept for it to mean anything against.
+const DefaultComposeProject = "solace-ibmmq-connectors"
 
 // EffectiveManagementPort returns d.Management.Port, falling back to
 // DefaultMgmtPort when unset. Nil-receiver safe so callers can invoke it on a
@@ -129,16 +144,22 @@ func (p Port) String() string {
 // so an old env.yaml fails loudly instead of silently losing its credentials.
 // Image and Timezone are kept on the same terms, both having moved to their own
 // top-level keys.
+//
+// ProjectName has no Podman counterpart: it names a compose project, and podman
+// has no equivalent grouping to attach one to.
 type Docker struct {
-	Command  string       `yaml:"command"` // default docker; e.g. "podman" or "docker --context foo"
-	Image    string       `yaml:"image"`   // removed; non-empty is a validation error
-	Name     string       `yaml:"name"`
-	Restart  string       `yaml:"restart"`
-	Ports    []Port       `yaml:"ports"`
-	Timezone string       `yaml:"timezone"` // removed; non-empty is a validation error
-	Secrets  *Secrets     `yaml:"secrets"`  // removed; non-nil is a validation error
-	Stores   *StoresMount `yaml:"stores"`
-	Libs     *LibsMount   `yaml:"libs"`
+	Command string `yaml:"command"` // default docker; e.g. "podman" or "docker --context foo"
+	Image   string `yaml:"image"`   // removed; non-empty is a validation error
+	Name    string `yaml:"name"`
+	// ProjectName becomes the compose file's top-level name:, which is what
+	// labels every container in the stack as belonging to one project.
+	ProjectName string       `yaml:"project-name"`
+	Restart     string       `yaml:"restart"`
+	Ports       []Port       `yaml:"ports"`
+	Timezone    string       `yaml:"timezone"` // removed; non-empty is a validation error
+	Secrets     *Secrets     `yaml:"secrets"`  // removed; non-nil is a validation error
+	Stores      *StoresMount `yaml:"stores"`
+	Libs        *LibsMount   `yaml:"libs"`
 }
 
 // Quadlet locates the systemd generator directory and its scope.
@@ -163,7 +184,7 @@ type Podman struct {
 	Libs     *LibsMount   `yaml:"libs"`
 }
 
-// applyDockerDefaults fills command/name/restart and the mount paths.
+// applyDockerDefaults fills command/name/project-name/restart and the mount paths.
 //
 // ports is deliberately not defaulted: publishing a container port to the host
 // is an exposure decision, and nothing the tool does needs one -- status execs
@@ -176,6 +197,9 @@ func applyDockerDefaults(d *Docker) {
 	}
 	if d.Name == "" {
 		d.Name = DefaultConnectorName
+	}
+	if d.ProjectName == "" {
+		d.ProjectName = DefaultComposeProject
 	}
 	if d.Restart == "" {
 		d.Restart = DefaultRestart

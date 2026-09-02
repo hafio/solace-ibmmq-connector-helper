@@ -114,8 +114,12 @@ type Instance struct {
 	// about, as connectorIndex picked it. Empty on docker/podman, where the
 	// target is the container, and empty for a multi-container pod in which
 	// none is the connector -- the case connectorIndex deliberately refuses to
-	// guess at. A caller addressing the container by name (kubectl -c) reads it
-	// here rather than deciding again.
+	// guess at.
+	//
+	// It is reported, not used to address anything: every exec and log read
+	// names spec.ConnectorContainerName outright (runner.ExecArgv), so this
+	// field says which container the facts below came from rather than deciding
+	// which one to reach.
 	ContainerName string `json:"containerName,omitempty"`
 
 	Container   *Container   `json:"container,omitempty"`

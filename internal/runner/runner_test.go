@@ -106,6 +106,14 @@ func TestHelperProcess(t *testing.T) {
 			os.Getenv("RUNNER_TEST_AMBIENT_ONLY"),
 			os.Getenv("RUNNER_TEST_OVERRIDE"),
 			os.Getenv("RUNNER_TEST_EXTRA_ONLY"))
+	case "stdiokind":
+		// Reports whether each standard file the parent handed over is a plain
+		// regular file. If os/exec had interposed a pipe -- which it does for
+		// any io.Writer that is not an *os.File -- these would read as pipes
+		// instead, and that substitution is exactly what Attach must never
+		// allow: a pipe is not a terminal, so the engine would refuse the tty.
+		fmt.Fprintf(os.Stdout, "in=%v out=%v err=%v\n",
+			regularFile(os.Stdin), regularFile(os.Stdout), regularFile(os.Stderr))
 	default:
 		fmt.Fprintf(os.Stderr, "TestHelperProcess: unknown mode %q\n", args[0])
 		os.Exit(2)
@@ -1148,12 +1156,12 @@ func TestScriptInstalledArgv(t *testing.T) {
 		{
 			name: "kubernetes no namespace", cmd: []string{"kubectl"}, platform: validate.PlatformKubernetes,
 			target: "pod-0",
-			want:   []string{"kubectl", "exec", "pod-0", "--", "sh", "-c", probePayload},
+			want:   []string{"kubectl", "exec", "pod-0", "-c", spec.ConnectorContainerName, "--", "sh", "-c", probePayload},
 		},
 		{
 			name: "kubernetes with namespace", cmd: []string{"oc"}, platform: validate.PlatformKubernetes,
 			target: "pod-0", namespace: "solace",
-			want: []string{"oc", "exec", "pod-0", "-n", "solace", "--", "sh", "-c", probePayload},
+			want: []string{"oc", "exec", "pod-0", "-n", "solace", "-c", spec.ConnectorContainerName, "--", "sh", "-c", probePayload},
 		},
 		{
 			name: "docker", cmd: []string{"docker"}, platform: validate.PlatformDocker,
@@ -1254,12 +1262,12 @@ func TestInstallScriptArgv(t *testing.T) {
 		{
 			name: "kubernetes no namespace", cmd: []string{"kubectl"}, platform: validate.PlatformKubernetes,
 			target: "pod-0",
-			want:   []string{"kubectl", "exec", "-i", "pod-0", "--", "sh", "-c", "mkdir -p /tmp && cat > /tmp/solmq-status.sh"},
+			want:   []string{"kubectl", "exec", "-i", "pod-0", "-c", spec.ConnectorContainerName, "--", "sh", "-c", "mkdir -p /tmp && cat > /tmp/solmq-status.sh"},
 		},
 		{
 			name: "kubernetes with namespace", cmd: []string{"oc"}, platform: validate.PlatformKubernetes,
 			target: "pod-0", namespace: "solace",
-			want: []string{"oc", "exec", "-i", "pod-0", "-n", "solace", "--", "sh", "-c", "mkdir -p /tmp && cat > /tmp/solmq-status.sh"},
+			want: []string{"oc", "exec", "-i", "pod-0", "-n", "solace", "-c", spec.ConnectorContainerName, "--", "sh", "-c", "mkdir -p /tmp && cat > /tmp/solmq-status.sh"},
 		},
 		{
 			name: "docker", cmd: []string{"docker"}, platform: validate.PlatformDocker,
@@ -1323,12 +1331,12 @@ func TestRunStatusScriptArgv(t *testing.T) {
 		{
 			name: "kubernetes no namespace", cmd: []string{"kubectl"}, platform: validate.PlatformKubernetes,
 			target: "pod-0",
-			want:   []string{"kubectl", "exec", "pod-0", "--", "sh", "/tmp/solmq-status.sh"},
+			want:   []string{"kubectl", "exec", "pod-0", "-c", spec.ConnectorContainerName, "--", "sh", "/tmp/solmq-status.sh"},
 		},
 		{
 			name: "kubernetes with namespace", cmd: []string{"oc"}, platform: validate.PlatformKubernetes,
 			target: "pod-0", namespace: "solace",
-			want: []string{"oc", "exec", "pod-0", "-n", "solace", "--", "sh", "/tmp/solmq-status.sh"},
+			want: []string{"oc", "exec", "pod-0", "-n", "solace", "-c", spec.ConnectorContainerName, "--", "sh", "/tmp/solmq-status.sh"},
 		},
 		{
 			name: "docker", cmd: []string{"docker"}, platform: validate.PlatformDocker,
@@ -1484,7 +1492,8 @@ func TestOSStreamRejectsEmptyAndUnresolvableArgv(t *testing.T) {
 // TestLogsArgvPerPlatform pins the two shapes, which differ in more than
 // spelling: kubectl takes the pod as a positional with the namespace and
 // container as flags, docker and podman take their options first and the
-// container name last.
+// container name last. The container is always named on kubernetes, whatever
+// the pod holds -- see ExecArgv for why.
 func TestLogsArgvPerPlatform(t *testing.T) {
 	for _, c := range []struct {
 		name      string
@@ -1495,18 +1504,18 @@ func TestLogsArgvPerPlatform(t *testing.T) {
 	}{
 		{
 			name: "kubernetes bare", platform: validate.PlatformKubernetes, namespace: "prod",
-			opts: LogsOpts{Tail: TailAll, Container: "connector"},
-			want: []string{"cli", "logs", "pod-a", "-n", "prod", "-c", "connector"},
+			opts: LogsOpts{Tail: TailAll},
+			want: []string{"cli", "logs", "pod-a", "-n", "prod", "-c", spec.ConnectorContainerName},
 		},
 		{
-			name: "kubernetes without a namespace or container", platform: validate.PlatformKubernetes,
+			name: "kubernetes without a namespace still names the container", platform: validate.PlatformKubernetes,
 			opts: LogsOpts{Tail: TailAll},
-			want: []string{"cli", "logs", "pod-a"},
+			want: []string{"cli", "logs", "pod-a", "-c", spec.ConnectorContainerName},
 		},
 		{
 			name: "kubernetes with every option", platform: validate.PlatformKubernetes, namespace: "prod",
-			opts: LogsOpts{Follow: true, Previous: true, Timestamps: true, Tail: 50, Since: "10m0s", Container: "connector"},
-			want: []string{"cli", "logs", "pod-a", "-n", "prod", "-c", "connector", "-p", "-f", "--timestamps", "--tail", "50", "--since", "10m0s"},
+			opts: LogsOpts{Follow: true, Previous: true, Timestamps: true, Tail: 50, Since: "10m0s"},
+			want: []string{"cli", "logs", "pod-a", "-n", "prod", "-c", spec.ConnectorContainerName, "-p", "-f", "--timestamps", "--tail", "50", "--since", "10m0s"},
 		},
 		{
 			name: "docker bare", platform: validate.PlatformDocker,
@@ -1559,7 +1568,7 @@ func TestLogsArgvRefusesPreviousOffKubernetes(t *testing.T) {
 	}
 }
 
-// TestLogsArgvUnknownPlatform mirrors execArgv's refusal: an unrecognised
+// TestLogsArgvUnknownPlatform mirrors ExecArgv's refusal: an unrecognised
 // platform names the three that exist rather than producing a half-built argv.
 func TestLogsArgvUnknownPlatform(t *testing.T) {
 	_, err := LogsArgv([]string{"kubectl"}, "nomad", "c", "", LogsOpts{Tail: TailAll})
@@ -1570,5 +1579,258 @@ func TestLogsArgvUnknownPlatform(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the error should name %q, got %v", want, err)
 		}
+	}
+}
+
+// ---- ExecArgv (the shared exec prefix) -----------------------------------------
+
+// TestExecArgvPerPlatform pins the shape each engine's exec actually parses,
+// which is a parser difference rather than a spelling one: kubectl accepts its
+// own flags after the pod positional and needs the "--" terminator to know
+// where the in-container command begins, while docker and podman stop parsing
+// their own flags at the container name -- so theirs must come first, and a
+// "--" would reach the container as an argument.
+//
+// The container is asserted on every kubernetes row, including the one with no
+// namespace: it is a constant, not something discovery supplies.
+func TestExecArgvPerPlatform(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		platform  string
+		namespace string
+		opts      ExecOpts
+		want      []string
+	}{
+		{
+			name: "kubernetes bare", platform: validate.PlatformKubernetes,
+			want: []string{"cli", "exec", "pod-0", "-c", spec.ConnectorContainerName, "--"},
+		},
+		{
+			name: "kubernetes with a namespace", platform: validate.PlatformKubernetes, namespace: "prod",
+			want: []string{"cli", "exec", "pod-0", "-n", "prod", "-c", spec.ConnectorContainerName, "--"},
+		},
+		{
+			name: "kubernetes with stdin", platform: validate.PlatformKubernetes, namespace: "prod",
+			opts: ExecOpts{Stdin: true},
+			want: []string{"cli", "exec", "-i", "pod-0", "-n", "prod", "-c", spec.ConnectorContainerName, "--"},
+		},
+		{
+			name: "kubernetes with a terminal", platform: validate.PlatformKubernetes, namespace: "prod",
+			opts: ExecOpts{Stdin: true, TTY: true},
+			want: []string{"cli", "exec", "-i", "-t", "pod-0", "-n", "prod", "-c", spec.ConnectorContainerName, "--"},
+		},
+		{
+			// No -c and no "--": both would be handed to the container, which
+			// stops parsing engine flags at its own name.
+			name: "docker", platform: validate.PlatformDocker, namespace: "ignored",
+			opts: ExecOpts{Stdin: true, TTY: true},
+			want: []string{"cli", "exec", "-i", "-t", "pod-0"},
+		},
+		{
+			name: "podman", platform: validate.PlatformPodman,
+			opts: ExecOpts{Stdin: true},
+			want: []string{"cli", "exec", "-i", "pod-0"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := ExecArgv([]string{"cli"}, c.platform, "pod-0", c.namespace, c.opts)
+			if err != nil {
+				t.Fatalf("ExecArgv: %v", err)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("argv = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestExecArgvRefusesATTYWithoutStdin pins the guard: a terminal the child
+// cannot read from can only be a caller mistake, so it is refused rather than
+// quietly produced.
+func TestExecArgvRefusesATTYWithoutStdin(t *testing.T) {
+	_, err := ExecArgv([]string{"kubectl"}, validate.PlatformKubernetes, "pod-0", "", ExecOpts{TTY: true})
+	if err == nil {
+		t.Fatal("a tty without stdin must be refused")
+	}
+	if !strings.Contains(err.Error(), "stdin") {
+		t.Errorf("the error should say what is missing, got %v", err)
+	}
+}
+
+// TestExecArgvUnknownPlatform mirrors LogsArgv's refusal: an unrecognised
+// platform names the three that exist rather than producing a half-built argv.
+func TestExecArgvUnknownPlatform(t *testing.T) {
+	_, err := ExecArgv([]string{"kubectl"}, "nomad", "c", "", ExecOpts{})
+	if err == nil {
+		t.Fatal("an unknown platform must be refused")
+	}
+	for _, want := range []string{validate.PlatformKubernetes, validate.PlatformDocker, validate.PlatformPodman} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error should name %q, got %v", want, err)
+		}
+	}
+}
+
+// ---- OS.Attach (the terminal-handover boundary) --------------------------------
+
+// regularFile reports whether f is a plain file rather than a pipe, which is
+// how the stdiokind helper mode tells an inherited descriptor from one os/exec
+// substituted a pipe for. Go reports an anonymous pipe as ModeNamedPipe on
+// Windows and unix alike, so IsRegular separates the two on both.
+func regularFile(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// attachFiles opens three temp files to stand in for a terminal, since a test
+// has no terminal to hand over. They are regular files, which is the whole
+// point: the child reports back what kind of descriptor it was given.
+func attachFiles(t *testing.T) (stdin, stdout, stderr *os.File) {
+	t.Helper()
+	dir := t.TempDir()
+	open := func(name string) *os.File {
+		f, err := os.Create(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("creating %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = f.Close() })
+		return f
+	}
+	return open("stdin"), open("stdout"), open("stderr")
+}
+
+// readFile returns what the child wrote to one of those files.
+func readFile(t *testing.T, f *os.File) string {
+	t.Helper()
+	b, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatalf("reading %s: %v", f.Name(), err)
+	}
+	return string(b)
+}
+
+// TestOSAttachHandsTheChildTheCallersFilesNotPipes is the test that justifies
+// the seam existing at all. Stream copies through io.Writers, and os/exec
+// answers any writer that is not an *os.File with a pipe -- so a future
+// "simplification" of Attach onto io.Writer would silently take the terminal
+// away from the engine and leave an operator with a shell that has no prompt.
+// The child reports what it was actually given.
+func TestOSAttachHandsTheChildTheCallersFilesNotPipes(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	stdin, stdout, stderr := attachFiles(t)
+	code, err := (OS{}).Attach(Cmd{Argv: helperProcessArgv(os.Args[0], "stdiokind")}, stdin, stdout, stderr)
+	if err != nil || code != 0 {
+		t.Fatalf("Attach = (%d, %v), want (0, nil); stderr %q", code, err, readFile(t, stderr))
+	}
+	if got, want := readFile(t, stdout), "in=true out=true err=true\n"; !strings.Contains(got, want) {
+		t.Errorf("the child saw %q, want %q -- os/exec interposed a pipe", got, want)
+	}
+}
+
+// TestOSAttachStdinIsTheHandedFile pins the other half: what the caller gives
+// as stdin is what the child reads, with nothing copied through this process.
+func TestOSAttachStdinIsTheHandedFile(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	stdin, stdout, stderr := attachFiles(t)
+	if _, err := stdin.WriteString("hello-attach\n"); err != nil {
+		t.Fatalf("writing stdin: %v", err)
+	}
+	if _, err := stdin.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("rewinding stdin: %v", err)
+	}
+	code, err := (OS{}).Attach(Cmd{Argv: helperProcessArgv(os.Args[0], "stdin")}, stdin, stdout, stderr)
+	if err != nil || code != 0 {
+		t.Fatalf("Attach = (%d, %v), want (0, nil); stderr %q", code, err, readFile(t, stderr))
+	}
+	if got := readFile(t, stdout); got != "hello-attach\n" {
+		t.Errorf("child echoed %q, want the handed stdin", got)
+	}
+}
+
+// TestOSAttachReportsTheChildExitStatus pins the fact the cli verb's exit-code
+// contract rests on: a session that ended non-zero is reported as that status,
+// not as an error, because only the caller knows whether it means the engine
+// could not attach or the operator's last command failed.
+func TestOSAttachReportsTheChildExitStatus(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	stdin, stdout, stderr := attachFiles(t)
+	code, err := (OS{}).Attach(Cmd{Argv: helperProcessArgv(os.Args[0], "fail")}, stdin, stdout, stderr)
+	if err != nil {
+		t.Fatalf("a child that ran and exited non-zero is not an error here: %v", err)
+	}
+	if code != 3 {
+		t.Errorf("code = %d, want 3", code)
+	}
+	if got := readFile(t, stdout); !strings.Contains(got, "before-exit") {
+		t.Errorf("the child's output should still have reached the caller's file, got %q", got)
+	}
+}
+
+// TestOSAttachEnvReachesChild covers the third call site of the applyCmdEnv
+// split, so the credential channel cannot behave differently here than under
+// Run.
+func TestOSAttachEnvReachesChild(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	t.Setenv("RUNNER_TEST_AMBIENT_ONLY", "ambient")
+	t.Setenv("RUNNER_TEST_OVERRIDE", "ambient")
+	stdin, stdout, stderr := attachFiles(t)
+	cmd := Cmd{
+		Argv: helperProcessArgv(os.Args[0], "env"),
+		Env:  []string{"RUNNER_TEST_OVERRIDE=supplied", "RUNNER_TEST_EXTRA_ONLY=extra"},
+	}
+	code, err := (OS{}).Attach(cmd, stdin, stdout, stderr)
+	if err != nil || code != 0 {
+		t.Fatalf("Attach = (%d, %v), want (0, nil); stderr %q", code, err, readFile(t, stderr))
+	}
+	want := "AMBIENT_ONLY=ambient OVERRIDE=supplied EXTRA_ONLY=extra\n"
+	if got := readFile(t, stdout); got != want {
+		t.Errorf("child env = %q, want %q", got, want)
+	}
+}
+
+// TestOSAttachRefusesACmdCarryingStdinText pins the contradiction guard: a Cmd
+// that wants a string written to the child cannot also be a session reading the
+// operator's keyboard, and honouring one of them silently is the class of bug
+// LogsArgv's --previous guard exists to prevent.
+func TestOSAttachRefusesACmdCarryingStdinText(t *testing.T) {
+	stdin, stdout, stderr := attachFiles(t)
+	_, err := (OS{}).Attach(Cmd{Argv: []string{"go"}, Stdin: "payload"}, stdin, stdout, stderr)
+	if err == nil {
+		t.Fatal("a Cmd carrying stdin text must be refused")
+	}
+	if !strings.Contains(err.Error(), "Cmd.Stdin") {
+		t.Errorf("the error should name the field, got %v", err)
+	}
+}
+
+// TestOSAttachRefusesANilFile fails here rather than at the child's first
+// write, where os/exec panics on a typed-nil *os.File in its io.Writer field.
+func TestOSAttachRefusesANilFile(t *testing.T) {
+	stdin, stdout, stderr := attachFiles(t)
+	for _, c := range []struct {
+		name          string
+		in, out, errf *os.File
+	}{
+		{"no stdin", nil, stdout, stderr},
+		{"no stdout", stdin, nil, stderr},
+		{"no stderr", stdin, stdout, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := (OS{}).Attach(Cmd{Argv: []string{"go"}}, c.in, c.out, c.errf); err == nil {
+				t.Fatal("a nil file must be refused")
+			}
+		})
+	}
+}
+
+// TestOSAttachRejectsEmptyAndUnresolvableArgv mirrors the Run and Stream
+// refusals: all three go through resolveArgv0, so the rules cannot drift apart.
+func TestOSAttachRejectsEmptyAndUnresolvableArgv(t *testing.T) {
+	stdin, stdout, stderr := attachFiles(t)
+	if _, err := (OS{}).Attach(Cmd{}, stdin, stdout, stderr); err == nil {
+		t.Error("an empty argv must be refused")
+	}
+	if _, err := (OS{}).Attach(Cmd{Argv: []string{"solmq-no-such-binary-xyz"}}, stdin, stdout, stderr); err == nil {
+		t.Error("an unresolvable argv[0] must be refused")
 	}
 }

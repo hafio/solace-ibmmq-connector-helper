@@ -17,6 +17,7 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusreport"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
 
 // ---- fixtures -----------------------------------------------------------------
@@ -226,6 +227,26 @@ func withPromptAnswer(t *testing.T, answer string) {
 	t.Cleanup(func() { promptLine = old })
 }
 
+// withPromptAnswers is withPromptAnswer for a run that asks more than once,
+// answering each prompt in turn. remove is the case that needs it: the teardown
+// and the namespace are deliberately separate questions, so a test that wants
+// "yes, tear down" then "no, keep the namespace" cannot use one canned answer
+// for both. Answers beyond the list repeat the last one.
+func withPromptAnswers(t *testing.T, answers ...string) {
+	t.Helper()
+	old := promptLine
+	i := 0
+	promptLine = func(string) (string, error) {
+		a := answers[len(answers)-1]
+		if i < len(answers) {
+			a = answers[i]
+		}
+		i++
+		return a, nil
+	}
+	t.Cleanup(func() { promptLine = old })
+}
+
 // ---- deploy/remove seam helpers -------------------------------------------------
 
 // fakeRunner records every invocation reaching the deploy/remove seam so tests
@@ -309,6 +330,7 @@ func TestExitCodeContract(t *testing.T) {
 		// as the help verb's argument, or somewhere among the flags (routed
 		// through the flag parser as ErrHelp).
 		{"verb help short", []string{"status", "-h"}, 0},
+		{"cli help", []string{"cli", "-h"}, 0},
 		{"verb help long", []string{"deploy", "--help"}, 0},
 		{"verb help via flag parser", []string{"examples", "-f", "-h"}, 0},
 		{"help with a command", []string{"help", "status"}, 0},
@@ -320,6 +342,11 @@ func TestExitCodeContract(t *testing.T) {
 		{"generate bogus target", []string{"generate", "bogus"}, 2},
 		{"deploy bogus platform", []string{"deploy", "bogus"}, 2},
 		{"download missing target", []string{"download"}, 2},
+		// cli is the one verb whose exit code can leave this table, but only
+		// once a session is actually running inside an instance. Everything
+		// decided from the command line alone still answers 2.
+		{"cli unexpected positional", []string{"cli", "bogus"}, 2},
+		{"cli separator with no command", []string{"cli", "--platform", "docker", "--container", "c", "--"}, 2},
 		{"download unknown target", []string{"download", "bogus"}, 2},
 		{"download missing set", []string{"download", "jar"}, 2},
 		{"download unknown set", []string{"download", "jar", "bogus"}, 2},
@@ -707,7 +734,13 @@ func TestDeployKubernetesSeamHappyPath(t *testing.T) {
 }
 
 func TestRemoveKubernetesSeamHappyPath(t *testing.T) {
-	f := useFakeRunner(t)
+	// Three responses: the preflight probe, the manifest delete, and the
+	// occupancy probe that every kubernetes teardown now makes. nsList() is an
+	// empty namespace, so the run reaches the namespace question.
+	f := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
+	// remove asks before it tears down; this test is about the argv that
+	// follows, so it answers yes. The prompt itself is covered below.
+	withPromptAnswer(t, "y")
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
@@ -715,8 +748,10 @@ func TestRemoveKubernetesSeamHappyPath(t *testing.T) {
 	if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
-	if len(f.calls) != 2 {
-		t.Fatalf("want 2 calls to the runner (preflight, remove), got %d: %+v", len(f.calls), f.calls)
+	// preflight, delete, the occupancy probe, and the namespace delete the
+	// prompt approved.
+	if len(f.calls) != 4 {
+		t.Fatalf("want 4 calls (preflight, delete, probe, namespace delete), got %d: %+v", len(f.calls), f.calls)
 	}
 	wantPreflight := []string{"kubectl", "auth", "can-i", "delete", "deployment", "--namespace", "solace-connectors"}
 	if !reflect.DeepEqual(f.calls[0].argv, wantPreflight) {
@@ -742,6 +777,733 @@ func TestDeployKubernetesSeamRejectsUnsafeCommand(t *testing.T) {
 	}
 	if len(f.calls) != 0 {
 		t.Fatalf("nothing must reach the runner when the command is rejected, got %d calls", len(f.calls))
+	}
+}
+
+// TestRemoveKubernetesSeamPromptsBeforeTearingDown is the confirmation half of
+// TestRemoveKubernetesSeamHappyPath above: an accepted answer produces exactly
+// the same two calls, so the prompt gates the teardown without changing it.
+func TestRemoveKubernetesSeamPromptsBeforeTearingDown(t *testing.T) {
+	for _, answer := range []string{"y", "yes", "YES", "Y"} {
+		t.Run(answer, func(t *testing.T) {
+			f := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
+			withPromptAnswer(t, answer)
+			dir := t.TempDir()
+			write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+			write(t, dir, "10.yaml", validWF)
+
+			if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+				t.Fatalf("exit=%d, want 0", code)
+			}
+			// The same answer approves the namespace question too, so all four
+			// calls happen: preflight, delete, probe, namespace delete.
+			if len(f.calls) != 4 {
+				t.Fatalf("want 4 calls, got %d: %+v", len(f.calls), f.calls)
+			}
+		})
+	}
+}
+
+// TestRemoveDeclinedTouchesNothing pins the whole point of the prompt: a
+// declined teardown runs nothing at all, not even the read-only preflight probe,
+// because the question is asked before it. A blank line declines -- the safe
+// answer is the one Enter gives.
+func TestRemoveDeclinedTouchesNothing(t *testing.T) {
+	for _, answer := range []string{"n", "no", "", "  ", "anything else"} {
+		t.Run("answer="+answer, func(t *testing.T) {
+			f := useFakeRunner(t)
+			withPromptAnswer(t, answer)
+			dir := t.TempDir()
+			write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+			write(t, dir, "10.yaml", validWF)
+
+			var code int
+			stderr := captureStderr(t, func() {
+				code = dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f)
+			})
+			if code != 0 {
+				t.Fatalf("exit=%d, want 0 -- a teardown declined on purpose did not fail", code)
+			}
+			if len(f.calls) != 0 {
+				t.Fatalf("nothing may run when the teardown is declined, got %d calls: %+v", len(f.calls), f.calls)
+			}
+			if !strings.Contains(stderr, "cancelled") {
+				t.Errorf("a declined teardown should say so, got:\n%s", stderr)
+			}
+		})
+	}
+}
+
+// TestRemoveNoPromptSkipsThePromptEntirely covers the scripted path: --no-prompt must not
+// reach promptLine at all, rather than reaching it and ignoring the answer.
+func TestRemoveNoPromptSkipsThePromptEntirely(t *testing.T) {
+	f := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
+	old := promptLine
+	promptLine = func(string) (string, error) {
+		t.Error("--no-prompt must not prompt at all")
+		return "n", nil
+	}
+	t.Cleanup(func() { promptLine = old })
+
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	if code := dispatch([]string{"remove", "--platform", "kubernetes", noPromptFlagName, "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	// Neither question is asked, and the empty namespace goes with it:
+	// preflight, delete, probe, namespace delete.
+	if len(f.calls) != 4 {
+		t.Fatalf("want 4 calls, got %d: %+v", len(f.calls), f.calls)
+	}
+}
+
+// TestRemoveNonTTYFailsFastNamingTheFlag is the CI case: rather than blocking on
+// a read that will never return, the prompt refuses and the error names the flag
+// that skips it -- the same shape the platform menu and the status install
+// confirmation use.
+func TestRemoveNonTTYFailsFastNamingTheFlag(t *testing.T) {
+	f := useFakeRunner(t)
+	old := promptLine
+	promptLine = func(string) (string, error) {
+		return "", fmt.Errorf("stdin is not a terminal, so this prompt cannot be answered interactively")
+	}
+	t.Cleanup(func() { promptLine = old })
+
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f)
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	if !strings.Contains(stderr, noPromptFlagName) {
+		t.Errorf("the refusal must name %s, got:\n%s", noPromptFlagName, stderr)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("nothing may run, got %d calls: %+v", len(f.calls), f.calls)
+	}
+}
+
+// TestRemovePromptNamesWhatItWillDestroy is why the prompt is worth having: the
+// question has to carry the identifier that tells one target from another, or an
+// operator confirms "kubernetes" and loses production. On kubernetes that is the
+// namespace.
+func TestRemovePromptNamesWhatItWillDestroy(t *testing.T) {
+	quadlet := t.TempDir()
+	for _, c := range []struct {
+		platform string
+		env      string
+		want     []string
+	}{
+		{"kubernetes", kubeEnv, []string{"solmq-connector", "solace-connectors"}},
+		{"docker", dockerEnv, []string{"container"}},
+		{"podman", podmanEnv(quadlet), []string{"container", ".service"}},
+	} {
+		t.Run(c.platform, func(t *testing.T) {
+			f := useFakeRunner(t)
+			var asked string
+			old := promptLine
+			promptLine = func(q string) (string, error) { asked = q; return "n", nil }
+			t.Cleanup(func() { promptLine = old })
+
+			dir := t.TempDir()
+			write(t, dir, "env.yaml", sharedEnv+c.env)
+			write(t, dir, "10.yaml", validWF)
+
+			captureStderr(t, func() {
+				dispatch([]string{"remove", "--platform", c.platform, "-e", filepath.Join(dir, "env.yaml")}, f)
+			})
+			if !strings.Contains(asked, c.platform) {
+				t.Errorf("the prompt should name the platform, got %q", asked)
+			}
+			for _, w := range c.want {
+				if !strings.Contains(asked, w) {
+					t.Errorf("the prompt should carry %q so the target is identifiable, got %q", w, asked)
+				}
+			}
+		})
+	}
+}
+
+// TestDeployNeverPromptsAndRejectsNoPrompt keeps the flag where it belongs. deploy is
+// additive and re-runnable, so it has nothing to confirm; accepting --no-prompt there
+// would be a flag that silently does nothing, which is what checkStatusFlags
+// refuses elsewhere for the same reason.
+func TestDeployNeverPromptsAndRejectsNoPrompt(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	f := useFakeRunner(t)
+	old := promptLine
+	promptLine = func(string) (string, error) {
+		t.Error("deploy must never prompt")
+		return "n", nil
+	}
+	t.Cleanup(func() { promptLine = old })
+	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+		t.Fatalf("deploy exit=%d, want 0", code)
+	}
+
+	f2 := useFakeRunner(t)
+	var code int
+	captureStderr(t, func() {
+		code = dispatch([]string{"deploy", "--platform", "kubernetes", noPromptFlagName, "-e", filepath.Join(dir, "env.yaml")}, f2)
+	})
+	if code != 2 {
+		t.Fatalf("deploy %s should be an unknown flag (exit 2), got %d", noPromptFlagName, code)
+	}
+	if len(f2.calls) != 0 {
+		t.Fatalf("nothing may run, got %d calls", len(f2.calls))
+	}
+}
+
+// TestRemoveTargetDescriptions covers removeTarget directly, including the
+// branches the end-to-end tests cannot reach: a section-less env (guards, since
+// resolvePlatform demands the section for deploy/remove) and a namespace-less
+// deployment (which validate rejects moments later, so the prompt is the only
+// place it can surface).
+func TestRemoveTargetDescriptions(t *testing.T) {
+	kube := func(name, ns string) *spec.Env {
+		e := &spec.Env{Kubernetes: &spec.Kubernetes{}}
+		e.Kubernetes.Deployment.Name = name
+		e.Kubernetes.Deployment.Namespace = ns
+		return e
+	}
+	for _, c := range []struct {
+		name     string
+		platform string
+		env      *spec.Env
+		want     string
+	}{
+		{"kube with namespace", "kubernetes", kube("solmq", "prod"), "deployment solmq in namespace prod"},
+		{"kube without namespace", "kubernetes", kube("solmq", ""), "deployment solmq in the current namespace"},
+		{"kube section missing", "kubernetes", &spec.Env{}, "the kubernetes deployment"},
+		{"kube env nil", "kubernetes", nil, "the kubernetes deployment"},
+		{"docker", "docker", &spec.Env{Docker: &spec.Docker{Name: "solmq-conn"}}, "container solmq-conn"},
+		{"docker section missing", "docker", &spec.Env{}, "the docker container"},
+		{"podman", "podman", &spec.Env{Podman: &spec.Podman{Name: "solmq-conn"}}, "container solmq-conn and its systemd unit solmq-conn.service"},
+		{"podman section missing", "podman", &spec.Env{}, "the podman container"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := removeTarget(c.platform, c.env); got != c.want {
+				t.Errorf("removeTarget(%q) = %q, want %q", c.platform, got, c.want)
+			}
+		})
+	}
+}
+
+// ---- the namespace half of a kubernetes teardown ----
+
+// nsList builds the document `kubectl get all,...` returns, so the occupancy
+// cases read as the objects they describe rather than as JSON.
+func nsList(items ...string) string {
+	return `{"apiVersion":"v1","kind":"List","items":[` + strings.Join(items, ",") + `]}`
+}
+
+func nsItemJSON(kind, name string) string {
+	return `{"kind":"` + kind + `","metadata":{"name":"` + name + `"}}`
+}
+
+// TestRemoveTeardownManifestOmitsTheNamespace is the bug this whole file exists
+// for: the manifest piped to `kubectl delete -f -` used to carry a Namespace,
+// which cascades to every object inside it -- including workloads this tool
+// never deployed. The namespace is a separate, checked step now; the manifest
+// must never carry it.
+func TestRemoveTeardownManifestOmitsTheNamespace(t *testing.T) {
+	f := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
+	withPromptAnswer(t, "y")
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if strings.Contains(f.calls[1].stdin, "kind: Namespace") {
+		t.Fatalf("a teardown manifest must not carry the namespace:\n%s", f.calls[1].stdin)
+	}
+	// The separate namespace delete is the ONLY place a Namespace document is
+	// piped for a teardown, and only after the occupancy check passed.
+	if !strings.Contains(f.calls[3].stdin, "kind: Namespace") {
+		t.Errorf("the namespace step should pipe the Namespace document, got %q", f.calls[3].stdin)
+	}
+	// deploy still needs it, or the objects have nowhere to land.
+	f2 := useFakeRunner(t)
+	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f2); code != 0 {
+		t.Fatalf("deploy exit=%d", code)
+	}
+	if !strings.Contains(f2.calls[1].stdin, "kind: Namespace") {
+		t.Errorf("deploy must still create the namespace:\n%s", f2.calls[1].stdin)
+	}
+}
+
+// TestRemoveNamespaceOccupiedLeavesItAlone is the case that motivated the flag:
+// another connector, or anything else, living in the same namespace.
+func TestRemoveNamespaceOccupiedLeavesItAlone(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil}, // preflight
+		{"", nil}, // delete
+		{nsList(
+			nsItemJSON("Deployment", "billing-api"),
+			nsItemJSON("StatefulSet", "postgres"),
+			nsItemJSON("PersistentVolumeClaim", "billing-data"),
+		), nil},
+	}}
+	withPromptAnswer(t, "y")
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0 -- the teardown succeeded", code)
+	}
+	// preflight, delete, the occupancy probe -- and no fourth call.
+	if len(q.calls) != 3 {
+		t.Fatalf("the namespace must not be deleted, got %d calls: %+v", len(q.calls), q.calls)
+	}
+	for _, want := range []string{"deployment/billing-api", "statefulset/postgres", "persistentvolumeclaim/billing-data", "leaving namespace"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr should carry %q, got:\n%s", want, stderr)
+		}
+	}
+}
+
+// TestRemoveNamespaceEmptyPromptsSeparately covers the second question. Saying
+// yes to tearing down a deployment is not saying yes to removing the namespace
+// around it, so it is asked on its own.
+func TestRemoveNamespaceEmptyPromptsSeparately(t *testing.T) {
+	for _, c := range []struct {
+		answer  string
+		deleted bool
+	}{
+		{"y", true},
+		{"n", false},
+		{"", false},
+	} {
+		t.Run("answer="+c.answer, func(t *testing.T) {
+			q := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
+			// Two questions: yes to the teardown, then the case's answer to the
+			// namespace. That separation is the point of the feature.
+			withPromptAnswers(t, "y", c.answer)
+			dir := t.TempDir()
+			write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+			write(t, dir, "10.yaml", validWF)
+
+			if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, q); code != 0 {
+				t.Fatalf("exit=%d, want 0", code)
+			}
+			want := 3
+			if c.deleted {
+				want = 4
+			}
+			if len(q.calls) != want {
+				t.Fatalf("want %d calls, got %d: %+v", want, len(q.calls), q.calls)
+			}
+			if c.deleted && !strings.Contains(q.calls[3].stdin, "kind: Namespace") {
+				t.Errorf("the namespace delete should pipe the Namespace document, got %q", q.calls[3].stdin)
+			}
+		})
+	}
+}
+
+// TestRemoveNoPromptNeverRemovesAnOccupiedNamespace is the invariant, and the
+// case that must never regress: no flag removes a namespace that still holds
+// someone else's work.
+//
+// --no-prompt approves the questions a teardown asks. It does not approve a
+// cascade -- the occupancy check runs first and an occupant of any kind ends it,
+// silently or not.
+func TestRemoveNoPromptNeverRemovesAnOccupiedNamespace(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil}, // preflight
+		{"", nil}, // delete
+		{nsList(nsItemJSON("Deployment", "billing-api")), nil},
+	}}
+	old := promptLine
+	promptLine = func(string) (string, error) {
+		t.Error("--no-prompt must not prompt at all")
+		return "n", nil
+	}
+	t.Cleanup(func() { promptLine = old })
+
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"remove", "--platform", "kubernetes", noPromptFlagName, "-e", filepath.Join(dir, "env.yaml")}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0 -- the teardown succeeded", code)
+	}
+	// preflight, delete, probe -- and no fourth call, whatever the flags say.
+	if len(q.calls) != 3 {
+		t.Fatalf("an occupied namespace must never be deleted, got %d calls: %+v", len(q.calls), q.calls)
+	}
+	for _, want := range []string{"deployment/billing-api", "leaving namespace"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr should carry %q, got:\n%s", want, stderr)
+		}
+	}
+}
+
+// TestRemovePlainRunChecksTheNamespace is the regression this change exists for:
+// a plain `remove` used to skip the namespace step entirely, so nothing was
+// checked and nothing was offered. It is part of what remove does now, not
+// something to opt into.
+func TestRemovePlainRunChecksTheNamespace(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
+	var asked []string
+	old := promptLine
+	promptLine = func(question string) (string, error) { asked = append(asked, question); return "y", nil }
+	t.Cleanup(func() { promptLine = old })
+
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, q); code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	// Two questions with no flags at all: the teardown, then the namespace.
+	if len(asked) != 2 {
+		t.Fatalf("want 2 prompts (teardown, namespace), got %d: %v", len(asked), asked)
+	}
+	if !strings.Contains(asked[1], "namespace") {
+		t.Errorf("the second question should be about the namespace, got %q", asked[1])
+	}
+	if len(q.calls) != 4 {
+		t.Fatalf("want 4 calls (preflight, delete, probe, namespace delete), got %d: %+v", len(q.calls), q.calls)
+	}
+	if !containsToken(q.calls[2].argv, namespaceProbeTypes) {
+		t.Errorf("call 2 should be the occupancy probe, got %v", q.calls[2].argv)
+	}
+}
+
+// TestRemoveNamespaceRefusesClusterNamespaces pins the guard that no occupancy
+// result can override. Deleting one of these breaks the cluster rather than an
+// application, and a wrong namespace in env.yaml is the likeliest way to get here.
+func TestRemoveNamespaceRefusesClusterNamespaces(t *testing.T) {
+	for _, ns := range []string{"default", "kube-system", "kube-public", "kube-node-lease"} {
+		t.Run(ns, func(t *testing.T) {
+			env := strings.Replace(kubeEnv, "namespace: solace-connectors", "namespace: "+ns, 1)
+			dir := t.TempDir()
+			write(t, dir, "env.yaml", sharedEnv+env)
+			write(t, dir, "10.yaml", validWF)
+
+			q := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}}}
+			var code int
+			stderr := captureStderr(t, func() {
+				code = dispatch([]string{"remove", "--platform", "kubernetes", noPromptFlagName, "-e", filepath.Join(dir, "env.yaml")}, q)
+			})
+			if code != 0 {
+				t.Fatalf("exit=%d, want 0", code)
+			}
+			// Refused before the occupancy probe: preflight and delete only.
+			if len(q.calls) != 2 {
+				t.Fatalf("%s must be refused without even being probed, got %d calls: %+v", ns, len(q.calls), q.calls)
+			}
+			if !strings.Contains(stderr, "never removed") {
+				t.Errorf("the refusal should say so, got:\n%s", stderr)
+			}
+		})
+	}
+}
+
+// TestRemoveNamespaceProbeFailureLeavesItAlone: a namespace is not worth
+// deleting on a guess.
+func TestRemoveNamespaceProbeFailureLeavesItAlone(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {"boom", fmt.Errorf("forbidden")}}}
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"remove", "--platform", "kubernetes", noPromptFlagName, "-e", filepath.Join(dir, "env.yaml")}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0 -- the teardown itself succeeded", code)
+	}
+	if len(q.calls) != 3 {
+		t.Fatalf("the namespace must not be deleted after a failed probe, got %d calls", len(q.calls))
+	}
+	if !strings.Contains(stderr, "left in place") {
+		t.Errorf("stderr should say the namespace was left alone, got:\n%s", stderr)
+	}
+}
+
+// TestRemoveFailedTeardownSkipsTheNamespace: whatever did not come down is still
+// in there, so the namespace is not even considered.
+func TestRemoveFailedTeardownSkipsTheNamespace(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{{"", nil}, {"boom", fmt.Errorf("denied")}}}
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	var code int
+	captureStderr(t, func() {
+		code = dispatch([]string{"remove", "--platform", "kubernetes", noPromptFlagName, "-e", filepath.Join(dir, "env.yaml")}, q)
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	if len(q.calls) != 2 {
+		t.Fatalf("a failed teardown must not probe or delete the namespace, got %d calls: %+v", len(q.calls), q.calls)
+	}
+}
+
+// TestNamespaceOccupantsRules is the exclusion table. Each non-occupant is here
+// because it would otherwise keep a namespace alive forever: our own leftovers,
+// the objects kubernetes puts in every namespace, and -- the likeliest of all --
+// the release that was deleted moments ago and is still terminating.
+func TestNamespaceOccupantsRules(t *testing.T) {
+	owned := map[string]bool{"solmq-connector": true, "solmq-connector-config": true}
+
+	for _, c := range []struct {
+		name string
+		item string
+		want bool // is it an occupant
+	}{
+		{"a foreign deployment", nsItemJSON("Deployment", "billing-api"), true},
+		{"a foreign statefulset", nsItemJSON("StatefulSet", "postgres"), true},
+		{"a foreign pvc", nsItemJSON("PersistentVolumeClaim", "data"), true},
+		{"a foreign service", nsItemJSON("Service", "billing-svc"), true},
+		{"our deployment", nsItemJSON("Deployment", "solmq-connector"), false},
+		{"our configmap", nsItemJSON("ConfigMap", "solmq-connector-config"), false},
+		{
+			name: "a pod we own via ownerReferences",
+			item: `{"kind":"Pod","metadata":{"name":"solmq-connector-7d4-abc","ownerReferences":[{"kind":"ReplicaSet","name":"solmq-connector"}]}}`,
+			want: false,
+		},
+		{
+			name: "anything already terminating",
+			item: `{"kind":"Deployment","metadata":{"name":"whatever","deletionTimestamp":"2026-08-31T10:00:00Z"}}`,
+			want: false,
+		},
+		{"the default root CA configmap", nsItemJSON("ConfigMap", "kube-root-ca.crt"), false},
+		{"the default service account", nsItemJSON("ServiceAccount", "default"), false},
+		{
+			name: "a service-account token secret",
+			item: `{"kind":"Secret","type":"kubernetes.io/service-account-token","metadata":{"name":"default-token-abc"}}`,
+			want: false,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := namespaceOccupants(nsList(c.item), owned)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (len(got) > 0) != c.want {
+				t.Errorf("occupant=%v, want %v (got %v)", len(got) > 0, c.want, got)
+			}
+		})
+	}
+}
+
+// TestNamespaceOccupantsAreSortedAndLabelled pins the output shape: kind/name,
+// lower-cased and sorted, so the list an operator reads is stable between runs.
+func TestNamespaceOccupantsAreSortedAndLabelled(t *testing.T) {
+	got, err := namespaceOccupants(nsList(
+		nsItemJSON("StatefulSet", "postgres"),
+		nsItemJSON("Deployment", "billing-api"),
+	), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"deployment/billing-api", "statefulset/postgres"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("= %v, want %v", got, want)
+	}
+}
+
+// TestNamespaceOccupantsRejectsUnreadableOutput: a parse failure must be an
+// error, never an empty list, or unreadable output would read as "empty" and
+// authorise the delete.
+func TestNamespaceOccupantsRejectsUnreadableOutput(t *testing.T) {
+	if _, err := namespaceOccupants("not json", nil); err == nil {
+		t.Fatal("unreadable output must not be treated as an empty namespace")
+	}
+}
+
+// TestOwnedNamesCoversEverythingThisReleaseCreates is the safety net behind the
+// occupancy check. The check runs after the teardown, so these objects are
+// normally gone -- but one that has not finished terminating and carries no
+// deletionTimestamp yet must not be mistaken for someone else's workload and
+// keep the namespace alive forever.
+func TestOwnedNamesCoversEverythingThisReleaseCreates(t *testing.T) {
+	k := &spec.Kubernetes{
+		Secrets: spec.Secrets{
+			Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "solmq-creds"}},
+			Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{Name: "solmq-tls"}},
+			ImagePull:   &spec.ImagePullSecret{Name: "solmq-pull", Create: true},
+		},
+		Libs: &spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{Name: "solmq-libs"}}},
+	}
+	k.Deployment.Name = "solmq-connector"
+
+	owned := ownedNames(k)
+	for _, want := range []string{"solmq-connector", "solmq-connector-config", "solmq-creds", "solmq-tls", "solmq-pull", "solmq-libs"} {
+		if !owned[want] {
+			t.Errorf("ownedNames should carry %q, got %v", want, owned)
+		}
+	}
+	if owned[""] {
+		t.Error("an empty name must never be owned, or every unnamed object counts as ours")
+	}
+
+	// Referenced-but-not-created objects are NOT ours: the operator manages
+	// them, the teardown does not delete them, and their presence is a real
+	// reason to keep the namespace.
+	k2 := &spec.Kubernetes{
+		Secrets: spec.Secrets{
+			Credentials: &spec.CredentialsSecret{Existing: "their-creds"},
+			Stores:      &spec.StoresSecret{Existing: "their-tls"},
+			ImagePull:   &spec.ImagePullSecret{Name: "their-pull"},
+		},
+		Libs: &spec.Libs{PVC: &spec.LibsPVC{Existing: "their-pvc"}},
+	}
+	k2.Deployment.Name = "solmq-connector"
+	owned2 := ownedNames(k2)
+	for _, no := range []string{"their-creds", "their-tls", "their-pull", "their-pvc"} {
+		if owned2[no] {
+			t.Errorf("%q is referenced, not created, so it is not ours to discount", no)
+		}
+	}
+
+	if got := ownedNames(nil); len(got) != 0 {
+		t.Errorf("a nil section owns nothing, got %v", got)
+	}
+}
+
+// TestRemoveNamespaceWithoutANamespaceSaysSo covers the guard for a kubernetes
+// section carrying no namespace: there is nothing to remove, and that is worth
+// saying rather than deleting something named "".
+func TestRemoveNamespaceWithoutANamespaceSaysSo(t *testing.T) {
+	f := useFakeRunner(t)
+	k := &spec.Kubernetes{Command: spec.DefaultKubeCommand}
+	k.Deployment.Name = "solmq-connector"
+
+	var code int
+	stderr := captureStderr(t, func() {
+		code = removeNamespace(f, actionOpts{action: "remove"}, k)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if !strings.Contains(stderr, "no namespace") {
+		t.Errorf("stderr should say there is no namespace, got:\n%s", stderr)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("nothing may run, got %d calls", len(f.calls))
+	}
+}
+
+// TestRemoveNamespaceRejectsAnUnsafeCommand pins that the namespace delete goes
+// through the same binary allowlist as everything else, rather than being a
+// second path around it.
+func TestRemoveNamespaceRejectsAnUnsafeCommand(t *testing.T) {
+	f := useFakeRunner(t)
+	k := &spec.Kubernetes{Command: "curl"}
+	k.Deployment.Name = "solmq-connector"
+	k.Deployment.Namespace = "prod"
+
+	var code int
+	stderr := captureStderr(t, func() {
+		code = removeNamespace(f, actionOpts{action: "remove"}, k)
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	if !strings.Contains(stderr, "curl") {
+		t.Errorf("the error should name the refused binary, got:\n%s", stderr)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("nothing may run, got %d calls", len(f.calls))
+	}
+}
+
+// TestRemoveNamespaceUnreadableProbeLeavesItAlone: output that cannot be parsed
+// must not read as "empty" and authorise the delete.
+func TestRemoveNamespaceUnreadableProbeLeavesItAlone(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{{"not json at all", nil}}}
+	k := &spec.Kubernetes{Command: spec.DefaultKubeCommand}
+	k.Deployment.Name = "solmq-connector"
+	k.Deployment.Namespace = "prod"
+
+	var code int
+	stderr := captureStderr(t, func() {
+		code = removeNamespace(q, actionOpts{action: "remove", noPrompt: true}, k)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if len(q.calls) != 1 {
+		t.Fatalf("the namespace must not be deleted, got %d calls: %+v", len(q.calls), q.calls)
+	}
+	if !strings.Contains(stderr, "left in place") {
+		t.Errorf("stderr should say the namespace was left alone, got:\n%s", stderr)
+	}
+}
+
+// TestRemoveNamespaceNonTTYFailsFastNamingTheFlag: the namespace question
+// refuses a non-TTY the same way every other prompt does, naming the flag that
+// skips it rather than blocking on a read that will never return.
+func TestRemoveNamespaceNonTTYFailsFastNamingTheFlag(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{{nsList(), nil}}}
+	old := promptLine
+	promptLine = func(string) (string, error) {
+		return "", fmt.Errorf("stdin is not a terminal, so this prompt cannot be answered interactively")
+	}
+	t.Cleanup(func() { promptLine = old })
+
+	k := &spec.Kubernetes{Command: spec.DefaultKubeCommand}
+	k.Deployment.Name = "solmq-connector"
+	k.Deployment.Namespace = "prod"
+
+	var code int
+	stderr := captureStderr(t, func() {
+		code = removeNamespace(q, actionOpts{action: "remove"}, k)
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	if !strings.Contains(stderr, noPromptFlagName) {
+		t.Errorf("the refusal must name %s, got:\n%s", noPromptFlagName, stderr)
+	}
+	if len(q.calls) != 1 {
+		t.Errorf("the namespace must not be deleted, got %d calls", len(q.calls))
+	}
+}
+
+// TestRemoveNamespaceProbeArgvIsOneQuery pins the shape of the occupancy query:
+// one call listing every kind whose loss would matter, in the namespace being
+// considered.
+func TestRemoveNamespaceProbeArgvIsOneQuery(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{{nsList(nsItemJSON("Deployment", "other")), nil}}}
+	k := &spec.Kubernetes{Command: spec.DefaultKubeCommand}
+	k.Deployment.Name = "solmq-connector"
+	k.Deployment.Namespace = "prod"
+
+	captureStderr(t, func() { removeNamespace(q, actionOpts{action: "remove", noPrompt: true}, k) })
+	if len(q.calls) != 1 {
+		t.Fatalf("want 1 probe call, got %d", len(q.calls))
+	}
+	want := []string{"kubectl", "get", namespaceProbeTypes, "-n", "prod", "-o", "json"}
+	if !reflect.DeepEqual(q.calls[0].argv, want) {
+		t.Errorf("probe argv = %v, want %v", q.calls[0].argv, want)
 	}
 }
 
@@ -1473,6 +2235,11 @@ func TestGenerateDockerToFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// dockerEnv sets no project-name, so this is the defaulted value, and it is
+	// the document's first line -- the compose project this stack belongs to.
+	if want := "name: " + spec.DefaultComposeProject + "\n"; !strings.HasPrefix(string(b), want) {
+		t.Errorf("compose must open with %q:\n%s", want, b)
+	}
 	for _, w := range []string{"services:", "image: img:1"} {
 		if !strings.Contains(string(b), w) {
 			t.Errorf("compose missing %q:\n%s", w, b)
@@ -1526,6 +2293,9 @@ func TestDeployDockerSeamWritesComposeAndRuns(t *testing.T) {
 	if want := []string{"docker", "info"}; !reflect.DeepEqual(f.calls[0].argv, want) {
 		t.Errorf("preflight argv = %v, want %v", f.calls[0].argv, want)
 	}
+	// No -p/--project-name: the compose project is declared by the file's own
+	// top-level name: key instead, so the argv stays exactly as it was. Pinned
+	// here so the choice is a recorded one rather than an omission.
 	want := []string{"docker", "compose", "-f", compose, "up", "-d"}
 	if !reflect.DeepEqual(f.calls[1].argv, want) {
 		t.Errorf("argv = %v, want %v", f.calls[1].argv, want)
@@ -1556,9 +2326,14 @@ func TestDeployDockerSeamComposeFileSurvivesFailedRun(t *testing.T) {
 }
 
 // TestDeployDockerSeamChildEnvCarriesCredentials asserts the credential values
-// reach the docker child process's environment as STABLE=value pairs (never in
+// reach the docker child process's environment as NAME=value pairs (never in
 // argv or on disk), covering both a literal credential (mq) and a -env one
 // (solace) resolved from the real process environment.
+//
+// It also shows why an operator-chosen mount name cannot smuggle a dangerous
+// variable into that child: an -env credential is keyed by the same variable it
+// is read from, so the pair only ever restates what the child already inherited
+// (SOLACE_PASS=envpass, from SOLACE_PASS). Literals keep a derived name.
 func TestDeployDockerSeamChildEnvCarriesCredentials(t *testing.T) {
 	t.Setenv("SOLACE_USER", "envuser")
 	t.Setenv("SOLACE_PASS", "envpass")
@@ -1576,10 +2351,10 @@ func TestDeployDockerSeamChildEnvCarriesCredentials(t *testing.T) {
 		t.Fatalf("want 2 runner calls, got %d: %+v", len(f.calls), f.calls)
 	}
 	want := []string{
-		"MQ_CONN_1_USER=app",
-		"MQ_CONN_1_PASSWORD=pw",
-		"SOL_CONN_1_CLIENT_USERNAME=envuser",
-		"SOL_CONN_1_CLIENT_PASSWORD=envpass",
+		"_GEN_MQ_CONN_1_USER=app",
+		"_GEN_MQ_CONN_1_PASSWORD=pw",
+		"SOLACE_USER=envuser",
+		"SOLACE_PASS=envpass",
 	}
 	if !reflect.DeepEqual(f.calls[1].env, want) {
 		t.Errorf("child env = %v, want %v", f.calls[1].env, want)
@@ -1588,6 +2363,9 @@ func TestDeployDockerSeamChildEnvCarriesCredentials(t *testing.T) {
 
 func TestRemoveDockerSeam(t *testing.T) {
 	f := useFakeRunner(t)
+	// remove asks before it tears down; this test is about the argv that
+	// follows, so it answers yes. The prompt itself is covered in section g.
+	withPromptAnswer(t, "y")
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
@@ -1646,14 +2424,14 @@ func TestDeployPodmanSeamWritesUnitsAndStarts(t *testing.T) {
 	// the read-only preflight probe, which runs before any of that.
 	wantCalls := [][]string{
 		{"podman", "info"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-MQ_CONN_1_USER"},
-		{"podman", "secret", "create", "solmq-conn-MQ_CONN_1_USER", "-"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-MQ_CONN_1_PASSWORD"},
-		{"podman", "secret", "create", "solmq-conn-MQ_CONN_1_PASSWORD", "-"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-SOL_CONN_1_CLIENT_USERNAME"},
-		{"podman", "secret", "create", "solmq-conn-SOL_CONN_1_CLIENT_USERNAME", "-"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-SOL_CONN_1_CLIENT_PASSWORD"},
-		{"podman", "secret", "create", "solmq-conn-SOL_CONN_1_CLIENT_PASSWORD", "-"},
+		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_MQ_CONN_1_USER"},
+		{"podman", "secret", "create", "solmq-conn-_GEN_MQ_CONN_1_USER", "-"},
+		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_MQ_CONN_1_PASSWORD"},
+		{"podman", "secret", "create", "solmq-conn-_GEN_MQ_CONN_1_PASSWORD", "-"},
+		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_USERNAME"},
+		{"podman", "secret", "create", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_USERNAME", "-"},
+		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_PASSWORD"},
+		{"podman", "secret", "create", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_PASSWORD", "-"},
 		{"systemctl", "--user", "daemon-reload"},
 		{"systemctl", "--user", "start", "solmq-conn.service"},
 	}
@@ -1671,6 +2449,9 @@ func TestRemovePodmanSeamStopsRemovesReloads(t *testing.T) {
 	f := useFakeRunner(t)
 	quadletDir := t.TempDir()
 	dir := t.TempDir()
+	// remove asks before it tears down; this test is about the argv that
+	// follows, so it answers yes. The prompt itself is covered in section g.
+	withPromptAnswer(t, "y")
 	write(t, dir, "env.yaml", sharedEnv+podmanEnv(quadletDir))
 	write(t, dir, "10.yaml", validWF)
 	// Pre-seed the files a deploy would have written; remove must clear all
@@ -1692,8 +2473,8 @@ func TestRemovePodmanSeamStopsRemovesReloads(t *testing.T) {
 		{"systemctl", "--user", "stop", "solmq-conn.service"},
 		{"systemctl", "--user", "daemon-reload"},
 		{"podman", "secret", "rm", "--ignore",
-			"solmq-conn-MQ_CONN_1_USER", "solmq-conn-MQ_CONN_1_PASSWORD",
-			"solmq-conn-SOL_CONN_1_CLIENT_USERNAME", "solmq-conn-SOL_CONN_1_CLIENT_PASSWORD"},
+			"solmq-conn-_GEN_MQ_CONN_1_USER", "solmq-conn-_GEN_MQ_CONN_1_PASSWORD",
+			"solmq-conn-_GEN_SOL_CONN_1_CLIENT_USERNAME", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_PASSWORD"},
 	}
 	if len(f.calls) != len(wantCalls) {
 		t.Fatalf("want %d runner calls, got %+v", len(wantCalls), f.calls)
@@ -3012,6 +3793,81 @@ func TestStatusImageMismatchIsReportedAtBothLevels(t *testing.T) {
 	})
 }
 
+// TestStatusDockerProjectMismatchIsReported covers the compose-project finding.
+// A stack brought up before docker.project-name existed is labelled with the
+// basename of the directory its compose file was in, so `remove` -- which runs
+// `compose down` against the configured project -- would tear down nothing and
+// still report success. Nothing else in the report would say so, which is why
+// the mismatch is a note.
+func TestStatusDockerProjectMismatchIsReported(t *testing.T) {
+	dir := t.TempDir()
+	// dockerInspect labels the container with project "eg"; each env below names a
+	// different project, so the arms differ only in whether they agree with it.
+	writeEnv := func(t *testing.T, name, project string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		env := "image:\n  name: solace/x\n  tag: \"2.14.1\"\ndocker:\n  command: docker\n  name: solmq-connector\n  project-name: " + project + "\n"
+		if err := os.WriteFile(path, []byte(env), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("a different project is a note", func(t *testing.T) {
+		envPath := writeEnv(t, "other.yaml", "solace-ibmmq-connectors")
+		q := &queueRunner{resp: []queuedResp{{"", nil}, {dockerInspect, nil}}}
+		var code int
+		stdout := captureStdout(t, func() {
+			code = dispatch([]string{"status", "container", "-e", envPath, "--platform", "docker", "--container", "solmq-connector"}, q)
+		})
+		if code != 0 {
+			t.Fatalf("exit=%d, want 0 (a project mismatch is a finding, not a failed run)", code)
+		}
+		// The note must name both projects and the way out, so an operator can act
+		// on it without reading the source.
+		for _, want := range []string{"status:", "compose project", "eg", "solace-ibmmq-connectors", "docker.project-name"} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("the note should carry %q, got:\n%s", want, stdout)
+			}
+		}
+	})
+
+	t.Run("the configured project says nothing at all", func(t *testing.T) {
+		envPath := writeEnv(t, "match.yaml", "eg")
+		q := &queueRunner{resp: []queuedResp{{"", nil}, {dockerInspect, nil}}}
+		var code int
+		stdout := captureStdout(t, func() {
+			code = dispatch([]string{"status", "container", "-e", envPath, "--platform", "docker", "--container", "solmq-connector"}, q)
+		})
+		if code != 0 {
+			t.Fatalf("exit=%d, want 0", code)
+		}
+		if strings.Contains(stdout, "compose project") {
+			t.Errorf("a matching project must be silent, got:\n%s", stdout)
+		}
+	})
+
+	// A container compose never created carries no project label at all. That is
+	// not the wrong project, it is a container outside compose entirely, and
+	// reporting it as drift would be the likeliest false positive.
+	t.Run("no compose label is not a mismatch", func(t *testing.T) {
+		envPath := writeEnv(t, "nolabel.yaml", "solace-ibmmq-connectors")
+		bare := `[{"Name":"/solmq-connector","State":{"Status":"running","StartedAt":"2026-08-18T04:12:07Z"},
+		  "RestartCount":0,"Config":{"Image":"solace/x:2.14.1"},"HostConfig":{}}]`
+		q := &queueRunner{resp: []queuedResp{{"", nil}, {bare, nil}}}
+		var code int
+		stdout := captureStdout(t, func() {
+			code = dispatch([]string{"status", "container", "-e", envPath, "--platform", "docker", "--container", "solmq-connector"}, q)
+		})
+		if code != 0 {
+			t.Fatalf("exit=%d, want 0", code)
+		}
+		if strings.Contains(stdout, "compose project") {
+			t.Errorf("an unlabelled container must be silent, got:\n%s", stdout)
+		}
+	})
+}
+
 // TestStatusDockerDetailsAddsDigestAndStats covers what --details costs on
 // docker and podman: the digest lives on the image rather than on the container
 // there, so it is a second call, and the resource sample is a third.
@@ -3140,6 +3996,68 @@ func containsToken(argv []string, want string) bool {
 	return false
 }
 
+// TestStatusAllSkipsAnUnsafeNameOutLoud covers the re-validation on the way back
+// from the engine: under --all the container names come from `ps` rather than
+// from the operator, so one that could not go into an argv is skipped with a
+// note naming it, never passed on, and the instances around it are still
+// reported.
+//
+// This lives here rather than under logs because --all is a status flag: logs
+// reads one instance and has no image search.
+func TestStatusAllSkipsAnUnsafeNameOutLoud(t *testing.T) {
+	img := "reg/" + statusreport.ImageMatch + ":2.14.1"
+	list := "bad;name\t" + img + "\nsolmq-connector\t" + img + "\n"
+	// The inspect doc has to carry a matching image too: under --all,
+	// ParseInspect filters by the same image match the ps list was filtered by.
+	inspect := `[{"Name":"/solmq-connector","State":{"Status":"running","StartedAt":"2026-08-18T04:12:07Z"},
+	  "RestartCount":0,"Config":{"Image":"` + img + `"},"HostConfig":{}}]`
+	q := &queueRunner{resp: []queuedResp{{"", nil}, {list, nil}, {inspect, nil}}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "container", "--platform", "docker", "--all"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	for _, want := range []string{"bad;name", "unsafe character"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the skip should name the container and why, got:\n%s", want+"\n"+stdout)
+		}
+	}
+	for _, c := range q.calls {
+		if containsToken(c.argv, "bad;name") {
+			t.Errorf("an unsafe name must never reach an argv: %v", c.argv)
+		}
+	}
+	if !strings.Contains(stdout, "solmq-connector") {
+		t.Errorf("the safe instance should still be reported, got:\n%s", stdout)
+	}
+}
+
+// TestStatusAllSortsRowsAlphabetically pins the ordering an index depends on.
+// docker ps returns creation order, so without the sort --pod/--container <n>
+// would select a different instance than the row the operator counted to.
+func TestStatusAllSortsRowsAlphabetically(t *testing.T) {
+	img := "reg/" + statusreport.ImageMatch + ":2.14.1"
+	// Newest first, which is what ps gives -- deliberately not alphabetical.
+	list := "zeta\t" + img + "\nalpha\t" + img + "\n"
+	inspect := `[{"Name":"/zeta","State":{"Status":"running","StartedAt":"2026-08-18T04:12:07Z"},
+	  "RestartCount":0,"Config":{"Image":"` + img + `"},"HostConfig":{}},
+	 {"Name":"/alpha","State":{"Status":"running","StartedAt":"2026-08-18T04:12:07Z"},
+	  "RestartCount":0,"Config":{"Image":"` + img + `"},"HostConfig":{}}]`
+	q := &queueRunner{resp: []queuedResp{{"", nil}, {list, nil}, {inspect, nil}}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "container", "--platform", "docker", "--all"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if i, j := strings.Index(stdout, "alpha"), strings.Index(stdout, "zeta"); i < 0 || j < 0 || i > j {
+		t.Errorf("rows must be sorted by name so an index means the same thing in both verbs, got:\n%s", stdout)
+	}
+}
+
 // ---- n) logs --------------------------------------------------------------------
 //
 // logs shares status's platform resolution and instance discovery (instances.go),
@@ -3206,45 +4124,6 @@ func (s *streamRunner) Stream(_ context.Context, c runner.Cmd, stdout, stderr io
 var logsImage = "registry.example/solace/" + statusreport.ImageMatch + ":2.14.1"
 
 // ---- the argv each platform gets ----
-
-// TestLogsKubernetesArgvShape pins the kubernetes read: one `get pods` answers
-// discovery for every named pod, and each pod's log is then read with the
-// namespace and the connector container named explicitly -- the container from
-// the pod document rather than from a guess, so a pod with a sidecar is still
-// addressed correctly.
-func TestLogsKubernetesArgvShape(t *testing.T) {
-	q := &streamRunner{
-		resp:    []queuedResp{{"", nil}, {podsJSON, nil}},
-		streams: []streamed{{stdout: "line-a\n"}, {stdout: "line-b\n"}},
-	}
-	var code int
-	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
-	})
-	if code != 0 {
-		t.Fatalf("exit=%d, want 0", code)
-	}
-	if len(q.calls) != 4 {
-		t.Fatalf("want 4 calls (preflight, get pods, one log read per pod), got %d: %+v", len(q.calls), q.calls)
-	}
-	if want := []string{"kubectl", "get", "pods", "pod-a", "pod-b", "-o", "json"}; !reflect.DeepEqual(q.calls[1].argv, want) {
-		t.Errorf("discovery argv = %v, want %v", q.calls[1].argv, want)
-	}
-	for i, want := range [][]string{
-		{"kubectl", "logs", "pod-a", "-n", "prod", "-c", "connector"},
-		{"kubectl", "logs", "pod-b", "-n", "prod", "-c", "connector"},
-	} {
-		if got := q.calls[2+i].argv; !reflect.DeepEqual(got, want) {
-			t.Errorf("log argv %d = %v, want %v", i, got, want)
-		}
-	}
-	// Several instances need saying apart, so each gets a heading.
-	for _, want := range []string{"==> pod-a <==", "line-a", "==> pod-b <==", "line-b"} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("stdout is missing %q, got:\n%s", want, stdout)
-		}
-	}
-}
 
 // TestLogsDockerArgvShape pins the docker read, which differs from kubernetes in
 // more than spelling: the options come first and the container name last, and
@@ -3326,54 +4205,6 @@ func TestLogsTailAllAndZero(t *testing.T) {
 
 // ---- the combinations that cannot mean anything ----
 
-// TestLogsRejectsImpossibleFlagCombinations pins that each refusal happens before
-// anything is resolved or run, with the usage exit code.
-func TestLogsRejectsImpossibleFlagCombinations(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		args []string
-		want []string
-	}{
-		{
-			name: "follow with previous",
-			args: []string{"logs", "--platform", "kubernetes", "--follow", "--previous"},
-			want: []string{"--previous", "--follow"},
-		},
-		{
-			name: "follow with all",
-			args: []string{"logs", "--platform", "docker", "--follow", "--all"},
-			want: []string{"--all", "--follow", "--pod", "--container"},
-		},
-		{
-			name: "all with pod",
-			args: []string{"logs", "--platform", "kubernetes", "--all", "--pod", "pod-a"},
-			want: []string{"--all", "--pod"},
-		},
-		{
-			name: "all with container",
-			args: []string{"logs", "--platform", "docker", "--all", "--container", "solmq-conn"},
-			want: []string{"--all", "--container"},
-		},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			q := &streamRunner{}
-			var code int
-			stderr := captureStderr(t, func() { code = dispatch(c.args, q) })
-			if code != 2 {
-				t.Fatalf("exit=%d, want 2", code)
-			}
-			for _, w := range c.want {
-				if !strings.Contains(stderr, w) {
-					t.Errorf("stderr should name %q, got:\n%s", w, stderr)
-				}
-			}
-			if len(q.calls) != 0 {
-				t.Errorf("nothing may run, got %d calls: %+v", len(q.calls), q.calls)
-			}
-		})
-	}
-}
-
 // TestLogsPreviousIsKubernetesOnly covers the one refusal that cannot be made
 // until the platform is known: neither docker nor podman keeps a prior run's log
 // under the same name, so --previous there is refused by name rather than
@@ -3409,31 +4240,8 @@ func TestLogsPreviousReachesTheKubernetesArgv(t *testing.T) {
 	if code := dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "pod-a", "--previous"}, q); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
-	if !containsToken(q.calls[2].argv, "-p") {
-		t.Errorf("--previous should reach the argv as -p, got %v", q.calls[2].argv)
-	}
-}
-
-// TestLogsFollowRefusesSeveralInstances covers the runtime half of --follow's
-// single-instance rule: discovery is what decides how many there are, so this
-// cannot be a flag check. The refusal names the instances it found, since
-// choosing between them is exactly what the operator has to do next.
-func TestLogsFollowRefusesSeveralInstances(t *testing.T) {
-	q := &streamRunner{resp: []queuedResp{{"", nil}, {podsJSON, nil}}}
-	var code int
-	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b", "--follow"}, q)
-	})
-	if code != 1 {
-		t.Fatalf("exit=%d, want 1", code)
-	}
-	for _, w := range []string{"--follow", "pod-a", "pod-b", "--pod"} {
-		if !strings.Contains(stderr, w) {
-			t.Errorf("stderr should name %q, got:\n%s", w, stderr)
-		}
-	}
-	if len(q.calls) != 2 {
-		t.Errorf("no log may be read once the refusal is known, got %d calls: %+v", len(q.calls), q.calls)
+	if !containsToken(q.calls[1].argv, "-p") {
+		t.Errorf("--previous should reach the argv as -p, got %v", q.calls[1].argv)
 	}
 }
 
@@ -3521,67 +4329,6 @@ func TestLogsSinceAndTailAreValidatedAtParse(t *testing.T) {
 }
 
 // ---- reporting across several instances ----
-
-// TestLogsOneFailedInstanceStillPrintsTheRest pins the record-and-continue rule
-// status keeps too: one unreachable instance must not hide the others, and the
-// run still exits 1 because something asked for did not arrive.
-func TestLogsOneFailedInstanceStillPrintsTheRest(t *testing.T) {
-	q := &streamRunner{
-		resp: []queuedResp{{"", nil}, {podsJSON, nil}},
-		streams: []streamed{
-			{stdout: "line-a\n"},
-			{err: fmt.Errorf("pod is gone")},
-		},
-	}
-	var code int
-	var stderr string
-	stdout := captureStdout(t, func() {
-		stderr = captureStderr(t, func() {
-			code = dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
-		})
-	})
-	if code != 1 {
-		t.Fatalf("exit=%d, want 1", code)
-	}
-	if !strings.Contains(stdout, "line-a") {
-		t.Errorf("the readable instance must still be printed, got:\n%s", stdout)
-	}
-	if !strings.Contains(stderr, "pod-b") || !strings.Contains(stderr, "pod is gone") {
-		t.Errorf("the failure should name the instance and the cause, got:\n%s", stderr)
-	}
-	if len(q.calls) != 4 {
-		t.Errorf("both instances must still be attempted, got %d calls: %+v", len(q.calls), q.calls)
-	}
-}
-
-// TestLogsAllSearchesByImage covers --all on docker: the instance names in
-// env.yaml are ignored and every container running a matching image is read,
-// with the names re-validated on the way back from the engine.
-func TestLogsAllSearchesByImage(t *testing.T) {
-	list := "solmq-a\t" + logsImage + "\nsome-other\tnginx:1\nsolmq-b\t" + logsImage + "\n"
-	q := &streamRunner{
-		resp:    []queuedResp{{"", nil}, {list, nil}},
-		streams: []streamed{{stdout: "a\n"}, {stdout: "b\n"}},
-	}
-	var code int
-	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"logs", "--platform", "docker", "--all"}, q)
-	})
-	if code != 0 {
-		t.Fatalf("exit=%d, want 0", code)
-	}
-	if len(q.calls) != 4 {
-		t.Fatalf("want 4 calls (preflight, ps, one log read per match), got %d: %+v", len(q.calls), q.calls)
-	}
-	for i, name := range []string{"solmq-a", "solmq-b"} {
-		if got := q.calls[2+i].argv; got[len(got)-1] != name {
-			t.Errorf("log argv %d should end with %q, got %v", i, name, got)
-		}
-	}
-	if strings.Contains(stdout, "some-other") {
-		t.Errorf("a container not running the connector image must not be read, got:\n%s", stdout)
-	}
-}
 
 // TestLogsUnexpectedPositionalArgument pins that logs has no target word: an
 // instance is named with a flag, so a bare word is a mistake worth naming rather
@@ -3738,66 +4485,6 @@ func TestLogsNeedsAStreamingRunner(t *testing.T) {
 	}
 }
 
-// TestLogsFollowRefusalNamesThePlatformsOwnFlag is the docker half of the
-// single-instance refusal: the message has to point at the flag that exists on
-// the resolved platform, not at both, or it sends the operator to a flag that
-// does nothing there.
-func TestLogsFollowRefusalNamesThePlatformsOwnFlag(t *testing.T) {
-	list := "solmq-a\t" + logsImage + "\nsolmq-b\t" + logsImage + "\n"
-	q := &streamRunner{resp: []queuedResp{{"", nil}, {list, nil}}}
-	var code int
-	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"logs", "--platform", "docker", "--container", "solmq-a", "--container", "solmq-b", "--follow"}, q)
-	})
-	if code != 1 {
-		t.Fatalf("exit=%d, want 1", code)
-	}
-	if !strings.Contains(stderr, containerFlagName) {
-		t.Errorf("on docker the refusal should point at %s, got:\n%s", containerFlagName, stderr)
-	}
-	if strings.Contains(stderr, podFlagName) {
-		t.Errorf("%s does nothing on docker and must not be suggested, got:\n%s", podFlagName, stderr)
-	}
-}
-
-// TestLogsWithoutASectionToDiscoverFrom covers the discovery branch that has
-// nothing to work from. It is reached by naming an instance with the OTHER
-// platform's flag -- --container on kubernetes, --pod on docker/podman -- which
-// is enough to make the run explicit (so env.yaml need not exist) while leaving
-// discovery with no name and no section. The message names the section that is
-// missing and both ways forward, since the operator can either name the instance
-// properly or search for it.
-func TestLogsWithoutASectionToDiscoverFrom(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "no-such-env.yaml")
-	for _, c := range []struct {
-		platform, wrongFlag, wrongVal, wantSection, wantFix string
-	}{
-		{"kubernetes", containerFlagName, "solmq-conn", "no kubernetes: section", podFlagName},
-		{"docker", podFlagName, "pod-a", "no docker: section", containerFlagName},
-		{"podman", podFlagName, "pod-a", "no podman: section", containerFlagName},
-	} {
-		t.Run(c.platform, func(t *testing.T) {
-			q := &streamRunner{resp: []queuedResp{{"", nil}}}
-			var code int
-			stderr := captureStderr(t, func() {
-				code = dispatch([]string{"logs", "--platform", c.platform, c.wrongFlag, c.wrongVal, "-e", missing}, q)
-			})
-			if code != 1 {
-				t.Fatalf("exit=%d, want 1", code)
-			}
-			for _, w := range []string{c.wantSection, c.wantFix, allFlagName} {
-				if !strings.Contains(stderr, w) {
-					t.Errorf("the error should carry %q, got:\n%s", w, stderr)
-				}
-			}
-			// Discovery is what failed, so no log was read.
-			if q.streamN != 0 {
-				t.Errorf("no log may be read, got %d stream calls", q.streamN)
-			}
-		})
-	}
-}
-
 // TestLogsPlatformWithNoSectionAtAllIsLoud is the earlier failure: an env.yaml
 // that parses but describes no platform cannot answer --platform either, and
 // says so before discovery is even attempted.
@@ -3823,78 +4510,17 @@ func TestLogsPlatformWithNoSectionAtAllIsLoud(t *testing.T) {
 	}
 }
 
-// TestLogsAllSkipsAnUnsafeNameOutLoud covers the re-validation on the way back
-// from the engine: a container name that could not go into an argv is skipped
-// and said so, never passed on, and the instances around it are still read.
-func TestLogsAllSkipsAnUnsafeNameOutLoud(t *testing.T) {
-	list := "bad;name\t" + logsImage + "\nsolmq-a\t" + logsImage + "\n"
+// TestLogsNamedPodIsNotPreChecked pins what naming a pod outright now costs,
+// and what it no longer does. A name is taken at its word: there is no
+// `get pods <name>` first, because the only thing that lookup ever established
+// was which container to read, and that is a constant now. A pod that is not
+// there is reported by the platform on the read itself, rather than by a probe
+// this tool paid for on every run that named one.
+func TestLogsNamedPodIsNotPreChecked(t *testing.T) {
 	q := &streamRunner{
-		resp:    []queuedResp{{"", nil}, {list, nil}},
-		streams: []streamed{{stdout: "a\n"}},
+		resp:    []queuedResp{{"", nil}},
+		streams: []streamed{{stderr: "Error from server (NotFound): pods \"ghost\" not found\n", err: fmt.Errorf("exit status 1")}},
 	}
-	var code int
-	var stderr string
-	stdout := captureStdout(t, func() {
-		stderr = captureStderr(t, func() {
-			code = dispatch([]string{"logs", "--platform", "docker", "--all"}, q)
-		})
-	})
-	if code != 0 {
-		t.Fatalf("exit=%d, want 0", code)
-	}
-	if !strings.Contains(stderr, "bad;name") || !strings.Contains(stderr, "unsafe character") {
-		t.Errorf("the skip should name the container and why, got:\n%s", stderr)
-	}
-	for _, c := range q.calls {
-		if containsToken(c.argv, "bad;name") {
-			t.Errorf("an unsafe name must never reach an argv: %v", c.argv)
-		}
-	}
-	if !strings.Contains(stdout, "a\n") {
-		t.Errorf("the safe instance should still be read, got:\n%s", stdout)
-	}
-}
-
-// TestLogsAllWithNoMatchIsActionable covers --all finding nothing on either
-// platform: the message names the image it searched for, which is the only
-// thing the operator can act on.
-func TestLogsAllWithNoMatchIsActionable(t *testing.T) {
-	t.Run("docker", func(t *testing.T) {
-		q := &streamRunner{resp: []queuedResp{{"", nil}, {"other\tnginx:1\n", nil}}}
-		var code int
-		stderr := captureStderr(t, func() {
-			code = dispatch([]string{"logs", "--platform", "docker", "--all"}, q)
-		})
-		if code != 1 {
-			t.Fatalf("exit=%d, want 1", code)
-		}
-		if !strings.Contains(stderr, statusreport.ImageMatch) {
-			t.Errorf("the error should name the image searched for, got:\n%s", stderr)
-		}
-	})
-	t.Run("kubernetes", func(t *testing.T) {
-		q := &streamRunner{resp: []queuedResp{{"", nil}, {`{"items":[]}`, nil}}}
-		var code int
-		stderr := captureStderr(t, func() {
-			code = dispatch([]string{"logs", "--platform", "kubernetes", "--all"}, q)
-		})
-		if code != 1 {
-			t.Fatalf("exit=%d, want 1", code)
-		}
-		if !strings.Contains(stderr, statusreport.ImageMatch) {
-			t.Errorf("the error should name the image searched for, got:\n%s", stderr)
-		}
-		if !containsToken(q.calls[1].argv, "--all-namespaces") {
-			t.Errorf("--all should search every namespace, got %v", q.calls[1].argv)
-		}
-	})
-}
-
-// TestLogsNamedPodThatDoesNotExistNamesTheNamespace covers the third empty-result
-// branch: the operator named pods themselves, so there is no selector to quote
-// back -- the namespace that was searched is what is left to be wrong.
-func TestLogsNamedPodThatDoesNotExistNamesTheNamespace(t *testing.T) {
-	q := &streamRunner{resp: []queuedResp{{"", nil}, {`{"items":[]}`, nil}}}
 	var code int
 	stderr := captureStderr(t, func() {
 		code = dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "ghost", "--namespace", "prod"}, q)
@@ -3902,11 +4528,16 @@ func TestLogsNamedPodThatDoesNotExistNamesTheNamespace(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
 	}
-	if !strings.Contains(stderr, "prod") {
-		t.Errorf("the error should name the namespace searched, got:\n%s", stderr)
+	if len(q.calls) != 2 {
+		t.Fatalf("want 2 calls (preflight, the read), got %d: %+v", len(q.calls), q.calls)
 	}
-	if q.streamN != 0 {
-		t.Errorf("no log may be read, got %d stream calls", q.streamN)
+	for _, c := range q.calls {
+		if containsToken(c.argv, "get") {
+			t.Errorf("a named pod must not cost a discovery query, got %v", c.argv)
+		}
+	}
+	if !strings.Contains(stderr, "ghost") {
+		t.Errorf("the failure should name the instance, got:\n%s", stderr)
 	}
 }
 
@@ -3963,6 +4594,667 @@ func TestLogsCommandFlagOverridesTheSection(t *testing.T) {
 	}
 }
 
+// ---- one instance per run: the picker, and index selection ----
+
+// TestLogsKubernetesArgvShape pins the kubernetes read: a named pod costs no
+// discovery at all, and the log is read with the namespace and the connector
+// container both named explicitly, so a pod carrying a sidecar cannot have the
+// wrong half of it read.
+func TestLogsKubernetesArgvShape(t *testing.T) {
+	q := &streamRunner{
+		resp:    []queuedResp{{"", nil}},
+		streams: []streamed{{stdout: "line-a\n"}},
+	}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"logs", "--platform", "kubernetes", "--namespace", "prod", "--pod", "pod-a"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if len(q.calls) != 2 {
+		t.Fatalf("want 2 calls (preflight, the log read), got %d: %+v", len(q.calls), q.calls)
+	}
+	if want := []string{"kubectl", "logs", "pod-a", "-n", "prod", "-c", spec.ConnectorContainerName}; !reflect.DeepEqual(q.calls[1].argv, want) {
+		t.Errorf("log argv = %v, want %v", q.calls[1].argv, want)
+	}
+	// One instance prints its log and nothing else, so the output pipes cleanly.
+	if stdout != "line-a\n" {
+		t.Errorf("stdout should be the log alone, got:\n%s", stdout)
+	}
+}
+
+// TestLogsRejectsImpossibleFlagCombinations covers the combinations refused
+// before anything runs. --pod/--container given twice is among them: logs reads
+// one instance, so a second is a question it cannot answer, and losing the first
+// silently would be worse than saying so.
+func TestLogsRejectsImpossibleFlagCombinations(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "follow with previous",
+			args: []string{"logs", "--platform", "kubernetes", "--follow", "--previous"},
+			want: []string{"--previous", "--follow"},
+		},
+		{
+			name: "two pods",
+			args: []string{"logs", "--platform", "kubernetes", "--pod", "a", "--pod", "b"},
+			want: []string{"--pod", "once"},
+		},
+		{
+			name: "two containers",
+			args: []string{"logs", "--platform", "docker", "--container", "a", "--container", "b"},
+			want: []string{"--container", "once"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			q := &streamRunner{}
+			var code int
+			stderr := captureStderr(t, func() { code = dispatch(c.args, q) })
+			if code != 2 {
+				t.Fatalf("exit=%d, want 2", code)
+			}
+			for _, w := range c.want {
+				if !strings.Contains(stderr, w) {
+					t.Errorf("the refusal should name %q, got:\n%s", w, stderr)
+				}
+			}
+			if len(q.calls) != 0 {
+				t.Errorf("nothing may run, got %d calls: %+v", len(q.calls), q.calls)
+			}
+		})
+	}
+}
+
+// TestLogsAllIsNotALogsFlag pins the removal: --all searches by image and
+// returns many, which is the one thing logs cannot do, so it is an unknown flag
+// here rather than one that is accepted and then refused.
+func TestLogsAllIsNotALogsFlag(t *testing.T) {
+	q := &streamRunner{}
+	var code int
+	captureStderr(t, func() {
+		code = dispatch([]string{"logs", "--platform", "kubernetes", "--all"}, q)
+	})
+	if code != 2 {
+		t.Fatalf("exit=%d, want 2", code)
+	}
+	if len(q.calls) != 0 {
+		t.Errorf("nothing may run, got %d calls", len(q.calls))
+	}
+}
+
+// TestLogsWithoutASectionToDiscoverFrom covers the discovery branch with nothing
+// to work from, reached by naming an instance with the other platform's flag
+// (--container on kubernetes, --pod on docker/podman): enough to make the run
+// explicit, but leaving no name and no section.
+//
+// It also pins the verb-aware wording. status offers --all as a way out; logs
+// does not have that flag, so naming it here would send an operator to a flag
+// their verb does not accept.
+func TestLogsWithoutASectionToDiscoverFrom(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-env.yaml")
+	for _, c := range []struct {
+		platform, wrongFlag, wrongVal, wantSection, wantFix string
+	}{
+		{"kubernetes", containerFlagName, "solmq-conn", "no kubernetes: section", podFlagName},
+		{"docker", podFlagName, "pod-a", "no docker: section", containerFlagName},
+		{"podman", podFlagName, "pod-a", "no podman: section", containerFlagName},
+	} {
+		t.Run(c.platform, func(t *testing.T) {
+			q := &streamRunner{resp: []queuedResp{{"", nil}}}
+			var code int
+			stderr := captureStderr(t, func() {
+				code = dispatch([]string{"logs", "--platform", c.platform, c.wrongFlag, c.wrongVal, "-e", missing}, q)
+			})
+			if code != 1 {
+				t.Fatalf("exit=%d, want 1", code)
+			}
+			for _, w := range []string{c.wantSection, c.wantFix} {
+				if !strings.Contains(stderr, w) {
+					t.Errorf("the error should carry %q, got:\n%s", w, stderr)
+				}
+			}
+			if strings.Contains(stderr, allFlagName) {
+				t.Errorf("logs has no %s, so the hint must not name it, got:\n%s", allFlagName, stderr)
+			}
+			if q.streamN != 0 {
+				t.Errorf("no log may be read, got %d stream calls", q.streamN)
+			}
+		})
+	}
+}
+
+// unsortedPodsJSON lists three pods in an order kubectl would not return them
+// in, so anything relying on the sort has to do the sorting itself.
+const unsortedPodsJSON = `{"items":[
+ {"metadata":{"name":"pod-c","namespace":"prod"},"spec":{"nodeName":"n1","containers":[{"name":"connector","image":"img:1"}]},"status":{"phase":"Running","containerStatuses":[{"name":"connector","image":"img:1","restartCount":0,"state":{"running":{"startedAt":"2026-01-01T00:00:00Z"}}}]}},
+ {"metadata":{"name":"pod-a","namespace":"prod"},"spec":{"nodeName":"n1","containers":[{"name":"connector","image":"img:1"}]},"status":{"phase":"Running","containerStatuses":[{"name":"connector","image":"img:1","restartCount":0,"state":{"running":{"startedAt":"2026-01-01T00:00:00Z"}}}]}},
+ {"metadata":{"name":"pod-b","namespace":"prod"},"spec":{"nodeName":"n1","containers":[{"name":"connector","image":"img:1"}]},"status":{"phase":"Running","containerStatuses":[{"name":"connector","image":"img:1","restartCount":0,"state":{"running":{"startedAt":"2026-01-01T00:00:00Z"}}}]}}
+]}`
+
+// kubeEnvForLogs is a kubernetes section whose deployment name gives discovery a
+// selector to find pods with, so a bare logs run has something to discover.
+const kubeEnvForLogs = `
+kubernetes:
+  command: kubectl
+  deployment:
+    name: solmq-connector
+    namespace: prod
+`
+
+// TestLogsPickerListsPasteableCommands is the whole point of reading one
+// instance: when discovery finds several and none was named, nothing is read and
+// the operator is handed exactly what to type next.
+func TestLogsPickerListsPasteableCommands(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
+	envPath := filepath.Join(dir, "env.yaml")
+
+	q := &streamRunner{resp: []queuedResp{{"", nil}, {unsortedPodsJSON, nil}}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"logs", "-e", envPath, "--tail", "50", "--follow"}, q)
+	})
+	// The run answered an ambiguous request with what to type next, which is
+	// not a failure.
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if q.streamN != 0 {
+		t.Fatalf("the picker must read no log, got %d stream calls", q.streamN)
+	}
+	// Listed in sorted order, one pasteable command each, carrying the flags
+	// already typed and the resolved platform so a paste cannot re-open the menu.
+	for _, want := range []string{
+		"3 pods match",
+		"solmq-conn-util logs --platform kubernetes -e " + envPath + " --follow --tail 50 --pod pod-a",
+		"--pod pod-b",
+		"--pod pod-c",
+		"or by index, 0-2",
+		"--pod 0",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the picker is missing %q, got:\n%s", want, stdout)
+		}
+	}
+	if i, j := strings.Index(stdout, "pod-a"), strings.Index(stdout, "pod-b"); i > j {
+		t.Errorf("the picker must list in sorted order, got:\n%s", stdout)
+	}
+}
+
+// TestLogsOneDiscoveredInstanceIsJustRead pins that the picker is for ambiguity
+// only: a single match needs no choosing, so it is read directly.
+func TestLogsOneDiscoveredInstanceIsJustRead(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
+
+	q := &streamRunner{
+		resp:    []queuedResp{{"", nil}, {onePodJSON, nil}},
+		streams: []streamed{{stdout: "only-line\n"}},
+	}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml")}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if stdout != "only-line\n" {
+		t.Errorf("a single match should print its log alone, got:\n%s", stdout)
+	}
+}
+
+// TestLogsIndexSelectsFromTheSortedList is why the sort is load-bearing: the
+// pod list comes back unsorted, and index 0 must still be the instance an
+// operator counts to in the picker and in the status table.
+func TestLogsIndexSelectsFromTheSortedList(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
+
+	for _, c := range []struct{ index, want string }{
+		{"0", "pod-a"},
+		{"1", "pod-b"},
+		{"2", "pod-c"},
+	} {
+		t.Run(c.index, func(t *testing.T) {
+			q := &streamRunner{
+				resp:    []queuedResp{{"", nil}, {unsortedPodsJSON, nil}},
+				streams: []streamed{{stdout: "x\n"}},
+			}
+			if code := dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml"), "--pod", c.index}, q); code != 0 {
+				t.Fatalf("exit=%d, want 0", code)
+			}
+			read := q.calls[len(q.calls)-1].argv
+			if !containsToken(read, c.want) {
+				t.Errorf("--pod %s should read %s, got %v", c.index, c.want, read)
+			}
+		})
+	}
+}
+
+// TestLogsNameWinsOverIndex covers the rule that keeps indexes from stealing a
+// legitimate name: a pod genuinely called "0" is reachable by name, and the
+// index reading only applies when nothing is actually named that.
+func TestLogsNameWinsOverIndex(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
+
+	// Two pods, the second literally named "0".
+	podsNamedZero := `{"items":[
+ {"metadata":{"name":"pod-a","namespace":"prod"},"spec":{"containers":[{"name":"connector","image":"img:1"}]},"status":{"phase":"Running","containerStatuses":[{"name":"connector","image":"img:1","restartCount":0,"state":{"running":{"startedAt":"2026-01-01T00:00:00Z"}}}]}},
+ {"metadata":{"name":"0","namespace":"prod"},"spec":{"containers":[{"name":"connector","image":"img:1"}]},"status":{"phase":"Running","containerStatuses":[{"name":"connector","image":"img:1","restartCount":0,"state":{"running":{"startedAt":"2026-01-01T00:00:00Z"}}}]}}
+]}`
+	q := &streamRunner{
+		resp:    []queuedResp{{"", nil}, {podsNamedZero, nil}},
+		streams: []streamed{{stdout: "x\n"}},
+	}
+	if code := dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml"), "--pod", "0"}, q); code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	// Sorted, "0" is index 0 anyway -- so assert the name matched rather than
+	// the position: the read must be for the pod called "0".
+	read := q.calls[len(q.calls)-1].argv
+	if !containsToken(read, "0") {
+		t.Errorf("the pod named 0 should be read, got %v", read)
+	}
+}
+
+// TestLogsIndexOutOfRangeNamesTheRange keeps the error actionable: the operator
+// needs to know how many there were, not just that the number was wrong.
+func TestLogsIndexOutOfRangeNamesTheRange(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
+
+	q := &streamRunner{resp: []queuedResp{{"", nil}, {unsortedPodsJSON, nil}}}
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml"), "--pod", "3"}, q)
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	for _, want := range []string{"3 pods match", "0-2"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the error should carry %q, got:\n%s", want, stderr)
+		}
+	}
+	if q.streamN != 0 {
+		t.Errorf("no log may be read, got %d stream calls", q.streamN)
+	}
+}
+
+// TestLogsIndexWithNothingToIndexInto covers an index given where discovery has
+// no list to offer: the message has to say that is the problem, rather than
+// reporting a missing pod named "0".
+func TestLogsIndexWithNothingToIndexInto(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-env.yaml")
+	q := &streamRunner{resp: []queuedResp{{"", nil}}}
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"logs", "--platform", "kubernetes", "-e", missing, "--pod", "0"}, q)
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	if !strings.Contains(stderr, "index") {
+		t.Errorf("the error should say an index needs a list, got:\n%s", stderr)
+	}
+	if q.streamN != 0 {
+		t.Errorf("no log may be read, got %d stream calls", q.streamN)
+	}
+}
+
+// TestStatusAcceptsAnIndexToo pins that the two verbs share one vocabulary: the
+// same --pod 1 means the same instance, resolved to a real name before status
+// queries anything.
+func TestStatusAcceptsAnIndexToo(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
+
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},               // preflight
+		{unsortedPodsJSON, nil}, // enumeration for the index
+		{unsortedPodsJSON, nil}, // the report query itself
+	}}
+	if code := dispatch([]string{"status", "container", "-e", filepath.Join(dir, "env.yaml"), "--pod", "1"}, q); code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	// calls: 0 preflight, 1 the enumeration for the index, 2 the report query.
+	// Later calls are the workload summary, which is not what this pins.
+	report := q.calls[2].argv
+	if !containsToken(report, "pod-b") {
+		t.Errorf("--pod 1 should resolve to pod-b, got %v", report)
+	}
+	if containsToken(report, "1") {
+		t.Errorf("the index must not reach the argv, got %v", report)
+	}
+}
+
+// TestStatusKeepsPodRepeatable is the other half of the arity split: status
+// reports many instances by design, so the one-entry limit is a logs rule only.
+func TestStatusKeepsPodRepeatable(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{{"", nil}, {podsJSON, nil}}}
+	if code := dispatch([]string{"status", "container", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q); code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	argv := q.calls[1].argv
+	for _, want := range []string{"pod-a", "pod-b"} {
+		if !containsToken(argv, want) {
+			t.Errorf("both pods should be queried, got %v", argv)
+		}
+	}
+}
+
+// ---- the pieces the picker and indexes are built from ----
+
+// TestIsIndex pins what counts as an index. Only a bare run of digits does: a
+// name that merely starts with one is a name, or an instance called 0-abc could
+// never be reached.
+func TestIsIndex(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want bool
+	}{
+		{"0", true},
+		{"12", true},
+		{"", false},
+		{"0-abc", false},
+		{"abc", false},
+		{"-1", false},
+		{"1.0", false},
+		{" 1", false},
+	} {
+		if got := isIndex(c.in); got != c.want {
+			t.Errorf("isIndex(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// TestResolveOneIndexRules covers the three outcomes in one place: an exact name
+// always wins, a digit run in range selects positionally, and one past the end
+// says how many there were.
+func TestResolveOneIndexRules(t *testing.T) {
+	refs := []instanceRef{{name: "alpha"}, {name: "0"}, {name: "zeta"}}
+	for _, c := range []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"a plain name passes through", "alpha", "alpha", false},
+		{"a name that is digits wins over the index", "0", "0", false},
+		{"an index selects positionally", "2", "zeta", false},
+		{"an unknown name passes through for discovery to judge", "ghost", "ghost", false},
+		{"past the end is an error", "3", "", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := resolveOneIndex(c.in, refs, podFlagName, validate.PlatformKubernetes)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("want an error for %q", c.in)
+				}
+				for _, w := range []string{"3 pods match", "0-2"} {
+					if !strings.Contains(err.Error(), w) {
+						t.Errorf("the error should carry %q, got %v", w, err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("resolveOneIndex(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestSortIsByNameThenNamespace pins the order an index selects into. The
+// namespace tie-break matters for a cross-namespace status --all, where two
+// deployments can run pods of the same name.
+func TestSortIsByNameThenNamespace(t *testing.T) {
+	refs := []instanceRef{
+		{name: "b", namespace: "prod"},
+		{name: "a", namespace: "prod"},
+		{name: "a", namespace: "dev"},
+	}
+	sortRefs(refs)
+	want := []string{"a/dev", "a/prod", "b/prod"}
+	for i, w := range want {
+		if got := refs[i].name + "/" + refs[i].namespace; got != w {
+			t.Errorf("refs[%d] = %s, want %s", i, got, w)
+		}
+	}
+
+	insts := []statusreport.Instance{
+		{Name: "b", Namespace: "prod"},
+		{Name: "a", Namespace: "prod"},
+		{Name: "a", Namespace: "dev"},
+	}
+	sortInstances(insts)
+	for i, w := range want {
+		if got := insts[i].Name + "/" + insts[i].Namespace; got != w {
+			t.Errorf("insts[%d] = %s, want %s", i, got, w)
+		}
+	}
+}
+
+// TestNamingHintIsVerbAware pins that a hint never names a flag the verb it came
+// from does not accept: status offers --all as a way out, logs has no such flag.
+func TestNamingHintIsVerbAware(t *testing.T) {
+	for _, c := range []struct {
+		verb, platform string
+		wantFlag       string
+		wantAll        bool
+	}{
+		{verbStatus, validate.PlatformKubernetes, podFlagName, true},
+		{verbStatus, validate.PlatformDocker, containerFlagName, true},
+		{verbLogs, validate.PlatformKubernetes, podFlagName, false},
+		{verbLogs, validate.PlatformPodman, containerFlagName, false},
+		{verbShell, validate.PlatformKubernetes, podFlagName, false},
+		{verbShell, validate.PlatformDocker, containerFlagName, false},
+	} {
+		t.Run(c.verb+"/"+c.platform, func(t *testing.T) {
+			got := namingHint(instanceSession{verb: c.verb, platform: c.platform})
+			if !strings.Contains(got, c.wantFlag) {
+				t.Errorf("hint should name %s, got %q", c.wantFlag, got)
+			}
+			if strings.Contains(got, allFlagName) != c.wantAll {
+				t.Errorf("hint mentions %s = %v, want %v: %q", allFlagName, !c.wantAll, c.wantAll, got)
+			}
+		})
+	}
+}
+
+// TestLogsPickerCarriesEveryFlagBack is what makes the picker worth printing:
+// every flag already typed has to come back in the suggested command, or pasting
+// one silently drops what the operator asked for.
+func TestLogsPickerCarriesEveryFlagBack(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
+	envPath := filepath.Join(dir, "env.yaml")
+
+	q := &streamRunner{resp: []queuedResp{{"", nil}, {unsortedPodsJSON, nil}}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{
+			"logs", "-e", envPath,
+			"--namespace", "prod",
+			"--command", "oc",
+			"--allow-command", "sudo",
+			"--previous",
+			"--timestamps",
+			"--since", "10m",
+			"--tail", "50",
+		}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	for _, want := range []string{
+		"--platform kubernetes",
+		"-e " + envPath,
+		"--namespace prod",
+		"--command oc",
+		"--allow-command sudo",
+		"--previous",
+		"--timestamps",
+		"--tail 50",
+		"--since 10m0s",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the suggested command is missing %q, got:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestInstanceCommandResolution covers the three-step binary resolution both
+// verbs share: the --command override, then the section command in env.yaml,
+// then the platform default. The defaults matter because a run can happen with
+// no section at all (explicit targets), where parse-time defaulting never ran.
+func TestInstanceCommandResolution(t *testing.T) {
+	withKube := &spec.Env{Kubernetes: &spec.Kubernetes{Command: "oc"}}
+	withDocker := &spec.Env{Docker: &spec.Docker{Command: "podman-compat"}}
+	withPodman := &spec.Env{Podman: &spec.Podman{Command: "sudo podman"}}
+
+	for _, c := range []struct {
+		name     string
+		platform string
+		override string
+		env      *spec.Env
+		want     string
+	}{
+		{"override wins", validate.PlatformKubernetes, "kubectl --context prod", withKube, "kubectl --context prod"},
+		{"kube section", validate.PlatformKubernetes, "", withKube, "oc"},
+		{"kube default", validate.PlatformKubernetes, "", &spec.Env{}, spec.DefaultKubeCommand},
+		{"kube nil env", validate.PlatformKubernetes, "", nil, spec.DefaultKubeCommand},
+		{"docker section", validate.PlatformDocker, "", withDocker, "podman-compat"},
+		{"docker default", validate.PlatformDocker, "", &spec.Env{}, spec.DefaultDockerCommand},
+		{"podman section", validate.PlatformPodman, "", withPodman, "sudo podman"},
+		{"podman default", validate.PlatformPodman, "", &spec.Env{}, spec.DefaultPodmanCommand},
+		{"unknown platform", "nonsense", "", &spec.Env{}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := instanceCommand(c.platform, c.override, c.env); got != c.want {
+				t.Errorf("instanceCommand(%q, %q) = %q, want %q", c.platform, c.override, got, c.want)
+			}
+		})
+	}
+}
+
+// TestInstanceNamespaceResolution is the same three steps for the namespace,
+// including that it stays empty on docker/podman, which have no such concept.
+func TestInstanceNamespaceResolution(t *testing.T) {
+	e := &spec.Env{Kubernetes: &spec.Kubernetes{}}
+	e.Kubernetes.Deployment.Namespace = "prod"
+
+	for _, c := range []struct {
+		name     string
+		platform string
+		override string
+		env      *spec.Env
+		want     string
+	}{
+		{"override wins", validate.PlatformKubernetes, "other", e, "other"},
+		{"from the section", validate.PlatformKubernetes, "", e, "prod"},
+		{"no section", validate.PlatformKubernetes, "", &spec.Env{}, ""},
+		{"nil env", validate.PlatformKubernetes, "", nil, ""},
+		{"docker has none", validate.PlatformDocker, "", e, ""},
+		{"podman has none", validate.PlatformPodman, "", e, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := instanceNamespace(c.platform, c.override, c.env); got != c.want {
+				t.Errorf("instanceNamespace(%q, %q) = %q, want %q", c.platform, c.override, got, c.want)
+			}
+		})
+	}
+}
+
+// TestConfiguredInstanceName covers both engines and both missing-section
+// errors, including that the message names the section that is absent rather
+// than just reporting that nothing was found.
+func TestConfiguredInstanceName(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		sess    instanceSession
+		want    string
+		wantErr string
+	}{
+		{
+			name: "docker",
+			sess: instanceSession{platform: validate.PlatformDocker, env: &spec.Env{Docker: &spec.Docker{Name: "solmq-dk"}}},
+			want: "solmq-dk",
+		},
+		{
+			name: "podman",
+			sess: instanceSession{platform: validate.PlatformPodman, env: &spec.Env{Podman: &spec.Podman{Name: "solmq-pm"}}},
+			want: "solmq-pm",
+		},
+		{
+			name:    "docker section absent",
+			sess:    instanceSession{verb: verbStatus, platform: validate.PlatformDocker, env: &spec.Env{}},
+			wantErr: "no docker: section",
+		},
+		{
+			name:    "podman section absent",
+			sess:    instanceSession{verb: verbStatus, platform: validate.PlatformPodman, env: &spec.Env{}},
+			wantErr: "no podman: section",
+		},
+		{
+			name:    "nil env",
+			sess:    instanceSession{verb: verbLogs, platform: validate.PlatformDocker},
+			wantErr: "no docker: section",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := configuredInstanceName(c.sess)
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("want an error carrying %q, got %v", c.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("= %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestNoPodsFoundExplainsTheBranchItCameFrom pins that an empty result is
+// explained in the terms of whichever discovery produced it: a cluster-wide
+// image search, a selector, or pods named outright. Quoting a selector back at
+// someone who named pods directly would be noise.
+func TestNoPodsFoundExplainsTheBranchItCameFrom(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		selector string
+		ns       string
+		all      bool
+		want     []string
+	}{
+		{"image search", "", "", true, []string{"anywhere in the cluster", statusreport.ImageMatch}},
+		{"selector", "app=solmq", "prod", false, []string{"app=solmq", "prod", podFlagName}},
+		{"named pods", "", "prod", false, []string{"none of the named pods", "prod"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := noPodsFound(c.selector, c.ns, c.all)
+			for _, w := range c.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("the error should carry %q, got %v", w, err)
+				}
+			}
+		})
+	}
+}
+
 // ---- o) version -------------------------------------------------------------------
 
 // TestVersionOutputShape pins the exact printed shape in an un-injected test
@@ -3990,5 +5282,353 @@ func TestAbsPath(t *testing.T) {
 	}
 	if got := absPath("base", "rel.yaml"); got != filepath.Join("base", "rel.yaml") {
 		t.Errorf("relative input must join onto dir: got %q", got)
+	}
+}
+
+// ---- j) the cli verb: a session inside one instance ----------------------------
+
+// attached is one Attach call's canned result: the status the session ended
+// with, and an error only for a session that could not be started at all.
+type attached struct {
+	code int
+	err  error
+}
+
+// attachRunner is the fake cli needs: it satisfies runner.Attacher as well as
+// runner.Runner, since cli reaches its instance through the attaching seam
+// while the preflight probe and discovery still go through Run. Both kinds of
+// call are recorded in one ordered slice, while the canned answers are queued
+// per kind -- the same split streamRunner uses for logs.
+//
+// The three *os.File values are ignored outright, and that is exactly why the
+// seam takes them as parameters instead of reading os.Stdin itself: the fake
+// needs no terminal, no pipe, and no temp file standing in for one.
+type attachRunner struct {
+	calls []fakeCall
+
+	resp []queuedResp
+	runN int
+
+	attaches []attached
+	attachN  int
+}
+
+func (a *attachRunner) Run(c runner.Cmd) (string, error) {
+	a.calls = append(a.calls, fakeCall{argv: c.Argv, stdin: c.Stdin, env: c.Env})
+	i := a.runN
+	a.runN++
+	if i < len(a.resp) {
+		return a.resp[i].out, a.resp[i].err
+	}
+	return "", nil
+}
+
+func (a *attachRunner) Attach(c runner.Cmd, _, _, _ *os.File) (int, error) {
+	a.calls = append(a.calls, fakeCall{argv: c.Argv, stdin: c.Stdin, env: c.Env})
+	i := a.attachN
+	a.attachN++
+	if i >= len(a.attaches) {
+		return 0, nil
+	}
+	return a.attaches[i].code, a.attaches[i].err
+}
+
+// withTerminal drives the stdinIsTerminal seam, mirroring withPromptAnswer and
+// existing for the same reason: go test's own stdin is never a character
+// device, so every path behind the real probe would be unreachable.
+func withTerminal(t *testing.T, yes bool) {
+	t.Helper()
+	prev := stdinIsTerminal
+	stdinIsTerminal = func() bool { return yes }
+	t.Cleanup(func() { stdinIsTerminal = prev })
+}
+
+// TestCliNeedsAnAttachingRunner pins the type assertion: a Runner that cannot
+// hand over the terminal fails loudly, before anything runs, rather than
+// silently degrading to a session with no prompt.
+func TestCliNeedsAnAttachingRunner(t *testing.T) {
+	withTerminal(t, true)
+	f := useFakeRunner(t)
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, f)
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	if !strings.Contains(stderr, "terminal") {
+		t.Errorf("the error should say what the runner cannot do, got:\n%s", stderr)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("nothing may run, got %d calls: %+v", len(f.calls), f.calls)
+	}
+}
+
+// TestCliRefusesAShellWithoutATerminal is the same non-TTY contract the
+// platform menu, the status install prompt and the remove confirmation keep:
+// fail with the next step rather than open a session nobody can type into. The
+// next step here is the one-shot form, so the message has to name it.
+func TestCliRefusesAShellWithoutATerminal(t *testing.T) {
+	withTerminal(t, false)
+	q := &attachRunner{}
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, q)
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	if !strings.Contains(stderr, "cli -- <command>") {
+		t.Errorf("the refusal should name the one-shot form, got:\n%s", stderr)
+	}
+	if len(q.calls) != 0 {
+		t.Errorf("nothing may run, got %d calls: %+v", len(q.calls), q.calls)
+	}
+}
+
+// TestCliKubernetesArgvShape pins the session argv: -i and -t both asked for,
+// the namespace and the connector container both named, and the "--" that tells
+// kubectl where the in-container command starts. Naming a pod costs no
+// discovery call, so the whole run is the preflight probe and the attach.
+func TestCliKubernetesArgvShape(t *testing.T) {
+	withTerminal(t, true)
+	q := &attachRunner{}
+	if code := dispatch([]string{"cli", "--platform", "kubernetes", "--pod", "pod-a", "--namespace", "prod"}, q); code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if len(q.calls) != 2 {
+		t.Fatalf("want 2 calls (preflight, the attach), got %d: %+v", len(q.calls), q.calls)
+	}
+	want := []string{"kubectl", "exec", "-i", "-t", "pod-a", "-n", "prod", "-c", spec.ConnectorContainerName, "--", runner.ContainerShell}
+	if !reflect.DeepEqual(q.calls[1].argv, want) {
+		t.Errorf("session argv = %v, want %v", q.calls[1].argv, want)
+	}
+}
+
+// TestCliEngineArgvShape is the other half: docker and podman stop parsing
+// their own flags at the container name, so the options come first and there is
+// no "--" and no -c to add.
+func TestCliEngineArgvShape(t *testing.T) {
+	for _, platform := range []string{"docker", "podman"} {
+		t.Run(platform, func(t *testing.T) {
+			withTerminal(t, true)
+			q := &attachRunner{}
+			if code := dispatch([]string{"cli", "--platform", platform, "--container", "solmq-conn"}, q); code != 0 {
+				t.Fatalf("exit=%d, want 0", code)
+			}
+			if len(q.calls) != 2 {
+				t.Fatalf("want 2 calls (preflight, the attach), got %d: %+v", len(q.calls), q.calls)
+			}
+			want := []string{platform, "exec", "-i", "-t", "solmq-conn", runner.ContainerShell}
+			if !reflect.DeepEqual(q.calls[1].argv, want) {
+				t.Errorf("session argv = %v, want %v", q.calls[1].argv, want)
+			}
+		})
+	}
+}
+
+// TestCliOneShotRunsTheCommandWithNoTerminal pins the form a script uses:
+// everything after "--" replaces the shell, no -t is asked for because there is
+// no prompt to draw, and no -i either while stdin is a terminal -- a command
+// that reads stdin would otherwise wait on one that never sends EOF.
+func TestCliOneShotRunsTheCommandWithNoTerminal(t *testing.T) {
+	withTerminal(t, true)
+	q := &attachRunner{}
+	code := dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn", "--", "ls", "-la", "/app/external"}, q)
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	want := []string{"docker", "exec", "solmq-conn", "ls", "-la", "/app/external"}
+	if !reflect.DeepEqual(q.calls[1].argv, want) {
+		t.Errorf("one-shot argv = %v, want %v", q.calls[1].argv, want)
+	}
+}
+
+// TestCliOneShotAttachesStdinWhenSomethingIsPiped is the other side of that
+// rule: a stdin that is not a terminal is a stdin something is being piped
+// into, so -i is what makes `echo hi | cli -- cat` work. It is also the case
+// that proves the one-shot form is allowed without a terminal at all.
+func TestCliOneShotAttachesStdinWhenSomethingIsPiped(t *testing.T) {
+	withTerminal(t, false)
+	q := &attachRunner{}
+	code := dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn", "--", "cat"}, q)
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	want := []string{"docker", "exec", "-i", "solmq-conn", "cat"}
+	if !reflect.DeepEqual(q.calls[1].argv, want) {
+		t.Errorf("one-shot argv = %v, want %v", q.calls[1].argv, want)
+	}
+}
+
+// TestCliPropagatesTheSessionExitStatus is cli's one departure from the 0/1/2
+// contract: once the session ran, its own status is the answer, so `exit 3`
+// inside the shell reaches the operator as 3.
+func TestCliPropagatesTheSessionExitStatus(t *testing.T) {
+	withTerminal(t, true)
+	q := &attachRunner{attaches: []attached{{code: 3}}}
+	if code := dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, q); code != 3 {
+		t.Errorf("exit=%d, want the session status 3", code)
+	}
+}
+
+// TestCliSessionThatCouldNotStartIsAnError separates the two: a session that
+// never began is this tool failing, which is exit 1 and names the instance.
+func TestCliSessionThatCouldNotStartIsAnError(t *testing.T) {
+	withTerminal(t, true)
+	q := &attachRunner{attaches: []attached{{err: fmt.Errorf("docker: not found")}}}
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, q)
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	if !strings.Contains(stderr, "solmq-conn") {
+		t.Errorf("the failure should name the instance, got:\n%s", stderr)
+	}
+}
+
+// TestCliRejectsWhatCannotMeanAnything gathers the refusals that are decided
+// from the command line alone. Every one of them must reach no process at all:
+// a mistake in the invocation costs nothing.
+func TestCliRejectsWhatCannotMeanAnything(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		args []string
+		want []string
+		code int
+	}{
+		{
+			name: "a bare word is not a target",
+			args: []string{"cli", "bogus"},
+			want: []string{"unexpected argument", "--pod", "--"},
+			code: 2,
+		},
+		{
+			name: "a separator with no command",
+			args: []string{"cli", "--platform", "docker", "--container", "c", "--"},
+			want: []string{"no command after it"},
+			code: 2,
+		},
+		{
+			name: "two pods",
+			args: []string{"cli", "--platform", "kubernetes", "--pod", "a", "--pod", "b"},
+			want: []string{"--pod may be given once"},
+			code: 2,
+		},
+		{
+			name: "two containers",
+			args: []string{"cli", "--platform", "docker", "--container", "a", "--container", "b"},
+			want: []string{"--container may be given once"},
+			code: 2,
+		},
+		{
+			// cli runs an argv and never a shell line, so a glob has nothing to
+			// expand it -- which makes one in the command a mistake, and the
+			// message has to say where it can be written instead.
+			name: "an unsafe command token",
+			args: []string{"cli", "--platform", "docker", "--container", "c", "--", "ls", "*"},
+			want: []string{"unsafe character", "argv, not a shell line"},
+			code: 1,
+		},
+		{
+			name: "an unsafe instance name",
+			args: []string{"cli", "--platform", "kubernetes", "--pod", "pod-a;rm -rf /"},
+			want: []string{"unsafe character"},
+			code: 1,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			withTerminal(t, true)
+			q := &attachRunner{}
+			var code int
+			stderr := captureStderr(t, func() { code = dispatch(c.args, q) })
+			if code != c.code {
+				t.Fatalf("exit=%d, want %d; stderr:\n%s", code, c.code, stderr)
+			}
+			for _, w := range c.want {
+				if !strings.Contains(stderr, w) {
+					t.Errorf("the refusal should mention %q, got:\n%s", w, stderr)
+				}
+			}
+			if len(q.calls) != 0 {
+				t.Errorf("nothing may run, got %d calls: %+v", len(q.calls), q.calls)
+			}
+		})
+	}
+}
+
+// TestCliPickerCarriesTheCommandBehindTheSeparator is the picker's cli-specific
+// twist: the in-container command has to stay behind its "--", and therefore
+// behind the --pod the picker is telling the operator to add. A line that
+// pasted the flag after the command would not parse.
+func TestCliPickerCarriesTheCommandBehindTheSeparator(t *testing.T) {
+	withTerminal(t, true)
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
+	envPath := filepath.Join(dir, "env.yaml")
+
+	q := &attachRunner{resp: []queuedResp{{"", nil}, {unsortedPodsJSON, nil}}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"cli", "-e", envPath, "--", "ls", "-la"}, q)
+	})
+	// An ambiguous request answered with what to type next is not a failure.
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if q.attachN != 0 {
+		t.Fatalf("the picker must open no session, got %d attaches", q.attachN)
+	}
+	for _, want := range []string{
+		"3 pods match; cli takes one",
+		"solmq-conn-util cli --platform kubernetes -e " + envPath + " --pod pod-a -- ls -la",
+		"--pod pod-b -- ls -la",
+		"or by index, 0-2",
+		"--pod 0 -- ls -la",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the picker is missing %q, got:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestCliIndexSelectsFromTheSortedList pins that cli indexes into the same
+// order logs and status print, so a number copied off one verb means the same
+// instance in another.
+func TestCliIndexSelectsFromTheSortedList(t *testing.T) {
+	withTerminal(t, true)
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
+
+	q := &attachRunner{resp: []queuedResp{{"", nil}, {unsortedPodsJSON, nil}}}
+	if code := dispatch([]string{"cli", "-e", filepath.Join(dir, "env.yaml"), "--pod", "1"}, q); code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if len(q.calls) != 3 {
+		t.Fatalf("want 3 calls (preflight, get pods, the attach), got %d: %+v", len(q.calls), q.calls)
+	}
+	// pod-b: the middle of the sorted list, not the middle of the JSON.
+	if !containsToken(q.calls[2].argv, "pod-b") {
+		t.Errorf("index 1 should select pod-b from the sorted list, got %v", q.calls[2].argv)
+	}
+}
+
+// TestCliPreflightFailureOpensNothing keeps cli on the same contract as status
+// and logs: an engine that cannot be reached is reported once, up front, and no
+// session is attempted.
+func TestCliPreflightFailureOpensNothing(t *testing.T) {
+	withTerminal(t, true)
+	q := &attachRunner{resp: []queuedResp{{"cannot connect to the docker daemon", fmt.Errorf("exit status 1")}}}
+	var code int
+	captureStderr(t, func() {
+		code = dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, q)
+	})
+	if code == 0 {
+		t.Fatal("a failed preflight must not exit 0")
+	}
+	if q.attachN != 0 {
+		t.Errorf("no session may be opened, got %d attaches", q.attachN)
 	}
 }

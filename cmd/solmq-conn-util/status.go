@@ -268,6 +268,7 @@ func checkStatusFlags(o statusOpts, output string) int {
 // preflight -- fails here, before any instance is queried.
 func actStatus(o statusOpts, r runner.Runner) int {
 	sess, serr := resolveInstanceSession(instanceRequest{
+		verb:     verbStatus,
 		envPath:  o.envPath,
 		platform: o.platform,
 		ns:       o.ns,
@@ -306,6 +307,19 @@ func actStatus(o statusOpts, r runner.Runner) int {
 	if code, ok := preflight(r, runner.ActionDeploy, sess.platform, sess.command, sess.ns, o.allow); !ok {
 		return code
 	}
+
+	// An index is resolved to a real name here, once, so every query below sees
+	// only names. It costs one extra enumeration and only when an index was
+	// actually typed -- resolveIndexes returns the names untouched otherwise.
+	pods, perr := resolveIndexes(r, sess, o.pods, o.all)
+	if perr != nil {
+		return errExit(perr)
+	}
+	conts, cerr := resolveIndexes(r, sess, o.conts, o.all)
+	if cerr != nil {
+		return errExit(cerr)
+	}
+	o.pods, o.conts = pods, conts
 
 	c := &statusCollector{opts: o, platform: sess.platform, cmdArgv: sess.cmdArgv, env: sess.env, r: r}
 	if o.watch.on {
@@ -367,6 +381,7 @@ func (c *statusCollector) collect() (statusreport.Report, bool, error) {
 	}
 	statusreport.SortInstances(rep.Instances)
 	c.compareImage(&rep)
+	c.compareProject(&rep)
 
 	failed := false
 	if c.opts.view != statusreport.ViewContainer {
@@ -397,6 +412,10 @@ func (c *statusCollector) collectKubernetes(rep *statusreport.Report) error {
 	if len(insts) == 0 {
 		return noPodsFound(selector, o.ns, o.all)
 	}
+	// Alphabetical, so the row an operator counts to is the one --pod <index>
+	// selects. kubectl usually returns this order already; docker and podman do
+	// not, and the two verbs have to agree.
+	sortInstances(insts)
 	rep.Instances = insts
 
 	// The workload summary is the deployment and service this tool created; a
@@ -500,6 +519,7 @@ func (c *statusCollector) collectEngine(rep *statusreport.Report) error {
 		}
 		return fmt.Errorf("the engine reported nothing for %s", strings.Join(names, ", "))
 	}
+	sortInstances(insts)
 	rep.Instances = insts
 
 	// The restart count is a basic column, so the truthful one has to be
@@ -614,6 +634,58 @@ func (c *statusCollector) compareImage(rep *statusreport.Report) {
 			"%d of %d instance(s) are not running the image env.yaml configures (%s); run with %s for the per-instance detail",
 			mismatched, len(rep.Instances), want, detailsFlagName))
 	}
+}
+
+// compareProject flags containers labelled with a compose project other than the
+// one env.yaml configures. That happens to every stack brought up before
+// docker.project-name existed -- compose named those after the directory holding
+// the compose file -- and to any stack whose project-name was edited since. It
+// matters because `remove` runs `compose down` against the configured project, so
+// it tears down nothing and reports success while the stack keeps running.
+//
+// Docker only: podman containers carry no compose label, and on kubernetes Group
+// is the deployment rather than a project. An instance with no label at all is
+// skipped -- that is a container compose never created, which is a different
+// thing from one under the wrong project, and the likeliest false positive.
+//
+// Only ever appended on a mismatch, so the note's presence is the finding.
+func (c *statusCollector) compareProject(rep *statusreport.Report) {
+	if rep.Platform != validate.PlatformDocker || c.env == nil || c.env.Docker == nil {
+		return
+	}
+	want := c.env.Docker.ProjectName
+	if want == "" {
+		return
+	}
+	// Instances are already sorted, so first-seen order is stable and no sort of
+	// its own is needed here.
+	seen := map[string]bool{}
+	var others []string
+	for _, inst := range rep.Instances {
+		if inst.Group == "" || inst.Group == want || seen[inst.Group] {
+			continue
+		}
+		seen[inst.Group] = true
+		others = append(others, inst.Group)
+	}
+	if len(others) == 0 {
+		return
+	}
+	rep.Notes = append(rep.Notes, fmt.Sprintf(
+		"running under compose project %s, not the %q env.yaml configures; remove would not see this stack -- set docker.project-name to the running value, or tear it down by hand with %q",
+		strings.Join(quoteAll(others), ", "), want,
+		"docker compose -p "+others[0]+" -f docker-compose.yml down"))
+}
+
+// quoteAll quotes each project name for the compareProject note. The values are
+// read back off a container's labels rather than authored here, so quoting keeps
+// an odd one legible instead of letting it blend into the sentence around it.
+func quoteAll(vals []string) []string {
+	out := make([]string, 0, len(vals))
+	for _, v := range vals {
+		out = append(out, strconv.Quote(v))
+	}
+	return out
 }
 
 // ---- the application half ----------------------------------------------------

@@ -21,20 +21,26 @@ func containsSub(ss []string, sub string) bool {
 
 // testSecretRef mirrors the bookkeeping Build's own secretRef closure does
 // (see consolidate.go), for white-box tests that call buildLeaderElection
-// directly: one entry per stable name, "" for an unset credential, the same
-// stable name collapsing repeats onto the first recording.
+// directly: one entry per mount name, "" for an unset credential, the same
+// name collapsing repeats onto the first recording, and an -env credential
+// mounted under its own variable name. origin only labels collisions, which
+// these white-box callers do not produce, so it is ignored here.
 func testSecretRef() (secretFn, func() []SecretRef) {
 	seen := map[string]bool{}
 	var secrets []SecretRef
-	fn := func(stable string, c spec.Cred) string {
+	fn := func(stable, _ string, c spec.Cred) string {
 		if c.Empty() {
 			return ""
 		}
-		if !seen[stable] {
-			seen[stable] = true
-			secrets = append(secrets, SecretRef{Stable: stable, Literal: c.Literal, EnvVar: c.EnvVar})
+		name := stable
+		if c.EnvVar != "" {
+			name = c.EnvVar
 		}
-		return "${" + stable + "}"
+		if !seen[name] {
+			seen[name] = true
+			secrets = append(secrets, SecretRef{Stable: name, Literal: c.Literal, EnvVar: c.EnvVar})
+		}
+		return "${" + name + "}"
 	}
 	return fn, func() []SecretRef { return secrets }
 }
@@ -180,12 +186,15 @@ func TestBuildMQmTLSBundle(t *testing.T) {
 	// once by the Solace binder's tcps:// api-properties (both TLS-enabled sides
 	// share the one truststore in d.TLS) -- and must collapse to a single
 	// Model.Secrets entry, not be mounted/resolved twice under the same name.
+	// Keyed on the operator's own -env name, because that is what an -env
+	// credential is mounted under: SecretRef.Stable is the variable written in
+	// the spec, and only a literal takes a derived name.
 	var truststoreRefs int
 	for _, s := range m.Secrets {
-		if s.Stable == TruststorePasswordName {
+		if s.EnvVar == "TRUSTSTORE_PASSWORD_ENV" {
 			truststoreRefs++
-			if s.EnvVar != "TRUSTSTORE_PASSWORD_ENV" {
-				t.Errorf("truststore secret EnvVar = %q, want TRUSTSTORE_PASSWORD_ENV", s.EnvVar)
+			if s.Stable != s.EnvVar {
+				t.Errorf("truststore secret Stable = %q, want the -env name %q", s.Stable, s.EnvVar)
 			}
 		}
 	}
@@ -309,11 +318,15 @@ func TestApplyStatusAccessAppendsAfterExistingUsers(t *testing.T) {
 	if last.Name != spec.StatusUserName || last.Password != "status-literal" {
 		t.Errorf("last user = %+v, want the reserved account carrying the literal password", last)
 	}
+	// The two existing users differ on purpose: alice's password is a literal, so
+	// it is mounted under the name its position derives, while bob's comes from
+	// -env and keeps the variable the operator wrote. Both are placeholders --
+	// neither value reaches the config.
 	if got := m.Security.Users[0]; got.Password != "${"+securityUserPasswordName("alice")+"}" {
-		t.Errorf("existing user alice = %+v, want a secretRef placeholder", got)
+		t.Errorf("existing user alice = %+v, want the derived secretRef placeholder", got)
 	}
-	if got := m.Security.Users[1]; got.Password != "${"+securityUserPasswordName("bob")+"}" {
-		t.Errorf("existing user bob = %+v, want a secretRef placeholder", got)
+	if got := m.Security.Users[1]; got.Password != "${BOB_PASS_ENV}" {
+		t.Errorf("existing user bob = %+v, want the -env name as the placeholder", got)
 	}
 	for _, s := range m.Secrets {
 		if s.Literal == "status-literal" {
@@ -408,14 +421,16 @@ func TestBuildLeaderElection(t *testing.T) {
 		t.Fatalf("conn-ref happy path: le = %+v", le)
 	}
 	// No credential value or host env-var name ever reaches the rendered
-	// session: ClientUser/ClientPass carry the stable placeholder, not "u"/"p"
-	// or the env-var name, and the leader-election secrets are recorded under
-	// their own fixed stable names.
-	if le.Session.ClientUser != "${"+LeaderUsernameName+"}" {
-		t.Errorf("conn-ref happy path: Session.ClientUser = %q, want the %s placeholder", le.Session.ClientUser, LeaderUsernameName)
+	// session: ClientUser/ClientPass carry the mount-name placeholder, never the
+	// credential value. For an -env credential that mount name is the operator's
+	// own variable, so an `existing:` Secret's keys are the names written in the
+	// spec; the fixed LEADER_ELECTION_* names are what a literal would fall back
+	// to instead.
+	if le.Session.ClientUser != "${EDGE_USER}" {
+		t.Errorf("conn-ref happy path: Session.ClientUser = %q, want the ${EDGE_USER} placeholder", le.Session.ClientUser)
 	}
-	if le.Session.ClientPass != "${"+LeaderPasswordName+"}" {
-		t.Errorf("conn-ref happy path: Session.ClientPass = %q, want the %s placeholder", le.Session.ClientPass, LeaderPasswordName)
+	if le.Session.ClientPass != "${EDGE_PASS}" {
+		t.Errorf("conn-ref happy path: Session.ClientPass = %q, want the ${EDGE_PASS} placeholder", le.Session.ClientPass)
 	}
 	got := map[string]string{}
 	for _, p := range le.Session.APIProps {
@@ -436,14 +451,12 @@ func TestBuildLeaderElection(t *testing.T) {
 	for _, s := range secrets {
 		byStable[s.Stable] = s
 	}
-	if s := byStable[LeaderUsernameName]; s.EnvVar != "EDGE_USER" {
-		t.Errorf("Secrets[%s].EnvVar = %q, want EDGE_USER", LeaderUsernameName, s.EnvVar)
-	}
-	if s := byStable[LeaderPasswordName]; s.EnvVar != "EDGE_PASS" {
-		t.Errorf("Secrets[%s].EnvVar = %q, want EDGE_PASS", LeaderPasswordName, s.EnvVar)
-	}
-	if s := byStable[TruststorePasswordName]; s.EnvVar != "TRUSTSTORE_PASSWORD_ENV" {
-		t.Errorf("Secrets[%s].EnvVar = %q, want TRUSTSTORE_PASSWORD_ENV", TruststorePasswordName, s.EnvVar)
+	// Stable is the -env variable itself, so each of these is keyed by its own
+	// name and carries that name as EnvVar too.
+	for _, name := range []string{"EDGE_USER", "EDGE_PASS", "TRUSTSTORE_PASSWORD_ENV"} {
+		if s, ok := byStable[name]; !ok || s.EnvVar != name {
+			t.Errorf("Secrets[%s] = %+v (present=%v), want an entry whose EnvVar is %s", name, s, ok, name)
+		}
 	}
 	// solace-defaults reaches the session as direct session.* keys, in authored
 	// order, exactly as it reaches a binder's solace.java.*.
@@ -472,8 +485,11 @@ func TestBuildLeaderElection(t *testing.T) {
 	if le == nil || le.Session == nil || le.Session.Host != "tcp://b:55555" {
 		t.Fatalf("inline session: le = %+v", le)
 	}
-	if le.Session.ClientUser != "${"+LeaderUsernameName+"}" {
-		t.Errorf("inline session: Session.ClientUser = %q, want the %s placeholder (never the literal/env source)", le.Session.ClientUser, LeaderUsernameName)
+	// An inline session is named the same way a conn-ref one is: the placeholder
+	// is the mount name, which for an -env credential is the operator's variable.
+	// What it must never be is the credential value.
+	if le.Session.ClientUser != "${INLINE_USER}" {
+		t.Errorf("inline session: Session.ClientUser = %q, want the ${INLINE_USER} placeholder (never the credential value)", le.Session.ClientUser)
 	}
 	// A plaintext host adds no tool TLS props, but the inline block's own
 	// api-properties and solace-defaults must still come through -- they are what
@@ -574,21 +590,33 @@ func TestBuildLeaderElectionSharesBinderSecretNames(t *testing.T) {
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 		Source: src, Target: mqSide("QM1", "MQ1", spec.DestQueue, false)}}
 
+	// A session sharing a binder's connection reuses that binder's credential
+	// names, which under the -env rule are the operator's own variables.
 	shared, _ := Build(wfs, defs("edge"), Opts{})
-	if got, want := shared.LeaderElection.Session.ClientUser, "${EDGE_CLIENT_USERNAME}"; got != want {
+	if got, want := shared.LeaderElection.Session.ClientUser, "${EDGE_USER}"; got != want {
 		t.Errorf("shared session ClientUser = %q, want %q", got, want)
 	}
-	if got, want := shared.LeaderElection.Session.ClientPass, "${EDGE_CLIENT_PASSWORD}"; got != want {
+	if got, want := shared.LeaderElection.Session.ClientPass, "${EDGE_PASS}"; got != want {
 		t.Errorf("shared session ClientPass = %q, want %q", got, want)
 	}
-	for _, sec := range shared.Secrets {
-		if sec.Stable == LeaderUsernameName || sec.Stable == LeaderPasswordName {
-			t.Errorf("a shared session must not mount a second secret, got %q", sec.Stable)
+	// Sharing means reusing, not mounting again: each of the binder's two
+	// credentials must appear exactly once, whatever it is called.
+	for _, name := range []string{"EDGE_USER", "EDGE_PASS"} {
+		var n int
+		for _, sec := range shared.Secrets {
+			if sec.Stable == name {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%s appears %d times in Secrets, want 1 -- a shared session must not mount a second copy: %+v", name, n, shared.Secrets)
 		}
 	}
 
+	// A management-only connection is nobody's binder, but its credentials are
+	// still -env, so it too is mounted under the operator's own names.
 	lone, _ := Build(wfs, defs("mgmt-only"), Opts{})
-	if got, want := lone.LeaderElection.Session.ClientUser, "${"+LeaderUsernameName+"}"; got != want {
+	if got, want := lone.LeaderElection.Session.ClientUser, "${M_USER}"; got != want {
 		t.Errorf("management-only session ClientUser = %q, want %q", got, want)
 	}
 }

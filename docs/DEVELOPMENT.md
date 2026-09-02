@@ -184,12 +184,39 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
   context is reported as success -- a follow the operator ended with Ctrl-C did not fail --
   and `cmd.Cancel` interrupts, falling back to `Kill` where a signal cannot be delivered
   (Windows), with `WaitDelay` as the backstop for a child that ignores it.
+- **Terminal attach seam.** `runner.Attacher` is the third capability beside `Runner` and
+  `Streamer`, asked for by the same type assertion, and it exists for the one case neither can
+  express: `cli`, where the child must be given the operator's real terminal. Its parameters are
+  `*os.File` rather than `io.Reader`/`io.Writer`, and that is the whole point -- `os/exec`
+  interposes an OS pipe for any writer that is not an `*os.File`, a pipe is not a terminal, and
+  the engine would then refuse the pty it was asked for, leaving a shell with no prompt, no line
+  editing and no job control. It returns `(int, error)`: the int is the child's own exit status
+  (an `*exec.ExitError` unwrapped here so `os/exec` stays out of the CLI layer), and the error is
+  reserved for a child that never started. No `context.Context`, unlike `Stream`: a followed log
+  is ended from outside, an attached session from inside by the operator typing `exit`.
+  Ctrl-C is handled by *not* handling it -- `signal.Notify` onto a channel nobody reads keeps the
+  parent alive while the terminal delivers the interrupt to the child directly. Deliberately not
+  `signal.Ignore`, whose SIG_IGN would be inherited across exec and leave the container's shell
+  uninterruptible.
+- **One container name, always named.** `spec.ConnectorContainerName` (`connector`) is the
+  container this tool renders into a kubernetes pod, and `spec.DefaultConnectorName` is the same
+  word, so docker and podman default to it too. Every kubernetes `exec` and `logs` argv names it
+  outright (`-c`), built in `runner.ExecArgv`/`runner.LogsArgv` from the constant rather than from
+  anything discovery returned. A pod carrying a sidecar therefore cannot have the wrong half of it
+  read, and a pod with no such container fails loudly instead of being guessed at -- the same
+  judgement `statusreport.connectorIndex` records for the reporting side. The accepted cost is
+  that a pod this tool did not deploy, whose container is called something else, is no longer
+  reachable. `statusreport.Instance.ContainerName` still exists, but it is reported (it is a field
+  of the `--output json` document) rather than used to address anything.
 - **Shared instance resolution.** `cmd/solmq-conn-util/instances.go` holds what every verb
   that reaches into running instances needs: platform resolution, namespace resolution, the
-  `SafeToken` checks on every operator-supplied name, `ParseCommand`, and the pod/container
-  discovery branches. `status` and `logs` both call it rather than each carrying a copy --
-  a debugging pair that disagreed about which instances it meant would be worse than either
-  verb alone.
+  `SafeToken` checks on every operator-supplied name, `ParseCommand`, the pod/container
+  discovery branches, and -- for the single-instance verbs -- `resolveOneInstance` and the
+  paste-back picker. `status`, `logs` and `cli` all call it rather than each carrying a copy --
+  a debugging set of verbs that disagreed about which instances it meant would be worse than any
+  one of them alone. Because `-c` is a constant, naming an instance outright now costs no query at
+  all: the `get pods <name>` call that used to precede a named read existed only to learn the
+  container name.
 - **Durable names** use UUIDv5 (namespace `6ba7f4e2-9c1d-5a3b-8e47-2f9a0c7d13e5`, key =
   `conn-name ‖ queue-manager ‖ topic ‖ file-basename` joined by `0x1F`). Renaming a workflow
   file changes its durable name and orphans the old subscription — rename deliberately.

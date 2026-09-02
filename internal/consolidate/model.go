@@ -125,15 +125,32 @@ type LeaderElectionModel struct {
 }
 
 // SecretRef is one credential the connector needs at runtime, named by the
-// stable in-container name it is mounted under. Exactly one of Literal/EnvVar
-// carries the source: a literal value from the spec, or the name of a host
-// environment variable read at deploy time. Neither ever reaches a generated
+// in-container name it is mounted under. Exactly one of Literal/EnvVar carries
+// the source: a literal value from the spec, or the name of a host environment
+// variable read at deploy time. The credential *value* never reaches a generated
 // artifact -- the config references only Stable, and the value is resolved
 // straight into the platform's secret store.
+//
+// Stable is the operator's own EnvVar when there is one, so an `existing:`
+// Secret's keys are exactly the -env names written in the spec and need no
+// derivation to reproduce. A literal has no name of its own and takes the
+// derived name its position gives it (see stableName).
 type SecretRef struct {
-	Stable  string // e.g. PROD_SOLACE_CLIENT_PASSWORD
+	Stable  string // SOL_PASSWORD from -env; PROD_SOLACE_CLIENT_PASSWORD when literal
 	Literal string
 	EnvVar  string
+}
+
+// SecretConflict is one mount name two different credentials claimed. First is
+// the position that got the name, Second the one that collided with it; both are
+// spec positions an operator can find and rename ("binder \"mq-conn-1\"
+// password-env", "tls.truststore.password"). Naming both is the whole point --
+// the contested key alone does not say which field to change, and one of the two
+// is a derived name the operator never wrote.
+type SecretConflict struct {
+	Name   string
+	First  string
+	Second string
 }
 
 // Model is the fully-ordered result of consolidation, consumed by render/deploy.
@@ -154,6 +171,12 @@ type Model struct {
 	// The rendered config carries `${Stable}` placeholders; the deploy layer turns
 	// this list into mounted files under /run/secrets.
 	Secrets []SecretRef
+
+	// SecretConflicts is every mount name two *different* credentials competed
+	// for -- an -env variable colliding with another position's derived name. One
+	// name can hold one value, so the loser would silently run with the winner's
+	// credential; gen turns a non-empty list into an error rather than emit that.
+	SecretConflicts []SecretConflict
 
 	// ConfigImport, when set, emits spring.config.import so the connector reads
 	// the mounted secret files as properties.

@@ -30,10 +30,14 @@ func TestStableTokenFolding(t *testing.T) {
 }
 
 // TestBinderFieldsCarryStablePlaceholders is the S3 guarantee at the binder
-// level: no credential value or host env-var name -- literal or -env -- ever
-// reaches a rendered binder field, only the derived ${STABLE_NAME} placeholder,
-// and Model.Secrets records the real source (Literal or EnvVar) under that name
-// so the deploy layer can resolve it.
+// level: no credential *value* -- literal or -env -- ever reaches a rendered
+// binder field, only a ${NAME} placeholder, and Model.Secrets records the real
+// source (Literal or EnvVar) under that name so the deploy layer can resolve it.
+//
+// The name is the operator's own -env variable when there is one, so a
+// hand-built `existing:` Secret keys on the names written in the spec; a literal
+// has no name of its own and takes the derived stableName for its position. This
+// pins both halves against one fixture that mixes the two forms on each side.
 func TestBinderFieldsCarryStablePlaceholders(t *testing.T) {
 	sol := spec.Side{System: spec.SystemSolace, Host: "tcps://b", MsgVPN: "v",
 		ClientUserEnv: "SOL_USER_ENV", ClientPass: "sol-literal-pass",
@@ -59,24 +63,24 @@ func TestBinderFieldsCarryStablePlaceholders(t *testing.T) {
 		t.Fatalf("binders = %v, want sol-conn-1 and mq-conn-1", binderNames(m))
 	}
 
-	if solBinder.ClientUser != "${SOL_CONN_1_CLIENT_USERNAME}" {
-		t.Errorf("SolaceBinder.ClientUser = %q, want the SOL_CONN_1_CLIENT_USERNAME placeholder (never SOL_USER_ENV)", solBinder.ClientUser)
+	if solBinder.ClientUser != "${SOL_USER_ENV}" {
+		t.Errorf("SolaceBinder.ClientUser = %q, want the SOL_USER_ENV placeholder: an -env credential is mounted under the operator's own variable name", solBinder.ClientUser)
 	}
-	if solBinder.ClientPass != "${SOL_CONN_1_CLIENT_PASSWORD}" {
-		t.Errorf("SolaceBinder.ClientPass = %q, want the SOL_CONN_1_CLIENT_PASSWORD placeholder (never the literal)", solBinder.ClientPass)
+	if solBinder.ClientPass != "${_GEN_SOL_CONN_1_CLIENT_PASSWORD}" {
+		t.Errorf("SolaceBinder.ClientPass = %q, want the derived _GEN_SOL_CONN_1_CLIENT_PASSWORD placeholder (never the literal value)", solBinder.ClientPass)
 	}
-	if mqBinder.User != "${MQ_CONN_1_USER}" {
-		t.Errorf("MQBinder.User = %q, want the MQ_CONN_1_USER placeholder (never the literal)", mqBinder.User)
+	if mqBinder.User != "${_GEN_MQ_CONN_1_USER}" {
+		t.Errorf("MQBinder.User = %q, want the derived _GEN_MQ_CONN_1_USER placeholder (never the literal value)", mqBinder.User)
 	}
-	if mqBinder.Password != "${MQ_CONN_1_PASSWORD}" {
-		t.Errorf("MQBinder.Password = %q, want the MQ_CONN_1_PASSWORD placeholder (never MQ_PASS_ENV)", mqBinder.Password)
+	if mqBinder.Password != "${MQ_PASS_ENV}" {
+		t.Errorf("MQBinder.Password = %q, want the MQ_PASS_ENV placeholder: an -env credential is mounted under the operator's own variable name", mqBinder.Password)
 	}
 
 	want := map[string]SecretRef{
-		"SOL_CONN_1_CLIENT_USERNAME": {Stable: "SOL_CONN_1_CLIENT_USERNAME", EnvVar: "SOL_USER_ENV"},
-		"SOL_CONN_1_CLIENT_PASSWORD": {Stable: "SOL_CONN_1_CLIENT_PASSWORD", Literal: "sol-literal-pass"},
-		"MQ_CONN_1_USER":             {Stable: "MQ_CONN_1_USER", Literal: "mq-literal-user"},
-		"MQ_CONN_1_PASSWORD":         {Stable: "MQ_CONN_1_PASSWORD", EnvVar: "MQ_PASS_ENV"},
+		"SOL_USER_ENV":                    {Stable: "SOL_USER_ENV", EnvVar: "SOL_USER_ENV"},
+		"_GEN_SOL_CONN_1_CLIENT_PASSWORD": {Stable: "_GEN_SOL_CONN_1_CLIENT_PASSWORD", Literal: "sol-literal-pass"},
+		"_GEN_MQ_CONN_1_USER":             {Stable: "_GEN_MQ_CONN_1_USER", Literal: "mq-literal-user"},
+		"MQ_PASS_ENV":                     {Stable: "MQ_PASS_ENV", EnvVar: "MQ_PASS_ENV"},
 	}
 	if len(m.Secrets) != len(want) {
 		t.Fatalf("Secrets = %+v, want %d entries", m.Secrets, len(want))
@@ -93,25 +97,109 @@ func TestBinderFieldsCarryStablePlaceholders(t *testing.T) {
 	}
 }
 
-// stableSecretName is every generated-secret-name shape the connector emits:
+// TestEnvCredentialsShareOneMountName pins the dedup half of secretRef: two
+// positions naming the same host variable are one credential, so they contribute
+// one mounted file rather than two files holding the same value under two names.
+// This is the normal case for a password shared across binders, and it must not
+// be mistaken for the collision the next test covers.
+func TestEnvCredentialsShareOneMountName(t *testing.T) {
+	mqA := spec.Side{System: spec.SystemMQ, ConnName: "a(1414)", QueueManager: "QMA", Channel: "C",
+		PasswordEnv: "SHARED_PASS", DestKind: spec.DestQueue, Dest: "IN"}
+	mqB := spec.Side{System: spec.SystemMQ, ConnName: "b(1414)", QueueManager: "QMB", Channel: "C",
+		PasswordEnv: "SHARED_PASS", DestKind: spec.DestQueue, Dest: "OUT"}
+	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mqA, Target: mqB}}
+
+	m, _ := Build(wfs, nil, Opts{MountStores: true})
+
+	if len(m.SecretConflicts) != 0 {
+		t.Errorf("SecretConflicts = %v, want none: one variable named by two positions is one credential", m.SecretConflicts)
+	}
+	if len(m.Secrets) != 1 || m.Secrets[0].Stable != "SHARED_PASS" {
+		t.Errorf("Secrets = %+v, want exactly one SHARED_PASS entry", m.Secrets)
+	}
+}
+
+// TestSecretNameConflictIsRecorded pins the collision guard against the case
+// that survives the reserved prefix. validate rejects an -env variable inside
+// spec.GeneratedNamePrefix, so an operator's name can no longer reach a derived
+// one; what remains is two *derived* names folding together, because stableToken
+// maps every run of non-alphanumeric characters to a single '_'. Two management
+// users differing only in punctuation are the reachable example, and nothing
+// upstream rejects them: validate checks security.users names only against the
+// reserved status account.
+//
+// One file cannot hold two passwords, so Build records the name and both
+// claiming positions for gen to refuse, rather than silently dropping one.
+func TestSecretNameConflictIsRecorded(t *testing.T) {
+	sol := spec.Side{System: spec.SystemSolace, Host: "tcp://b", MsgVPN: "v",
+		DestKind: spec.DestQueue, Dest: "OUT"}
+	mq := spec.Side{System: spec.SystemMQ, ConnName: "h(1)", QueueManager: "QM", Channel: "C",
+		DestKind: spec.DestQueue, Dest: "IN"}
+	// "ops.1" and "ops-1" both fold to OPS_1.
+	d := &spec.Defaults{Security: spec.Security{Users: []spec.User{
+		{Name: "ops.1", Password: "first-pass"},
+		{Name: "ops-1", Password: "second-pass"},
+	}}}
+	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: sol, Target: mq}}
+
+	m, _ := Build(wfs, d, Opts{MountStores: true, StatusPassword: "status-pw"})
+
+	want := SecretConflict{
+		Name:   "_GEN_SECURITY_USER_OPS_1_PASSWORD",
+		First:  "security.users[ops.1].password",
+		Second: "security.users[ops-1].password",
+	}
+	if len(m.SecretConflicts) != 1 || m.SecretConflicts[0] != want {
+		t.Fatalf("SecretConflicts = %+v, want [%+v]", m.SecretConflicts, want)
+	}
+	// The first credential still wins the name, so the model stays deterministic
+	// for any caller that ignores the conflict list.
+	for _, s := range m.Secrets {
+		if s.Stable == want.Name && s.Literal != "first-pass" {
+			t.Errorf("Secrets[%s] = %+v, want the first credential kept", want.Name, s)
+		}
+	}
+}
+
+// stableSecretName is every *derived* secret-name shape the connector emits:
 // stableName(binder, suffix), securityUserPasswordName(user), and the fixed
 // truststore/keystore/leader-election constants. All fold through stableToken,
 // so config-controlled text (a connection name, a security-user name) can only
 // ever land in the run of characters before the fixed suffix -- never replace
 // it -- but this pins the actual suffix vocabulary in use today (MQBinder.User
 // is "..._USER", not "..._USERNAME") rather than assuming it.
-var stableSecretName = regexp.MustCompile(`^[A-Z0-9_]+_(PASSWORD|USERNAME|USER)$`)
+//
+// It applies to literal credentials only. An -env credential is mounted under
+// the operator's own variable name, which is deliberately not a derived name;
+// see TestGeneratedSecretNamesStayOutOfChildEnvDanger for why that stays safe.
+//
+// The spec.GeneratedNamePrefix anchor is the load-bearing part: it is what keeps
+// every derived name inside a namespace no operator would export, so a derived
+// name and an -env name cannot collide by accident.
+var stableSecretName = regexp.MustCompile(`^` + regexp.QuoteMeta(spec.GeneratedNamePrefix) + `[A-Z0-9_]+_(PASSWORD|USERNAME|USER)$`)
 
 // TestGeneratedSecretNamesStayOutOfChildEnvDanger is the S3 guarantee behind
 // runner.Docker's env param: every SecretRef.Stable this package can produce is
 // injected as a name into the docker-compose child process's environment, so if
 // config text (a connection name, a security-user name) could ever fold into a
 // dangerous identifier like PATH or LD_PRELOAD, the config file would control
-// what the child process loads. stableToken uppercases and folds adversarial
-// input, but the real guarantee is the fixed, code-chosen suffix appended after
-// it (_PASSWORD/_USERNAME/_USER, or one of the four exported constants) --
-// config text only ever supplies the run of characters *before* that suffix, so
-// it can fold to "LD_PRELOAD_PASSWORD" but never to bare "LD_PRELOAD" or "PATH".
+// what the child process loads. The guarantee now has two halves, because a
+// credential's mount name is its -env variable when it has one and a derived
+// name otherwise:
+//
+//   - Literal credentials take a derived name. stableToken uppercases and folds
+//     adversarial input, but the real protection is the fixed, code-chosen
+//     suffix appended after it (_PASSWORD/_USERNAME/_USER, or one of the four
+//     exported constants) -- config text only ever supplies the run of
+//     characters *before* that suffix, so it can fold to "LD_PRELOAD_PASSWORD"
+//     but never to bare "LD_PRELOAD" or "PATH".
+//
+//   - An -env credential's name is operator-chosen and so *could* be "PATH".
+//     That is safe because its name and its source are then the same variable:
+//     envPairs emits `<EnvVar>=<value of EnvVar>` and runner.applyCmdEnv appends
+//     it to os.Environ(), so the pair can only restate what the child already
+//     inherited. Naming a dangerous variable overwrites it with its own value.
+//     Stable == EnvVar is what makes that argument hold, so it is what is pinned.
 func TestGeneratedSecretNamesStayOutOfChildEnvDanger(t *testing.T) {
 	d := &spec.Defaults{
 		Connections: map[string]spec.Side{
@@ -144,9 +232,23 @@ func TestGeneratedSecretNamesStayOutOfChildEnvDanger(t *testing.T) {
 	if len(m.Secrets) == 0 {
 		t.Fatal("Secrets is empty; the fixture did not exercise any secret-name producer")
 	}
+	var literals, envs int
 	for _, s := range m.Secrets {
-		if !stableSecretName.MatchString(s.Stable) {
-			t.Errorf("secret name %q does not match %s: an adversarial config value may be able to produce a dangerous child-process env var name", s.Stable, stableSecretName.String())
+		if s.EnvVar != "" {
+			envs++
+			if s.Stable != s.EnvVar {
+				t.Errorf("secret %+v: an -env credential must be mounted under its own variable name, or the pair injected into the compose child stops being a restatement of what it inherited", s)
+			}
+			continue
 		}
+		literals++
+		if !stableSecretName.MatchString(s.Stable) {
+			t.Errorf("literal secret name %q does not match %s: an adversarial config value may be able to produce a dangerous child-process env var name", s.Stable, stableSecretName.String())
+		}
+	}
+	// Both halves of the guarantee must actually be exercised, or a future change
+	// to the fixture could silently retire one of them.
+	if literals == 0 || envs == 0 {
+		t.Errorf("fixture produced %d literal and %d -env secrets; it must exercise both naming paths", literals, envs)
 	}
 }

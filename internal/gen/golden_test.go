@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/scan"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
@@ -54,6 +54,33 @@ func envWithKube(t *testing.T, kubeBlock string) []byte {
 	}
 	base := append([]byte(nil), full[:i+1]...) // defaults + workflows, trailing newline
 	return append(base, kubeBlock...)
+}
+
+// envWithKubeNoSyslog is envWithKube with the top-level logging.syslog block
+// dropped as well.
+//
+// syslog is a top-level key now, so a variant that wants none has to remove it
+// there: swapping the kubernetes: section no longer takes it out, and without
+// this the "no secrets" golden would silently start asserting a rendering that
+// includes syslog.
+func envWithKubeNoSyslog(t *testing.T, kubeBlock string) []byte {
+	t.Helper()
+	var out []string
+	skip := false
+	for _, ln := range strings.Split(string(envWithKube(t, kubeBlock)), "\n") {
+		if strings.HasPrefix(ln, "  syslog:") {
+			skip = true
+			continue
+		}
+		if skip {
+			if strings.HasPrefix(ln, "    ") {
+				continue
+			}
+			skip = false
+		}
+		out = append(out, ln)
+	}
+	return []byte(strings.Join(out, "\n"))
 }
 
 // setGoldenCredEnv sets the six host environment variables the golden spec's
@@ -116,7 +143,7 @@ func TestGoldenKubernetesCreate(t *testing.T) {
 	// positions -- usernames -- need no environment at all).
 	setGoldenCredEnv(t)
 	req := loadSpecs(t)
-	out, errs, _ := gen.GenerateKubernetes(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()})
+	out, errs, _ := gen.GenerateKubernetes(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()}, gen.KubeOpts{})
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -147,8 +174,8 @@ func TestGoldenKubernetesNoSecrets(t *testing.T) {
 	setGoldenCredEnv(t)
 	req := loadSpecs(t)
 	// Swap in a secrets/syslog/libs-free kubernetes: section (defaults unchanged).
-	req.Env = &gen.File{Name: "env.yaml", Data: envWithKube(t, kubeNoSecrets)}
-	out, errs, _ := gen.GenerateKubernetes(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()})
+	req.Env = &gen.File{Name: "env.yaml", Data: envWithKubeNoSyslog(t, kubeNoSecrets)}
+	out, errs, _ := gen.GenerateKubernetes(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()}, gen.KubeOpts{})
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -178,7 +205,7 @@ metadata:
   name: solace-connectors
 `
 
-func configMapDoc(appYAML string, logback bool) string {
+func configMapDoc(appYAML string, withLogback bool) string {
 	var b strings.Builder
 	b.WriteString("apiVersion: v1\nkind: ConfigMap\nmetadata:\n")
 	b.WriteString("  name: solmq-connector-config\n  namespace: solace-connectors\n")
@@ -190,9 +217,9 @@ func configMapDoc(appYAML string, logback bool) string {
 			b.WriteString("    " + ln + "\n")
 		}
 	}
-	if logback {
+	if withLogback {
 		b.WriteString("  logback-spring.xml: |\n")
-		for _, ln := range strings.Split(strings.TrimSuffix(deploy.LogbackXML("udp"), "\n"), "\n") {
+		for _, ln := range strings.Split(strings.TrimSuffix(logback.XML("udp"), "\n"), "\n") {
 			if ln == "" {
 				b.WriteString("\n")
 			} else {
@@ -223,10 +250,16 @@ func configMapDoc(appYAML string, logback bool) string {
 // mounting the same value a second time. The
 // golden spec configures no operator security.users, so the reserved
 // solmq-status account (goldenStatusPassword, a literal rather than a
-// secretRef) is the only management user and never appears here. Usernames
-// are literal in the spec, so their values are the literal text; passwords
-// are -env, so their values are the six t.Setenv values set by
-// setGoldenCredEnv.
+// secretRef) is the only management user and never appears here.
+//
+// The key names show both halves of the naming rule: usernames are literal in
+// the spec, so they take the derived name for their position
+// (MQ_CONN_1_USER, PROD_SOLACE_CLIENT_USERNAME, ...), while every password is
+// -env and is keyed by the host variable the spec names -- so SOL_PASSWORD, not
+// PROD_SOLACE_CLIENT_PASSWORD. That is what makes this list reproducible by hand
+// for a `credentials.existing` Secret: the keys are read straight off the spec.
+// The values are the literal text and the six t.Setenv values set by
+// setGoldenCredEnv respectively.
 const credDoc = `apiVersion: v1
 kind: Secret
 metadata:
@@ -234,16 +267,16 @@ metadata:
   namespace: solace-connectors
 type: Opaque
 stringData:
-  MQ_CONN_1_USER: "appuser"
-  MQ_CONN_1_PASSWORD: "mqcore-pw"
+  _GEN_MQ_CONN_1_USER: "appuser"
+  MQ_CORE_PASSWORD: "mqcore-pw"
   TRUSTSTORE_PASSWORD: "ts-pw"
   KEYSTORE_PASSWORD: "ks-pw"
-  PROD_SOLACE_CLIENT_USERNAME: "connector"
-  PROD_SOLACE_CLIENT_PASSWORD: "sol-pw"
-  MQ_ARCHIVE_USER: "appuser"
+  _GEN_PROD_SOLACE_CLIENT_USERNAME: "connector"
+  SOL_PASSWORD: "sol-pw"
+  _GEN_MQ_ARCHIVE_USER: "appuser"
   MQ_ARCHIVE_PASSWORD: "mqarchive-pw"
-  SOL_CONN_1_CLIENT_USERNAME: "bridge"
-  SOL_CONN_1_CLIENT_PASSWORD: "edge-pw"
+  _GEN_SOL_CONN_1_CLIENT_USERNAME: "bridge"
+  EDGE_SOL_PASSWORD: "edge-pw"
 `
 
 const storesDoc = `apiVersion: v1

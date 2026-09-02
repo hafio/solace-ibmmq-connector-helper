@@ -8,6 +8,9 @@
 package podmangen
 
 import (
+	"strconv"
+
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/yamlwriter"
@@ -36,7 +39,11 @@ type Instance struct {
 	AppYAMLPath      string // host path to the application.yml on disk (bind-mounted)
 	MQTLS            bool   // when true, add JAVA_TOOL_OPTIONS env for IBM cipher mappings
 	StatusScriptPath string // host path to the rendered status script on disk (bind-mounted); empty omits the mount
-	LeaderMode       string // leader-election mode; empty means standalone (see leaderLabels)
+	// LogbackPath is the host path to the rendered logback-spring.xml
+	// (bind-mounted); empty omits the mount. podman cannot inline file content,
+	// so unlike compose this has to exist on disk before the unit starts.
+	LogbackPath string
+	LeaderMode  string // leader-election mode; empty means standalone (see leaderLabels)
 }
 
 // Mount is one read-only bind mount (host path -> container path).
@@ -60,9 +67,12 @@ type SecretRef struct {
 type Input struct {
 	Podman   *spec.Podman
 	Instance Instance
-	Secrets  []SecretRef // podman secret store entries to mount; nil/empty when none
-	Stores   []Mount     // .jks bind mounts (read-only); nil/empty when none
-	Libs     *Mount      // libs dir bind mount (read-only); nil when none
+	// Syslog is the top-level logging.syslog block, nil when absent. It supplies
+	// the three env vars the mounted logback config reads at runtime.
+	Syslog  *spec.Syslog
+	Secrets []SecretRef // podman secret store entries to mount; nil/empty when none
+	Stores  []Mount     // .jks bind mounts (read-only); nil/empty when none
+	Libs    *Mount      // libs dir bind mount (read-only); nil when none
 }
 
 // Unit is one rendered quadlet file.
@@ -160,6 +170,11 @@ func runArgs(in Input, p *spec.Podman, inst Instance) []string {
 	if inst.MQTLS {
 		args = append(args, "-e JAVA_TOOL_OPTIONS="+javaToolOptions)
 	}
+	if sl := in.Syslog; sl != nil {
+		args = append(args, "-e LOGGING_SYSLOG_APPNAME="+inst.Name)
+		args = append(args, "-e LOGGING_SYSLOG_HOST="+sl.Host)
+		args = append(args, "-e LOGGING_SYSLOG_PORT="+strconv.Itoa(sl.Port))
+	}
 	for _, s := range in.Secrets {
 		args = append(args, "--secret "+s.StoreName+",type=mount,target="+s.Target)
 	}
@@ -175,6 +190,9 @@ func runArgs(in Input, p *spec.Podman, inst Instance) []string {
 		// inside it instead of being shadowed by a libs directory mount at
 		// the same path.
 		args = append(args, "-v "+inst.StatusScriptPath+":"+statusTarget+":ro")
+	}
+	if inst.LogbackPath != "" {
+		args = append(args, "-v "+inst.LogbackPath+":"+logback.ContainerPath+":ro")
 	}
 	args = append(args, inst.Image)
 	return args
@@ -211,6 +229,11 @@ func RenderQuadlet(in Input) Unit {
 	if inst.MQTLS {
 		w.Line(0, "Environment=JAVA_TOOL_OPTIONS="+javaToolOptions)
 	}
+	if sl := in.Syslog; sl != nil {
+		w.Line(0, "Environment=LOGGING_SYSLOG_APPNAME="+inst.Name)
+		w.Line(0, "Environment=LOGGING_SYSLOG_HOST="+sl.Host)
+		w.Line(0, "Environment=LOGGING_SYSLOG_PORT="+strconv.Itoa(sl.Port))
+	}
 	for _, s := range in.Secrets {
 		w.Line(0, "Secret="+s.StoreName+",type=mount,target="+s.Target)
 	}
@@ -225,6 +248,9 @@ func RenderQuadlet(in Input) Unit {
 		// Same ordering rationale as runArgs: nests inside the libs volume
 		// rather than being shadowed by it.
 		w.Line(0, "Volume="+inst.StatusScriptPath+":"+statusTarget+":ro")
+	}
+	if inst.LogbackPath != "" {
+		w.Line(0, "Volume="+inst.LogbackPath+":"+logback.ContainerPath+":ro")
 	}
 	w.Line(0, "")
 

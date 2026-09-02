@@ -124,6 +124,100 @@ func TestTargetMounts(t *testing.T) {
 	}
 }
 
+// TestConfigRejectsSecretNameConflict pins gen.build's refusal. With
+// spec.GeneratedNamePrefix reserved, an operator's -env name can no longer reach
+// a derived one, so the reachable collision is two derived names folding
+// together: stableToken maps runs of punctuation to a single '_', and nothing
+// upstream rejects two management users differing only in punctuation. Config
+// must fail naming the shared key and both positions, rather than render a
+// config where one credential silently takes the other's password.
+func TestConfigRejectsSecretNameConflict(t *testing.T) {
+	env := File{Name: "env.yaml", Data: []byte(`
+security:
+  users:
+    - name: ops.1
+      password: first-pass
+    - name: ops-1
+      password: second-pass
+`)}
+	wf := File{Name: "workflow-0.yaml", Data: []byte(`
+source:
+  solace:
+    host: tcp://broker.internal:55555
+    msg-vpn: prod
+    queue: Q.IN
+target:
+  mq:
+    conn-name: host(1414)
+    queue-manager: QM1
+    channel: CH
+    queue: Q.OUT
+`)}
+	res := Resolver{Env: func(string) (string, bool) { return "v", true }, Rand: fixedStatusRand}
+	req := Request{Env: &env, Workflows: []File{wf}}
+
+	// The message must name both claiming positions, not just the contested key:
+	// a derived name appears nowhere in the spec, so the key alone does not tell
+	// the operator which field to edit.
+	wants := []string{
+		"_GEN_SECURITY_USER_OPS_1_PASSWORD",
+		"security.users[ops.1].password",
+		"security.users[ops-1].password",
+	}
+	check := func(t *testing.T, what string, errs []Issue) {
+		t.Helper()
+		joined := ""
+		for _, e := range errs {
+			joined += e.String() + "\n"
+		}
+		for _, w := range wants {
+			if !strings.Contains(joined, w) {
+				t.Errorf("%s: error must mention %q, got:\n%s", what, w, joined)
+			}
+		}
+	}
+
+	out, errs, _ := Config(req, res)
+	check(t, "Config", errs)
+	if out != "" {
+		t.Errorf("a rejected config must render nothing, got %d bytes", len(out))
+	}
+
+	// Validate must catch it too. A collision is only visible once consolidate
+	// assigns names, so without the build call on the validate path this spec
+	// would lint clean and fail only at generate/deploy.
+	verrs, _ := Validate(req, res)
+	check(t, "Validate", verrs)
+}
+
+// TestValidateCleanSpecStillPasses guards the build call Validate now makes: a
+// spec with no collision must not pick up errors from it, and consolidate's own
+// warnings must not start leaking into validate output.
+func TestValidateCleanSpecStillPasses(t *testing.T) {
+	env := File{Name: "env.yaml", Data: nil}
+	wf := File{Name: "workflow-0.yaml", Data: []byte(`
+source:
+  solace:
+    host: tcps://broker.internal:55443
+    msg-vpn: prod
+    client-username: connector
+    client-password-env: SOL_PASSWORD
+    queue: Q.IN
+target:
+  mq:
+    conn-name: host(1414)
+    queue-manager: QM1
+    channel: CH
+    password-env: MQ_CORE_PASSWORD
+    queue: Q.OUT
+`)}
+	errs, _ := Validate(Request{Env: &env, Workflows: []File{wf}},
+		Resolver{Env: func(string) (string, bool) { return "v", true }, Rand: fixedStatusRand})
+	if len(errs) != 0 {
+		t.Errorf("a clean spec must validate without errors, got %v", errs)
+	}
+}
+
 // TestResolveCredentials covers the three behaviors ResolveCredentials must
 // get right: a literal reference passes its value straight through, an -env
 // reference is read from the resolver's environment, and an unset variable
@@ -239,7 +333,7 @@ func TestGenerateKubernetesWorkflowCap(t *testing.T) {
 		Env:       &File{Name: "env.yaml", Data: []byte(envData)},
 		Workflows: synthWorkflowFiles(21),
 	}
-	out, errs, _ := GenerateKubernetes(req, Resolver{})
+	out, errs, _ := GenerateKubernetes(req, Resolver{}, KubeOpts{})
 	if out != "" {
 		t.Errorf("expected no manifest over the cap, got:\n%s", out)
 	}
@@ -316,7 +410,7 @@ func TestConfigNoSecretsLeak(t *testing.T) {
 	if strings.Contains(out, "client-username: u") || strings.Contains(out, "user: u") {
 		t.Errorf("rendered config leaks a literal credential value:\n%s", out)
 	}
-	if !strings.Contains(out, "${SOL_CONN_1_CLIENT_USERNAME}") || !strings.Contains(out, "${MQ_CONN_1_USER}") {
+	if !strings.Contains(out, "${_GEN_SOL_CONN_1_CLIENT_USERNAME}") || !strings.Contains(out, "${_GEN_MQ_CONN_1_USER}") {
 		t.Errorf("rendered config missing expected ${STABLE} placeholders:\n%s", out)
 	}
 
@@ -372,13 +466,22 @@ docker:
 		t.Errorf("compose missing image:\n%s", plan.Compose)
 	}
 
+	// The compose project comes from the spec, so it is the document's first
+	// line -- and it is the defaulted value here, since the docker: section
+	// above sets no project-name.
+	wantName := "name: " + spec.DefaultComposeProject + "\n"
+	if !strings.HasPrefix(plan.Compose, wantName) {
+		t.Errorf("compose must open with %q:\n%s", wantName, plan.Compose)
+	}
+
 	// One workflow, inline solace source (auto sol-conn-1) + inline mq target
-	// (auto mq-conn-1): four credential positions, all literal.
+	// (auto mq-conn-1): four credential positions, all literal -- so all four
+	// take derived names, which carry spec.GeneratedNamePrefix.
 	want := []consolidate.SecretRef{
-		{Stable: "SOL_CONN_1_CLIENT_USERNAME", Literal: "u"},
-		{Stable: "SOL_CONN_1_CLIENT_PASSWORD", Literal: "p"},
-		{Stable: "MQ_CONN_1_USER", Literal: "u"},
-		{Stable: "MQ_CONN_1_PASSWORD", Literal: "p"},
+		{Stable: "_GEN_SOL_CONN_1_CLIENT_USERNAME", Literal: "u"},
+		{Stable: "_GEN_SOL_CONN_1_CLIENT_PASSWORD", Literal: "p"},
+		{Stable: "_GEN_MQ_CONN_1_USER", Literal: "u"},
+		{Stable: "_GEN_MQ_CONN_1_PASSWORD", Literal: "p"},
 	}
 	if len(plan.Secrets) != len(want) {
 		t.Fatalf("secrets = %+v, want %+v", plan.Secrets, want)
@@ -562,7 +665,7 @@ func TestConfigStatusPasswordRandErrorNoOutput(t *testing.T) {
 func TestGenerateKubernetesCarriesStatusScript(t *testing.T) {
 	envData := "image:\n  name: img\n  tag: v1\nkubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n"
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
-	out, errs, _ := GenerateKubernetes(req, Resolver{Rand: fixedStatusRand})
+	out, errs, _ := GenerateKubernetes(req, Resolver{Rand: fixedStatusRand}, KubeOpts{})
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -651,7 +754,7 @@ func TestGenerateMissingTargetSection(t *testing.T) {
 		gen  func(Request, Resolver) []Issue
 	}{
 		{"kubernetes", "kubernetes target requires a 'kubernetes:' section in env.yaml",
-			func(r Request, res Resolver) []Issue { _, e, _ := GenerateKubernetes(r, res); return e }},
+			func(r Request, res Resolver) []Issue { _, e, _ := GenerateKubernetes(r, res, KubeOpts{}); return e }},
 		{"docker", "docker target requires a 'docker:' section in env.yaml",
 			func(r Request, res Resolver) []Issue { _, e, _ := GenerateDocker(r, res); return e }},
 		{"podman", "podman target requires a 'podman:' section in env.yaml",

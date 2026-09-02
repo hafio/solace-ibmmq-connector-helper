@@ -225,7 +225,7 @@ func kubeEnvWithPull(mode string, creds bool) []byte {
 func TestGenerateKubernetesImagePull(t *testing.T) {
 	run := func(mode string, creds bool, env func(string) (string, bool)) (string, []Issue) {
 		req := Request{Env: &File{Name: "env.yaml", Data: kubeEnvWithPull(mode, creds)}, Workflows: synthWorkflowFiles(1)}
-		out, errs, _ := GenerateKubernetes(req, Resolver{Env: env, Rand: fixedStatusRand})
+		out, errs, _ := GenerateKubernetes(req, Resolver{Env: env, Rand: fixedStatusRand}, KubeOpts{})
 		return out, errs
 	}
 	withPass := func(k string) (string, bool) { return "hunter2", k == "REGISTRY_PASSWORD" }

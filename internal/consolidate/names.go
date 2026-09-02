@@ -17,13 +17,16 @@ import (
 const (
 	TruststorePasswordName = tls.TruststorePasswordName
 	KeystorePasswordName   = tls.KeystorePasswordName
-	LeaderUsernameName     = "LEADER_ELECTION_CLIENT_USERNAME"
-	LeaderPasswordName     = "LEADER_ELECTION_CLIENT_PASSWORD"
+	LeaderUsernameName     = spec.GeneratedNamePrefix + "LEADER_ELECTION_CLIENT_USERNAME"
+	LeaderPasswordName     = spec.GeneratedNamePrefix + "LEADER_ELECTION_CLIENT_PASSWORD"
 )
 
-// secretFn records a credential under a stable name and returns the placeholder
-// the rendered config carries ("" for an unset credential).
-type secretFn func(stable string, c spec.Cred) string
+// secretFn records a credential under a mount name and returns the placeholder
+// the rendered config carries ("" for an unset credential). origin is the spec
+// position the credential came from, used only to name both sides when two
+// credentials collide on one name; secretRef appends "-env" to it itself, so
+// callers pass the bare field label.
+type secretFn func(stable, origin string, c spec.Cred) string
 
 // leaderNameFn answers the stable names the management session's username and
 // password are recorded under. Which pair those are depends on the binders
@@ -33,14 +36,30 @@ type leaderNameFn func(sess spec.Side) (user, pass string)
 
 // storeSecret adapts a secretFn to the narrower callback internal/tls needs, so
 // a store password mounted for the SSL bundle and the same password referenced
-// from the Solace api-properties resolve to one name and one mounted file.
+// from the Solace api-properties resolve to one name and one mounted file. The
+// origin is recovered from the name here rather than widening tls's callback:
+// the two store passwords are the only credentials that reach it, and each has
+// exactly one spec position.
 func storeSecret(secretRef secretFn) func(string, spec.Cred) string {
-	return func(stable string, c spec.Cred) string { return secretRef(stable, c) }
+	return func(stable string, c spec.Cred) string {
+		return secretRef(stable, storeOrigin(stable), c)
+	}
 }
 
-// stableName is the in-container secret name for a binder-scoped credential.
+// storeOrigin is the spec position behind a store password's fixed mount name.
+func storeOrigin(stable string) string {
+	if stable == KeystorePasswordName {
+		return "tls.keystore.password"
+	}
+	return "tls.truststore.password"
+}
+
+// stableName is the in-container mount name for a binder-scoped credential that
+// has no name of its own -- a literal. It carries spec.GeneratedNamePrefix to
+// keep every derived name clear of the host variable names `-env` credentials
+// are mounted under, which share the same namespace.
 func stableName(binder, suffix string) string {
-	return stableToken(binder) + "_" + suffix
+	return spec.GeneratedNamePrefix + stableToken(binder) + "_" + suffix
 }
 
 // stableToken folds an arbitrary name into the character set every consumer of a
@@ -81,7 +100,7 @@ func stableToken(s string) string {
 // securityUserPasswordName is the stable secret name for one management user's
 // password, keyed by the user's name so adding a user never renumbers another.
 func securityUserPasswordName(user string) string {
-	return "SECURITY_USER_" + stableToken(user) + "_PASSWORD"
+	return spec.GeneratedNamePrefix + "SECURITY_USER_" + stableToken(user) + "_PASSWORD"
 }
 
 // assignBinderNames maps each accumulated connection to its binder name: the

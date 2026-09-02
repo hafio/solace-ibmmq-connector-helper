@@ -139,11 +139,11 @@ const richApplicationWant = `spring:
         mq-conn-1-bundle:
           truststore:
             location: /app/external/classpath/truststores/truststore.jks
-            password: ${TRUSTSTORE_PASSWORD}
+            password: ${_GEN_TRUSTSTORE_PASSWORD}
             type: JKS
           keystore:
             location: /app/external/classpath/truststores/keystore.jks
-            password: ${KEYSTORE_PASSWORD}
+            password: ${_GEN_KEYSTORE_PASSWORD}
             type: JKS
           key:
             alias: mc
@@ -158,8 +158,8 @@ const richApplicationWant = `spring:
                 queue-manager: QM1
                 channel: CH
                 conn-name: h(1414)
-                user: ${MQ_CONN_1_USER}
-                password: ${MQ_CONN_1_PASSWORD}
+                user: ${_GEN_MQ_CONN_1_USER}
+                password: ${_GEN_MQ_CONN_1_PASSWORD}
                 ssl-bundle: mq-conn-1-bundle
                 additional-properties:
                   WMQ_SSL_CIPHER_SUITE: TLS_X
@@ -171,16 +171,16 @@ const richApplicationWant = `spring:
               java:
                 host: tcps://b:55443
                 msg-vpn: prod
-                client-username: ${SOL_CONN_1_CLIENT_USERNAME}
-                client-password: ${SOL_CONN_1_CLIENT_PASSWORD}
+                client-username: ${_GEN_SOL_CONN_1_CLIENT_USERNAME}
+                client-password: ${_GEN_SOL_CONN_1_CLIENT_PASSWORD}
                 connect-retries: -1
                 api-properties:
                   SSL_VALIDATE_CERTIFICATE: true
                   SSL_TRUST_STORE: /app/external/classpath/truststores/truststore.jks
-                  SSL_TRUST_STORE_PASSWORD: ${TRUSTSTORE_PASSWORD}
+                  SSL_TRUST_STORE_PASSWORD: ${_GEN_TRUSTSTORE_PASSWORD}
                   SSL_TRUST_STORE_FORMAT: JKS
                   SSL_KEY_STORE: /app/external/classpath/truststores/keystore.jks
-                  SSL_KEY_STORE_PASSWORD: ${KEYSTORE_PASSWORD}
+                  SSL_KEY_STORE_PASSWORD: ${_GEN_KEYSTORE_PASSWORD}
                   SSL_KEY_STORE_FORMAT: JKS
                   SSL_PRIVATE_KEY_ALIAS: sc
                   REAPPLY_SUBSCRIPTIONS: true
@@ -224,7 +224,7 @@ solace:
       enabled: true
       users:
         - name: hc
-          password: ${SECURITY_USER_HC_PASSWORD}
+          password: ${_GEN_SECURITY_USER_HC_PASSWORD}
         - name: solmq-status
           password: status-literal-pw
 management:
@@ -395,16 +395,16 @@ func TestApplicationLeaderElection(t *testing.T) {
 	want := "      session:\n" +
 		"        host: tcps://b:55443\n" +
 		"        msg-vpn: prod\n" +
-		"        client-username: ${EDGE_CLIENT_USERNAME}\n" +
-		"        client-password: ${EDGE_CLIENT_PASSWORD}\n" +
+		"        client-username: ${_GEN_EDGE_CLIENT_USERNAME}\n" +
+		"        client-password: ${_GEN_EDGE_CLIENT_PASSWORD}\n" +
 		"        connect-retries: -1\n" +
 		"        api-properties:\n" +
 		"          SSL_VALIDATE_CERTIFICATE: true\n" +
 		"          SSL_TRUST_STORE: /app/external/classpath/truststores/truststore.jks\n" +
-		"          SSL_TRUST_STORE_PASSWORD: ${TRUSTSTORE_PASSWORD}\n" +
+		"          SSL_TRUST_STORE_PASSWORD: ${_GEN_TRUSTSTORE_PASSWORD}\n" +
 		"          SSL_TRUST_STORE_FORMAT: JKS\n" +
 		"          SSL_KEY_STORE: /app/external/classpath/truststores/keystore.jks\n" +
-		"          SSL_KEY_STORE_PASSWORD: ${KEYSTORE_PASSWORD}\n" +
+		"          SSL_KEY_STORE_PASSWORD: ${_GEN_KEYSTORE_PASSWORD}\n" +
 		"          SSL_KEY_STORE_FORMAT: JKS\n" +
 		"          SSL_PRIVATE_KEY_ALIAS: sc\n" +
 		"          REAPPLY_SUBSCRIPTIONS: true\n"
@@ -487,8 +487,8 @@ solace-defaults:
 	want := "      session:\n" +
 		"        host: tcp://b:55555\n" +
 		"        msg-vpn: prod\n" +
-		"        client-username: ${LEADER_ELECTION_CLIENT_USERNAME}\n" +
-		"        client-password: ${LEADER_ELECTION_CLIENT_PASSWORD}\n" +
+		"        client-username: ${_GEN_LEADER_ELECTION_CLIENT_USERNAME}\n" +
+		"        client-password: ${_GEN_LEADER_ELECTION_CLIENT_PASSWORD}\n" +
 		"        connect-retries: -1\n" +
 		"        reconnect-retries: -1\n" +
 		"        api-properties:\n" +
@@ -694,7 +694,7 @@ target:
 	out := Application(m)
 
 	want := "        - name: ops\n" +
-		"          password: ${SECURITY_USER_OPS_PASSWORD}\n" +
+		"          password: ${_GEN_SECURITY_USER_OPS_PASSWORD}\n" +
 		"          roles:\n" +
 		"            - admin\n" +
 		"            - auditor\n"

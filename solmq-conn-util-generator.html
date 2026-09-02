@@ -180,6 +180,15 @@ details[open]>summary::before{content:"- "}
   <!-- Logging -->
   <div class="sec" id="s-log"><h3>Logging</h3>
     <div class="f"><label>logging.level</label><textarea id="i-log" rows="3" placeholder="root: INFO"></textarea><div class="h">One "key: value" per line, order preserved.</div></div>
+    <div class="tgl"><input type="checkbox" id="i-sl-on" onchange="togOpt('i-sl-on','sl-fields')"><label for="i-sl-on">Ship logs to syslog (every platform)</label></div>
+    <div class="opt-fields" id="sl-fields">
+      <div class="fr">
+        <div class="f"><label>Host</label><input id="i-sl-host" placeholder="syslog.corp"></div>
+        <div class="f"><label>Port</label><input id="i-sl-port" type="number" min="1" max="65535" value="514"></div>
+        <div class="f"><label>Protocol</label><select id="i-sl-proto"><option value="udp">udp</option><option value="tcp">tcp</option></select></div>
+      </div>
+      <div class="h">tcp needs the logstash-logback-encoder jar on the classpath.</div>
+    </div>
   </div>
 
   <!-- Management -->
@@ -272,16 +281,6 @@ details[open]>summary::before{content:"- "}
       <div class="tgl"><input type="checkbox" id="i-k8s-svc"><label for="i-k8s-svc">Create a Service</label></div>
       <div class="f"><label>Service Port</label><input id="i-k8s-svcport" type="number" min="1" max="65535" value="8090"></div>
 
-      <div class="sub-h">Syslog (optional)</div>
-      <div class="tgl"><input type="checkbox" id="i-k8s-sl-on" onchange="togOpt('i-k8s-sl-on','k8s-sl-fields')"><label for="i-k8s-sl-on">Ship logs to syslog</label></div>
-      <div class="opt-fields" id="k8s-sl-fields">
-        <div class="fr">
-          <div class="f"><label>Host</label><input id="i-k8s-sl-host" placeholder="syslog.corp"></div>
-          <div class="f"><label>Port</label><input id="i-k8s-sl-port" type="number" min="1" max="65535" value="514"></div>
-          <div class="f"><label>Protocol</label><select id="i-k8s-sl-proto"><option value="udp">udp</option><option value="tcp">tcp</option></select></div>
-        </div>
-      </div>
-
       <div class="sub-h">IBM MQ Libraries</div>
       <div class="f"><label>Mode</label><select id="i-k8s-libs" onchange="syncK8s()">
         <option value="">(none)</option>
@@ -313,7 +312,7 @@ details[open]>summary::before{content:"- "}
         <option value="">(none)</option>
         <option value="create">create</option>
         <option value="existing">existing</option>
-      </select><div class="h">Keys/values are derived from the connection fields above; this only names the generated Secret.</div></div>
+      </select><div class="h">Keys come from the credential fields above -- each *-env name is its own key. <b>create</b> builds the Secret and fills those keys from your environment; <b>existing</b> leaves your Secret alone, so it must already carry them.</div></div>
       <div class="opt-fields" id="k8s-cred-c">
         <div class="f"><label>Secret Name</label><input id="i-k8s-cred-name" placeholder="solmq-credentials"></div>
       </div>
@@ -324,7 +323,7 @@ details[open]>summary::before{content:"- "}
         <option value="existing">existing</option>
       </select></div>
       <div class="opt-fields" id="k8s-stores-c"><div class="f"><label>Secret Name</label><input id="i-k8s-stores-name" placeholder="solmq-tls"></div></div>
-      <div class="opt-fields" id="k8s-stores-e"><div class="f"><label>Existing Secret</label><input id="i-k8s-stores-existing" placeholder="my-tls"></div></div>
+      <div class="opt-fields" id="k8s-stores-e"><div class="f"><label>Existing Secret</label><input id="i-k8s-stores-existing" placeholder="my-tls"><div class="h">Its keys must be the base filenames of the truststore/keystore above (truststore.jks, keystore.jks) -- that is what the rendered config points at.</div></div></div>
       <div class="f"><label>Image Pull Secret</label><select id="i-k8s-ipull" onchange="syncK8s()">
         <option value="">(none)</option>
         <option value="reference">reference an existing Secret</option>
@@ -340,9 +339,10 @@ details[open]>summary::before{content:"- "}
     <div class="opt-fields" id="dk-fields">
       <div class="fr">
         <div class="f"><label>Deploy Command</label><input id="i-dk-cmd" value="docker"></div>
-        <div class="f"><label>Container Name</label><input id="i-dk-name" value="solmq-connector"></div>
+        <div class="f"><label>Container Name</label><input id="i-dk-name" value="connector"></div>
       </div>
       <div class="fr">
+        <div class="f"><label>Compose Project Name</label><input id="i-dk-project" value="solace-ibmmq-connectors"></div>
         <div class="f"><label>Restart Policy</label><input id="i-dk-restart" value="unless-stopped"></div>
       </div>
       <div class="sub-h">Published Ports</div>
@@ -363,7 +363,7 @@ details[open]>summary::before{content:"- "}
     <div class="opt-fields" id="pd-fields">
       <div class="fr">
         <div class="f"><label>Deploy Command</label><input id="i-pd-cmd" value="podman"></div>
-        <div class="f"><label>Container Name</label><input id="i-pd-name" value="solmq-connector"></div>
+        <div class="f"><label>Container Name</label><input id="i-pd-name" value="connector"></div>
       </div>
       <div class="fr">
         <div class="f"><label>Generate Mode</label><select id="i-pd-mode"><option value="run">run</option><option value="quadlet">quadlet</option></select><div class="h">Controls generate only; deploy is always quadlet + systemctl.</div></div>
@@ -443,8 +443,8 @@ details[open]>summary::before{content:"- "}
                 queue-manager: QM_CORE
                 channel: DSU.SVRCONN
                 conn-name: mqhost-core.internal(1414)
-                user: ${MQ_CONN_1_USER}
-                password: ${MQ_CONN_1_PASSWORD}
+                user: ${_GEN_MQ_CONN_1_USER}
+                password: ${MQ_CORE_PASSWORD}
                 ssl-bundle: mq-conn-1-bundle
                 additional-properties:
                   WMQ_SSL_CIPHER_SUITE: TLS_RSA_WITH_AES_256_CBC_SHA256
@@ -455,8 +455,8 @@ details[open]>summary::before{content:"- "}
               java:
                 host: tcps://broker.internal:55443
                 msg-vpn: prod
-                client-username: ${PROD_SOLACE_CLIENT_USERNAME}
-                client-password: ${PROD_SOLACE_CLIENT_PASSWORD}
+                client-username: ${_GEN_PROD_SOLACE_CLIENT_USERNAME}
+                client-password: ${SOL_PASSWORD}
                 connect-retries: -1
                 reconnect-retries: -1
                 api-properties:
@@ -477,7 +477,7 @@ details[open]>summary::before{content:"- "}
                 queue-manager: QM_ARCHIVE
                 channel: DSU.SVRCONN
                 conn-name: mqhost-archive.internal(1414)
-                user: ${MQ_ARCHIVE_USER}
+                user: ${_GEN_MQ_ARCHIVE_USER}
                 password: ${MQ_ARCHIVE_PASSWORD}
                 ssl-bundle: mq-archive-bundle
                 additional-properties:
@@ -489,8 +489,8 @@ details[open]>summary::before{content:"- "}
               java:
                 host: tcp://edge-broker.internal:55555
                 msg-vpn: edge
-                client-username: ${SOL_CONN_1_CLIENT_USERNAME}
-                client-password: ${SOL_CONN_1_CLIENT_PASSWORD}
+                client-username: ${_GEN_SOL_CONN_1_CLIENT_USERNAME}
+                client-password: ${EDGE_SOL_PASSWORD}
                 connect-retries: -1
                 reconnect-retries: -1
         undefined:
@@ -563,8 +563,8 @@ solace:
       session:
         host: tcps://broker.internal:55443
         msg-vpn: prod
-        client-username: ${PROD_SOLACE_CLIENT_USERNAME}
-        client-password: ${PROD_SOLACE_CLIENT_PASSWORD}
+        client-username: ${_GEN_PROD_SOLACE_CLIENT_USERNAME}
+        client-password: ${SOL_PASSWORD}
         connect-retries: -1
         reconnect-retries: -1
         api-properties:
@@ -999,6 +999,7 @@ function readModel(){
     keystore: C('i-ks-on') ? { file: V('i-ks-file'), password: readCredById('i-ks-pass', 'i-ks-pass-env'), type: V('i-ks-type') } : null
   };
   m.loggingLevel = parseProps(V('i-log'));
+  m.syslog = C('i-sl-on') ? { host: V('i-sl-host'), port: parseInt(V('i-sl-port') || '0', 10), protocol: V('i-sl-proto') } : null;
   m.solaceDefaults = parseProps(V('i-soldef'));
   m.management = C('i-mgmt-on')
     ? { present: true, port: V('i-mgmt-port'), healthShowDetails: V('i-mgmt-hsd') }
@@ -1050,7 +1051,6 @@ function readModel(){
       cpu: V('i-k8s-cpu'), memory: V('i-k8s-mem')
     },
     service: { enabled: C('i-k8s-svc'), port: V('i-k8s-svcport') },
-    syslog: C('i-k8s-sl-on') ? { host: V('i-k8s-sl-host'), port: parseInt(V('i-k8s-sl-port') || '0', 10), protocol: V('i-k8s-sl-proto') } : null,
     libs: readLibs(),
     cred: readCred('k8s'),
     stores: V('i-k8s-stores') === 'create' ? { create: V('i-k8s-stores-name') }
@@ -1058,7 +1058,11 @@ function readModel(){
     imagePull: V('i-k8s-ipull') ? { name: V('i-k8s-ipull-name'), create: V('i-k8s-ipull') === 'create' } : null
   } : null;
 
-  m.docker = C('i-dk-on') ? readCtr('dk', 'docker') : null;
+  // project-name is docker-only, so it extends readCtr here rather than living
+  // in it -- the same shape podman uses below for mode/quadlet.
+  m.docker = C('i-dk-on') ? Object.assign(readCtr('dk', 'docker'), {
+    projectName: V('i-dk-project') || 'solace-ibmmq-connectors'
+  }) : null;
   m.podman = C('i-pd-on') ? Object.assign(readCtr('pd', 'podman'), {
     mode: V('i-pd-mode') || 'run',
     quadlet: { scope: V('i-pd-scope') || 'auto', dir: V('i-pd-qdir') }
@@ -1085,7 +1089,7 @@ function readCtr(p, section){
   return {
     section: section,
     command: V('i-' + p + '-cmd') || section,
-    name: V('i-' + p + '-name') || 'solmq-connector',
+    name: V('i-' + p + '-name') || 'connector',
     restart: V('i-' + p + '-restart') || 'unless-stopped',
     ports: Array.from(document.querySelectorAll('#' + p + '-ports .p-val')).map(i => i.value.trim()).filter(Boolean),
     cred: readCred(p),
@@ -1124,8 +1128,9 @@ function emitEnv(m){
   y += '# below is a literal/-env pair (exactly one set); prefer *-env with a bare\n';
   y += '# variable name (SOL_PASSWORD, never ${SOL_PASSWORD}) so this file carries no\n';
   y += '# secret and stays safe to commit -- a literal value is accepted but then this\n';
-  y += '# file itself holds the secret. Neither form ever reaches application.yml:\n';
-  y += '# both resolve to a stable ${VAR} placeholder backed by a mounted secret file.\n';
+  y += '# file itself holds the secret. No credential *value* reaches application.yml:\n';
+  y += '# each becomes a ${VAR} placeholder backed by a mounted secret file, named by\n';
+  y += '# the -env variable itself so a pre-made Secret keys on the names written here.\n';
   y += '# Block style throughout -- ${VAR} is invalid inside YAML flow { }.\n\n';
 
   y += 'workflows:\n' + kv('dir', m.workflows.dir, '  ') + kv('file_pattern', m.workflows.filePattern, '  ');
@@ -1143,7 +1148,14 @@ function emitEnv(m){
   if(ks) tb += '  keystore:\n' + kv('file', ks.file, '    ') + kcred('password', ks.password, '    ') + kv('type', ks.type, '    ');
   if(tb) y += '\ntls:\n' + tb;
 
-  if(m.loggingLevel.length) y += '\nlogging:\n  level:\n' + emitProps(m.loggingLevel, '    ');
+  if(m.loggingLevel.length || m.syslog){
+    y += '\nlogging:\n';
+    if(m.loggingLevel.length) y += '  level:\n' + emitProps(m.loggingLevel, '    ');
+    if(m.syslog){
+      y += '  syslog:\n' + kv('host', m.syslog.host, '    ')
+         + knum('port', m.syslog.port, '    ') + kv('protocol', m.syslog.protocol, '    ');
+    }
+  }
 
   if(m.management.present){
     y += '\nmanagement:\n' + knum('port', m.management.port, '  ')
@@ -1205,10 +1217,6 @@ function emitKube(k){
      + knum('replicas', d.replicas, '    ');
   if(d.cpu || d.memory) y += '    resources:\n' + kv('cpu', d.cpu, '      ') + kv('memory', d.memory, '      ');
   y += '  service:\n' + kbool('enabled', k.service.enabled, '    ') + knum('port', k.service.port, '    ');
-  if(k.syslog){
-    y += '  logging:\n    syslog:\n' + kv('host', k.syslog.host, '      ')
-       + knum('port', k.syslog.port, '      ') + kv('protocol', k.syslog.protocol, '      ');
-  }
   const lb = k.libs;
   if(lb){
     y += '  libs:\n';
@@ -1245,7 +1253,10 @@ function emitCtr(c){
       y += '  quadlet:\n' + kv('scope', c.quadlet.scope, '    ') + kv('dir', c.quadlet.dir, '    ');
     }
   }
-  y += kv('name', c.name, '  ') + kv('restart', c.restart, '  ');
+  y += kv('name', c.name, '  ');
+  // The compose project. Docker only: podman has no equivalent grouping.
+  if(c.section === 'docker') y += kv('project-name', c.projectName, '  ');
+  y += kv('restart', c.restart, '  ');
   y += klist('ports', c.ports, '  ');
   // No secrets: block at all -- credentials are derived from the connection's
   // own client-username/-password (or user/password) fields and mounted at
@@ -1330,6 +1341,11 @@ const ENV_FILE = 'env.yaml';
 function isDNS1123(s){ return s.length <= 63 && RE_DNS1123.test(s); }
 function isTCPS(h){ return String(h || '').startsWith('tcps://'); }
 const RE_ENVNAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// GEN_PREFIX marks every mount name the tool derives for itself, keeping the
+// derived half of the namespace clear of the host variable names -env
+// credentials are mounted under. Declared here because checkCred reserves it and
+// the naming helpers below build on it. Mirrors spec.GeneratedNamePrefix.
+const GEN_PREFIX = '_GEN_';
 
 // checkWorkflowCount rejects a folder holding more workflows than one connector
 // instance can run. Change 2 removes per-instance sharding entirely -- more than
@@ -1346,6 +1362,7 @@ function validateModel(m){
   const haveKeystore = !!(m.tls.keystore && m.tls.keystore.file);
 
   checkWorkflowCount(add, m.wfs.length);
+  checkSyslog(add, warn, m.syslog);
   checkExpansion(warn, ENV_FILE, 'workflows.dir', m.workflows.dir);
   checkExpansion(warn, ENV_FILE, 'workflows.file_pattern', m.workflows.filePattern);
 
@@ -1427,7 +1444,14 @@ function validateModel(m){
   if(m.kube || m.docker || m.podman) checkImageBlock(add, warn, m);
 
   if(m.kube) checkKube(add, warn, m);
-  if(m.docker) checkContainerTarget(add, warn, m, m.docker);
+  if(m.docker){
+    checkContainerTarget(add, warn, m, m.docker);
+    // Held to the same DNS-1123 rule as name, and checked here rather than in
+    // checkContainerTarget because podman has no project to check.
+    if(!isDNS1123(m.docker.projectName)){
+      add(ENV_FILE, `docker.project-name "${m.docker.projectName}" is not a valid DNS-1123 label`);
+    }
+  }
   if(m.podman){
     checkContainerTarget(add, warn, m, m.podman);
     checkExpansion(warn, ENV_FILE, 'podman.quadlet.dir', m.podman.quadlet.dir);
@@ -1526,6 +1550,11 @@ function checkCred(add, warn, file, label, cred){
   if(envVar){
     if(envVar.indexOf('${') >= 0){
       add(file, `${label}-env "${envVar}" must be a bare variable name, not a \${...} reference`);
+    } else if(envVar.indexOf(GEN_PREFIX) === 0){
+      // Reserving this prefix is what keeps an operator's -env name and a derived
+      // name apart; RE_ENVNAME accepts a leading underscore, so it needs its own
+      // branch. Mirrors validate.checkCred.
+      add(file, `${label}-env "${envVar}" starts with ${GEN_PREFIX}, which is reserved for the mount names this tool derives for itself; rename the variable so it falls outside that prefix`);
     } else if(!RE_ENVNAME.test(envVar)){
       add(file, `${label}-env "${envVar}" is not a valid environment variable name (letters, digits and underscore; not starting with a digit)`);
     }
@@ -1703,6 +1732,11 @@ function checkKube(add, warn, m){
   }
 
   if(k.cred){
+    // create XOR existing: Render takes the create branch when both are set,
+    // emitting a Secret doc over the object 'existing' names.
+    if(!!k.cred.create === !!k.cred.existing){
+      add(ENV_FILE, "kubernetes.secrets.credentials must set exactly one of 'create' or 'existing'");
+    }
     if(k.cred.create){
       checkSecretName(add, 'kubernetes.secrets.credentials.create.name', k.cred.create.name);
       const removed = [];
@@ -1718,6 +1752,9 @@ function checkKube(add, warn, m){
     }
   }
   if(k.stores){
+    if(!!k.stores.create === !!k.stores.existing){
+      add(ENV_FILE, "kubernetes.secrets.stores must set exactly one of 'create' or 'existing'");
+    }
     if(k.stores.create){
       if(!m.tls.truststore) add(ENV_FILE, 'kubernetes.secrets.stores.create requires tls.truststore');
       checkSecretName(add, 'kubernetes.secrets.stores.create.name', k.stores.create);
@@ -1727,16 +1764,21 @@ function checkKube(add, warn, m){
     }
   }
 
-  if(k.syslog){
-    if(!k.syslog.host) add(ENV_FILE, 'logging.syslog.host is required');
-    else if(!RE_HOST.test(k.syslog.host)) add(ENV_FILE, `logging.syslog.host "${k.syslog.host}" may only contain letters, digits, '.', ':', '_' and '-'`);
-    checkExpansion(warn, ENV_FILE, 'logging.syslog.host', k.syslog.host);
-    if(k.syslog.port < 1 || k.syslog.port > 65535) add(ENV_FILE, `logging.syslog.port must be 1-65535 (got ${k.syslog.port})`);
-    if(k.syslog.protocol === 'tcp'){
-      warn(ENV_FILE, 'logging.syslog protocol tcp requires the logstash-logback-encoder jar on the connector classpath (provide it via libs)');
-    }
-  }
   checkLibs(add, warn, k.libs);
+}
+
+// checkSyslog mirrors validate.checkSyslog. It is called unconditionally rather
+// than from checkKube: syslog is a top-level key now, so it applies whichever
+// platform (or none) is selected.
+function checkSyslog(add, warn, sl){
+  if(!sl) return;
+  if(!sl.host) add(ENV_FILE, 'logging.syslog.host is required');
+  else if(!RE_HOST.test(sl.host)) add(ENV_FILE, `logging.syslog.host "${sl.host}" may only contain letters, digits, '.', ':', '_' and '-'`);
+  checkExpansion(warn, ENV_FILE, 'logging.syslog.host', sl.host);
+  if(sl.port < 1 || sl.port > 65535) add(ENV_FILE, `logging.syslog.port must be 1-65535 (got ${sl.port})`);
+  if(sl.protocol === 'tcp'){
+    warn(ENV_FILE, 'logging.syslog protocol tcp requires the logstash-logback-encoder jar on the connector classpath (provide it via libs)');
+  }
 }
 
 function checkLibs(add, warn, lb){
@@ -1991,10 +2033,10 @@ function userCred(u){ return u.password; }
 
 // Stable secret names for the credential positions that belong to env.yaml as a
 // whole rather than to one binder (mirrors consolidate.go's exported consts).
-const TRUSTSTORE_PASSWORD_NAME = 'TRUSTSTORE_PASSWORD';
-const KEYSTORE_PASSWORD_NAME = 'KEYSTORE_PASSWORD';
-const LEADER_USERNAME_NAME = 'LEADER_ELECTION_CLIENT_USERNAME';
-const LEADER_PASSWORD_NAME = 'LEADER_ELECTION_CLIENT_PASSWORD';
+const TRUSTSTORE_PASSWORD_NAME = GEN_PREFIX + 'TRUSTSTORE_PASSWORD';
+const KEYSTORE_PASSWORD_NAME = GEN_PREFIX + 'KEYSTORE_PASSWORD';
+const LEADER_USERNAME_NAME = GEN_PREFIX + 'LEADER_ELECTION_CLIENT_USERNAME';
+const LEADER_PASSWORD_NAME = GEN_PREFIX + 'LEADER_ELECTION_CLIENT_PASSWORD';
 // ConfigImport is the Spring config-data import every generated application.yml
 // carries; credentials are mounted one-file-per-name under this directory on all
 // three platforms. Mirrors gen.ConfigImport.
@@ -2035,7 +2077,7 @@ function randomStatusPassword(){
 }
 
 // stableName is the in-container secret name for a binder-scoped credential.
-function stableName(binder, suffix){ return stableToken(binder) + '_' + suffix; }
+function stableName(binder, suffix){ return GEN_PREFIX + stableToken(binder) + '_' + suffix; }
 
 // stableToken folds an arbitrary name into an env-var-safe, Kubernetes-Secret-key-
 // safe identifier: uppercase, any char outside [A-Za-z0-9] becomes '_', runs of
@@ -2056,7 +2098,7 @@ function stableToken(s){
 }
 // securityUserPasswordName is the stable secret name for one management user's
 // password, keyed by the user's name so adding a user never renumbers another.
-function securityUserPasswordName(user){ return 'SECURITY_USER_' + stableToken(user) + '_PASSWORD'; }
+function securityUserPasswordName(user){ return GEN_PREFIX + 'SECURITY_USER_' + stableToken(user) + '_PASSWORD'; }
 
 // solaceProps returns the ordered tool-managed Solace api-properties for a TLS
 // (tcps://) binder; keyAlias != '' adds the mTLS keystore selection. Missing
@@ -2070,12 +2112,12 @@ function solaceProps(m, keyAlias, secretRef){
   if(ts){
     out.push({ key: 'SSL_VALIDATE_CERTIFICATE', val: 'true' });
     out.push({ key: 'SSL_TRUST_STORE', val: storePath(ts.file) });
-    out.push({ key: 'SSL_TRUST_STORE_PASSWORD', val: secretRef(TRUSTSTORE_PASSWORD_NAME, storeCred(ts)) });
+    out.push({ key: 'SSL_TRUST_STORE_PASSWORD', val: secretRef(TRUSTSTORE_PASSWORD_NAME, 'tls.truststore.password', storeCred(ts)) });
     out.push({ key: 'SSL_TRUST_STORE_FORMAT', val: ts.type });
   }
   if(keyAlias && ks){
     out.push({ key: 'SSL_KEY_STORE', val: storePath(ks.file) });
-    out.push({ key: 'SSL_KEY_STORE_PASSWORD', val: secretRef(KEYSTORE_PASSWORD_NAME, storeCred(ks)) });
+    out.push({ key: 'SSL_KEY_STORE_PASSWORD', val: secretRef(KEYSTORE_PASSWORD_NAME, 'tls.keystore.password', storeCred(ks)) });
     out.push({ key: 'SSL_KEY_STORE_FORMAT', val: ks.type });
     out.push({ key: 'SSL_PRIVATE_KEY_ALIAS', val: keyAlias });
   }
@@ -2091,14 +2133,14 @@ function buildBundle(a, m, secretRef){
   const ts = m.tls.truststore;
   if(!ts || !ts.file) return null;
   const b = { name: a.name + '-bundle', tsLoc: storePath(ts.file),
-              tsPwd: secretRef(TRUSTSTORE_PASSWORD_NAME, storeCred(ts)), tsTyp: ts.type,
+              tsPwd: secretRef(TRUSTSTORE_PASSWORD_NAME, 'tls.truststore.password', storeCred(ts)), tsTyp: ts.type,
               hasKeystore: false, ksLoc: '', ksPwd: '', ksTyp: '', keyAlias: '' };
   if(a.keyAlias){
     const ks = m.tls.keystore;
     if(ks){
       b.hasKeystore = true;
       b.ksLoc = storePath(ks.file);
-      b.ksPwd = secretRef(KEYSTORE_PASSWORD_NAME, storeCred(ks));
+      b.ksPwd = secretRef(KEYSTORE_PASSWORD_NAME, 'tls.keystore.password', storeCred(ks));
       b.ksTyp = ks.type;
       b.keyAlias = a.keyAlias;
     }
@@ -2127,18 +2169,31 @@ function consolidateBuild(wfs, m, statusPassword){
     management: { port: effectiveManagementPort(m),
                   healthShowDetails: m.management.present ? m.management.healthShowDetails : '' },
     loggingLevel: m.loggingLevel,
-    leader: null, mqTLS: false, secrets: [], configImport: CONFIG_IMPORT
+    leader: null, mqTLS: false, secrets: [], secretConflicts: [], configImport: CONFIG_IMPORT
   };
   const warns = [];
 
+  // Mirrors consolidate.Build's secretRef. A credential that names a host
+  // variable is mounted under that very name, so an `existing:` Secret's keys
+  // are the -env names written in the spec; the caller's derived name is the
+  // fallback for a literal, which has no name of its own. Two different
+  // credentials on one name would need one file to hold two values -- recorded
+  // so the page can refuse, matching Model.SecretConflicts.
   const seenSecret = {};
-  const secretRef = (stable, cred) => {
+  const conflicted = {};
+  const secretRef = (stable, origin, cred) => {
     if(credEmpty(cred)) return '';
-    if(!seenSecret[stable]){
-      seenSecret[stable] = true;
-      model.secrets.push({ stable: stable, literal: cred.literal, envVar: cred.env });
+    let name = stable;
+    if(cred.env){ name = cred.env; origin += '-env'; }
+    const prev = seenSecret[name];
+    if(!prev){
+      seenSecret[name] = { cred: cred, origin: origin };
+      model.secrets.push({ stable: name, literal: cred.literal, envVar: cred.env });
+    } else if((prev.cred.literal !== cred.literal || prev.cred.env !== cred.env) && !conflicted[name]){
+      conflicted[name] = true;
+      model.secretConflicts.push({ name: name, first: prev.origin, second: origin });
     }
-    return '${' + stable + '}';
+    return '${' + name + '}';
   };
 
   const rwfs = wfs.map(wf => ({
@@ -2202,8 +2257,8 @@ function consolidateBuild(wfs, m, statusPassword){
   accs.forEach(a => {
     if(a.kind === 'solace'){
       const sb = { host: a.host, msgVpn: a.vpn,
-                   clientUser: secretRef(stableName(a.name, 'CLIENT_USERNAME'), a.user),
-                   clientPass: secretRef(stableName(a.name, 'CLIENT_PASSWORD'), a.pass),
+                   clientUser: secretRef(stableName(a.name, 'CLIENT_USERNAME'), binderOwner(a.name) + ' client-username', a.user),
+                   clientPass: secretRef(stableName(a.name, 'CLIENT_PASSWORD'), binderOwner(a.name) + ' client-password', a.pass),
                    extras: (m.solaceDefaults || []).slice(), apiProps: [] };
       let props = [];
       if(a.tls) props = solaceProps(m, a.keyAlias, secretRef);
@@ -2211,8 +2266,8 @@ function consolidateBuild(wfs, m, statusPassword){
       a.binder = { name: a.name, kind: 'solace', solace: sb };
     } else {
       const mb = { queueManager: a.qm, channel: a.ch, connName: a.conn,
-                   user: secretRef(stableName(a.name, 'USER'), a.mqUser),
-                   password: secretRef(stableName(a.name, 'PASSWORD'), a.mqPass),
+                   user: secretRef(stableName(a.name, 'USER'), binderOwner(a.name) + ' user', a.mqUser),
+                   password: secretRef(stableName(a.name, 'PASSWORD'), binderOwner(a.name) + ' password', a.mqPass),
                    sslBundle: '', addlProps: [] };
       if(a.tls){
         model.mqTLS = true;
@@ -2280,7 +2335,7 @@ function applyStatusAccess(model, m, statusPassword, secretRef){
   // roles pass through as authored.
   const users = (m.security.present ? m.security.users : []).map(u => ({
     name: u.name,
-    password: secretRef(securityUserPasswordName(u.name), userCred(u)),
+    password: secretRef(securityUserPasswordName(u.name), 'security.users[' + u.name + '].password', userCred(u)),
     roles: u.roles || []
   }));
 
@@ -2306,7 +2361,19 @@ function buildConfig(m){
   // application.yml this call renders.
   const statusPassword = randomStatusPassword();
   const r = consolidateBuild(m.wfs, m, statusPassword);
-  return { out: renderApplication(r.model), warns: r.warns };
+  // One mounted name holds one value, so two different credentials landing on it
+  // means one would silently run with the other's value. Refuse before rendering,
+  // mirroring gen.build's check on Model.SecretConflicts.
+  if(r.model.secretConflicts.length){
+    // Names both claiming positions, mirroring gen.secretConflictError: the
+    // contested key alone does not say which field to edit, since a derived name
+    // appears nowhere in the spec. With GEN_PREFIX reserved by checkCred, what
+    // is left is two derived names folding together -- stableToken maps runs of
+    // punctuation to one '_', so "ops.1" and "ops-1" reach the same name.
+    const parts = r.model.secretConflicts.map(c => `${c.name} (claimed by ${c.first} and ${c.second})`);
+    return { out: '', warns: r.warns, err: `two different credentials are mounted under one name: ${parts.join('; ')}. One mounted file holds one value, so rename one of them; names differing only in punctuation ("ops.1" vs "ops-1") fold to the same mount name` };
+  }
+  return { out: renderApplication(r.model), warns: r.warns, err: '' };
 }
 
 function emitBindingOptions(model, name, s, isInput, file){
@@ -2350,8 +2417,8 @@ function buildLeaderElection(m, secretRef, leaderNames, warns){
     const names = leaderNames(sess);
     const s = {
       host: sess.host, msgVpn: sess.msgVpn,
-      clientUser: secretRef(names[0], sideUsername(sess)),
-      clientPass: secretRef(names[1], sideSecret(sess)),
+      clientUser: secretRef(names[0], LEADER_SESSION_OWNER + ' client-username', sideUsername(sess)),
+      clientPass: secretRef(names[1], LEADER_SESSION_OWNER + ' client-password', sideSecret(sess)),
       extras: (m.solaceDefaults || []).slice(), apiProps: []
     };
     const props = isTCPS(sess.host) ? solaceProps(m, sess.keyAlias, secretRef) : [];
@@ -2762,11 +2829,21 @@ function runGen(){
   } else {
     const cfg = buildConfig(m);
     warns = warns.concat(cfg.warns.map(w => ({ file: ENV_FILE, msg: w })));
-    syncPanels('app-panels', [{
-      name: 'application.yml',
-      label: 'application.yml (preview -- generate config is authoritative)',
-      text: cfg.out
-    }]);
+    if(cfg.err){
+      v.errs.push({ file: ENV_FILE, msg: cfg.err });
+      syncPanels('app-panels', [{
+        name: 'application.yml',
+        label: 'application.yml (blocked)',
+        text: '# generate config stops at the first error and writes nothing.\n'
+            + '# Resolve the findings above to preview the consolidated application.yml.\n'
+      }]);
+    } else {
+      syncPanels('app-panels', [{
+        name: 'application.yml',
+        label: 'application.yml (preview -- generate config is authoritative)',
+        text: cfg.out
+      }]);
+    }
   }
   renderFindings(v.errs, warns);
   setPanel('yc-cmd', emitCommands(m));
@@ -2884,6 +2961,7 @@ function sampleModel(){
       keystore: { file: './certs/keystore.jks', password: envCred('KEYSTORE_PASSWORD'), type: 'JKS' }
     },
     loggingLevel: parseProps('root: INFO\ncom.solace.connector: INFO'),
+    syslog: { host: 'syslog.corp.example', port: 514, protocol: 'udp' },
     solaceDefaults: parseProps('connect-retries: -1\nreconnect-retries: -1'),
     management: { present: true, port: '8090', healthShowDetails: 'always' },
     // No operator users in the shipped sample -- the tool injects its own
@@ -2898,15 +2976,16 @@ function sampleModel(){
       deployment: { name: 'solmq-connector', namespace: 'solace-connectors',
                     replicas: 2, cpu: '1', memory: '1Gi' },
       service: { enabled: true, port: '8090' },
-      syslog: null, libs: null, cred: cred, stores: { create: 'solmq-tls' }, imagePull: null
+      libs: null, cred: cred, stores: { create: 'solmq-tls' }, imagePull: null
     },
     docker: {
-      section: 'docker', command: 'docker', name: 'solmq-connector',
+      section: 'docker', command: 'docker', name: 'connector',
+      projectName: 'solace-ibmmq-connectors',
       restart: 'unless-stopped', ports: ['8090'],
       cred: null, stores: true, libsDir: ''
     },
     podman: {
-      section: 'podman', command: 'podman', name: 'solmq-connector',
+      section: 'podman', command: 'podman', name: 'connector',
       restart: 'unless-stopped', ports: ['8090'],
       cred: null, stores: true, libsDir: '',
       mode: 'run', quadlet: { scope: 'auto', dir: '' }
@@ -2966,7 +3045,7 @@ function fillWf(card, w){
 function clearForm(){
   ['conns-list', 'wfs-list', 'users-list', 'dk-ports', 'pd-ports'].forEach(id => { $(id).innerHTML = ''; });
   ['i-ts-on', 'i-ks-on', 'i-mgmt-on', 'i-sec-on', 'i-k8s-on', 'i-dk-on', 'i-pd-on',
-   'i-k8s-sl-on', 'i-k8s-svc', 'i-dk-stores', 'i-pd-stores', 'i-dk-libs-on', 'i-pd-libs-on'].forEach(id => setC(id, false));
+   'i-sl-on', 'i-k8s-svc', 'i-dk-stores', 'i-pd-stores', 'i-dk-libs-on', 'i-pd-libs-on'].forEach(id => setC(id, false));
   ['i-ts-pass-env', 'i-ks-pass-env', 'i-le-user-env', 'i-le-pass-env',
    'i-img-user-env', 'i-img-pass-env'].forEach(id => setC(id, true));
   ['i-log', 'i-soldef', 'i-le-queue', 'i-le-fo', 'i-le-props', 'i-k8s-name', 'i-k8s-ns',
@@ -2981,7 +3060,7 @@ function clearForm(){
 }
 function applyAllToggles(){
   [['i-ts-on', 'ts-fields'], ['i-ks-on', 'ks-fields'], ['i-mgmt-on', 'mgmt-fields'], ['i-sec-on', 'sec-fields'],
-   ['i-k8s-on', 'k8s-fields'], ['i-k8s-sl-on', 'k8s-sl-fields'], ['i-dk-on', 'dk-fields'],
+   ['i-k8s-on', 'k8s-fields'], ['i-sl-on', 'sl-fields'], ['i-dk-on', 'dk-fields'],
    ['i-pd-on', 'pd-fields'], ['i-dk-libs-on', 'dk-libs-f'], ['i-pd-libs-on', 'pd-libs-f']]
     .forEach(([c, f]) => show(f, C(c)));
   syncLE(); syncK8s(); syncCtr('dk'); syncCtr('pd');
@@ -3008,6 +3087,11 @@ function loadSample(){
   setV('i-ks-pass', m.tls.keystore.password.literal || m.tls.keystore.password.env || '');
   setC('i-ks-pass-env', !m.tls.keystore.password.literal); setV('i-ks-type', m.tls.keystore.type);
   setV('i-log', emitProps(m.loggingLevel, ''));
+  if(m.syslog){
+    setC('i-sl-on', true);
+    setV('i-sl-host', m.syslog.host); setV('i-sl-port', m.syslog.port);
+    setV('i-sl-proto', m.syslog.protocol);
+  }
   setV('i-soldef', emitProps(m.solaceDefaults, ''));
 
   setC('i-mgmt-on', true);
@@ -3047,6 +3131,8 @@ function loadSample(){
     c.ports.forEach(v => addPort(p + '-ports', v));
     setC('i-' + p + '-stores', true);
   });
+  // Both docker-only and podman-only keys are set outside the shared loop above.
+  setV('i-dk-project', m.docker.projectName);
   setV('i-pd-mode', m.podman.mode); setV('i-pd-scope', m.podman.quadlet.scope);
 
   applyAllToggles();

@@ -146,6 +146,10 @@ func Run(ctx Context) (errs, warns []Issue) {
 
 	// The image every platform deploys, and then the per-target deploy-grade checks.
 	checkImage(add, warn, ctx)
+	// Unconditional: syslog is a top-level key now, so a docker-only run or a
+	// bare `generate config` has to validate it too. Under kubernetes only, it
+	// would go unchecked everywhere else it now applies.
+	checkSyslog(add, warn, d.Syslog)
 	checkTargets(add, warn, ctx, resolved)
 
 	return errs, warns
@@ -274,6 +278,14 @@ func checkCred(add, warn func(string, string, ...any), env func(string) (string,
 		switch {
 		case strings.Contains(c.EnvVar, "${"):
 			add(file, "%s-env %q must be a bare variable name, not a ${...} reference", label, c.EnvVar)
+		case strings.HasPrefix(c.EnvVar, spec.GeneratedNamePrefix):
+			// An -env credential is mounted under the variable name it gives, and
+			// so shares one namespace with the names the tool derives for literals.
+			// Reserving this prefix is what keeps the two apart: without it a
+			// variable spelled like a derived name would put two credentials on one
+			// mounted file. envNameRE would accept it (a leading underscore is a
+			// legal identifier), so it needs its own case.
+			add(file, "%s-env %q starts with %s, which is reserved for the mount names this tool derives for itself; rename the variable so it falls outside that prefix", label, c.EnvVar, spec.GeneratedNamePrefix)
 		case !envNameRE.MatchString(c.EnvVar):
 			add(file, "%s-env %q is not a valid environment variable name (letters, digits and underscore; not starting with a digit)", label, c.EnvVar)
 		case env != nil:
@@ -674,6 +686,13 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 	// instead of by kubectl mid-apply (libs.pvc.create.name is checked the same
 	// way in checkLibs).
 	if c := ctx.Kube.Secrets.Credentials; c != nil {
+		// create and existing are mutually exclusive: Render takes the create
+		// branch when both are set, which would emit a Secret doc over the very
+		// object 'existing' names. Omitting the whole credentials block stays
+		// legal -- it is a present-but-undecided block that is rejected here.
+		if (c.Create != nil) == (c.Existing != "") {
+			add(fileEnv, "kubernetes.secrets.credentials must set exactly one of 'create' or 'existing'")
+		}
 		if c.Create != nil {
 			checkSecretName(add, "kubernetes.secrets.credentials.create.name", c.Create.Name)
 			if removed := c.Create.RemovedKeys(); len(removed) > 0 {
@@ -685,6 +704,9 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 		}
 	}
 	if s := ctx.Kube.Secrets.Stores; s != nil {
+		if (s.Create != nil) == (s.Existing != "") {
+			add(fileEnv, "kubernetes.secrets.stores must set exactly one of 'create' or 'existing'")
+		}
 		if s.Create != nil {
 			if ctx.Defaults.TLS.Truststore == nil {
 				add(fileEnv, "kubernetes.secrets.stores.create requires tls.truststore")
@@ -697,16 +719,21 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 	}
 	checkImagePull(add, warn, ctx)
 
-	checkSyslog(add, warn, ctx.Kube)
+	if ctx.Kube.Logging != nil {
+		add(fileEnv, "kubernetes.logging is no longer configured here: syslog moved to the top-level logging: block (beside logging.level) so one declaration serves every platform. Remove kubernetes.logging")
+	}
 	checkLibs(add, ctx.Kube)
 }
 
-// checkSyslog validates the optional logging.syslog block.
-func checkSyslog(add, warn func(string, string, ...any), k *spec.Kubernetes) {
-	if k.Logging == nil || k.Logging.Syslog == nil {
+// checkSyslog validates the optional top-level logging.syslog block.
+//
+// It takes the block rather than a section because it is no longer a kubernetes
+// key: the same settings drive the docker and podman renderers, so the checks
+// have to run whichever platform is being generated.
+func checkSyslog(add, warn func(string, string, ...any), s *spec.Syslog) {
+	if s == nil {
 		return
 	}
-	s := k.Logging.Syslog
 	if s.Host == "" {
 		add(fileEnv, "logging.syslog.host is required")
 	} else if !hostRE.MatchString(s.Host) {
@@ -1142,7 +1169,18 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 	}
 }
 
-// checkDocker validates the docker (compose) section.
+// checkDocker validates the docker (compose) section, including the compose
+// project name.
+//
+// project-name is checked here rather than in checkContainerTarget because
+// containerTarget is shared with podman, which has no project concept to hold
+// one -- the mirror of how checkPodman keeps mode/scope out of the shared
+// struct. It is held to the same DNS-1123 rule as name: docker compose's own
+// grammar additionally allows an underscore and a trailing hyphen, so this is
+// stricter than compose requires but can never accept a project name compose
+// would then reject (an explicit one it dislikes is a hard error, not a
+// sanitised value). Checked unconditionally, as name is: ParseEnv always
+// defaults it, so an empty value means the section was built without defaults.
 func checkDocker(add func(string, string, ...any), ctx Context) {
 	d := ctx.Docker
 	checkContainerTarget(add, ctx, containerTarget{
@@ -1158,6 +1196,9 @@ func checkDocker(add func(string, string, ...any), ctx Context) {
 		Stores:   d.Stores,
 		Libs:     d.Libs,
 	})
+	if !isDNS1123(d.ProjectName) {
+		add(fileEnv, "docker.project-name %q is not a valid DNS-1123 label", d.ProjectName)
+	}
 }
 
 // checkPodman validates the podman section, including the generate mode and the

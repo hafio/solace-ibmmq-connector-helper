@@ -7,9 +7,9 @@
 //
 //	solmq-conn-util generate [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
 //	solmq-conn-util deploy   [--platform kubernetes|docker|podman] [-e env.yaml]
-//	solmq-conn-util remove   [--platform kubernetes|docker|podman] [-e env.yaml]
+//	solmq-conn-util remove   [--no-prompt] [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util status   <container|application|all> [-d] [-w] [--all] [--output table|json] [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
-//	solmq-conn-util logs     [--follow] [--previous] [--tail N] [--since d] [--timestamps] [--all] [--platform kubernetes|docker|podman] [-e env.yaml]
+//	solmq-conn-util logs     [--follow] [--previous] [--tail N] [--since d] [--timestamps] [--pod name|index] [--container name|index] [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util version
 //	solmq-conn-util validate [-e env.yaml]
 //	solmq-conn-util examples [dir] [-f]
@@ -130,6 +130,7 @@ var verbHandlers = map[string]func(args []string, r runner.Runner) int{
 	"remove":        func(args []string, r runner.Runner) int { return runAction(runner.ActionRemove, args, r) },
 	"status":        func(args []string, r runner.Runner) int { return runStatus(args, r) },
 	"logs":          func(args []string, r runner.Runner) int { return runLogs(args, r) },
+	"cli":           func(args []string, r runner.Runner) int { return runShell(args, r) },
 	"version":       func(args []string, r runner.Runner) int { return actVersion() },
 	"validate":      func(args []string, r runner.Runner) int { return runValidate(args) },
 	"examples":      func(args []string, r runner.Runner) int { return runExamples(args) },
@@ -382,7 +383,7 @@ func genKubernetes(envPath, out string) int {
 	if err != nil {
 		return errExit(err)
 	}
-	manifest, errs, warns := gen.GenerateKubernetes(req, resolver(envDir))
+	manifest, errs, warns := gen.GenerateKubernetes(req, resolver(envDir), gen.KubeOpts{})
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
@@ -427,7 +428,24 @@ func genPodman(envPath, out string) int {
 // platform is resolved by resolvePlatform, not looked up from args[0]).
 // extraAllowed carries the values of a repeatable --allow-command flag (nil
 // when unused).
-var actTargets = map[string]func(action, envPath string, r runner.Runner, extraAllowed []string) int{
+// actionOpts is one deploy/remove invocation, as an options struct rather than
+// a growing positional list: removeNamespace applies to exactly one platform,
+// and threading it as a fourth argument through all three would put a
+// kubernetes-only concern in the docker and podman signatures.
+type actionOpts struct {
+	action  string
+	envPath string
+	allow   []string
+	// noPrompt skips both questions a teardown asks: the confirmation and, when
+	// the namespace turns out to be empty, whether to remove it too.
+	//
+	// It cannot authorise more than that. A namespace holding anything this
+	// release does not own is never removed, with or without this set -- the
+	// occupancy check runs first and an occupant of any kind ends it.
+	noPrompt bool
+}
+
+var actTargets = map[string]func(o actionOpts, r runner.Runner) int{
 	tgtKubernetes: actKubernetes,
 	tgtDocker:     actDocker,
 	tgtPodman:     actPodman,
@@ -444,6 +462,12 @@ func runAction(action string, args []string, r runner.Runner) int {
 	env := envFlag(fs)
 	platform := platformFlag(fs)
 	allow := allowCommandFlag(fs)
+	// remove only: deploy has nothing to confirm, so --no-prompt is an unknown flag
+	// there rather than a no-op that quietly accepts it.
+	var noPrompt *bool
+	if action == runner.ActionRemove {
+		noPrompt = noPromptFlag(fs)
+	}
 	pos, err := collectFlagsAndDirs(fs, args)
 	if err != nil {
 		return flagExit(action, err)
@@ -465,7 +489,27 @@ func runAction(action string, args []string, r runner.Runner) int {
 	if perr != nil {
 		return errExit(perr)
 	}
-	return actTargets[platformName](action, *env, r, *allow)
+	// The one destructive verb asks before it acts, and asks here -- ahead of
+	// the per-platform preflight probe -- so a cancelled teardown touches the
+	// cluster not at all, not even with a read.
+	if noPrompt != nil && !*noPrompt {
+		ok, cerr := confirmRemove(platformName, removeTarget(platformName, e))
+		if cerr != nil {
+			return errExit(cerr)
+		}
+		if !ok {
+			// Declining is an answer, not a failure -- the same reasoning
+			// watchStatus records for a deliberate Ctrl-C.
+			fmt.Fprintln(os.Stderr, "remove: cancelled")
+			return 0
+		}
+	}
+	return actTargets[platformName](actionOpts{
+		action:   action,
+		envPath:  *env,
+		allow:    *allow,
+		noPrompt: noPrompt != nil && *noPrompt,
+	}, r)
 }
 
 // preflight runs the read-only login/reachability probe (runner.Preflight)
@@ -481,7 +525,8 @@ func preflight(r runner.Runner, action, platform, command, namespace string, ext
 	return 0, true
 }
 
-func actKubernetes(action, envPath string, r runner.Runner, extraAllowed []string) int {
+func actKubernetes(o actionOpts, r runner.Runner) int {
+	action, envPath, extraAllowed := o.action, o.envPath, o.allow
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
 		return errExit(err)
@@ -489,7 +534,12 @@ func actKubernetes(action, envPath string, r runner.Runner, extraAllowed []strin
 	if e.Kubernetes == nil {
 		return errExit(fmt.Errorf("env.yaml has no kubernetes: section to %s", action))
 	}
-	manifest, errs, warns := gen.GenerateKubernetes(req, resolver(envDir), extraAllowed...)
+	// A teardown renders without the Namespace document: piping one to
+	// `kubectl delete -f -` deletes the namespace and cascades to everything in
+	// it, including workloads this tool never deployed. The namespace is its own
+	// step below, opted into and confirmed separately.
+	manifest, errs, warns := gen.GenerateKubernetes(req, resolver(envDir),
+		gen.KubeOpts{OmitNamespace: action == runner.ActionRemove}, extraAllowed...)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
@@ -498,10 +548,19 @@ func actKubernetes(action, envPath string, r runner.Runner, extraAllowed []strin
 		return code
 	}
 	out, rerr := runner.Kubernetes(r, e.Kubernetes.Command, action, manifest, extraAllowed)
-	return report(action, tgtKubernetes, out, rerr)
+	if code := report(action, tgtKubernetes, out, rerr); code != 0 {
+		// A failed teardown leaves the namespace alone: whatever did not come
+		// down is still in there.
+		return code
+	}
+	if action == runner.ActionRemove {
+		return removeNamespace(r, o, e.Kubernetes)
+	}
+	return 0
 }
 
-func actDocker(action, envPath string, r runner.Runner, extraAllowed []string) int {
+func actDocker(o actionOpts, r runner.Runner) int {
+	action, envPath, extraAllowed := o.action, o.envPath, o.allow
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
 		return errExit(err)
@@ -549,7 +608,8 @@ func envPairs(kvs []gen.KV) []string {
 	return out
 }
 
-func actPodman(action, envPath string, r runner.Runner, extraAllowed []string) int {
+func actPodman(o actionOpts, r runner.Runner) int {
+	action, envPath, extraAllowed := o.action, o.envPath, o.allow
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
 		return errExit(err)
@@ -600,6 +660,11 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.AppYAML.Name), plan.AppYAML.Data, 0o600); err != nil {
 		return errExit(err)
 	}
+	if plan.Logback.Name != "" {
+		if err := runner.WriteFile(filepath.Join(sc.Dir, plan.Logback.Name), plan.Logback.Data, 0o644); err != nil {
+			return errExit(err)
+		}
+	}
 	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.StatusScript.Name), plan.StatusScript.Data, 0o644); err != nil {
 		return errExit(err)
 	}
@@ -615,6 +680,9 @@ func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	// Best-effort cleanup of the files we generated.
 	_ = os.Remove(filepath.Join(sc.Dir, plan.AppYAML.Name))
 	_ = os.Remove(filepath.Join(sc.Dir, plan.StatusScript.Name))
+	if plan.Logback.Name != "" {
+		_ = os.Remove(filepath.Join(sc.Dir, plan.Logback.Name))
+	}
 	// Credentials are removed from podman's store last, after the units that
 	// referenced them are gone. Leaving credential material behind is worth
 	// reporting even when the teardown itself succeeded, so a failure here
@@ -707,13 +775,25 @@ func resolvePlatform(flagVal string, present []string, requireSection bool) (str
 // dispatch already threads explicitly -- see useFakeRunner in main_test.go).
 var promptLine = readStdinLine
 
+// stdinIsTerminal reports whether stdin is a character device, which is this
+// tool's one definition of "the operator is here to answer". Both the prompts
+// below and cli's refusal to open a shell nobody can type into read it, so the
+// two cannot come to different conclusions about the same terminal.
+//
+// A var rather than a func for the reason promptLine is one: go test's own
+// stdin is never a character device, so a hard-coded probe would make every
+// path behind it unreachable from a test.
+var stdinIsTerminal = func() bool {
+	fi, err := os.Stdin.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
 // readStdinLine refuses to read when stdin is not a character device (a
 // script, a CI job, or anything else that is not an interactive terminal) so
 // a non-interactive invocation fails fast with actionable guidance instead of
 // blocking forever on a read that will never return.
 func readStdinLine(question string) (string, error) {
-	fi, err := os.Stdin.Stat()
-	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+	if !stdinIsTerminal() {
 		return "", fmt.Errorf("stdin is not a terminal, so this prompt cannot be answered interactively")
 	}
 	fmt.Fprint(os.Stderr, question)
@@ -1123,6 +1203,69 @@ func allowCommandFlag(fs *flag.FlagSet) *[]string {
 	vals := &[]string{}
 	fs.Var(allowCommandValue{vals}, "allow-command", "approve an extra command binary for this invocation (repeatable)")
 	return vals
+}
+
+// noPromptFlag registers remove's --no-prompt confirmation skip.
+//
+// runAction registers it for remove only, never for deploy: deploy has nothing
+// to confirm, so accepting the flag there would silently do nothing -- the kind
+// of surprise checkStatusFlags refuses for the same reason. On deploy it is an
+// unknown flag, which is the honest answer.
+func noPromptFlag(fs *flag.FlagSet) *bool {
+	return fs.Bool("no-prompt", false, "tear down without asking for confirmation")
+}
+
+// confirmRemove asks once before anything is torn down, through the same
+// promptLine seam and non-TTY refusal promptPlatformMenu and confirmInstall
+// use. "y"/"yes" (case-insensitive) proceeds; anything else, a blank line
+// included, cancels -- the safe answer is the one you get by pressing Enter.
+//
+// what names the actual target so a run pointed at the wrong env.yaml is caught
+// here: on kubernetes that means the namespace, which is usually the only thing
+// distinguishing production from a scratch cluster.
+func confirmRemove(platform, what string) (bool, error) {
+	line, err := promptLine(fmt.Sprintf("remove %s: this tears down %s -- continue? [y/N] ", platform, what))
+	if err != nil {
+		return false, fmt.Errorf("confirming the teardown interactively: %w; pass %s instead", err, noPromptFlagName)
+	}
+	switch strings.ToLower(line) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+// removeTarget describes what remove is about to destroy on the resolved
+// platform, for the confirmation prompt. It names the identifier that tells one
+// deployment from another -- the namespace on kubernetes, the container name on
+// docker/podman -- rather than just the platform, which the operator already
+// typed.
+//
+// The section is present because resolvePlatform demanded it (requireSection is
+// true for deploy/remove), so the nil branches are guards, not expected paths.
+func removeTarget(platform string, e *spec.Env) string {
+	switch platform {
+	case validate.PlatformKubernetes:
+		if e == nil || e.Kubernetes == nil {
+			return "the kubernetes deployment"
+		}
+		d := e.Kubernetes.Deployment
+		if d.Namespace == "" {
+			return fmt.Sprintf("deployment %s in the current namespace", d.Name)
+		}
+		return fmt.Sprintf("deployment %s in namespace %s", d.Name, d.Namespace)
+	case validate.PlatformDocker:
+		if e == nil || e.Docker == nil {
+			return "the docker container"
+		}
+		return "container " + e.Docker.Name
+	default:
+		if e == nil || e.Podman == nil {
+			return "the podman container"
+		}
+		return fmt.Sprintf("container %s and its systemd unit %s", e.Podman.Name, gen.PodmanServiceName(e.Podman.Name))
+	}
 }
 
 // collectFlagsAndDirs parses fs while tolerating flags before, after, or between

@@ -6,12 +6,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Syslog protocols.
-const (
-	SyslogUDP = "udp"
-	SyslogTCP = "tcp"
-)
-
 // Resources is the container's cpu/memory. requests and limits are emitted with
 // the same value (guaranteed QoS), so only one cpu/memory pair is specified.
 type Resources struct {
@@ -76,7 +70,10 @@ func (c *CredCreate) RemovedKeys() []string {
 	return out
 }
 
-// CredentialsSecret is the env-var Secret (envFrom). Create XOR Existing.
+// CredentialsSecret is the credentials Secret, mounted as a volume at
+// /run/secrets with one file per credential name -- never envFrom, so no
+// credential is ever an environment variable in the container. Create XOR
+// Existing, enforced by validate.
 type CredentialsSecret struct {
 	Create   *CredCreate `yaml:"create"`
 	Existing string      `yaml:"existing"`
@@ -87,7 +84,10 @@ type StoreCreate struct {
 	Name string `yaml:"name"`
 }
 
-// StoresSecret is the truststore/keystore Secret (volume mount). Create XOR Existing.
+// StoresSecret is the truststore/keystore Secret (volume mount). Create XOR
+// Existing, enforced by validate. An Existing Secret's keys are the base
+// filenames of tls.truststore.file / tls.keystore.file, which is what the
+// rendered config points at under the stores mount.
 type StoresSecret struct {
 	Create   *StoreCreate `yaml:"create"`
 	Existing string       `yaml:"existing"`
@@ -111,18 +111,6 @@ type Secrets struct {
 type ImagePullSecret struct {
 	Name   string `yaml:"name"`
 	Create bool   `yaml:"create"`
-}
-
-// Syslog mirrors the kubernetes.logging.syslog section of env.yaml.
-type Syslog struct {
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	Protocol string `yaml:"protocol"` // SyslogUDP (default) | SyslogTCP
-}
-
-// Logging mirrors the kubernetes.logging section of env.yaml.
-type Logging struct {
-	Syslog *Syslog `yaml:"syslog"`
 }
 
 // NFS locates the export backing a created PersistentVolume.
@@ -162,11 +150,17 @@ type Libs struct {
 const DefaultKubeCommand = "kubectl"
 
 // Kubernetes is the parsed kubernetes section of env.yaml.
+//
+// Logging is parsed but rejected: syslog moved to the top-level logging: block,
+// beside logging.level, so one declaration serves every platform. The field
+// stays so a stale config fails loudly in validate rather than being silently
+// ignored -- ParseEnv decodes non-strict, so a deleted field would simply be
+// dropped and the instance would come up with no syslog and no diagnostic.
 type Kubernetes struct {
 	Command    string     `yaml:"command"` // deploy CLI (default kubectl; e.g. "oc" or "kubectl --context prod")
 	Deployment Deployment `yaml:"deployment"`
 	Service    Service    `yaml:"service"`
-	Logging    *Logging   `yaml:"logging"`
+	Logging    *Logging   `yaml:"logging"` // removed; non-nil is a validation error
 	Libs       *Libs      `yaml:"libs"`
 	Secrets    Secrets    `yaml:"secrets"`
 }
@@ -185,8 +179,7 @@ func ParseKubernetes(data []byte) (*Kubernetes, error) {
 }
 
 // applyKubeDefaults fills in the defaults the connector runtime expects:
-// command kubectl, replicas 1, udp syslog, 1Gi libs storage, busybox download
-// image. mgmtPort is the effective management.port (see
+// command kubectl, replicas 1, 1Gi libs storage, busybox download image. mgmtPort is the effective management.port (see
 // EffectiveManagementPort): an unset service.port defaults to publishing that
 // port to itself, since that is the only port the pod actually listens on.
 func applyKubeDefaults(k *Kubernetes, mgmtPort int) {
@@ -198,9 +191,6 @@ func applyKubeDefaults(k *Kubernetes, mgmtPort int) {
 	}
 	if k.Service.Port == (Port{}) {
 		k.Service.Port = Port{Host: mgmtPort, Container: mgmtPort}
-	}
-	if l := k.Logging; l != nil && l.Syslog != nil && l.Syslog.Protocol == "" {
-		l.Syslog.Protocol = SyslogUDP
 	}
 	if lb := k.Libs; lb != nil {
 		if lb.PVC != nil && lb.PVC.Create != nil && lb.PVC.Create.Storage == "" {

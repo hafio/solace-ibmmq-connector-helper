@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
@@ -33,9 +34,10 @@ curl -fsS "$STATUS_URL"
 func TestRenderFull_WithEverything(t *testing.T) {
 	in := Input{
 		Docker: &spec.Docker{
-			Name:    "solmq-connector",
-			Restart: "unless-stopped",
-			Ports:   []spec.Port{{Host: 8090, Container: 8090}, {Host: 8080, Container: 8091}},
+			Name:        "solmq-connector",
+			ProjectName: "solace-ibmmq-connectors",
+			Restart:     "unless-stopped",
+			Ports:       []spec.Port{{Host: 8090, Container: 8090}, {Host: 8080, Container: 8091}},
 		},
 		Instance: Instance{
 			Name:         "solmq-connector",
@@ -53,7 +55,8 @@ func TestRenderFull_WithEverything(t *testing.T) {
 		Libs: &Mount{Source: "/abs/libs", Target: "/app/external/libs"},
 	}
 
-	want := `services:
+	want := `name: solace-ibmmq-connectors
+services:
   solmq-connector:
     image: solace/solace-pubsub-connector-ibmmq:2.13.0
     container_name: solmq-connector
@@ -121,6 +124,10 @@ secrets:
 // TestRenderFull_Minimal is the second full-string golden: no creds, no stores,
 // no libs, MQTLS false, empty timezone, no restart and no ports -- so the
 // restart, ports, environment, secrets and volumes blocks are all omitted.
+//
+// It also carries no project-name, which is the other half of the pair with
+// TestRenderFull_WithEverything: one full document pins the leading name: line,
+// this one pins its absence, so both branches are covered byte-for-byte.
 func TestRenderFull_Minimal(t *testing.T) {
 	in := Input{
 		Docker: &spec.Docker{
@@ -397,5 +404,78 @@ func TestAppYAMLSecretPlaceholdersAreNotInterpolated(t *testing.T) {
 	// those are compose's own, not Spring's.
 	if !strings.Contains(out, "  LOCAL_SOLACE_CLIENT_USERNAME:\n    environment: LOCAL_SOLACE_CLIENT_USERNAME\n") {
 		t.Errorf("secrets provider entry should not be escaped:\n%s", out)
+	}
+}
+
+// TestRenderSyslogAddsConfigAndEnv covers what the syslog hoist bought docker:
+// before it, logging.syslog was a kubernetes-only key and a compose deployment
+// got nothing at all.
+//
+// Compose can inline file content, so the logback config is a third configs
+// entry rather than a file on disk -- the same mechanism application.yml and the
+// status script already use.
+func TestRenderSyslogAddsConfigAndEnv(t *testing.T) {
+	in := minimalDockerInput()
+	in.Syslog = &spec.Syslog{Host: "syslog.corp", Port: 514, Protocol: spec.SyslogUDP}
+	out := Render(in)
+
+	for _, want := range []string{
+		"solmq-connector-logback:",
+		"- source: solmq-connector-logback",
+		"target: " + logback.ContainerPath,
+		"ch.qos.logback.classic.net.SyslogAppender",
+		"LOGGING_SYSLOG_APPNAME: solmq-connector",
+		"LOGGING_SYSLOG_HOST: syslog.corp",
+		`LOGGING_SYSLOG_PORT: "514"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("compose is missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderSyslogTCPUsesTheLogstashAppender pins that the protocol reaches the
+// inlined config: the two appenders have different classpath requirements, so
+// rendering the wrong one fails at runtime rather than at generate time.
+func TestRenderSyslogTCPUsesTheLogstashAppender(t *testing.T) {
+	in := minimalDockerInput()
+	in.Syslog = &spec.Syslog{Host: "syslog.corp", Port: 6514, Protocol: spec.SyslogTCP}
+	out := Render(in)
+
+	if !strings.Contains(out, "LogstashTcpSocketAppender") {
+		t.Errorf("tcp should inline the logstash appender, got:\n%s", out)
+	}
+	if !strings.Contains(out, `LOGGING_SYSLOG_PORT: "6514"`) {
+		t.Errorf("the port must reach the environment, got:\n%s", out)
+	}
+}
+
+// TestRenderWithoutSyslogEmitsNeither is the negative: no block, no config
+// entry, no env vars, and no empty environment: key left behind.
+func TestRenderWithoutSyslogEmitsNeither(t *testing.T) {
+	out := Render(minimalDockerInput())
+	for _, no := range []string{"logback", "LOGGING_SYSLOG"} {
+		if strings.Contains(out, no) {
+			t.Errorf("compose should not mention %q without a syslog block, got:\n%s", no, out)
+		}
+	}
+}
+
+// minimalDockerInput is the smallest valid compose input: no creds, stores,
+// libs, timezone or MQ TLS, so anything these syslog cases assert is something
+// the syslog block itself added.
+func minimalDockerInput() Input {
+	return Input{
+		Docker: &spec.Docker{
+			Command: "docker",
+			Name:    "solmq-connector",
+			Ports:   []spec.Port{{Host: 8090, Container: 8090}},
+		},
+		Instance: Instance{
+			Name:         "solmq-connector",
+			Image:        "solace/connector:9.9",
+			AppYAML:      "x: 1\n",
+			StatusScript: "#!/bin/sh\n",
+		},
 	}
 }

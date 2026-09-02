@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/yamlwriter"
@@ -53,12 +54,26 @@ type Instance struct {
 
 // Input is everything needed to render the manifests.
 type Input struct {
-	Kube      *spec.Kubernetes
-	Defaults  *spec.Defaults
-	CredKVs   []KV        // resolved credential values (only when credentials.create)
-	Stores    []StoreFile // resolved .jks files (only when stores.create)
-	ImagePull *PullSecret // nil when no image-pull block is configured
-	Instance  Instance
+	Kube     *spec.Kubernetes
+	Defaults *spec.Defaults
+	// Syslog is the top-level logging.syslog block, nil when absent. It arrives
+	// as its own field rather than being read off Kube because it is no longer a
+	// kubernetes key: the same value drives the docker and podman renderers.
+	Syslog *spec.Syslog
+	// OmitNamespace drops the Namespace document from the rendered set.
+	//
+	// It exists for teardown. Piping a manifest that contains a Namespace to
+	// `kubectl delete -f -` deletes the namespace and cascades to everything
+	// inside it, including workloads this tool never deployed -- so remove
+	// renders without it and handles the namespace as its own, separately
+	// confirmed step. apply always wants it: creating a namespace that already
+	// exists is a no-op, and the objects below need it to exist in the same
+	// apply.
+	OmitNamespace bool
+	CredKVs       []KV        // resolved credential values (only when credentials.create)
+	Stores        []StoreFile // resolved .jks files (only when stores.create)
+	ImagePull     *PullSecret // nil when no image-pull block is configured
+	Instance      Instance
 }
 
 // yw is the indentation-aware line writer used by every renderer here.
@@ -75,95 +90,9 @@ func quoteRes(v string) string {
 	return v
 }
 
-// LogbackXML returns the logback-spring.xml content for the given syslog
-// protocol. Host/port/appname flow in at runtime via springProperty from the
-// LOGGING_SYSLOG_* env vars set on the Deployment, so the XML itself is static.
-func LogbackXML(protocol string) string {
-	if protocol == spec.SyslogTCP {
-		return logbackTCP
-	}
-	return logbackUDP
-}
-
-// logbackUDP mirrors the reference deployment: Logback's built-in UDP
-// (RFC 3164) SyslogAppender behind an async wrapper.
-const logbackUDP = `<?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <!-- Spring Boot defaults: conversion rules, CONSOLE appender -->
-  <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
-  <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
-
-  <!-- Spring property substitution from application.yml or env vars -->
-  <springProperty scope="context" name="SYSLOG_HOST" source="logging.syslog.host" />
-  <springProperty scope="context" name="SYSLOG_PORT" source="logging.syslog.port" />
-  <springProperty scope="context" name="SYSLOG_APPNAME" source="logging.syslog.appname" defaultValue="solace-ibmmq-connector-default"/>
-
-  <!-- UDP syslog, RFC 3164. This is Logback's built-in, no extra deps. -->
-  <appender name="SYSLOG" class="ch.qos.logback.classic.net.SyslogAppender">
-    <syslogHost>${SYSLOG_HOST}</syslogHost>
-    <port>${SYSLOG_PORT}</port>
-    <facility>LOCAL0</facility>
-    <suffixPattern>${SYSLOG_APPNAME}[%thread] %-5level %logger{36} - %msg</suffixPattern>
-    <stackTracePattern>${SYSLOG_APPNAME}[%thread] \t</stackTracePattern>
-    <throwableExcluded>false</throwableExcluded>
-  </appender>
-
-  <!-- Async wrapper. With UDP this is less critical (sends never block long)
-   but still good practice - keeps any DNS resolution or socket setup off
-   the app threads. -->
-  <appender name="ASYNC_SYSLOG" class="ch.qos.logback.classic.AsyncAppender">
-    <appender-ref ref="SYSLOG"/>
-    <queueSize>2048</queueSize>
-    <discardingThreshold>0</discardingThreshold>
-    <neverBlock>true</neverBlock>
-    <includeCallerData>false</includeCallerData>
-  </appender>
-
-  <root level="INFO">
-    <appender-ref ref="CONSOLE"/>
-    <appender-ref ref="ASYNC_SYSLOG"/>
-  </root>
-</configuration>
-`
-
-// logbackTCP sends newline-framed lines over TCP via logstash-logback-encoder's
-// LogstashTcpSocketAppender (internally async, so no AsyncAppender wrapper).
-// The jar must be provided on the connector classpath, e.g. via libs.
-const logbackTCP = `<?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
-  <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
-
-  <springProperty scope="context" name="SYSLOG_HOST" source="logging.syslog.host" />
-  <springProperty scope="context" name="SYSLOG_PORT" source="logging.syslog.port" />
-  <springProperty scope="context" name="SYSLOG_APPNAME" source="logging.syslog.appname" defaultValue="solace-ibmmq-connector-default"/>
-
-  <!-- TCP syslog via logstash-logback-encoder (jar required on the classpath). -->
-  <appender name="SYSLOG" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
-    <destination>${SYSLOG_HOST}:${SYSLOG_PORT}</destination>
-    <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
-      <pattern>${SYSLOG_APPNAME}[%thread] %-5level %logger{36} - %msg%n</pattern>
-    </encoder>
-  </appender>
-
-  <root level="INFO">
-    <appender-ref ref="CONSOLE"/>
-    <appender-ref ref="SYSLOG"/>
-  </root>
-</configuration>
-`
-
-// syslogOf returns the syslog settings, or nil when the block is absent.
-func syslogOf(k *spec.Kubernetes) *spec.Syslog {
-	if k.Logging == nil {
-		return nil
-	}
-	return k.Logging.Syslog
-}
-
 // leaderMode returns the pod's leader-election mode label value, defaulting
-// to standalone when Defaults is absent (mirrors the ManagementPort/syslogOf
-// nil-guard style: a *Defaults that was never parsed still renders).
+// to standalone when Defaults is absent (mirrors the ManagementPort nil-guard
+// style: a *Defaults that was never parsed still renders).
 func leaderMode(d *spec.Defaults) string {
 	if d == nil {
 		return spec.LeaderStandalone
@@ -208,15 +137,15 @@ func Render(in Input) string {
 
 	// 0. Namespace: emitted first so the objects below land in a namespace that
 	// exists in the same apply (applying it when it already exists is a no-op).
-	sep()
-	w.Line(0, "apiVersion: v1")
-	w.Line(0, "kind: Namespace")
-	w.Line(0, "metadata:")
-	w.Line(2, "name: "+ns)
+	// Omitted for a teardown -- see Input.OmitNamespace for why that matters.
+	if !in.OmitNamespace {
+		sep()
+		w.Raw(NamespaceManifest(ns))
+	}
 
 	// 1. ConfigMap.
 	sep()
-	renderConfigMap(w, in.Instance.Name+"-config", ns, in.Instance.AppYAML, in.Instance.StatusScript, syslogOf(in.Kube))
+	renderConfigMap(w, in.Instance.Name+"-config", ns, in.Instance.AppYAML, in.Instance.StatusScript, in.Syslog)
 
 	// 2. credentials Secret (stringData).
 	if emitCred {
@@ -330,8 +259,8 @@ func renderConfigMap(w *yw, cmName, ns, appYAML, statusScript string, sys *spec.
 		}
 	}
 	if sys != nil {
-		w.Line(2, "logback-spring.xml: |")
-		for _, ln := range yamlwriter.SplitLines(LogbackXML(sys.Protocol)) {
+		w.Line(2, logback.FileName+": |")
+		for _, ln := range yamlwriter.SplitLines(logback.XML(sys.Protocol)) {
 			if ln == "" {
 				w.Raw("\n")
 			} else {
@@ -416,7 +345,7 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 	// env: guarded as a whole, because every entry under it is optional now that
 	// the timezone is a top-level key rather than a required per-platform one --
 	// an unguarded "env:" with nothing beneath it is a null, not an empty list.
-	sys := syslogOf(in.Kube)
+	sys := in.Syslog
 	if inst.Timezone != "" || inst.Model.MQTLS || sys != nil {
 		w.Line(10, "env:")
 	}
@@ -450,10 +379,10 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 	w.Line(14, "mountPath: /app/external/spring/config/application.yml")
 	w.Line(14, "subPath: application.yml")
 	w.Line(14, "readOnly: true")
-	if syslogOf(in.Kube) != nil {
+	if in.Syslog != nil {
 		w.Line(12, "- name: config")
-		w.Line(14, "mountPath: /app/external/classpath/logback-spring.xml")
-		w.Line(14, "subPath: logback-spring.xml")
+		w.Line(14, "mountPath: "+logback.ContainerPath)
+		w.Line(14, "subPath: "+logback.FileName)
 		w.Line(14, "readOnly: true")
 	}
 	if hasStores {
@@ -559,4 +488,19 @@ func renderService(w *yw, name, ns string, port spec.Port) {
 // Input is ever built.
 func ManagementPort(in Input) int {
 	return in.Defaults.EffectiveManagementPort()
+}
+
+// NamespaceManifest is the Namespace document on its own, so the one caller
+// that deletes a namespace can pipe it through the same runner.Kubernetes path
+// (and therefore the same binary allowlist and verb mapping) as every other
+// manifest, instead of building a bespoke argv.
+//
+// It is the same four lines Render emits, spelled once so the two cannot drift.
+func NamespaceManifest(ns string) string {
+	w := &yw{}
+	w.Line(0, "apiVersion: v1")
+	w.Line(0, "kind: Namespace")
+	w.Line(0, "metadata:")
+	w.Line(2, "name: "+ns)
+	return w.String()
 }

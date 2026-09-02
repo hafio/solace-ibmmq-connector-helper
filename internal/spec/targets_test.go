@@ -79,6 +79,12 @@ docker:
 	if d.Name != DefaultConnectorName {
 		t.Errorf("name = %q want %q", d.Name, DefaultConnectorName)
 	}
+	// Unlike ports, project-name IS defaulted: the compose project is not an
+	// exposure decision, and leaving it empty would hand the grouping back to
+	// compose's basename-of-the-directory guess.
+	if d.ProjectName != DefaultComposeProject {
+		t.Errorf("project-name = %q want %q", d.ProjectName, DefaultComposeProject)
+	}
 	if d.Restart != DefaultRestart {
 		t.Errorf("restart = %q want %q", d.Restart, DefaultRestart)
 	}
@@ -98,6 +104,7 @@ docker:
   command: docker --context foo
   image: myimg
   name: custom-name
+  project-name: custom-project
   restart: always
   ports:
     - 9000
@@ -113,6 +120,11 @@ docker:
 	}
 	if d.Name != "custom-name" {
 		t.Errorf("name = %q", d.Name)
+	}
+	// project-name is its own key, not derived from name: a custom name must not
+	// drag the project along with it.
+	if d.ProjectName != "custom-project" {
+		t.Errorf("project-name = %q", d.ProjectName)
 	}
 	if d.Restart != "always" {
 		t.Errorf("restart = %q", d.Restart)

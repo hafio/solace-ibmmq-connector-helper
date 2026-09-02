@@ -17,6 +17,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -88,10 +89,42 @@ type Streamer interface {
 	Stream(ctx context.Context, cmd Cmd, stdout, stderr io.Writer) error
 }
 
-// The production Runner is also the production Streamer. Asserting it here
-// makes a follow-mode caller's type assertion unreachable in production a
-// compile-time fact rather than a hope.
-var _ Streamer = OS{}
+// Attacher is the optional third capability a Runner may have: run one process
+// with the operator's own terminal handed straight to it, and report the status
+// it exited with.
+//
+// It is a separate interface rather than a third method on Runner, or a flag on
+// Cmd, because it answers a question neither of the other two can. Run returns
+// the child's output as a string, which is meaningless for a session whose
+// output never existed as a value -- it went to the terminal as it was typed.
+// Stream copies output through a pair of io.Writers, and an io.Writer is
+// exactly what must not happen here: os/exec interposes an OS pipe for any
+// writer that is not an *os.File, and a pipe is not a terminal, so the engine
+// would refuse the pseudo-terminal it was asked for and the shell would come up
+// with no prompt, no line editing and no job control. The *os.File parameters
+// state that guarantee in the type rather than in a comment -- only a real
+// descriptor can be inherited, and os/exec passes an *os.File through untouched.
+//
+// There is deliberately no context.Context. Stream needs one because a followed
+// log is ended from outside, by the operator pressing Ctrl-C at a terminal the
+// child does not own. An attached session is ended from inside, by the operator
+// typing exit or Ctrl-D at the shell itself, and a cancellable session would
+// invite a caller to pull a shell out from under a half-typed command.
+//
+// A caller asks for this seam by type assertion and fails loudly when the
+// Runner it was handed does not have it, exactly as actLogs does for Streamer;
+// OS has it, pinned below.
+type Attacher interface {
+	Attach(cmd Cmd, stdin, stdout, stderr *os.File) (int, error)
+}
+
+// The production Runner is also the production Streamer and Attacher. Asserting
+// both here makes a follow-mode or session caller's type assertion unreachable
+// in production a compile-time fact rather than a hope.
+var (
+	_ Streamer = OS{}
+	_ Attacher = OS{}
+)
 
 // OS is the production Runner: it runs argv via os/exec with no shell.
 type OS struct{}
@@ -165,8 +198,60 @@ func (OS) Stream(ctx context.Context, c Cmd, stdout, stderr io.Writer) error {
 	return runErr
 }
 
-// resolveArgv0 resolves Argv[0] via exec.LookPath for both Run and Stream, so
-// the refusal rules cannot drift apart between them.
+// Attach runs argv the way Run does -- same PATH resolution, same refusal of a
+// current-directory hit, no shell -- but gives the child the three files it was
+// handed as its own standard input, output and error, and then waits. Nothing
+// is buffered, nothing is copied, and this process writes nothing of its own to
+// any of them.
+//
+// The returned int is the status the child exited with; err is non-nil only
+// when the child could not be started at all. A child that ran and exited
+// non-zero is not an error at this layer: only the caller knows whether that
+// status means the engine could not attach or means the operator's last command
+// failed, and unwrapping the ExitError here is what keeps os/exec out of the
+// caller. A child killed by a signal reports no status of its own, so it is
+// reported as 1 rather than as ExitCode's -1, which is not an exit status any
+// process could have produced.
+//
+// A Cmd carrying Stdin text is refused: "write this string to the child" and
+// "give the child the operator's keyboard" are contradictory requests, and
+// silently honouring one of them is the class of bug LogsArgv's --previous
+// guard exists to prevent. A nil file is refused too, because os/exec treats a
+// typed-nil *os.File in its io.Writer field as a live writer and panics at the
+// first write, which is a worse place to find out than here.
+func (OS) Attach(c Cmd, stdin, stdout, stderr *os.File) (int, error) {
+	if c.Stdin != "" {
+		return 0, fmt.Errorf("an attached session takes the terminal's own stdin, so Cmd.Stdin must be empty")
+	}
+	if stdin == nil || stdout == nil || stderr == nil {
+		return 0, fmt.Errorf("an attached session needs all three of stdin, stdout and stderr")
+	}
+	resolved, err := resolveArgv0(c)
+	if err != nil {
+		return 0, err
+	}
+	cmd := exec.Command(resolved, c.Argv[1:]...) //nolint:gosec // argv tokens are SafeToken-validated upstream; no shell is involved
+	applyCmdEnv(cmd, c)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
+	// No Cancel and no WaitDelay, unlike Stream: there is no context to cancel,
+	// and a session the operator is still typing into must not be killed on a
+	// timer.
+	runErr := cmd.Run()
+	var ee *exec.ExitError
+	if errors.As(runErr, &ee) {
+		if code := ee.ExitCode(); code >= 0 {
+			return code, nil
+		}
+		return 1, nil
+	}
+	if runErr != nil {
+		return 0, runErr
+	}
+	return 0, nil
+}
+
+// resolveArgv0 resolves Argv[0] via exec.LookPath for Run, Stream and Attach,
+// so the refusal rules cannot drift apart between them.
 func resolveArgv0(c Cmd) (string, error) {
 	if len(c.Argv) == 0 {
 		return "", fmt.Errorf("empty command")
@@ -181,17 +266,27 @@ func resolveArgv0(c Cmd) (string, error) {
 	return resolved, nil
 }
 
+// applyCmdEnv wires Env onto an exec.Cmd, shared by Run, Stream and Attach so
+// the credential channel behaves identically in all three.
+//
+// It is split out of applyCmdInput below because Attach needs this half alone:
+// it hands the child the operator's real terminal as stdin, so the string-stdin
+// wiring below is not merely unnecessary there but would clobber it.
+func applyCmdEnv(cmd *exec.Cmd, c Cmd) {
+	if len(c.Env) > 0 {
+		// Appended after the inherited environment so a supplied value wins over
+		// an ambient one of the same name.
+		cmd.Env = append(os.Environ(), c.Env...)
+	}
+}
+
 // applyCmdInput wires Stdin and Env onto an exec.Cmd, shared by Run and Stream
 // so the credential channel behaves identically in both.
 func applyCmdInput(cmd *exec.Cmd, c Cmd) {
 	if c.Stdin != "" {
 		cmd.Stdin = strings.NewReader(c.Stdin)
 	}
-	if len(c.Env) > 0 {
-		// Appended after the inherited environment so a supplied value wins over
-		// an ambient one of the same name.
-		cmd.Env = append(os.Environ(), c.Env...)
-	}
+	applyCmdEnv(cmd, c)
 }
 
 // ParseCommand splits a command string into an argv slice on whitespace (the
@@ -556,6 +651,26 @@ func KubernetesGetJSON(r Runner, cmd []string, namespace, kind, name string) (st
 	return out, nil
 }
 
+// KubernetesListJSON lists every object of the given types in a namespace:
+// `<cmd> get <types> -n <ns> -o json`.
+//
+// types is a tool-authored constant (a comma-separated kubectl resource list),
+// never operator input. It is separate from KubernetesGetJSON because that one
+// appends a name unconditionally, and an empty name there would put an empty
+// element in the argv rather than listing everything.
+func KubernetesListJSON(r Runner, cmd []string, namespace, types string) (string, error) {
+	argv := append(append([]string(nil), cmd...), "get", types)
+	if namespace != "" {
+		argv = append(argv, "-n", namespace)
+	}
+	argv = append(argv, "-o", "json")
+	out, err := r.Run(Cmd{Argv: argv})
+	if err != nil {
+		return out, fmt.Errorf("listing %s in namespace %q: %w\n%s", types, namespace, err, out)
+	}
+	return out, nil
+}
+
 // KubernetesTop samples pod resource usage:
 // `<cmd> top pod [names|-l selector] --containers --no-headers`.
 //
@@ -684,21 +799,69 @@ func SystemctlNRestarts(r Runner, sc QuadletScope, unit string) (int, error) {
 	return n, nil
 }
 
-// execArgv builds the `<cmd> exec` argv prefix shared by ScriptInstalled,
-// InstallScript, and RunStatusScript, keeping the per-platform shape in one
-// place instead of repeating it in each helper.
+// ContainerShell is the shell every in-container command is run through. The
+// connector image is Alpine, so its userland is busybox: sh exists, bash does
+// not -- the same assumption statusscript's package comment records for the
+// script it renders. Spelled as a constant because it is the one token on these
+// argvs that is a property of the image rather than of the engine.
+const ContainerShell = "sh"
+
+// ExecOpts is how one exec is shaped: whether the child reads standard input,
+// and whether the engine is asked for a terminal.
 //
-// kubectl/oc need the namespace as a flag and a "--" separator before the
-// in-container command; docker and podman exec take the command directly
-// after the target, with no namespace concept and no separator. interactive
-// adds -i, needed only when the caller pipes something on stdin.
+// Stdin adds -i, needed whenever anything is written to the child's standard
+// input -- a piped payload (InstallScript) or the operator's own keyboard. TTY
+// adds -t, which asks the engine for a pseudo-terminal so a remote shell gets a
+// prompt, line editing and job control.
 //
-// target and namespace are operator-supplied and must already be validated by
-// the caller before reaching this function.
-func execArgv(cmd []string, platform, target, namespace string, interactive bool) ([]string, error) {
+// A struct rather than two positional bools, for the reason LogsOpts is one:
+// execArgv(cmd, p, t, ns, true, false) says nothing at a call site about which
+// flag is which, and the two are one transposition away from asking for a
+// terminal that nothing can type into.
+type ExecOpts struct {
+	Stdin bool
+	TTY   bool
+}
+
+// ExecArgv builds the `<cmd> exec` argv prefix shared by ScriptInstalled,
+// InstallScript, RunStatusScript and the cli verb's attached session, keeping
+// the per-platform shape in one place instead of repeating it in each caller.
+//
+// The shapes differ in more than spelling, and the difference is a parser
+// difference rather than a style one. kubectl leaves its flag parser
+// interspersed, so the namespace and container flags are accepted after the pod
+// positional, and a "--" is required to mark where the in-container command
+// begins. docker and podman deliberately stop interspersing on exec, so that a
+// flag typed after the container name belongs to the in-container program --
+// which means their own flags must come first, and a "--" would be handed
+// through to the container as an argument rather than swallowed.
+//
+// The container is always spec.ConnectorContainerName rather than a name
+// discovered from the pod. This tool renders that name, so naming it outright
+// is what makes a multi-container pod fail loudly ("container connector not
+// found in pod ...") instead of quietly reaching whichever container kubectl
+// would have defaulted to -- the same judgement connectorIndex records for the
+// reporting side, applied one layer out. The cost is that a pod this tool did
+// not deploy, whose container is called something else, is no longer reachable;
+// accepted, because silently reading a sidecar is the worse of the two answers.
+//
+// The caller appends the in-container command itself, which is either
+// tool-authored (ContainerShell, or a payload built from constants) or already
+// SafeToken-validated. target and namespace are operator-supplied and must
+// already be validated by the caller before reaching this function.
+func ExecArgv(cmd []string, platform, target, namespace string, o ExecOpts) ([]string, error) {
+	if o.TTY && !o.Stdin {
+		// Unreachable via the CLI, which never asks for one without the other.
+		// Guarded anyway so a future caller cannot quietly get a terminal it has
+		// no way to type into.
+		return nil, fmt.Errorf("a tty needs stdin: ask for both or neither")
+	}
 	argv := append(append([]string(nil), cmd...), "exec")
-	if interactive {
+	if o.Stdin {
 		argv = append(argv, "-i")
+	}
+	if o.TTY {
+		argv = append(argv, "-t")
 	}
 	switch platform {
 	case validate.PlatformKubernetes:
@@ -706,7 +869,7 @@ func execArgv(cmd []string, platform, target, namespace string, interactive bool
 		if namespace != "" {
 			argv = append(argv, "-n", namespace)
 		}
-		argv = append(argv, "--")
+		argv = append(argv, "-c", spec.ConnectorContainerName, "--")
 	case validate.PlatformDocker, validate.PlatformPodman:
 		argv = append(argv, target)
 	default:
@@ -726,20 +889,15 @@ const TailAll = -1
 //
 // Since is already a canonical time.Duration string when it reaches here: the
 // CLI parses the operator's spelling and passes the parsed form on, so no raw
-// operator text is in this struct. Container and the target are operator- or
-// engine-supplied and must already be validated by the caller.
+// operator text is in this struct.
 type LogsOpts struct {
 	Follow, Previous, Timestamps bool
 	Tail                         int
 	Since                        string
-	// Container names which container in a multi-container pod to read. Empty
-	// leaves the choice to the platform, which is correct for docker/podman
-	// (one container per target) and for a single-container pod.
-	Container string
 }
 
 // LogsArgv builds the argv that reads one instance's log, keeping the
-// per-platform shape in one place the way execArgv does for exec.
+// per-platform shape in one place the way ExecArgv does for exec.
 //
 // The two shapes differ in more than spelling: kubectl takes the pod as a
 // positional with the namespace and container as flags, while docker and podman
@@ -748,9 +906,13 @@ type LogsOpts struct {
 // under the same name -- and is refused by the caller before it gets here
 // rather than being silently dropped.
 //
-// target, namespace and o.Container are operator- or engine-supplied and must
-// already be validated by the caller. Everything else this function appends is
-// a tool-authored constant or a number.
+// The container is spec.ConnectorContainerName, named outright for the reason
+// ExecArgv records: the tool renders that name, and a pod it cannot find it in
+// should say so rather than return some other container's log.
+//
+// target and namespace are operator-supplied and must already be validated by
+// the caller. Everything else this function appends is a tool-authored constant
+// or a number.
 func LogsArgv(cmd []string, platform, target, namespace string, o LogsOpts) ([]string, error) {
 	argv := append(append([]string(nil), cmd...), "logs")
 	switch platform {
@@ -759,9 +921,7 @@ func LogsArgv(cmd []string, platform, target, namespace string, o LogsOpts) ([]s
 		if namespace != "" {
 			argv = append(argv, "-n", namespace)
 		}
-		if o.Container != "" {
-			argv = append(argv, "-c", o.Container)
-		}
+		argv = append(argv, "-c", spec.ConnectorContainerName)
 		if o.Previous {
 			argv = append(argv, "-p")
 		}
@@ -824,7 +984,7 @@ const (
 // into the sh -c payload as-is. target and namespace are operator-supplied and
 // must already be validated by the caller.
 func ScriptInstalled(r Runner, cmd []string, platform, target, namespace, path string) (bool, error) {
-	argv, err := execArgv(cmd, platform, target, namespace, false)
+	argv, err := ExecArgv(cmd, platform, target, namespace, ExecOpts{})
 	if err != nil {
 		return false, err
 	}
@@ -835,7 +995,7 @@ func ScriptInstalled(r Runner, cmd []string, platform, target, namespace, path s
 	// pod are indistinguishable by exit status alone -- and treating the wrong
 	// one as an error would refuse to install on exactly the targets that need
 	// it. path is a tool constant, never operator input.
-	argv = append(argv, "sh", "-c", "if [ -f "+path+" ]; then echo "+ScriptPresentMarker+"; else echo "+ScriptAbsentMarker+"; fi")
+	argv = append(argv, ContainerShell, "-c", "if [ -f "+path+" ]; then echo "+ScriptPresentMarker+"; else echo "+ScriptAbsentMarker+"; fi")
 	out, runErr := r.Run(Cmd{Argv: argv})
 	switch {
 	case strings.Contains(out, ScriptPresentMarker):
@@ -857,11 +1017,11 @@ func ScriptInstalled(r Runner, cmd []string, platform, target, namespace, path s
 // the sh -c payload is built from them as-is. target and namespace are
 // operator-supplied and must already be validated by the caller.
 func InstallScript(r Runner, cmd []string, platform, target, namespace, dir, path, script string) (string, error) {
-	argv, err := execArgv(cmd, platform, target, namespace, true)
+	argv, err := ExecArgv(cmd, platform, target, namespace, ExecOpts{Stdin: true})
 	if err != nil {
 		return "", err
 	}
-	argv = append(argv, "sh", "-c", "mkdir -p "+dir+" && cat > "+path)
+	argv = append(argv, ContainerShell, "-c", "mkdir -p "+dir+" && cat > "+path)
 	return r.Run(Cmd{Argv: argv, Stdin: script})
 }
 
@@ -879,10 +1039,10 @@ func InstallScript(r Runner, cmd []string, platform, target, namespace, dir, pat
 // namespace are operator-supplied and must already be validated by the
 // caller.
 func RunStatusScript(r Runner, cmd []string, platform, target, namespace, path string) (string, error) {
-	argv, err := execArgv(cmd, platform, target, namespace, false)
+	argv, err := ExecArgv(cmd, platform, target, namespace, ExecOpts{})
 	if err != nil {
 		return "", err
 	}
-	argv = append(argv, "sh", path)
+	argv = append(argv, ContainerShell, path)
 	return r.Run(Cmd{Argv: argv})
 }

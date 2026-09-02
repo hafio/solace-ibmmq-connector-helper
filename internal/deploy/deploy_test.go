@@ -254,8 +254,8 @@ func TestRenderNoSecretsNoServiceNoTLS(t *testing.T) {
 
 func TestRenderSyslogUDP(t *testing.T) {
 	k := baseKube()
-	k.Logging = &spec.Logging{Syslog: &spec.Syslog{Host: "sys.host", Port: 514, Protocol: spec.SyslogUDP}}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	sys := &spec.Syslog{Host: "sys.host", Port: 514, Protocol: spec.SyslogUDP}
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Syslog: sys, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	for _, want := range []string{
 		"logback-spring.xml: |", "ch.qos.logback.classic.net.SyslogAppender",
 		"- name: LOGGING_SYSLOG_APPNAME", "value: solmq",
@@ -274,8 +274,8 @@ func TestRenderSyslogUDP(t *testing.T) {
 
 func TestRenderSyslogTCP(t *testing.T) {
 	k := baseKube()
-	k.Logging = &spec.Logging{Syslog: &spec.Syslog{Host: "sys.host", Port: 6514, Protocol: spec.SyslogTCP}}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	sys := &spec.Syslog{Host: "sys.host", Port: 6514, Protocol: spec.SyslogTCP}
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Syslog: sys, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	for _, want := range []string{"LogstashTcpSocketAppender", "<destination>${SYSLOG_HOST}:${SYSLOG_PORT}</destination>"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q", want)
@@ -498,5 +498,46 @@ func TestRenderServicePort(t *testing.T) {
 		if want := svcBlock(c.port); !strings.Contains(out, want) {
 			t.Errorf("%s: want\n%s\ngot\n%s", c.name, want, out)
 		}
+	}
+}
+
+// TestOmitNamespaceIsWhatMakesTeardownSafe pins the reason OmitNamespace exists.
+// A manifest carrying a Namespace, piped to `kubectl delete -f -`, deletes the
+// namespace and cascades to every object inside it -- including workloads this
+// tool never deployed. apply needs the document; delete must not have it.
+func TestOmitNamespaceIsWhatMakesTeardownSafe(t *testing.T) {
+	k := baseKube()
+	inst := one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})
+
+	applyManifest := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
+	if !strings.Contains(applyManifest, "kind: Namespace") {
+		t.Errorf("apply still needs the Namespace document, got:\n%s", applyManifest)
+	}
+
+	deleteManifest := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst, OmitNamespace: true})
+	if strings.Contains(deleteManifest, "kind: Namespace") {
+		t.Fatalf("a teardown manifest must carry no Namespace, got:\n%s", deleteManifest)
+	}
+	// Everything else is still there, and the document that was first is now the
+	// ConfigMap -- so dropping doc 0 must not leave a leading separator.
+	if strings.HasPrefix(deleteManifest, "---") {
+		t.Errorf("omitting the first document must not leave a leading separator, got:\n%s", deleteManifest)
+	}
+	for _, want := range []string{"kind: ConfigMap", "kind: Deployment"} {
+		if !strings.Contains(deleteManifest, want) {
+			t.Errorf("teardown manifest is missing %q, got:\n%s", want, deleteManifest)
+		}
+	}
+}
+
+// TestNamespaceManifestMatchesWhatRenderEmits keeps the standalone document and
+// the one inside Render from drifting: the namespace delete pipes the former
+// through the same path the full manifest uses.
+func TestNamespaceManifestMatchesWhatRenderEmits(t *testing.T) {
+	k := baseKube()
+	full := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	solo := NamespaceManifest(k.Deployment.Namespace)
+	if !strings.HasPrefix(full, solo) {
+		t.Errorf("Render should start with exactly NamespaceManifest, got:\n%s\nwant prefix:\n%s", full, solo)
 	}
 }

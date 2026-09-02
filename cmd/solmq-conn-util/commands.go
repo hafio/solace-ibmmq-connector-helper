@@ -47,6 +47,18 @@ const platformSpan = bt + platformFlagName + bt
 // installFlagName is status's --install flag (no short alias).
 const installFlagName = "--install"
 
+// noPromptFlagName is remove's confirmation skip (no short alias). It names
+// what it does -- ask nothing -- which covers both questions a teardown asks:
+// the confirmation, and whether to remove a namespace that turned out empty.
+//
+// Deliberately not -f/--force: cliFlags is keyed by Short across every verb, and
+// -f already means "overwrite existing files" for examples/download. One key
+// carrying two unrelated meanings would make that entry's own prose untrue.
+const noPromptFlagName = "--no-prompt"
+
+// noPromptSpan is the markdown code span for --no-prompt, for the remove Detail.
+const noPromptSpan = bt + noPromptFlagName + bt
+
 // urlFlagName is download's repeatable explicit-URL override (no short
 // alias): when given, no Maven resolution happens at all.
 const urlFlagName = "--url"
@@ -138,9 +150,9 @@ const platformResolutionDetail = "The platform is resolved in order: " + platfor
 	bt + "kubernetes:" + bt + "/" + bt + "docker:" + bt + "/" + bt + "podman:" + bt +
 	" section in env.yaml, when exactly one is present; otherwise an interactive menu, when more than one is present. A " +
 	platformSpan + " value with no matching section in env.yaml is a loud error, and so are zero sections. " +
-	bt + "status" + bt + " and " + bt + "logs" + bt + " are the exception, and only when the operator has already named the instances themselves (" + bt + podFlagName + bt + "/" + bt + containerFlagName + bt + ", or " + bt + allFlagName + bt + ") alongside an explicit " + platformSpan +
-	": there is then nothing left to read from env.yaml, so a missing file and a section-less platform are both fine -- which is how an instance this tool never deployed is reached. The menu -- and, under " +
-	bt + "status" + bt + ", the install confirmation prompt -- never block when stdin is not a TTY; both fail with the same guidance instead of hanging."
+	bt + "status" + bt + ", " + bt + "logs" + bt + " and " + bt + "cli" + bt + " are the exception, and only when the operator has already named the instances themselves (" + bt + podFlagName + bt + "/" + bt + containerFlagName + bt + ", or " + bt + allFlagName + bt + " under " + bt + "status" + bt + ") alongside an explicit " + platformSpan +
+	": there is then nothing left to read from env.yaml, so a missing file and a section-less platform are both fine -- which is how an instance this tool never deployed is reached. The menu -- and " +
+	bt + "status" + bt + "'s install confirmation, and " + bt + "remove" + bt + "'s teardown confirmation -- never block when stdin is not a TTY; all three fail with the same guidance (naming the flag that skips them) instead of hanging."
 
 // platformResolutionPointer is the one-line cross-reference each platform verb's
 // Detail ends with instead of restating platformResolutionDetail five times.
@@ -228,11 +240,11 @@ var cliFlags = []cliFlag{
 	// argName, not argFile: the value must be a bare, PATH-resolved binary name
 	// (allowCommandValue rejects a path), so offering filenames would suggest
 	// exactly what the flag refuses.
-	{Short: allowCommandFlagName, Long: allowCommandFlagName, AppliesTo: bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "status" + bt + "/" + bt + "logs" + bt, Meaning: "approve an extra command binary beyond the " + cmdFieldSpan + " allowlist; repeatable", Arg: argName, Usage: "approve an extra command binary beyond the platform allowlist (repeatable)"},
+	{Short: allowCommandFlagName, Long: allowCommandFlagName, AppliesTo: bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "approve an extra command binary beyond the " + cmdFieldSpan + " allowlist; repeatable", Arg: argName, Usage: "approve an extra command binary beyond the platform allowlist (repeatable)"},
 	// argName: the model has no enumerated-value kind (only argNone/argFile/
 	// argName), so this value offers no shell suggestions even though it is one
 	// of three fixed words. Adding a kind means teaching all four renderers.
-	{Short: platformFlagName, Long: platformFlagName, AppliesTo: bt + "generate" + bt + "/" + bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "status" + bt + "/" + bt + "logs" + bt, Meaning: "the platform: " + bt + "kubernetes" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " (short: " + bt + "kube" + bt + ", " + bt + "dk" + bt + ", " + bt + "pm" + bt + "; default: resolved from env.yaml, or an interactive menu -- see Platform resolution)", Arg: argName, Usage: "kubernetes, docker, or podman (short: kube, dk, pm; default: from env.yaml, or a menu)"},
+	{Short: platformFlagName, Long: platformFlagName, AppliesTo: bt + "generate" + bt + "/" + bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "the platform: " + bt + "kubernetes" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " (short: " + bt + "kube" + bt + ", " + bt + "dk" + bt + ", " + bt + "pm" + bt + "; default: resolved from env.yaml, or an interactive menu -- see Platform resolution)", Arg: argName, Usage: "kubernetes, docker, or podman (short: kube, dk, pm; default: from env.yaml, or a menu)"},
 	// argName, not argFile: a URL is not a filesystem path, so offering file
 	// suggestions would suggest exactly the wrong kind of value.
 	{Short: urlFlagName, Long: urlFlagName, AppliesTo: bt + "download" + bt, Meaning: "exact URL to download instead of Maven resolution; repeatable; when given, no resolution happens at all", Arg: argName, Usage: "exact URL to download instead of Maven resolution (repeatable)"},
@@ -240,16 +252,17 @@ var cliFlags = []cliFlag{
 	{Short: omitLibFileFlagName, Long: omitLibFileFlagName, AppliesTo: bt + "download" + bt, Meaning: "a jar list that replaces (never merges with) the embedded default the omission rule compares against; an empty file omits nothing", Arg: argFile, Usage: "replace the built-in jar list the omission rule compares against"},
 	{Short: includeProvidedFlagName, Long: includeProvidedFlagName, AppliesTo: bt + "download" + bt, Meaning: "download the whole closure even where the connector image already provides a jar, instead of omitting it", Arg: argNone, Usage: "download the whole closure even where the image already ships a jar"},
 	{Short: installFlagName, Long: installFlagName, AppliesTo: bt + "status" + bt, Meaning: "install the status script on every instance without prompting", Arg: argNone, Usage: "install the status script on every instance without prompting"},
+	{Short: noPromptFlagName, Long: noPromptFlagName, AppliesTo: bt + "remove" + bt, Meaning: "tear down without asking anything -- what a script or CI job passes, since the prompts refuse to read a non-TTY rather than hang. It covers both questions: the teardown confirmation, and whether to remove a namespace that turned out to be empty. It cannot authorise more than that: a namespace holding anything this release does not own is never removed, with or without it", Arg: argNone, Usage: "tear down without asking for confirmation"},
 	{Short: detailsFlagShort, Long: detailsFlagName, AppliesTo: bt + "status" + bt, Meaning: "add the enrichment lines each view can report: worker node, CPU/memory use against allocation, image digest and referenced components; app version, java version, config path and heap", Arg: argNone, Usage: "add node, cpu/memory, digest, components; application version, java, config, heap"},
 	{Short: watchFlagShort, Long: watchFlagName, AppliesTo: bt + "status" + bt, Meaning: "re-render the report every 5s until interrupted (Ctrl-C)", Arg: argNone, Usage: "re-render the report every 5s until interrupted"},
-	{Short: allFlagName, Long: allFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt, Meaning: "reach every connector instance found by image name (" + bt + statusreport.ImageMatch + bt + ") instead of the ones " + bt + "env.yaml" + bt + " describes -- every namespace on kubernetes, every container on docker/podman; cannot be combined with " + bt + podFlagName + bt + "/" + bt + containerFlagName + bt + ", nor with " + bt + followFlagName + bt + " under " + bt + "logs" + bt, Arg: argNone, Usage: "reach every instance found by image name instead of the ones env.yaml describes"},
+	{Short: allFlagName, Long: allFlagName, AppliesTo: bt + "status" + bt, Meaning: "reach every connector instance found by image name (" + bt + statusreport.ImageMatch + bt + ") instead of the ones " + bt + "env.yaml" + bt + " describes -- every namespace on kubernetes, every container on docker/podman; cannot be combined with " + bt + podFlagName + bt + "/" + bt + containerFlagName + bt, Arg: argNone, Usage: "reach every instance found by image name instead of the ones env.yaml describes"},
 	{Short: outputFlagName, Long: outputFlagName, AppliesTo: bt + "status" + bt, Meaning: "output format: " + bt + "table" + bt + " (default) or " + bt + "json" + bt + ", one machine-readable document per run; " + bt + "json" + bt + " cannot be combined with " + bt + watchFlagName + bt, Arg: argName, Usage: "table (default) or json"},
-	{Short: podFlagName, Long: podFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt, Meaning: "limit to this kubernetes pod name; repeatable (default: every running pod); no effect on docker/podman", Arg: argName, Usage: "limit to this kubernetes pod (repeatable)"},
-	{Short: containerFlagName, Long: containerFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt, Meaning: "limit to this docker/podman container name; repeatable (default: every running container); no effect on kubernetes", Arg: argName, Usage: "limit to this docker/podman container (repeatable)"},
-	{Short: namespaceFlagName, Long: namespaceFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt, Meaning: "kubernetes namespace to query (default: the namespace of the deployment in env.yaml); no effect on docker/podman", Arg: argName, Usage: "kubernetes namespace to query"},
+	{Short: podFlagName, Long: podFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "the kubernetes pod to reach, by name or by index into the listed order (alphabetical, the order " + bt + "status" + bt + " prints); a name always wins over the index reading. Repeatable on " + bt + "status" + bt + "; on " + bt + "logs" + bt + " and " + bt + "cli" + bt + ", which reach one instance, it may be given once. Default: every running pod on " + bt + "status" + bt + ", and on " + bt + "logs" + bt + "/" + bt + "cli" + bt + " the matching instances are listed instead. No effect on docker/podman", Arg: argName, Usage: "the kubernetes pod, by name or index (repeatable on status, once on logs)"},
+	{Short: containerFlagName, Long: containerFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "the docker/podman container to reach, by name or by index into the listed order (alphabetical, the order " + bt + "status" + bt + " prints); a name always wins over the index reading. Repeatable on " + bt + "status" + bt + "; on " + bt + "logs" + bt + " and " + bt + "cli" + bt + ", which reach one instance, it may be given once. Default: every running container on " + bt + "status" + bt + ", and on " + bt + "logs" + bt + "/" + bt + "cli" + bt + " the one the section in env.yaml names. No effect on kubernetes", Arg: argName, Usage: "the docker/podman container, by name or index (repeatable on status, once on logs)"},
+	{Short: namespaceFlagName, Long: namespaceFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "kubernetes namespace to query (default: the namespace of the deployment in env.yaml); no effect on docker/podman", Arg: argName, Usage: "kubernetes namespace to query"},
 	{Short: managementPortFlagName, Long: managementPortFlagName, AppliesTo: bt + "status" + bt, Meaning: "actuator management port to reach inside each instance (default: the configured management port)", Arg: argName, Usage: "actuator management port inside each instance"},
 	{Short: userFlagName, Long: userFlagName, AppliesTo: bt + "status" + bt, Meaning: "actuator account the status script authenticates as (default " + bt + spec.StatusUserName + bt + ")", Arg: argName, Usage: "actuator account the status script authenticates as (default solmq-status)"},
-	{Short: commandFlagName, Long: commandFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt, Meaning: "override the platform CLI binary (" + bt + "kubectl" + bt + "/" + bt + "oc" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + ") used to reach each instance, instead of the " + cmdFieldSpan + " in that section", Arg: argName, Usage: "override the platform CLI binary used to reach each instance"},
+	{Short: commandFlagName, Long: commandFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "override the platform CLI binary (" + bt + "kubectl" + bt + "/" + bt + "oc" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + ") used to reach each instance, instead of the " + cmdFieldSpan + " in that section", Arg: argName, Usage: "override the platform CLI binary used to reach each instance"},
 	{Short: followFlagName, Long: followFlagName, AppliesTo: bt + "logs" + bt, Meaning: "keep the log open and print new lines as they arrive, until interrupted (Ctrl-C); reads one instance, so it cannot be combined with " + bt + allFlagName + bt + " or " + bt + previousFlagName + bt, Arg: argNone, Usage: "keep the log open and print new lines until interrupted"},
 	{Short: previousFlagName, Long: previousFlagName, AppliesTo: bt + "logs" + bt, Meaning: "read the log of the previous container instead of the running one -- what a pod that is restarting printed before it died; kubernetes only, since neither docker nor podman keeps a prior run under the same name", Arg: argNone, Usage: "read the log of the previous container instead of the running one (kubernetes only)"},
 	{Short: tailFlagName, Long: tailFlagName, AppliesTo: bt + "logs" + bt, Meaning: "read only the last N lines, or " + bt + "all" + bt + " for the whole log (default: " + bt + "all" + bt + ")", Arg: argName, Usage: "read only the last N lines, or all (default: all)"},
@@ -281,13 +294,19 @@ var cliVerbs = []cliVerb{
 		Detail:     "Generates for the platform, then applies it by shelling out to the section's " + cmdFieldSpan + " (" + bt + "kubectl" + bt + "/" + bt + "oc" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " + " + bt + "systemctl" + bt + ") through an argv slice -- never a shell. The env file must contain the matching section. " + cmdFieldSpan + "'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); " + allowCommandSpan + " approves an extra binary for this invocation (e.g. a " + bt + "sudo" + bt + " prefix). Before anything is written or applied, a read-only preflight probe (login/permission check) must succeed, or the run stops with a login hint. " + platformResolutionPointer,
 	},
 	{
-		Name: "remove", Args: platformArgBracket + " [-e env.yaml] [" + allowCommandFlagName + " name]",
-		Flags: []string{platformFlagName, "-e", allowCommandFlagName}, PosArg: posNone, Aliases: []string{"rm"},
+		Name: "remove", Args: platformArgBracket + " [" + noPromptFlagName + "] [-e env.yaml] [" + allowCommandFlagName + " name]",
+		Flags: []string{noPromptFlagName, platformFlagName, "-e", allowCommandFlagName}, PosArg: posNone, Aliases: []string{"rm"},
 		Synopsis:   "remove [flags]",
 		Summary:    "Tear down what deploy created for a platform",
 		Example:    "solmq-conn-util remove --platform kubernetes -e env.yaml",
-		TreeSuffix: bt + platformArgBracket + bt,
-		Detail:     "Tears down what " + bt + "deploy" + bt + " created for the platform, the same way (via the section's " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", and the same read-only preflight probe before anything is torn down). " + platformResolutionPointer,
+		TreeSuffix: bt + platformArgBracket + bt + " " + bt + "[" + noPromptFlagName + "]" + bt,
+		Detail: "Tears down what " + bt + "deploy" + bt + " created for the platform, the same way (via the section's " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", and the same read-only preflight probe before anything is torn down). " +
+			"Because it is the one verb that destroys rather than creates, it asks for confirmation first, naming what it is about to tear down -- the deployment and its namespace on kubernetes, the container on docker/podman -- so a run pointed at the wrong " + bt + "env.yaml" + bt + " is caught before anything is deleted. " +
+			"Answering anything but " + bt + "y" + bt + "/" + bt + "yes" + bt + " cancels and exits 0, having touched nothing at all: the question comes before even the preflight probe. " +
+			noPromptSpan + " skips the prompt, which is what a script or CI job passes -- without it a non-TTY run fails fast with that hint rather than hanging on a read that will never return. " +
+			"On kubernetes the namespace is handled separately, and never as part of the manifest delete: deleting a Namespace cascades to every object inside it, including workloads this tool never deployed. " +
+			"So once the teardown succeeds, " + bt + "remove" + bt + " looks at what is left in the namespace. Anything this release does not own -- another deployment, a stateful set, a volume claim, a secret -- is listed and the namespace is kept. Only a namespace with nothing else in it is offered for removal, as its own separate question. " +
+			"That is an invariant rather than a default: no flag removes a namespace that still holds someone else's work. The cluster namespaces (" + bt + "default" + bt + ", " + bt + "kube-system" + bt + ", " + bt + "kube-public" + bt + ", " + bt + "kube-node-lease" + bt + ") are never removed either, and a check that cannot run leaves the namespace alone rather than assuming it is empty. " + platformResolutionPointer,
 	},
 	{
 		Name: "status", Args: statusTargetArgBracket + " [" + detailsFlagName + "] [" + watchFlagName + "] [" + allFlagName + "] [" + outputFlagName + " table|json] [" + installFlagName + "] " + platformArgBracket + " [-e env.yaml] [" + podFlagName + " name] [" + containerFlagName + " name] [" + namespaceFlagName + " ns] [" + managementPortFlagName + " port] [" + userFlagName + " name] [" + commandFlagName + " name] [" + allowCommandFlagName + " name]",
@@ -325,21 +344,41 @@ var cliVerbs = []cliVerb{
 		},
 	},
 	{
-		Name: "logs", Args: "[" + followFlagName + "] [" + previousFlagName + "] [" + tailFlagName + " N] [" + sinceFlagName + " d] [" + timestampsFlagName + "] [" + allFlagName + "] " + platformArgBracket + " [-e env.yaml] [" + podFlagName + " name] [" + containerFlagName + " name] [" + namespaceFlagName + " ns] [" + commandFlagName + " name] [" + allowCommandFlagName + " name]",
-		Flags:  []string{followFlagName, previousFlagName, tailFlagName, sinceFlagName, timestampsFlagName, allFlagName, platformFlagName, "-e", podFlagName, containerFlagName, namespaceFlagName, commandFlagName, allowCommandFlagName},
+		Name: "logs", Args: "[" + followFlagName + "] [" + previousFlagName + "] [" + tailFlagName + " N] [" + sinceFlagName + " d] [" + timestampsFlagName + "] " + platformArgBracket + " [-e env.yaml] [" + podFlagName + " name|index] [" + containerFlagName + " name|index] [" + namespaceFlagName + " ns] [" + commandFlagName + " name] [" + allowCommandFlagName + " name]",
+		Flags:  []string{followFlagName, previousFlagName, tailFlagName, sinceFlagName, timestampsFlagName, platformFlagName, "-e", podFlagName, containerFlagName, namespaceFlagName, commandFlagName, allowCommandFlagName},
 		PosArg: posNone, Aliases: []string{"lg"},
 		Synopsis:   "logs [flags]",
-		Summary:    "Print each instance log, where status says what but not why",
+		Summary:    "Print one instance log, where status says what but not why",
 		Example:    "solmq-conn-util logs " + tailFlagName + " 100 -e env.yaml",
 		TreeSuffix: bt + "[" + followFlagName + "]" + bt + " " + bt + "[" + previousFlagName + "]" + bt + " " + bt + platformArgBracket + bt,
-		Detail: "Prints what each connector instance of the resolved platform has written, read through the same read-only " + bt + "kubectl" + bt + "/" + bt + "docker" + bt + "/" + bt + "podman" + bt + " path " + bt + "status" + bt + " uses -- the same " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", and the same preflight probe -- and discovering the same instances from " + bt + "env.yaml" + bt + ", so the two verbs can never disagree about which ones they mean. " +
+		Detail: "Prints what one connector instance of the resolved platform has written, read through the same read-only " + bt + "kubectl" + bt + "/" + bt + "docker" + bt + "/" + bt + "podman" + bt + " path " + bt + "status" + bt + " uses -- the same " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", and the same preflight probe -- and discovering the same instances from " + bt + "env.yaml" + bt + ", so the two verbs can never disagree about which ones they mean. " +
 			"It is the answer to the question " + bt + "status" + bt + " leaves open: that view reports a restart count and an exit code, and this one reports the lines that preceded them. " +
+			"One instance is read per run. When discovery finds several and none was named, nothing is read: the matching instances are listed on stdout as commands that can be pasted back verbatim, carrying the flags already typed, and the run exits 0. " +
+			bt + podFlagName + bt + " and " + bt + containerFlagName + bt + " name the instance, and each may be given once -- a second is refused rather than silently losing the first. " +
+			"Either accepts an **index** as well as a name: " + bt + podFlagName + " 0" + bt + " is the first instance in the listed order, which is alphabetical by name and the same order " + bt + "status" + bt + " prints. A name always wins, so an instance genuinely called " + bt + "0" + bt + " is still reachable by name. " +
 			previousSpan + " is the pairing that matters most -- it reads what the previous container printed before it died, which is the only place a crash loop explains itself; kubernetes keeps that log, docker and podman do not, so it is refused there rather than quietly ignored. " +
-			followSpan + " keeps the log open and prints new lines until interrupted (Ctrl-C, which is a clean exit, not a failure). It reads one instance, so it cannot be combined with " + allSpan + ", and it will not guess when discovery finds several -- it names them and asks for " + bt + podFlagName + bt + " instead. " +
+			followSpan + " keeps the log open and prints new lines until interrupted (Ctrl-C, which is a clean exit, not a failure). " +
 			tailSpan + " limits how far back the read starts (" + bt + tailFlagName + " all" + bt + " is the default), " + sinceSpan + " limits it by age, and " + timestampsSpan + " prefixes each line with the time the platform recorded. " +
-			allSpan + " ignores the instance names in " + bt + "env.yaml" + bt + " and reads every connector instance it can find by image name (" + bt + statusreport.ImageMatch + bt + "), across every namespace on kubernetes and every container on docker/podman. " +
-			bt + podFlagName + bt + " and " + bt + containerFlagName + bt + " (both repeatable) name instances directly, " + bt + namespaceFlagName + bt + " overrides the kubernetes namespace, " + bt + commandFlagName + bt + " overrides the platform CLI binary, and " + allowCommandSpan + " approves an extra one, the same as status. " +
-			"One instance prints its log alone, so the output pipes cleanly; several are separated by a " + bt + "==> name <==" + bt + " heading each. An instance that cannot be read is reported against itself and the rest are still printed, and the run then exits 1. " + platformResolutionPointer,
+			bt + namespaceFlagName + bt + " overrides the kubernetes namespace, " + bt + commandFlagName + bt + " overrides the platform CLI binary, and " + allowCommandSpan + " approves an extra one, the same as status. " +
+			"The log itself goes to stdout and everything else to stderr, so " + bt + "logs > app.log" + bt + " captures the log and nothing but. " + platformResolutionPointer,
+	},
+	{
+		Name: "cli", Args: platformArgBracket + " [-e env.yaml] [" + podFlagName + " name|index] [" + containerFlagName + " name|index] [" + namespaceFlagName + " ns] [" + commandFlagName + " name] [" + allowCommandFlagName + " name] [-- command ...]",
+		Flags:      []string{platformFlagName, "-e", podFlagName, containerFlagName, namespaceFlagName, commandFlagName, allowCommandFlagName},
+		PosArg:     posNone,
+		Synopsis:   "cli [flags] [-- command ...]",
+		Summary:    "Open a shell inside one instance, or run one command in it",
+		Example:    "solmq-conn-util cli -e env.yaml",
+		TreeSuffix: bt + "[-- command ...]" + bt + " " + bt + platformArgBracket + bt,
+		Detail: "Opens an interactive shell inside one connector instance of the resolved platform, reached through the same read-only " + bt + "kubectl" + bt + "/" + bt + "docker" + bt + "/" + bt + "podman" + bt + " path " + bt + "status" + bt + " and " + bt + "logs" + bt + " use -- the same " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", the same preflight probe, and the same instance discovery from " + bt + "env.yaml" + bt + ", so the three verbs can never disagree about which instance they mean. " +
+			"It is where the questions " + bt + "status" + bt + " and " + bt + "logs" + bt + " cannot answer get settled: whether the truststore really mounted, what is actually in " + bt + "/app/external/libs" + bt + ", which " + bt + "application.yml" + bt + " the process is running. " +
+			"Everything after " + bt + "--" + bt + " is run in the instance instead of a shell, non-interactively, which is the form for a script -- an interactive run with no terminal on stdin is refused with that as the next step rather than opening a session nobody can type into. " +
+			"The shell is " + bt + "sh" + bt + ": the connector image is Alpine, so its userland is busybox and there is no " + bt + "bash" + bt + " to ask for. " +
+			"One instance is reached per run. When discovery finds several and none was named, nothing is opened: the matching instances are listed on stdout as commands that can be pasted back verbatim, carrying the flags already typed, and the run exits 0. " +
+			bt + podFlagName + bt + " and " + bt + containerFlagName + bt + " name the instance, each may be given once, and either accepts an **index** as well as a name -- " + bt + podFlagName + " 0" + bt + " is the first instance in the listed order, alphabetical by name and the same order " + bt + "status" + bt + " prints. A name always wins. " +
+			"On kubernetes the container is always named explicitly (" + bt + "-c " + spec.ConnectorContainerName + bt + "), so a pod carrying a sidecar cannot be entered by mistake; a pod with no such container is refused by the platform rather than guessed at. " +
+			"Every token of a " + bt + "--" + bt + " command is held to the same safe charset as every other value that reaches an argv, because " + bt + "cli" + bt + " runs an argv and never a shell line: a pipe, a redirect or a glob has to be written inside the session instead. " +
+			"**Exit status** is the one place " + bt + "cli" + bt + " leaves the usual contract: once the session or command is running, whatever it exited with is passed straight back. The engines give no way to be more precise -- " + bt + "kubectl exec" + bt + " reports an unreachable pod and a command that exited non-zero with the same status -- so a non-zero " + bt + "cli" + bt + " exit means one of the two, and the message the engine printed on stderr is what says which. " + platformResolutionPointer,
 	},
 	{
 		Name: "version", Args: "", Flags: nil, PosArg: posNone, Aliases: []string{"ver"},
@@ -575,6 +614,7 @@ func renderCommandsDoc() string {
 	add("| " + bt + "0" + bt + " | success |")
 	add("| " + bt + "1" + bt + " | processing error (bad input, unreadable file, missing env var, a deploy command that failed) |")
 	add("| " + bt + "2" + bt + " | usage error (missing/unknown verb or target, unknown flag) |")
+	add("| _other_ | " + bt + "cli" + bt + " only: once a session or command is running inside the instance, its own exit status is passed straight back. Anything that fails before that still uses the three codes above |")
 	add("")
 	add("## Command details")
 	add("")

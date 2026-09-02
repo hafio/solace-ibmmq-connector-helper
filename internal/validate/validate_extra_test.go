@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -245,8 +246,8 @@ func baseKubeService() spec.Service {
 
 func TestCheckSyslog(t *testing.T) {
 	run := func(sys *spec.Syslog) (errs, warns []Issue) {
-		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand, Service: baseKubeService(), Logging: &spec.Logging{Syslog: sys}}
-		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
+		k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand, Service: baseKubeService()}
+		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{Syslog: sys}, Image: imageOK(), Kube: k, CheckKubernetes: true})
 	}
 	if e, _ := run(&spec.Syslog{Port: 514, Protocol: spec.SyslogUDP}); !hasErr(e, "logging.syslog.host is required") {
 		t.Errorf("want missing host, got %v", e)
@@ -318,7 +319,7 @@ func TestCheckLibs(t *testing.T) {
 }
 
 func dockerOK() *spec.Docker {
-	return &spec.Docker{Command: "docker", Name: "c", Restart: "unless-stopped", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
+	return &spec.Docker{Command: "docker", Name: "c", ProjectName: "proj", Restart: "unless-stopped", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
 }
 
 func TestCheckDocker(t *testing.T) {
@@ -357,6 +358,55 @@ func TestCheckDocker(t *testing.T) {
 	// would pass whether the gate worked or not.
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: &spec.Docker{}}); hasErr(e, "docker.command must not be empty") {
 		t.Errorf("docker checks must be gated by CheckDocker, got %v", e)
+	}
+}
+
+// TestCheckDockerProjectName covers the compose project name. It is held to the
+// same DNS-1123 rule as docker.name, which is deliberately stricter than docker
+// compose's own grammar: compose would accept an underscore and a trailing
+// hyphen, so those two are rejected here on purpose rather than by accident.
+//
+// The check is unconditional, unlike restart's -- ParseEnv always defaults
+// project-name, so an empty value means the section reached the validator
+// without going through it, and emitting a compose file with no project at all
+// is not a state to pass silently.
+func TestCheckDockerProjectName(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		project string
+		wantErr bool
+	}{
+		{"lowercase and hyphens", "solace-ibmmq-connectors", false},
+		{"digits", "stack1", false},
+		{"single char", "a", false},
+		{"uppercase", "Solace-Connectors", true},
+		{"underscore -- compose allows it, DNS-1123 does not", "solmq_prod", true},
+		{"trailing hyphen -- compose allows it, DNS-1123 does not", "solmq-", true},
+		{"leading hyphen", "-solmq", true},
+		{"embedded space", "solmq prod", true},
+		{"empty -- means defaults never ran", "", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := dockerOK()
+			d.ProjectName = c.project
+			e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d, CheckDocker: true})
+			// The message must carry the offending value, so an operator sees what
+			// was rejected rather than only which key.
+			got := hasErr(e, "docker.project-name") && hasErr(e, strconv.Quote(c.project))
+			if got != c.wantErr {
+				t.Errorf("project-name %q: error = %v, want %v (errors: %v)", c.project, got, c.wantErr, e)
+			}
+		})
+	}
+}
+
+// TestCheckPodmanHasNoProjectName pins that project-name is docker-only. It
+// names a compose project, and podman has no equivalent grouping, so the shared
+// containerTarget must not grow one and a podman section must not be held to it.
+func TestCheckPodmanHasNoProjectName(t *testing.T) {
+	e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: podmanOK(), CheckPodman: true})
+	if hasErr(e, "project-name") {
+		t.Errorf("podman must not be checked for a project name, got %v", e)
 	}
 }
 
@@ -725,6 +775,90 @@ func TestCheckKubeSecretNames(t *testing.T) {
 	}
 }
 
+// TestCheckCredRejectsReservedPrefix pins the namespace reservation. An -env
+// credential is mounted under the variable name it gives, sharing one namespace
+// with the names derived for literals; rejecting the prefix here is what makes a
+// derived name and an operator's name structurally unable to meet. envNameRE
+// accepts a leading underscore, so this cannot be left to the charset check.
+func TestCheckCredRejectsReservedPrefix(t *testing.T) {
+	run := func(envVar string) []Issue {
+		d := &spec.Defaults{Security: spec.Security{Users: []spec.User{{Name: "ops", PasswordEnv: envVar}}}}
+		e, _ := Run(Context{Workflows: wfOK(), Defaults: d, Env: func(string) (string, bool) { return "v", true }})
+		return e
+	}
+	want := "is reserved for the mount names this tool derives for itself"
+	if e := run(spec.GeneratedNamePrefix + "SECURITY_USER_OPS_PASSWORD"); !hasErr(e, want) {
+		t.Errorf("an -env inside the reserved prefix must be rejected, got %v", e)
+	}
+	// The prefix is rejected wherever it starts the name, not only on an exact
+	// derived-name match -- the whole namespace is reserved.
+	if e := run(spec.GeneratedNamePrefix + "ANYTHING"); !hasErr(e, want) {
+		t.Errorf("the whole prefix namespace must be reserved, got %v", e)
+	}
+	// A name that merely contains it, or starts with a bare underscore, is fine.
+	for _, ok := range []string{"MY_GEN_PASSWORD", "_MY_PASSWORD", "SOL_PASSWORD"} {
+		if e := run(ok); hasErr(e, want) {
+			t.Errorf("%q is outside the reserved prefix and must be accepted, got %v", ok, e)
+		}
+	}
+}
+
+// TestCheckKubeSecretsCreateXorExisting pins the create/existing exclusivity for
+// both Secret kinds, the same rule libs.pvc already enforces. Both set is the
+// dangerous one: deploy.Render takes the create branch, so it would emit a Secret
+// doc over the very object 'existing' names. Neither set leaves the /run/secrets
+// mount out of the pod with nothing to say why.
+func TestCheckKubeSecretsCreateXorExisting(t *testing.T) {
+	base := spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}
+	run := func(sec spec.Secrets) []Issue {
+		k := &spec.Kubernetes{Deployment: base, Secrets: sec}
+		e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true, Env: func(string) (string, bool) { return "v", true }})
+		return e
+	}
+	cases := []struct {
+		name string
+		sec  spec.Secrets
+		want string
+	}{
+		{"cred both", spec.Secrets{Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "a"}, Existing: "b"}},
+			"kubernetes.secrets.credentials must set exactly one of 'create' or 'existing'"},
+		{"cred neither", spec.Secrets{Credentials: &spec.CredentialsSecret{}},
+			"kubernetes.secrets.credentials must set exactly one of 'create' or 'existing'"},
+		{"stores both", spec.Secrets{Stores: &spec.StoresSecret{Create: &spec.StoreCreate{Name: "a"}, Existing: "b"}},
+			"kubernetes.secrets.stores must set exactly one of 'create' or 'existing'"},
+		{"stores neither", spec.Secrets{Stores: &spec.StoresSecret{}},
+			"kubernetes.secrets.stores must set exactly one of 'create' or 'existing'"},
+	}
+	for _, c := range cases {
+		if e := run(c.sec); !hasErr(e, c.want) {
+			t.Errorf("%s: want %q, got %v", c.name, c.want, e)
+		}
+	}
+
+	// Exactly one set, either way round, passes for both kinds.
+	ok := []struct {
+		name string
+		sec  spec.Secrets
+	}{
+		{"create only", spec.Secrets{
+			Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "solmq-credentials"}},
+			Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{Name: "solmq-tls"}},
+		}},
+		{"existing only", spec.Secrets{
+			Credentials: &spec.CredentialsSecret{Existing: "their-creds"},
+			Stores:      &spec.StoresSecret{Existing: "their-tls"},
+		}},
+		// Omitting the blocks entirely stays legal: that is the documented "no
+		// Secret is produced" path, not an undecided block.
+		{"blocks omitted", spec.Secrets{}},
+	}
+	for _, c := range ok {
+		if e := run(c.sec); hasErr(e, "exactly one of 'create' or 'existing'") {
+			t.Errorf("%s: should pass the XOR check, got %v", c.name, e)
+		}
+	}
+}
+
 func TestCheckLibsNFSFields(t *testing.T) {
 	// nfs.server/path land unquoted in the PersistentVolume manifest piped to
 	// kubectl, so a newline (which would inject a sibling key) is rejected.
@@ -966,5 +1100,51 @@ func TestPasswordConflictSolaceSide(t *testing.T) {
 	}
 	if e, _ := Run(Context{Workflows: wfs, Defaults: defsWithStores()}); !hasErr(e, "conflicting password for the same binder") {
 		t.Errorf("want solace password-conflict error, got %v", e)
+	}
+}
+
+// TestCheckSyslogRunsForEveryPlatform is why checkSyslog moved out of checkKube:
+// syslog is a top-level key now, so a docker-only or podman-only run has to
+// validate it too. Under the old placement it went unchecked everywhere it had
+// just started applying.
+func TestCheckSyslogRunsForEveryPlatform(t *testing.T) {
+	bad := &spec.Syslog{Host: "h", Port: 514, Protocol: "xxx"}
+	for _, c := range []struct {
+		name string
+		ctx  Context
+	}{
+		{"docker", Context{Docker: dockerOK(), CheckDocker: true}},
+		{"podman", Context{Podman: podmanOK(), CheckPodman: true}},
+		{"config only", Context{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := c.ctx
+			ctx.Workflows = wfOK()
+			ctx.Image = imageOK()
+			ctx.Defaults = &spec.Defaults{Syslog: bad}
+			errs, _ := Run(ctx)
+			if !hasErr(errs, `must be "udp" or "tcp"`) {
+				t.Errorf("syslog must be validated on %s too, got %v", c.name, errs)
+			}
+		})
+	}
+}
+
+// TestKubernetesLoggingIsRetired pins the migration path. ParseEnv decodes
+// non-strict, so a leftover kubernetes.logging block would otherwise be dropped
+// in silence and the instance would come up with no syslog and no diagnostic.
+func TestKubernetesLoggingIsRetired(t *testing.T) {
+	k := &spec.Kubernetes{
+		Deployment: baseKubeDeploy(),
+		Command:    spec.DefaultKubeCommand,
+		Service:    baseKubeService(),
+		Logging:    &spec.Logging{Syslog: &spec.Syslog{Host: "h", Port: 514, Protocol: spec.SyslogUDP}},
+	}
+	errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
+	if !hasErr(errs, "kubernetes.logging is no longer configured here") {
+		t.Fatalf("a leftover kubernetes.logging must be rejected, got %v", errs)
+	}
+	if !hasErr(errs, "top-level logging:") {
+		t.Errorf("the error must name where it moved to, got %v", errs)
 	}
 }

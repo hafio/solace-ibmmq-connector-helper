@@ -77,8 +77,9 @@ func TestSolacePropsRawPathWhenNotMounted(t *testing.T) {
 	}
 }
 
-// The store passwords must reach api-properties as their stable placeholder
-// (${TRUSTSTORE_PASSWORD} / ${KEYSTORE_PASSWORD}) -- never as the literal
+// The store passwords must reach api-properties as their mount-name placeholder
+// (the two package constants, which carry spec.GeneratedNamePrefix) -- never as
+// the literal
 // value or the name of the host env var backing it (S3: no credential value
 // or host variable name may reach the rendered config).
 func TestSolacePropsStorePasswordIsStablePlaceholderNeverLiteral(t *testing.T) {
