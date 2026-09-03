@@ -150,15 +150,15 @@
     "semantic_hash": ""
   },
   "internal/validate/validate.go": {
-    "mtime": 1788415079.8655548,
-    "seen": 1788417154.6087003,
-    "ast_hash": "e46e201d722393ab6618a4820bcc6035",
+    "mtime": 1788417818.0117478,
+    "seen": 1788418149.6248913,
+    "ast_hash": "b87d3ac74b2159034ee1701add22f863",
     "semantic_hash": ""
   },
   "internal/validate/validate_extra_test.go": {
-    "mtime": 1788415415.4997344,
-    "seen": 1788417154.608702,
-    "ast_hash": "bae91035b20d5ee9616359444e06c0f9",
+    "mtime": 1788417840.6595259,
+    "seen": 1788418149.624897,
+    "ast_hash": "bc49f34c6ed3147ca6ef58a9ee0e8c42",
     "semantic_hash": ""
   },
   "internal/validate/validate_test.go": {
@@ -342,9 +342,9 @@
     "semantic_hash": ""
   },
   "docs/test.md": {
-    "mtime": 1788415644.0043457,
-    "seen": 1788417154.6087165,
-    "ast_hash": "e24776ab8328616af8c38894c3789e40",
+    "mtime": 1788417861.5854788,
+    "seen": 1788418149.6249273,
+    "ast_hash": "61dabbf19a3321b155a6cc868370d0f7",
     "semantic_hash": ""
   },
   "docs/commands.md": {
@@ -660,9 +660,9 @@
     "semantic_hash": ""
   },
   "docs/userguide.md": {
-    "mtime": 1788415601.8001645,
-    "seen": 1788417154.6087172,
-    "ast_hash": "00fb80d36fb58ee69e4f80e8290b1d61",
+    "mtime": 1788417769.202569,
+    "seen": 1788418149.6249292,
+    "ast_hash": "99a83356c6dd4d992fb9fb234f1b69ba",
     "semantic_hash": ""
   }
 }

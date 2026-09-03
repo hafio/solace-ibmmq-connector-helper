@@ -849,24 +849,36 @@ func safeShellChars(s string) bool {
 	return true
 }
 
+// pathShellMeta is shellMeta minus '~', for host paths only. A Windows 8.3 short
+// name is a legitimate path and carries one -- C:\Users\RUNNER~1\..., the form
+// %TEMP% takes on a GitHub Windows runner, and PROGRA~1 for Program Files -- so
+// rejecting the tilde rejects real directories an operator cannot rename.
+//
+// It is safe to allow in these sinks specifically: no shell is ever invoked (the
+// runner runs an argv slice), systemd does not expand a tilde in a unit
+// directive, and inside a compose plain scalar it is an ordinary character. It is
+// derived from shellMeta rather than spelled out so the two cannot drift apart if
+// shellMeta gains a character.
+var pathShellMeta = strings.ReplaceAll(shellMeta, "~", "")
+
 // safeHostPath gates a config-declared host path that a docker/podman renderer
-// concatenates unquoted into a mount argument (`-v src:dst:ro` in the run script,
-// `Volume=` in a quadlet unit, a compose `volumes:` entry). It rejects whitespace,
-// control characters, quotes, backtick and '$' plus the shell metacharacters: a
-// newline would open a new script line, unit directive, or YAML key, and a space
-// would split the mount argument in two.
+// concatenates unquoted into a mount argument (`Volume=` in a quadlet unit, a
+// compose `volumes:` entry). It rejects whitespace, control characters, quotes,
+// backtick and '$' plus the shell metacharacters: a newline would open a new unit
+// directive or YAML key, and a space would split the mount argument in two.
 //
 // Unlike safeShellChars it permits '\' and ':' so a Windows-authored path
-// (C:\certs\truststore.jks) still validates -- neither can escape any of those
-// three sinks. Only the value as written in env.yaml is checked, never the
-// absolute path it resolves to, which is the developer's own working directory.
+// (C:\certs\truststore.jks) still validates, and '~' for the short-name reason
+// pathShellMeta records -- none of the three can escape either sink. Only the
+// value as written in env.yaml is checked, never the absolute path it resolves
+// to, which is the developer's own working directory.
 func safeHostPath(s string) bool {
 	for _, r := range s {
 		if r <= 0x20 || r == 0x7f || r == '\'' || r == '"' || r == '`' || r == '$' {
 			return false
 		}
 	}
-	return !strings.ContainsAny(s, shellMeta)
+	return !strings.ContainsAny(s, pathShellMeta)
 }
 
 func usesTLS(wfs []spec.Workflow) bool {

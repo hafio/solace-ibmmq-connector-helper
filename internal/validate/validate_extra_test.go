@@ -478,6 +478,38 @@ func TestCheckPodmanBaseDirRequired(t *testing.T) {
 	}
 }
 
+// TestSafeHostPathAllowsWindowsShortNames pins the tilde exception. A Windows 8.3
+// short name is a real directory an operator cannot rename -- RUNNER~1 is what
+// %TEMP% expands to on a GitHub Windows runner, and PROGRA~1 is Program Files --
+// so a path gate that rejects '~' rejects valid input. It reached us as a CI-only
+// failure precisely because no fixture had a tilde in it; this one does.
+//
+// The check is on safeHostPath directly because it guards every host path
+// (tls.*.file, libs.dir, podman.base-dir, nfs.path), not just the one that
+// surfaced it.
+func TestSafeHostPathAllowsWindowsShortNames(t *testing.T) {
+	for _, ok := range []string{
+		`C:\Users\RUNNER~1\AppData\Local\Temp\x`,
+		"C:/Users/RUNNER~1/AppData/Local/Temp/x",
+		`C:\PROGRA~1\solmq`,
+		"~/certs/truststore.jks",
+	} {
+		if !safeHostPath(ok) {
+			t.Errorf("safeHostPath(%q) = false, want true: a tilde is legal in a host path", ok)
+		}
+	}
+	// The rest of the metacharacter set is still refused -- the tilde is the only
+	// concession, and only for paths.
+	for _, bad := range []string{
+		"/opt/a b", "/opt/a\nb", "/opt/$HOME", "/opt/a;rm", "/opt/a|b",
+		"/opt/a*b", "/opt/a(b)", "/opt/a#b", "/opt/a!b", "/opt/a`b",
+	} {
+		if safeHostPath(bad) {
+			t.Errorf("safeHostPath(%q) = true, want false", bad)
+		}
+	}
+}
+
 // TestCheckLibsMountPathRemoved pins the last of the fixed-path keys. dir stays --
 // the host side is genuinely the operator's choice -- but mount-path is rejected
 // for both sections, because the image launches with /app/external/libs literally

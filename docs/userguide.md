@@ -845,6 +845,15 @@ renders the resolved platform's artifacts, `deploy` renders and applies them, an
 order in [section 3](#3-commands). A run whose resolved section is absent errors
 (deploying to docker needs a `docker:` section).
 
+**A deployment is identified by its configured name.** Every platform section
+names its deployment -- `kubernetes.deployment.name`, `docker.name`,
+`podman.name`, each a DNS-1123 label -- and everything the tool does keys on
+that name: `deploy` creates the objects that carry it (on kubernetes the
+Deployment, its `app=<name>` selector and the derived `<name>-config`; on
+docker the compose service and container; on podman the container and its
+`<name>.container` quadlet unit), `status`, `logs` and `cli` find instances by
+it, and `remove` tears down exactly the objects that carry it.
+
 **The `command:` field** names the CLI each platform shells out to (default `kubectl`
 / `docker` / `podman`). Put any extra global arguments inside it -- e.g. `command:
 kubectl --context prod -n solace-connectors` or `command: oc`. The string is
