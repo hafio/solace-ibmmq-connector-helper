@@ -949,8 +949,10 @@ Makefile before running `deploy`/`remove` against it. `generate` is the dry-run:
 renders the same artifacts without shelling out to anything, so you can inspect
 them first.
 
-Credentials and stores use the **same schema across all three platform sections** -- see
-[section 9](#9-secrets-model).
+Credentials need no schema in any platform section: they come from the connection
+fields themselves. The stores are configured only under `kubernetes:`, which has to
+build a Secret; docker and podman bind-mount them from the `tls.*.file` paths
+directly. See [section 9](#9-secrets-model).
 
 ### 8.0 Image and timezone (shared by every platform)
 
@@ -1100,10 +1102,12 @@ that child process only, and no credential value is written to disk. Each entry
 uses compose's long syntax (`source: <name>` plus an absolute `target:`) rather
 than the short `- <name>` form, because the short form always lands at compose's
 own `/run/secrets/<name>` with no way to point elsewhere; the long form's `target:`
-is `/app/external/var/secrets/<name>`, the same directory every platform uses. A
-`stores:` block bind-mounts the `tls.*.file` host paths onto the fixed in-container store dir
-`/app/external/classpath/truststores`, and `libs.dir` bind-mounts a host jar
-directory to `/app/external/libs`.
+is `/app/external/var/secrets/<name>`, the same directory every platform uses. The
+`tls.*.file` host paths are bind-mounted onto the fixed in-container store dir
+`/app/external/classpath/truststores` whenever they are set -- the generated
+`application.yml` points there, so the mount follows the configuration rather than
+needing its own switch -- and `libs.dir` bind-mounts a host jar directory to
+`/app/external/libs`.
 
 Every `$` inside those inlined `configs:` blocks is written **doubled** (`$$`).
 Docker Compose interpolates variables across the whole document, content blocks
@@ -1158,20 +1162,19 @@ docker:
     - 8090                       # bare: publish to the same host port (8090:8090)
     - "8081:8090"                # or "host:container" to map a distinct host port
   # No secrets: section -- credentials come from the connection fields themselves.
-  stores:                        # opt in to bind-mounting tls.*.file host paths
-    mount-path: /app/external/classpath/truststores   # fixed in-container path; must be this value
+  # No stores: section either -- the tls.*.file paths are bind-mounted for you.
   # libs:
-  #   dir: ./libs                # host dir bind-mounted to /app/external/libs; populate it with
+  #   dir: ./libs                # the only key: the host dir, bind-mounted to the image's
+                                 # fixed /app/external/libs. Populate it with
                                  # "solmq-conn-util download jar mq" (section 10)
 ```
 
 ### 8.3 podman
 
-`generate --platform podman` honors `mode:` -- `run` (default) emits a `podman run`
-script, `quadlet` emits `.container` unit file(s). `deploy` / `remove` for podman
-are **always quadlet + systemctl**, regardless of `mode`. Because a quadlet unit or run
-script cannot inline file content, `generate`/`deploy` also write the rendered
-`application.yml` next to the unit/script and bind-mount it in. Credentials do not
+`generate --platform podman` emits a `.container` quadlet unit; `deploy` / `remove`
+install and tear down that same unit through **systemctl**. Because a quadlet unit
+cannot inline file content, `generate`/`deploy` also write the rendered
+`application.yml` next to the unit and bind-mount it in. Credentials do not
 go on disk: `deploy` loads each into **podman's secret store** and the unit mounts
 it at an absolute target (`Secret=<name>,type=mount,target=/app/external/var/secrets/<KEY>`).
 Requires **podman 4.5+**.
@@ -1191,14 +1194,11 @@ Requires **podman 4.5+**.
 `deploy --platform podman` loads the credentials into podman's secret store, writes
 the units, then `systemctl [--user] daemon-reload` and `start`;
 `remove --platform podman` `stop`s, removes the units, reloads, and removes the
-secrets. A run script generated in `mode: run` carries a preamble that creates the
-same secrets from **your** environment (`${NAME:?...}`) -- so the script itself
-holds no credential values.
+secrets.
 
 ```yaml
 podman:
   command: podman
-  mode: run                      # run (default) | quadlet -- controls `generate` only
   quadlet:
     scope: auto                  # auto | user | system
     dir: ""                      # overrides the default dir for the resolved scope
@@ -1208,10 +1208,10 @@ podman:
     - 8090                       # bare: publish to the same host port (8090:8090)
     - "8081:8090"                # or "host:container" to map a distinct host port
   # No secrets: section -- credentials come from the connection fields themselves.
-  stores:                        # opt in to bind-mounting tls.*.file host paths
-    mount-path: /app/external/classpath/truststores   # fixed in-container path; must be this value
+  # No stores: section either -- the tls.*.file paths are bind-mounted for you.
   # libs:
-  #   dir: ./libs                # host dir bind-mounted to /app/external/libs; populate it with
+  #   dir: ./libs                # the only key: the host dir, bind-mounted to the image's
+                                 # fixed /app/external/libs. Populate it with
                                  # "solmq-conn-util download jar mq" (section 10)
 ```
 
@@ -1223,9 +1223,15 @@ connector container -- [section 14.5](#145-which-container-it-enters)); `restart
 **omit it and nothing is published** -- exposing a container port to the host is
 your decision, and `status` reaches the connector by exec'ing into it rather than
 over a published port, so the tool never needs one);
-`stores` (opt in to bind-mounting the truststore/keystore;
-the in-container path is fixed); `libs.dir`. Neither section takes a `secrets:` key --
-setting one is an error naming the credential fields to use instead. `project-name`
+and `libs`, whose one key is `dir`.
+
+Every in-container path is fixed by the image, so no section configures one.
+`libs.dir` names the host directory to bind-mount and it lands at
+`/app/external/libs`, which the connector already launches with on its classpath;
+the truststore/keystore are bind-mounted onto `/app/external/classpath/truststores`
+whenever `tls.*.file` is set. Accordingly neither section takes a `secrets:`, a
+`stores:` or a `libs.mount-path` key -- setting any of them is an error naming what
+replaced it, which for the last two is nothing at all. `project-name`
 is **not** shared: it names a compose project, and podman has no equivalent
 grouping, so the key exists only under `docker:`.
 
@@ -1389,11 +1395,13 @@ names until deploying to a platform does.
   project on the host. `remove` removes them. Requires **podman 4.5+** ([section
   8.3](#83-podman) has the caveat on the absolute `target=` path specifically).
 
-The `stores` wiring is separate and follows its own naming rule: the shared
+The stores wiring is separate and follows its own naming rule: the shared
 truststore/keystore is base64-embedded into a Kubernetes Secret mounted at
 `/app/external/classpath/truststores/`, or bind-mounted there from the host for
-docker/podman (opt in with a `stores:` block; the in-container path is fixed).
-`stores` takes the same `create` XOR `existing` choice, and a `stores.existing`
+docker/podman -- which needs no configuration, since setting `tls.*.file` is
+itself the request. Kubernetes does need telling, so its
+`kubernetes.secrets.stores` takes the same `create` XOR `existing` choice as
+`credentials`, and a `stores.existing`
 Secret's keys are the **base filenames** of `tls.truststore.file` /
 `tls.keystore.file` -- `truststore.jks` and `keystore.jks` for the example in
 [section 7](#7-connector-defaults-envyaml-top-level) -- because that is the path
@@ -1827,12 +1835,12 @@ entry mounted at `/app/external/.status-script` (both with `$` doubled against
 compose interpolation -- [section 8.2](#82-docker)), the credential `secrets:` entries
 read from the environment ([section 9.3](#93-how-each-platform-delivers-them)), bind
 mounts for stores/libs, and the `solace-connector/le-mode`/`role`
-labels above on the service. **`generate --platform podman` -> a `podman run` script**
-(`mode: run`) **or a `.container` quadlet unit** (`mode: quadlet`); because
-neither can inline file content, the rendered `application.yml` **and** the
-status script are each written to disk next to the script/unit and bind-mounted
-in read-only (credentials go to the platform's secret store, not to disk -- see
-[section 9](#9-secrets-model)), with the same labels applied via `--label`/`Label=`.
+labels above on the service. **`generate --platform podman` -> a `.container`
+quadlet unit**; because it cannot inline file content, the rendered
+`application.yml` **and** the status script are each written to disk next to the
+unit and bind-mounted in read-only (credentials go to the platform's secret store,
+not to disk -- see [section 9](#9-secrets-model)), with the same labels applied
+via `Label=`.
 
 ---
 
@@ -2473,7 +2481,7 @@ Useful places to look once you are inside:
 |------|---------------|
 | `/app/external/spring/config/application.yml` | the configuration the process actually loaded |
 | `/app/external/libs` | the jars `download jar` put there ([section 10](#10-download-jar)) |
-| `/app/external/classpath/truststores` | the truststores the docker/podman `stores:` mount supplies |
+| `/app/external/classpath/truststores` | the truststores, bind-mounted from `tls.*.file` on docker/podman and Secret-mounted on kubernetes |
 | `/app/external/var/secrets` | the credentials, on every platform |
 
 ### 14.3 The one-shot form, and when it is the only form

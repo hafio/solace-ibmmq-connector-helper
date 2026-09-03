@@ -340,15 +340,15 @@ func TestCheckDocker(t *testing.T) {
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d2, CheckDocker: true}); !hasErr(e, "unsafe character") {
 		t.Errorf("want unsafe-command error, got %v", e)
 	}
-	// stores set but no truststore defined.
+	// stores is a removed key: any present block is rejected by name.
 	d3 := dockerOK()
-	d3.Stores = &spec.StoresMount{MountPath: "/x"}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d3, CheckDocker: true}); !hasErr(e, "docker.stores requires tls.truststore") {
-		t.Errorf("want stores-truststore error, got %v", e)
+	d3.Stores = &spec.StoresMount{}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d3, CheckDocker: true}); !hasErr(e, "docker.stores is no longer configured") {
+		t.Errorf("want stores-removed error, got %v", e)
 	}
 	// libs set but no dir.
 	d4 := dockerOK()
-	d4.Libs = &spec.LibsMount{MountPath: "/x"}
+	d4.Libs = &spec.LibsMount{}
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d4, CheckDocker: true}); !hasErr(e, "docker.libs.dir is required") {
 		t.Errorf("want libs-dir error, got %v", e)
 	}
@@ -435,17 +435,58 @@ func TestCheckPodmanModeAndScope(t *testing.T) {
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); len(e) != 0 {
 		t.Fatalf("valid podman should pass, got %v", e)
 	}
-	// Bad mode.
-	p1 := podmanOK()
-	p1.Mode = "swarm"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p1, CheckPodman: true}); !hasErr(e, "podman.mode must be") {
-		t.Errorf("want bad-mode error, got %v", e)
+	// mode: is removed. Both of its former values are rejected, "quadlet"
+	// included -- that is now the only artifact, so the key decides nothing and a
+	// section still carrying it should be told rather than quietly humoured.
+	for _, mode := range []string{"run", "quadlet", "swarm"} {
+		p := podmanOK()
+		p.Mode = mode
+		if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true}); !hasErr(e, "podman.mode is no longer configured") {
+			t.Errorf("mode %q should be rejected, got %v", mode, e)
+		}
 	}
 	// Bad quadlet scope.
 	p2 := podmanOK()
 	p2.Quadlet = &spec.Quadlet{Scope: "root"}
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p2, CheckPodman: true}); !hasErr(e, "podman.quadlet.scope must be auto, user, or system") {
 		t.Errorf("want bad-scope error, got %v", e)
+	}
+}
+
+// TestCheckLibsMountPathRemoved pins the last of the fixed-path keys. dir stays --
+// the host side is genuinely the operator's choice -- but mount-path is rejected
+// for both sections, because the image launches with /app/external/libs literally
+// on its classpath and a custom value silently put the jars out of its reach.
+func TestCheckLibsMountPathRemoved(t *testing.T) {
+	d := dockerOK()
+	d.Libs = &spec.LibsMount{Dir: "./libs", MountPath: "/custom/libs"}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d, CheckDocker: true}); !hasErr(e, "docker.libs.mount-path is no longer configured") {
+		t.Errorf("want libs mount-path removed error, got %v", e)
+	}
+	p := podmanOK()
+	p.Libs = &spec.LibsMount{Dir: "./libs", MountPath: spec.DefaultLibsMountPath}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true}); !hasErr(e, "podman.libs.mount-path is no longer configured") {
+		t.Errorf("even the fixed value should be rejected once the key is gone, got %v", e)
+	}
+	// dir alone is the supported shape and trips no such error.
+	d2 := dockerOK()
+	d2.Libs = &spec.LibsMount{Dir: "./libs"}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d2, CheckDocker: true}); hasErr(e, "mount-path") {
+		t.Errorf("libs with dir alone should pass, got %v", e)
+	}
+}
+
+// TestCheckPodmanStoresRemoved is the podman half of the removed stores: block;
+// the docker half rides along in TestCheckDockerRules.
+func TestCheckPodmanStoresRemoved(t *testing.T) {
+	p := podmanOK()
+	p.Stores = &spec.StoresMount{}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true}); !hasErr(e, "podman.stores is no longer configured") {
+		t.Errorf("want stores-removed error, got %v", e)
+	}
+	// Nil stores -- the only shape left -- trips no such error.
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); hasErr(e, "stores is no longer configured") {
+		t.Errorf("nil podman.stores should not be rejected, got %v", e)
 	}
 }
 
@@ -532,7 +573,7 @@ func TestConnectionDefinitionValidation(t *testing.T) {
 }
 
 func podmanOK() *spec.Podman {
-	return &spec.Podman{Command: "podman", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}, Mode: spec.PodmanModeRun, Quadlet: &spec.Quadlet{Scope: spec.QuadletScopeAuto}}
+	return &spec.Podman{Command: "podman", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}, Quadlet: &spec.Quadlet{Scope: spec.QuadletScopeAuto}}
 }
 
 func TestCheckContainerNameRejected(t *testing.T) {
@@ -560,44 +601,42 @@ func TestCheckContainerNameRejected(t *testing.T) {
 	}
 }
 
-func TestCheckStoresMountPathRejected(t *testing.T) {
-	// The in-container store path is fixed (application.yml always points at it),
-	// so a custom stores.mount-path is rejected -- it would silently break TLS by
-	// moving the mounted files. The fixed path is accepted.
-	d := dockerOK()
-	d.Stores = &spec.StoresMount{MountPath: "/custom/path"}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Image: imageOK(), Docker: d, CheckDocker: true}); !hasErr(e, "mount-path") || !hasErr(e, "is not supported") {
-		t.Errorf("non-default docker.stores.mount-path should be rejected, got %v", e)
+// TestDockerPodmanTLSNeedsNoStoresOptIn replaces the old TLS-without-stores
+// warning. The store files are bind-mounted whenever tls.*.file is set, so a TLS
+// workflow with no stores: block is now complete rather than half-wired, and
+// neither section has anything to warn about.
+func TestDockerPodmanTLSNeedsNoStoresOptIn(t *testing.T) {
+	tlsWF := []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}
+
+	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); hasErr(w, "stores is omitted") {
+		t.Errorf("docker should not warn about an omitted stores:, got %v", w)
 	}
-	d2 := dockerOK()
-	d2.Stores = &spec.StoresMount{MountPath: spec.DefaultStoresMountPath}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Image: imageOK(), Docker: d2, CheckDocker: true}); hasErr(e, "mount-path") {
-		t.Errorf("the fixed docker.stores.mount-path should be accepted, got %v", e)
+	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); hasErr(w, "stores is omitted") {
+		t.Errorf("podman should not warn about an omitted stores:, got %v", w)
 	}
 }
 
-func TestDockerPodmanTLSWithoutStoresWarning(t *testing.T) {
-	// A TLS workflow with no host stores bind-mounted leaves application.yml
-	// pointing at absent files, so each of docker/podman warns when stores is
-	// omitted and stays quiet once stores is wired.
-	tlsWF := []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}
+// TestDockerPodmanStorePathAlwaysGated pins the security boundary the derived
+// mount widened. The tls.*.file paths become bind-mount sources in a compose
+// document or a quadlet Volume= line with no stores: block to opt in, so the
+// unsafe-character gate has to run on them unconditionally -- it used to fire
+// only when the operator had opted in, which is exactly the case that no longer
+// exists.
+func TestDockerPodmanStorePathAlwaysGated(t *testing.T) {
+	defs := defsWithStores()
+	defs.TLS.Truststore.File = "./certs/$(evil).jks"
 
-	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(w, "docker.stores is omitted") {
-		t.Errorf("want docker TLS-without-stores warning, got %v", w)
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defs, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "unsafe character") {
+		t.Errorf("docker should reject an unsafe tls.truststore.file with no stores: block, got %v", e)
 	}
-	dYes := dockerOK()
-	dYes.Stores = &spec.StoresMount{MountPath: spec.DefaultStoresMountPath}
-	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Image: imageOK(), Docker: dYes, CheckDocker: true}); hasErr(w, "docker.stores is omitted") {
-		t.Errorf("docker stores wired should not warn, got %v", w)
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defs, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); !hasErr(e, "unsafe character") {
+		t.Errorf("podman should reject an unsafe tls.truststore.file with no stores: block, got %v", e)
 	}
-
-	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); !hasErr(w, "podman.stores is omitted") {
-		t.Errorf("want podman TLS-without-stores warning, got %v", w)
-	}
-	pYes := podmanOK()
-	pYes.Stores = &spec.StoresMount{MountPath: spec.DefaultStoresMountPath}
-	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Image: imageOK(), Podman: pYes, CheckPodman: true}); hasErr(w, "podman.stores is omitted") {
-		t.Errorf("podman stores wired should not warn, got %v", w)
+	// Kubernetes stays exempt: it embeds the store content in a Secret rather
+	// than naming a host path, so it never reaches this gate.
+	k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defs, Image: imageOK(), Kube: k, CheckKubernetes: true}); hasErr(e, "unsafe character") {
+		t.Errorf("kubernetes should not gate the host store path, got %v", e)
 	}
 }
 
@@ -638,27 +677,11 @@ func TestUsesTLS(t *testing.T) {
 	}
 }
 
-func TestMQOnlyTLSStoresOmittedWarning(t *testing.T) {
-	// MQ-only TLS workflow (no tcps Solace side anywhere) against a docker target
-	// with stores omitted: the stores-missing warning must still be emitted, since
-	// usesTLS is reached via the MQ TLS branch rather than a tcps Solace side.
-	mqOnlyTLS := []spec.Workflow{wf("x.yaml", vMQ("Q1", spec.DestQueue, false), vMQ("M1", spec.DestQueue, true))}
-	_, warns := Run(Context{Workflows: mqOnlyTLS, Defaults: &spec.Defaults{}, Image: imageOK(), Docker: dockerOK(), CheckDocker: true})
-	if !hasErr(warns, "a TLS/mTLS connection exists but docker.stores is omitted; the store files will be missing at runtime") {
-		t.Errorf("want docker stores-missing warning, got %v", warns)
-	}
-}
-
-func TestPlainTCPStoresOmittedNoWarning(t *testing.T) {
-	// Plain-TCP workflow (no TLS/mTLS anywhere), stores omitted: the
-	// stores-missing warning must be absent. Other warnings may still fire, so
-	// this asserts the specific text is missing rather than warns being empty.
-	plainTCP := []spec.Workflow{wf("x.yaml", vSolacePlainTCP("Q", spec.DestQueue), vMQ("M", spec.DestQueue, false))}
-	_, warns := Run(Context{Workflows: plainTCP, Defaults: &spec.Defaults{}, Image: imageOK(), Docker: dockerOK(), CheckDocker: true})
-	if hasErr(warns, "store files will be missing at runtime") {
-		t.Errorf("plain-tcp workflow with no TLS should not warn about missing store files, got %v", warns)
-	}
-}
+// The two docker/podman stores-omitted warning tests that stood here are gone
+// with the warning itself. What they were really guarding -- that usesTLS is
+// reachable through the MQ TLS branch and not only a tcps Solace side -- is
+// asserted directly by TestUsesTLS above, on the same workflow shape. usesTLS now
+// has exactly one caller, the kubernetes stores warning, which still needs telling.
 
 func TestBinderIdentityUsesTheCredentialPair(t *testing.T) {
 	// Regression: validate and consolidate each kept a private dedupKey, and the
@@ -698,8 +721,8 @@ func TestBinderIdentityUsesTheCredentialPair(t *testing.T) {
 // retirement is covered in validate_image_test.go, their charset in
 // TestImageBlockRequired and TestTopLevelTimezoneUnsafe).
 //
-// restart is still concatenated unquoted into the podman run script, the quadlet
-// unit and the compose YAML, so an embedded newline or metacharacter is rejected
+// restart is still concatenated unquoted into the quadlet unit and the compose
+// YAML, so an embedded newline or metacharacter is rejected
 // at the gate. A realistic value (on-failure:N) must still pass.
 func TestCheckContainerRestartUnsafe(t *testing.T) {
 	dR := dockerOK()
@@ -715,19 +738,17 @@ func TestCheckContainerRestartUnsafe(t *testing.T) {
 }
 
 func TestCheckContainerHostPathsUnsafe(t *testing.T) {
-	// The tls.*.file paths become bind-mount sources once stores opts in, and
-	// libs.dir always is one: whitespace or a metacharacter would split or extend
-	// the `-v src:dst:ro` argument, so both are gated. A Windows-style path keeps
-	// validating -- '\' and ':' cannot escape any of the three sinks.
+	// The tls.*.file paths are bind-mount sources for docker/podman, and libs.dir
+	// is one too: whitespace or a metacharacter would split or extend the mount
+	// argument, so both are gated. A Windows-style path keeps validating -- '\'
+	// and ':' cannot escape any of the three sinks.
 	badStores := defsWithStores()
 	badStores.TLS.Truststore.File = "t.jks\nprivileged: true"
-	d := dockerOK()
-	d.Stores = &spec.StoresMount{MountPath: spec.DefaultStoresMountPath}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: badStores, Image: imageOK(), Docker: d, CheckDocker: true}); !hasErr(e, "tls.truststore.file") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: badStores, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "tls.truststore.file") {
 		t.Errorf("want unsafe truststore path rejection, got %v", e)
 	}
 	p := podmanOK()
-	p.Libs = &spec.LibsMount{Dir: "/opt/my libs", MountPath: spec.DefaultLibsMountPath}
+	p.Libs = &spec.LibsMount{Dir: "/opt/my libs"}
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true}); !hasErr(e, "podman.libs.dir") {
 		t.Errorf("want unsafe libs.dir rejection, got %v", e)
 	}
@@ -735,8 +756,7 @@ func TestCheckContainerHostPathsUnsafe(t *testing.T) {
 	winStores.TLS.Truststore.File = `C:\certs\truststore.jks`
 	winStores.TLS.Keystore.File = `C:\certs\keystore.jks`
 	dWin := dockerOK()
-	dWin.Stores = &spec.StoresMount{MountPath: spec.DefaultStoresMountPath}
-	dWin.Libs = &spec.LibsMount{Dir: `C:\libs`, MountPath: spec.DefaultLibsMountPath}
+	dWin.Libs = &spec.LibsMount{Dir: `C:\libs`}
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: winStores, Image: imageOK(), Docker: dWin, CheckDocker: true}); hasErr(e, "unsafe character") {
 		t.Errorf("Windows-style host paths should validate, got %v", e)
 	}

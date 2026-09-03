@@ -2172,9 +2172,9 @@ docker:
     - 8090
 `
 
-// podmanEnv renders a minimal-but-valid podman: section in quadlet mode with the
-// unit dir overridden to a test-owned location (the default user-scope dir lives
-// under the real home directory). ToSlash keeps the Windows temp path valid YAML.
+// podmanEnv renders a minimal-but-valid podman: section with the unit dir
+// overridden to a test-owned location (the default user-scope dir lives under the
+// real home directory). ToSlash keeps the Windows temp path valid YAML.
 func podmanEnv(quadletDir string) string {
 	return fmt.Sprintf(`
 podman:
@@ -2182,7 +2182,6 @@ podman:
   name: solmq-conn
   ports:
     - 8090
-  mode: quadlet
   quadlet:
     scope: user
     dir: %s
@@ -2200,7 +2199,6 @@ podman:
   name: solmq-conn
   ports:
     - 8090
-  mode: quadlet
   quadlet:
     scope: user
     dir: %s

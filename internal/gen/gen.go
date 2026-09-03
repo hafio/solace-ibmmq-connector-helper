@@ -1,6 +1,6 @@
 // Package gen is the in-memory generation core behind the CLI. It ties together
 // parse -> validate -> consolidate -> render for every target (application.yml,
-// kubernetes manifests, docker compose, podman run/quadlet). All I/O (folder
+// kubernetes manifests, docker compose, podman quadlet). All I/O (folder
 // scan, env lookups, file reads, path resolution) is injected by callers so the
 // package stays pure and testable.
 package gen
@@ -253,7 +253,7 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 		return DockerPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
 
-	sm, lm := targetMounts(e.Defaults.TLS, d.Stores, d.Libs, res)
+	sm, lm := targetMounts(e.Defaults.TLS, d.Libs, res)
 	in := dockergen.Input{
 		Docker:  d,
 		Syslog:  e.Defaults.Syslog,
@@ -350,38 +350,33 @@ type NamedDoc struct {
 	Data string
 }
 
-// PodmanOpts tunes podman generation. ForceQuadlet overrides the config mode
-// (deploy/remove are always quadlet). BaseDir, when set, makes the on-disk file
+// PodmanOpts tunes podman generation. BaseDir, when set, makes the on-disk file
 // paths (application.yml, env-file) absolute under it so systemd quadlet units
 // reference real locations; empty BaseDir keeps base names for a preview.
 type PodmanOpts struct {
-	ForceQuadlet bool
-	BaseDir      string
+	BaseDir string
 }
 
-// PodmanPlan carries whichever artifact the effective mode produced plus the
-// on-disk material a deploy must write before activating the units.
+// PodmanPlan carries the rendered quadlet unit plus the on-disk material a deploy
+// must write before activating it.
 type PodmanPlan struct {
-	Mode      string         // effective mode: run | quadlet
-	RunScript string         // set when Mode == run
-	Unit      podmangen.Unit // set when Mode == quadlet
-	AppYAML   NamedDoc       // application.yml (write to disk)
+	Unit    podmangen.Unit // the .container quadlet unit
+	AppYAML NamedDoc       // application.yml (write to disk)
 	// StatusScript is the rendered status script (write to disk): like
 	// AppYAML, a container cannot inline file content, so it too has to be a
-	// bind-mounted file rather than embedded in the run script/quadlet unit.
+	// bind-mounted file rather than embedded in the quadlet unit.
 	StatusScript NamedDoc
 	// Logback is the rendered logback-spring.xml (write to disk), for the same
 	// reason. Zero when no syslog is configured, which is how callers know not
 	// to write or remove it.
 	Logback NamedDoc
 	Secrets []consolidate.SecretRef // credentials to place in podman's secret store
-	Service string                  // systemd service name (quadlet), e.g. name.service
+	Service string                  // systemd service name, e.g. name.service
 }
 
-// GeneratePodman parses+validates and renders either a `podman run` script
-// (mode run) or one .container quadlet unit per instance (mode quadlet, or when
-// opts.ForceQuadlet is set). application.yml documents are returned separately
-// for the caller to write to disk.
+// GeneratePodman parses+validates and renders the .container quadlet unit.
+// application.yml documents are returned separately for the caller to write to
+// disk.
 //
 // extraAllowed threads deploy/remove's --allow-command values into the
 // podman.command allowlist check; plain `generate podman` calls this with none.
@@ -411,13 +406,9 @@ func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...st
 		return PodmanPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
 
-	plan.Mode = p.Mode
-	if opts.ForceQuadlet {
-		plan.Mode = spec.PodmanModeQuadlet
-	}
 	plan.Secrets = b.model.Secrets
 
-	sm, lm := targetMounts(e.Defaults.TLS, p.Stores, p.Libs, res)
+	sm, lm := targetMounts(e.Defaults.TLS, p.Libs, res)
 	appName := p.Name + "-application.yml"
 	statusName := p.Name + "-status"
 	plan.AppYAML = NamedDoc{Name: appName, Data: b.appYAML}
@@ -446,11 +437,7 @@ func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...st
 			LeaderMode:       e.Defaults.LeaderElection.EffectiveMode(),
 		},
 	}
-	if plan.Mode == spec.PodmanModeQuadlet {
-		plan.Unit = podmangen.RenderQuadlet(in)
-	} else {
-		plan.RunScript = podmangen.RenderRunScript(in)
-	}
+	plan.Unit = podmangen.RenderQuadlet(in)
 	return plan, nil, warns
 }
 
@@ -579,18 +566,23 @@ type mount struct{ Source, Target string }
 // targetMounts resolves the store files (each tls.*.file bind-mounted onto the
 // fixed in-container store dir spec.DefaultStoresMountPath, matching where
 // application.yml references them) and the libs directory into host->container
-// mounts. Both are nil/absent unless the section opted in.
-func targetMounts(tls spec.TLSConfig, stores *spec.StoresMount, libs *spec.LibsMount, res Resolver) (sm []mount, lm *mount) {
-	if stores != nil {
-		for _, st := range []*spec.Store{tls.Truststore, tls.Keystore} {
-			if st == nil || st.File == "" {
-				continue
-			}
-			sm = append(sm, mount{Source: res.abs(st.File), Target: spec.DefaultStoresMountPath + "/" + spec.BaseName(st.File)})
+// mounts. Both container-side paths are constants: the image fixes them, and the
+// spec only chooses the host source.
+//
+// The stores are not gated on an opt-in: application.yml always references the
+// mounted path for docker/podman (consolidate is called with MountStores true),
+// so a configured store that was not mounted left the config pointing at a file
+// nothing supplied. A store with no file set is skipped, so a spec without TLS
+// still yields no store mounts. libs stays opt-in -- it has a host dir to name.
+func targetMounts(tls spec.TLSConfig, libs *spec.LibsMount, res Resolver) (sm []mount, lm *mount) {
+	for _, st := range []*spec.Store{tls.Truststore, tls.Keystore} {
+		if st == nil || st.File == "" {
+			continue
 		}
+		sm = append(sm, mount{Source: res.abs(st.File), Target: spec.DefaultStoresMountPath + "/" + spec.BaseName(st.File)})
 	}
 	if libs != nil && libs.Dir != "" {
-		lm = &mount{Source: res.abs(libs.Dir), Target: libs.MountPath}
+		lm = &mount{Source: res.abs(libs.Dir), Target: spec.DefaultLibsMountPath}
 	}
 	return sm, lm
 }
@@ -641,7 +633,7 @@ func PodmanSecretStoreName(container, stable string) string {
 }
 
 // podmanSecretRefs maps stable names onto the store-name/mount-target pairs the
-// quadlet and run-script renderers emit.
+// quadlet renderer emits.
 func podmanSecretRefs(container string, refs []consolidate.SecretRef) []podmangen.SecretRef {
 	out := make([]podmangen.SecretRef, 0, len(refs))
 	for _, r := range refs {

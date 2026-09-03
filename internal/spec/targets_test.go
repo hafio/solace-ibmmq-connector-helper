@@ -155,8 +155,10 @@ podman:
 	if p.Command != DefaultPodmanCommand {
 		t.Errorf("command = %q want %q", p.Command, DefaultPodmanCommand)
 	}
-	if p.Mode != PodmanModeRun {
-		t.Errorf("mode = %q want %q", p.Mode, PodmanModeRun)
+	// mode: is a removed key and must not be defaulted -- validate rejects any
+	// non-empty value, so a default here would fail every section.
+	if p.Mode != "" {
+		t.Errorf("mode = %q, want it left empty", p.Mode)
 	}
 	if p.Name != DefaultConnectorName {
 		t.Errorf("name = %q want %q", p.Name, DefaultConnectorName)
@@ -183,7 +185,6 @@ func TestApplyPodmanDefaultsOverrideWins(t *testing.T) {
 podman:
   command: podman --context foo
   image: myimg
-  mode: quadlet
   name: custom-name
   restart: always
   ports:
@@ -200,9 +201,6 @@ podman:
 	if p.Command != "podman --context foo" {
 		t.Errorf("command = %q", p.Command)
 	}
-	if p.Mode != PodmanModeQuadlet {
-		t.Errorf("mode = %q want %q", p.Mode, PodmanModeQuadlet)
-	}
 	if p.Name != "custom-name" || p.Restart != "always" {
 		t.Errorf("name/restart = %q/%q", p.Name, p.Restart)
 	}
@@ -215,7 +213,15 @@ podman:
 	}
 }
 
-func TestApplyMountDefaultsFillsMissing(t *testing.T) {
+// TestRemovedMountKeysDecodeButAreNotDefaulted covers what is left of the mount
+// wiring now that both container-side paths are fixed by the image. Nothing is
+// filled in: the removed keys only have to survive decoding, so validate can name
+// them in an error rather than yaml dropping them in silence.
+//
+// The mount-path assertion is the load-bearing one. Were it still defaulted,
+// every libs: block would carry a non-empty value and trip validate's rejection
+// for something the operator never wrote -- the same trap as podman.mode.
+func TestRemovedMountKeysDecodeButAreNotDefaulted(t *testing.T) {
 	data := []byte(`
 docker:
   image: myimg
@@ -228,11 +234,14 @@ docker:
 		t.Fatal(err)
 	}
 	d := e.Docker
-	if d.Stores == nil || d.Stores.MountPath != DefaultStoresMountPath {
-		t.Errorf("stores = %+v want mount-path %q", d.Stores, DefaultStoresMountPath)
+	if d.Libs == nil || d.Libs.Dir != "/host/libs" {
+		t.Errorf("libs = %+v want dir /host/libs", d.Libs)
 	}
-	if d.Libs == nil || d.Libs.Dir != "/host/libs" || d.Libs.MountPath != DefaultLibsMountPath {
-		t.Errorf("libs = %+v want dir /host/libs mount-path %q", d.Libs, DefaultLibsMountPath)
+	if d.Libs != nil && d.Libs.MountPath != "" {
+		t.Errorf("libs mount-path = %q, want it left empty", d.Libs.MountPath)
+	}
+	if d.Stores == nil {
+		t.Error("a present stores: must still decode non-nil so validate can reject it")
 	}
 }
 
@@ -360,12 +369,16 @@ func TestEffectiveManagementPort(t *testing.T) {
 	}
 }
 
-func TestApplyMountDefaultsOverrideWins(t *testing.T) {
+// TestWrittenLibsMountPathSurvivesDecoding is the other half of the removed-key
+// contract: a mount-path an operator actually wrote must reach validate intact so
+// it can be rejected by name. Decoding is non-strict, so dropping the field from
+// the struct would silently discard the value instead -- and this is the case
+// where that matters most, since a custom path used to be honoured and produced a
+// container whose jars the JVM never saw.
+func TestWrittenLibsMountPathSurvivesDecoding(t *testing.T) {
 	data := []byte(`
 docker:
   image: myimg
-  stores:
-    mount-path: /custom/store
   libs:
     dir: /host/libs
     mount-path: /custom/libs
@@ -375,10 +388,7 @@ docker:
 		t.Fatal(err)
 	}
 	d := e.Docker
-	if d.Stores == nil || d.Stores.MountPath != "/custom/store" {
-		t.Errorf("stores = %+v", d.Stores)
-	}
 	if d.Libs == nil || d.Libs.MountPath != "/custom/libs" {
-		t.Errorf("libs = %+v", d.Libs)
+		t.Errorf("libs = %+v, want the written mount-path preserved for validate", d.Libs)
 	}
 }

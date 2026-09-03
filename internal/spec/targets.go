@@ -47,12 +47,6 @@ func (d *Defaults) EffectiveManagementPort() int {
 	return d.Management.Port
 }
 
-// Podman generate modes.
-const (
-	PodmanModeRun     = "run"     // emit a `podman run` script (default)
-	PodmanModeQuadlet = "quadlet" // emit a .container quadlet unit
-)
-
 // Quadlet scopes. auto resolves at deploy time from the effective uid
 // (root -> system, otherwise user).
 const (
@@ -99,15 +93,28 @@ func BaseName(p string) string {
 	return p
 }
 
-// StoresMount bind-mounts the host tls.*.file directory into the container.
-type StoresMount struct {
-	MountPath string `yaml:"mount-path"` // default /app/external/classpath/truststores
-}
+// StoresMount was the docker/podman stores: block. The block is removed: the
+// tls.*.file store files are bind-mounted whenever they are set, onto the fixed
+// in-container path DefaultStoresMountPath, so there was nothing left for it to
+// decide -- its one field could only ever hold that same fixed path.
+//
+// The type survives with no fields so an old env.yaml still decodes into a non-nil
+// pointer and validate can reject it by name. ParseEnv decodes without
+// KnownFields, so deleting the field outright would drop the section in silence --
+// and the behaviour change runs both ways, since omitting stores: used to mean "do
+// not bind-mount" and now means nothing at all.
+type StoresMount struct{}
 
 // LibsMount bind-mounts a host directory of IBM MQ jars into the container.
+//
+// Only the host side is configurable. The container side is fixed at
+// DefaultLibsMountPath because the connector image launches with that directory
+// literally on its classpath (-cp /app/external/libs), so mounting anywhere else
+// puts the jars where the JVM never looks -- and kubernetes, which has no
+// mount-path key at all, always used the fixed path anyway.
 type LibsMount struct {
 	Dir       string `yaml:"dir"`        // host dir (relative to env.yaml or absolute)
-	MountPath string `yaml:"mount-path"` // default /app/external/libs
+	MountPath string `yaml:"mount-path"` // removed; non-empty is a validation error
 }
 
 // Port is one container port publication. A bare YAML scalar (e.g. 8090)
@@ -160,8 +167,9 @@ func (p Port) String() string {
 // credential fields and delivered as compose secrets, so there is nothing left
 // to configure here. Secrets is kept unexported-in-spirit (parsed but rejected)
 // so an old env.yaml fails loudly instead of silently losing its credentials.
-// Image and Timezone are kept on the same terms, both having moved to their own
-// top-level keys.
+// Image, Timezone and Stores are kept on the same terms: the first two moved to
+// their own top-level keys, and the store bind-mount is now derived from the
+// tls.*.file paths themselves.
 //
 // ProjectName has no Podman counterpart: it names a compose project, and podman
 // has no equivalent grouping to attach one to.
@@ -176,7 +184,7 @@ type Docker struct {
 	Ports       []Port       `yaml:"ports"`
 	Timezone    string       `yaml:"timezone"` // removed; non-empty is a validation error
 	Secrets     *Secrets     `yaml:"secrets"`  // removed; non-nil is a validation error
-	Stores      *StoresMount `yaml:"stores"`
+	Stores      *StoresMount `yaml:"stores"`   // removed; non-nil is a validation error
 	Libs        *LibsMount   `yaml:"libs"`
 }
 
@@ -186,11 +194,11 @@ type Quadlet struct {
 	Dir   string `yaml:"dir"`   // overrides the default dir for the resolved scope
 }
 
-// Podman is the parsed podman section of env.yaml. generate honours Mode
-// (run|quadlet); deploy/remove are always quadlet + systemctl.
+// Podman is the parsed podman section of env.yaml. generate renders a .container
+// quadlet unit; deploy/remove install and tear that same unit down via systemctl.
 type Podman struct {
 	Command  string       `yaml:"command"` // default podman
-	Mode     string       `yaml:"mode"`    // run (default) | quadlet -- controls generate only
+	Mode     string       `yaml:"mode"`    // removed; non-empty is a validation error
 	Quadlet  *Quadlet     `yaml:"quadlet"`
 	Image    string       `yaml:"image"` // removed; non-empty is a validation error (see Docker)
 	Name     string       `yaml:"name"`
@@ -198,11 +206,11 @@ type Podman struct {
 	Restart  string       `yaml:"restart"`
 	Timezone string       `yaml:"timezone"` // removed; non-empty is a validation error (see Docker)
 	Secrets  *Secrets     `yaml:"secrets"`  // removed; non-nil is a validation error (see Docker)
-	Stores   *StoresMount `yaml:"stores"`
+	Stores   *StoresMount `yaml:"stores"`   // removed; non-nil is a validation error (see Docker)
 	Libs     *LibsMount   `yaml:"libs"`
 }
 
-// applyDockerDefaults fills command/name/project-name/restart and the mount paths.
+// applyDockerDefaults fills command/name/project-name/restart.
 //
 // ports is deliberately not defaulted: publishing a container port to the host
 // is an exposure decision, and nothing the tool does needs one -- status execs
@@ -222,18 +230,19 @@ func applyDockerDefaults(d *Docker) {
 	if d.Restart == "" {
 		d.Restart = DefaultRestart
 	}
-	applyMountDefaults(d.Stores, d.Libs)
 }
 
 // applyPodmanDefaults mirrors applyDockerDefaults (ports left unpublished
-// included) and additionally defaults the generate mode and the quadlet scope
-// (auto).
+// included) and additionally defaults the quadlet scope (auto).
+//
+// Mode is deliberately not defaulted: the key is removed, and validate rejects a
+// non-empty one. Defaulting it here would make every section fail that check for a
+// value the operator never wrote. The same goes for libs.mount-path, which is why
+// neither of these functions fills in a mount path any more: both container-side
+// paths are fixed by the image, so there is nothing left to default.
 func applyPodmanDefaults(p *Podman) {
 	if p.Command == "" {
 		p.Command = DefaultPodmanCommand
-	}
-	if p.Mode == "" {
-		p.Mode = PodmanModeRun
 	}
 	if p.Name == "" {
 		p.Name = DefaultConnectorName
@@ -246,16 +255,5 @@ func applyPodmanDefaults(p *Podman) {
 	}
 	if p.Quadlet.Scope == "" {
 		p.Quadlet.Scope = QuadletScopeAuto
-	}
-	applyMountDefaults(p.Stores, p.Libs)
-}
-
-// applyMountDefaults fills the container-side mount paths shared by docker/podman.
-func applyMountDefaults(stores *StoresMount, libs *LibsMount) {
-	if stores != nil && stores.MountPath == "" {
-		stores.MountPath = DefaultStoresMountPath
-	}
-	if libs != nil && libs.MountPath == "" {
-		libs.MountPath = DefaultLibsMountPath
 	}
 }

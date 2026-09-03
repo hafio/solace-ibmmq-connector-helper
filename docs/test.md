@@ -142,16 +142,16 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestParseEnvPortsInvalid | mapping node {a: 1} | error 'env.yaml: ports entry must be an integer or "host:container", got a !!map' |
 | TestApplyDockerDefaultsFillsMissing | - | docker defaults command/name/project-name/restart applied, ports stay empty (publishing is opt-in), stores/libs stay nil |
 | TestApplyDockerDefaultsOverrideWins | - | explicit command/name/project-name/restart/ports override defaults exactly as given; a custom name does not drag project-name with it |
-| TestApplyPodmanDefaultsFillsMissing | - | podman defaults command/mode run/name/restart applied, ports stay empty (publishing is opt-in), and Quadlet non-nil with scope auto and empty dir |
-| TestApplyPodmanDefaultsOverrideWins | - | explicit command/mode quadlet/name/restart/ports/quadlet scope+dir override defaults exactly |
-| TestApplyMountDefaultsFillsMissing | - | stores mount-path defaults, libs dir kept and mount-path defaulted |
+| TestApplyPodmanDefaultsFillsMissing | - | podman defaults command/name/restart applied, ports stay empty (publishing is opt-in), Quadlet non-nil with scope auto and empty dir, and mode left empty -- it is a removed key, so defaulting it would trip validate for every section |
+| TestApplyPodmanDefaultsOverrideWins | - | explicit command/name/restart/ports/quadlet scope+dir override defaults exactly |
+| TestRemovedMountKeysDecodeButAreNotDefaulted | - | libs dir kept verbatim while mount-path is left empty (defaulting it would trip validate's rejection for a value nobody wrote), and a present stores: still decodes non-nil so validate can name it |
 | TestPortDefaultsFollowManagementPort | - | management.port 9091 with docker/podman/kubernetes present: kubernetes Service.Port defaults to {9091,9091}; docker/podman publish nothing with ports: omitted |
 | TestPortDefaultsFallBackWhenManagementPortUnset | - | no management.port set: kubernetes service.port falls back to {DefaultMgmtPort,DefaultMgmtPort} (8090); docker/podman still publish nothing |
 | TestKubernetesServicePortAcceptsBareAndHostContainerForms | bare int 8090 | kubernetes service.port parses to Host=8090 Container=8090 |
 | TestKubernetesServicePortAcceptsBareAndHostContainerForms | host:container 8080:8090 | kubernetes service.port parses to Host=8080 Container=8090 |
 | TestKubernetesServicePortRejectsInvalidForms | multi-colon 1:2:3 | error 'env.yaml: ports entry "1:2:3" must be "host:container" (exactly one colon)' |
 | TestKubernetesServicePortRejectsInvalidForms | mapping node {a: 1} | error 'env.yaml: ports entry must be an integer or "host:container", got a !!map' |
-| TestApplyMountDefaultsOverrideWins | - | explicit stores and libs mount-path overrides retained |
+| TestWrittenLibsMountPathSurvivesDecoding | - | a mount-path the operator wrote is preserved through decoding so validate can reject it by name, rather than being silently discarded |
 | TestExpandBracedVar | - | `${HOST}` in Side.Host expands from Lookup |
 | TestExpandDefaultVarSetUsesValue | - | `${VPN:fallback}` uses the looked-up value when VPN is set |
 | TestExpandDefaultVarUnsetUsesDefault | - | `${VPN:fallback}` falls back to the default when VPN is unset |
@@ -453,22 +453,19 @@ Tests: [dockergen_test.go](../internal/dockergen/dockergen_test.go)
 
 ## internal/podmangen
 
-Render the podman run script and the quadlet units from the target model.
+Render the quadlet unit from the target model.
 
 Tests: [podmangen_test.go](../internal/podmangen/podmangen_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
-| TestRenderRunScriptFull | - | full input renders run script matching exact golden string byte-for-byte |
-| TestRenderRunScriptSecretPreamble | - | the secret-loading preamble carries no credential value, only ${NAME:?...} referencing the stable name |
-| TestRenderRunScriptNoSecretsOmitsPreamble | - | no Secrets in Input emits no `podman secret` lines at all |
-| TestRenderRunScriptMinimal | - | minimal input renders run script matching exact golden string byte-for-byte |
+| TestRenderQuadletSecretsCarryNoValues | - | each credential appears only as a Secret= directive naming its store entry and absolute target; the value itself never reaches the unit, which sits on disk beside application.yml |
 | TestRenderQuadletFull | - | full input yields 1 unit named solmq-connector.container with content matching golden string |
 | TestRenderQuadletMinimal | - | minimal input yields 1 unit with content matching golden string (no Service section, no restart) |
-| TestLeaderLabelsPerMode | empty defaults to standalone / standalone / active_active | RenderRunScript and RenderQuadlet both carry the le-mode label and role: active |
-| TestLeaderLabelsPerMode | active_standby | both renderers carry le-mode active_standby and withhold role: active |
-| TestStatusScriptMountNestsAfterLibs | - | in both renderers, the status script mount/volume is declared after the libs mount, so it nests rather than being shadowed |
-| TestStatusScriptMountOmittedWhenPathEmpty | - | an empty StatusScriptPath omits the status mount entirely in both renderers, rather than mounting an empty source |
+| TestLeaderLabelsPerMode | empty defaults to standalone / standalone / active_active | the unit carries the le-mode label and role: active |
+| TestLeaderLabelsPerMode | active_standby | the unit carries le-mode active_standby and withholds role: active |
+| TestStatusScriptMountNestsAfterLibs | - | the status script volume is declared after the libs volume, so it nests rather than being shadowed |
+| TestStatusScriptMountOmittedWhenPathEmpty | - | an empty StatusScriptPath omits the status volume entirely, rather than mounting an empty source |
 
 | Test | Case | Verifies |
 |------|------|----------|
@@ -476,9 +473,8 @@ Tests: [podmangen_test.go](../internal/podmangen/podmangen_test.go)
 | TestImagePullSecretPayloadIsOpaqueToDeploy | - | deploy places the already-encoded payload verbatim and the registry password appears nowhere outside it |
 | TestEnvBlockOmittedWhenEmpty | nothing to emit | env: is omitted entirely rather than rendered with nothing beneath it, now that the timezone is one optional top-level key |
 | TestEnvBlockOmittedWhenEmpty | TZ only / MQTLS only | either entry alone opens the block, and no timezone means no TZ entry |
-| TestRunScriptSyslogMountsAndSetsEnv | - | podman cannot inline file content, so the run script bind-mounts the logback file read-only and sets the three LOGGING_SYSLOG_* vars |
-| TestQuadletSyslogMountsAndSetsEnv | - | the same for the quadlet unit, which spells Volume=/Environment= differently but has to carry both |
-| TestSyslogAbsentEmitsNoMountOrEnv | run / quadlet | no block, no mount, no env, in either mode |
+| TestQuadletSyslogMountsAndSetsEnv | - | podman cannot inline file content, so the unit bind-mounts the logback file read-only via Volume= and sets the three LOGGING_SYSLOG_* vars via Environment= |
+| TestSyslogAbsentEmitsNoMountOrEnv | - | no block, no mount, no env |
 
 ## internal/runner
 
@@ -671,8 +667,9 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckDocker | valid-docker | valid docker section passes with no errors |
 | TestCheckDocker | missing-image-empty-cmd-bad-port | errors docker.image required, command must not be empty, and port 0 must be 1-65535 |
 | TestCheckDocker | unsafe-command | docker command with semicolon errors unsafe character |
-| TestCheckDocker | stores-no-truststore | docker stores set without truststore errors docker.stores requires tls.truststore |
+| TestCheckDocker | stores-removed | a present docker.stores errors docker.stores is no longer configured |
 | TestCheckDocker | libs-no-dir | docker libs set without dir errors docker.libs.dir is required |
+| TestCheckLibsMountPathRemoved | docker custom / podman fixed / dir alone | libs.mount-path is rejected for both sections whatever its value -- the fixed one included, since the key decides nothing -- while libs with dir alone passes |
 | TestCheckDocker | checkdocker-false-gate | docker section not checked when CheckDocker is false |
 | TestCheckDockerProjectName | lowercase and hyphens / digits / single char | a DNS-1123 project-name passes |
 | TestCheckDockerProjectName | uppercase / leading hyphen / embedded space | rejected, naming docker.project-name and quoting the offending value |
@@ -683,8 +680,9 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckDockerPodmanSecretsRemoved | podman.secrets set | a podman section with a `.secrets` block errors naming podman.secrets as not a configurable section |
 | TestCheckDockerPodmanSecretsRemoved | nil secrets | omitting `.secrets` trips no such error |
 | TestCheckPodmanModeAndScope | valid-podman | valid podman section passes with no errors |
-| TestCheckPodmanModeAndScope | bad-mode | podman mode 'swarm' errors podman.mode must be |
+| TestCheckPodmanModeAndScope | run / quadlet / swarm | every value of the removed podman.mode errors podman.mode is no longer configured -- quadlet included, since it is now the only artifact and the key decides nothing |
 | TestCheckPodmanModeAndScope | bad-scope | podman quadlet scope 'root' errors scope must be auto, user, or system |
+| TestCheckPodmanStoresRemoved | present / nil | a present podman.stores errors podman.stores is no longer configured; omitting it trips no such error |
 | TestCheckCommandMultiToken | safe-multi-token | docker command with extra safe tokens has no unsafe-character error |
 | TestCheckCommandMultiToken | unsafe-token | docker command with $(evil) token errors unsafe character |
 | TestCheckDeployCommandAcceptReject | kubectl / oc / kubectl with flags / docker with flag / podman / kubectl.exe / sudo podman with extraAllowed | accept matrix: bare allowlisted argv[0], flag-shaped args, .exe-stripped comparison, and a chained binary approved via extraAllowed all pass |
@@ -732,20 +730,15 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckContainerNameRejected | ../evil | rejected for both docker.name and podman.name |
 | TestCheckContainerNameRejected | Bad_Name | rejected for both docker.name and podman.name |
 | TestCheckContainerNameRejected | valid-default-name | solmq-connector accepted with no docker.name error |
-| TestCheckStoresMountPathRejected | custom-mount-path | non-default stores.mount-path errors mount-path is not supported |
-| TestCheckStoresMountPathRejected | default-mount-path | fixed default mount-path accepted with no mount-path error |
-| TestDockerPodmanTLSWithoutStoresWarning | docker-tls-no-stores | TLS workflow with docker and no stores warns docker.stores is omitted |
-| TestDockerPodmanTLSWithoutStoresWarning | docker-tls-stores-wired | docker stores wired suppresses docker.stores omitted warning |
-| TestDockerPodmanTLSWithoutStoresWarning | podman-tls-no-stores | TLS workflow with podman and no stores warns podman.stores is omitted |
-| TestDockerPodmanTLSWithoutStoresWarning | podman-tls-stores-wired | podman stores wired suppresses podman.stores omitted warning |
+| TestDockerPodmanTLSNeedsNoStoresOptIn | docker / podman | a TLS workflow with no stores: block warns about nothing -- the store files are bind-mounted whenever tls.*.file is set, so the old "will be missing at runtime" case cannot arise |
+| TestDockerPodmanStorePathAlwaysGated | docker / podman | an unsafe character in tls.truststore.file is rejected with no stores: block present, since those paths are now always bind-mount sources |
+| TestDockerPodmanStorePathAlwaysGated | kubernetes | the same path is not gated for kubernetes, which embeds the store content in a Secret rather than naming a host path |
 | TestUsesTLS | solace-tcps-host | solace side with tcps host returns usesTLS true |
 | TestUsesTLS | mq-tls-true-no-tcps | no solace side, mq tls true returns usesTLS true |
 | TestUsesTLS | plain-tcp-mq-false | plain tcp solace and mq tls false returns usesTLS false |
-| TestMQOnlyTLSStoresOmittedWarning | - | mq-only TLS workflow with docker stores omitted still warns store files missing at runtime |
-| TestPlainTCPStoresOmittedNoWarning | - | plain-tcp workflow with stores omitted has no store-files-missing warning |
 | TestCheckContainerRestartUnsafe | newline in restart | docker.restart is rejected; image and timezone are top-level keys, covered by their own per-platform-rejection and charset tests |
 | TestCheckContainerRestartUnsafe | realistic value | on-failure:5 is accepted |
-| TestCheckContainerHostPathsUnsafe | newline in tls.truststore.file | bind-mounted store path rejected once docker.stores opts in |
+| TestCheckContainerHostPathsUnsafe | newline in tls.truststore.file | bind-mounted store path rejected |
 | TestCheckContainerHostPathsUnsafe | space in libs.dir | podman.libs.dir rejected |
 | TestCheckContainerHostPathsUnsafe | windows paths | `C:\certs\...` store paths and `C:\libs` accepted (backslash and colon permitted) |
 | TestCheckKubeSecretNames | cred create bad | non-DNS-1123 credentials create.name rejected |
@@ -807,8 +800,9 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestResolveStores | no stores configured | empty Defaults yields 0 stores, no error |
 | TestToIssues | - | toIssues wraps each string into an Issue carrying it as Msg |
 | TestNamesAndPaths | pathIn base variants | empty base returns bare path; trailing/no-trailing slash both join to /base/a |
-| TestTargetMounts | tls+stores+libs configured | 2 store mounts at fixed default mount path (ignores custom MountPath), libs mount uses resolved abs source and given target |
-| TestTargetMounts | nil stores and libs | opt-in mounts yield nil,nil when sections absent |
+| TestTargetMounts | tls+libs configured | 2 store mounts at the fixed default store path, and a libs mount whose source is the resolved abs host dir and whose target is the fixed default libs path -- both container-side paths come from constants, not from the spec |
+| TestTargetMounts | no tls, no libs | yields nil,nil -- with stores derived, an absent tls block is the only way to get no store mounts |
+| TestTargetMounts | store with no file | a tls.*.store present but with an empty file is skipped rather than mounted from an empty source |
 | TestResolveCredentials | nil refs | no kvs, no error |
 | TestResolveCredentials | literal + -env mix | literal ref passes through, -env ref reads from the resolver's environment |
 | TestResolveCredentials | unset -env variable | fails loud naming the stable secret and the variable, never a value |
@@ -822,8 +816,9 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestConfigCarriesSecurityUserRoles | - | end-to-end: a roles-bearing env.yaml validates clean and its role reaches the rendered application.yml, while the reserved account still renders none |
 | TestConfigNoSecretsLeak | - | every rendered password is a ${STABLE} placeholder except the one permitted literal: the reserved spec.StatusUserName account |
 | TestGenerateDockerBasics | - | generates non-empty compose opening with the defaulted `name: solace-ibmmq-connectors` project line and containing the image; all four credential positions render as top-level environment-provider secrets, never inlined as values, and each ${STABLE} placeholder in application.yml is doubled so compose cannot interpolate the value in |
-| TestGeneratePodmanRunAndQuadlet | mode: run | produces a run script (no unit) that loads each secret into podman's store before `podman run`, never carrying the value itself |
-| TestGeneratePodmanRunAndQuadlet | ForceQuadlet true | produces quadlet units, no run script |
+| TestGeneratePodmanQuadlet | - | produces the `<name>.container` unit with the app yaml name, service name and 4 secrets, each mounted from podman's store by its namespaced name at an absolute target under the secrets mount |
+| TestGeneratePodmanRejectsModeKey | run / quadlet | the removed podman.mode is rejected at generate for either former value |
+| TestGeneratePodmanNoModeKeyIsClean | - | an omitted mode: generates cleanly, guarding the removed applyPodmanDefaults default that would otherwise trip the rejection for every section |
 | TestResolveStatusPasswordFixedRand | - | a fixed Rand hook yields the exact 32-lowercase-hex-char literal (16 bytes hex-encoded) |
 | TestResolveStatusPasswordEnvOverride | - | a set, non-empty spec.StatusUserPasswordEnvVar is used verbatim and Rand is never consulted |
 | TestResolveStatusPasswordEmptyEnvFallsBackToRand | - | an empty override is treated as unset, falling back to Rand rather than returning "" |
@@ -831,7 +826,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestConfigStatusPasswordRandErrorNoOutput | - | the same Rand failure through Config is a hard error with no output |
 | TestGenerateKubernetesCarriesStatusScript | - | the ConfigMap gets a "status: \|" key carrying the rendered script, addressed to spec.StatusUserName on the resolved management port |
 | TestGenerateDockerCarriesStatusScript | - | compose gets a second top-level config (`<name>-status`) inlining the rendered script, mounted at statusscript.ContainerPath |
-| TestGeneratePodmanCarriesStatusScript | - | PodmanPlan.StatusScript names `<name>-status` and its on-disk mount path is BaseDir-resolved exactly like AppYAML |
+| TestGeneratePodmanCarriesStatusScript | - | PodmanPlan.StatusScript names `<name>-status` and the unit's Volume= for it is BaseDir-resolved exactly like AppYAML, since systemd starts the unit with no useful cwd |
 | TestGenerateMissingTargetSection | kubernetes | error contains kubernetes target requires a 'kubernetes:' section in env.yaml |
 | TestGenerateMissingTargetSection | docker | error contains docker target requires a 'docker:' section in env.yaml |
 | TestGenerateMissingTargetSection | podman | error contains podman target requires a 'podman:' section in env.yaml |

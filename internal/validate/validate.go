@@ -226,19 +226,15 @@ func checkTargets(add, warn func(string, string, ...any), ctx Context, resolved 
 			warn(fileEnv, "a TLS/mTLS connection exists but secrets.stores is omitted; the store files will be missing at runtime")
 		}
 	}
+	// docker and podman carry no stores warning: the tls.*.file paths are always
+	// bind-mounted now, so "TLS configured but nothing mounted" cannot arise. The
+	// kubernetes one above stays -- it embeds store content in a Secret, which is
+	// still something the operator has to wire up.
 	if ctx.CheckDocker && ctx.Docker != nil {
 		checkDocker(add, ctx)
-		// Warn: TLS/mTLS in use but no host stores are bind-mounted (the container
-		// image ships none, so application.yml would point at absent files).
-		if usesTLS(resolved) && ctx.Docker.Stores == nil {
-			warn(fileEnv, "a TLS/mTLS connection exists but docker.stores is omitted; the store files will be missing at runtime")
-		}
 	}
 	if ctx.CheckPodman && ctx.Podman != nil {
 		checkPodman(add, ctx)
-		if usesTLS(resolved) && ctx.Podman.Stores == nil {
-			warn(fileEnv, "a TLS/mTLS connection exists but podman.stores is omitted; the store files will be missing at runtime")
-		}
 	}
 }
 
@@ -1152,8 +1148,8 @@ type containerTarget struct {
 	Restart  string
 	Timezone string
 	Ports    []spec.Port
-	Secrets  *spec.Secrets // removed from the schema; non-nil is rejected
-	Stores   *spec.StoresMount
+	Secrets  *spec.Secrets     // removed from the schema; non-nil is rejected
+	Stores   *spec.StoresMount // removed from the schema; non-nil is rejected
 	Libs     *spec.LibsMount
 }
 
@@ -1169,8 +1165,8 @@ const secretsMountPath = spec.SecretsMountPath
 //
 // image/restart/timezone and the host paths are gated here because both renderers
 // concatenate them unquoted into artifacts that are later executed or parsed --
-// a `podman run` script line, a quadlet directive, a compose YAML line -- so an
-// embedded newline or metacharacter would add content the spec never declared.
+// a quadlet directive, a compose YAML line -- so an embedded newline or
+// metacharacter would add content the spec never declared.
 func checkContainerTarget(add func(string, string, ...any), ctx Context, t containerTarget) {
 	section := t.Section
 	// The section is gone: credentials are derived from the config's own
@@ -1178,6 +1174,12 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 	// keys, so without this an old env.yaml would parse and silently drop them.
 	if t.Secrets != nil {
 		add(fileEnv, "%s.secrets is no longer configured: credentials come from the connection fields themselves (client-password / client-password-env, password / password-env, ...) and are mounted at %s. Remove the %s.secrets section", section, secretsMountPath, section)
+	}
+	// Gone for the same reason: its one field could only ever hold the fixed
+	// in-container path, and the host side always came from tls.*.file, so the
+	// block decided nothing. The bind mount is now derived from those paths.
+	if t.Stores != nil {
+		add(fileEnv, "%s.stores is no longer configured: the tls.truststore.file / tls.keystore.file store files are bind-mounted at %s whenever they are set. Remove the %s.stores section", section, spec.DefaultStoresMountPath, section)
 	}
 	if !isDNS1123(t.Name) {
 		add(fileEnv, "%s.name %q is not a valid DNS-1123 label", section, t.Name)
@@ -1195,32 +1197,32 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 		add(fileEnv, "%s.timezone is no longer configured here: the container timezone moved to the top-level timezone: key so one declaration serves every platform. Remove %s.timezone", section, section)
 	}
 	checkPorts(add, section, t.Ports)
-	if t.Stores != nil {
-		if ctx.Defaults.TLS.Truststore == nil {
-			add(fileEnv, "%s.stores requires tls.truststore", section)
+	// The tls.*.file paths are always bind-mount sources in a docker or podman
+	// artifact, so they are always gated -- an unsafe character would add content
+	// to a compose YAML line or a quadlet Volume= directive that the spec never
+	// declared. This runs unconditionally because the mount is no longer opt-in.
+	// Kubernetes is still exempt: it embeds the store content in a Secret rather
+	// than naming a host path, and it does not reach this function.
+	for _, st := range []struct {
+		field string
+		store *spec.Store
+	}{{"tls.truststore.file", ctx.Defaults.TLS.Truststore}, {"tls.keystore.file", ctx.Defaults.TLS.Keystore}} {
+		if st.store == nil || st.store.File == "" {
+			continue
 		}
-		// The in-container store path is fixed (application.yml always points at
-		// it); stores only chooses the host source to bind-mount onto it. A custom
-		// mount-path would silently break TLS, so reject it (S4a fail-loud).
-		if t.Stores.MountPath != spec.DefaultStoresMountPath {
-			add(fileEnv, "%s.stores.mount-path %q is not supported; the in-container store path is fixed at %q", section, t.Stores.MountPath, spec.DefaultStoresMountPath)
-		}
-		// Only when stores opts in do the tls.*.file paths become bind-mount
-		// sources in a generated artifact; the kubernetes path embeds their
-		// content instead, so it is not gated here.
-		for _, st := range []struct {
-			field string
-			store *spec.Store
-		}{{"tls.truststore.file", ctx.Defaults.TLS.Truststore}, {"tls.keystore.file", ctx.Defaults.TLS.Keystore}} {
-			if st.store == nil || st.store.File == "" {
-				continue
-			}
-			if !safeHostPath(st.store.File) {
-				add(fileEnv, "%s.stores bind-mounts %s %q, which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", section, st.field, st.store.File)
-			}
+		if !safeHostPath(st.store.File) {
+			add(fileEnv, "%s bind-mounts %s %q, which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", section, st.field, st.store.File)
 		}
 	}
 	if t.Libs != nil {
+		// dir is the only key libs takes. The container side is fixed at
+		// DefaultLibsMountPath by the image, which launches with that directory
+		// literally on its classpath, so a custom mount-path put the jars where the
+		// JVM never looks -- and nothing caught it, unlike stores.mount-path, which
+		// at least failed loud.
+		if t.Libs.MountPath != "" {
+			add(fileEnv, "%s.libs.mount-path is no longer configured: the in-container libs path is fixed at %s, which is on the connector image's classpath. Remove %s.libs.mount-path", section, spec.DefaultLibsMountPath, section)
+		}
 		if t.Libs.Dir == "" {
 			add(fileEnv, "%s.libs.dir is required when libs is set", section)
 		} else if !safeHostPath(t.Libs.Dir) {
@@ -1261,8 +1263,7 @@ func checkDocker(add func(string, string, ...any), ctx Context) {
 	}
 }
 
-// checkPodman validates the podman section, including the generate mode and the
-// quadlet scope (deploy/remove are always quadlet + systemctl).
+// checkPodman validates the podman section, including the quadlet scope.
 func checkPodman(add func(string, string, ...any), ctx Context) {
 	p := ctx.Podman
 	checkContainerTarget(add, ctx, containerTarget{
@@ -1278,10 +1279,13 @@ func checkPodman(add func(string, string, ...any), ctx Context) {
 		Stores:   p.Stores,
 		Libs:     p.Libs,
 	})
-	switch p.Mode {
-	case spec.PodmanModeRun, spec.PodmanModeQuadlet:
-	default:
-		add(fileEnv, "podman.mode must be %q or %q (got %q)", spec.PodmanModeRun, spec.PodmanModeQuadlet, p.Mode)
+	// The mode used to choose between a `podman run` script and a quadlet unit,
+	// but only for generate -- deploy and remove always installed the unit. The
+	// script was an artifact the tool could emit and then never manage, so it is
+	// gone and the unit is the only output. Rejected rather than ignored: a
+	// section asking for a script should be told it will get a unit.
+	if p.Mode != "" {
+		add(fileEnv, "podman.mode is no longer configured: generate emits the .container quadlet unit that deploy and remove install. Remove podman.mode")
 	}
 	if q := p.Quadlet; q != nil {
 		switch q.Scope {

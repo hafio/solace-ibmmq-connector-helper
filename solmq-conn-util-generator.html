@@ -351,7 +351,7 @@ details[open]>summary::before{content:"- "}
       <div class="sub-h">Credentials</div>
       <div class="h">Derived automatically from the connection fields above and mounted at /app/external/var/secrets; nothing to configure here.</div>
       <div class="sub-h">Mounts</div>
-      <div class="tgl"><input type="checkbox" id="i-dk-stores"><label for="i-dk-stores">Bind-mount the TLS stores</label></div>
+      <div class="h">The TLS stores are bind-mounted at /app/external/classpath/truststores whenever tls.*.file is set; nothing to configure here.</div>
       <div class="tgl"><input type="checkbox" id="i-dk-libs-on" onchange="togOpt('i-dk-libs-on','dk-libs-f')"><label for="i-dk-libs-on">Bind-mount an IBM MQ jar directory</label></div>
       <div class="opt-fields" id="dk-libs-f"><div class="f"><label>Host Directory</label><input id="i-dk-libs-dir" placeholder="./libs"></div></div>
     </div>
@@ -366,11 +366,10 @@ details[open]>summary::before{content:"- "}
         <div class="f"><label>Container Name</label><input id="i-pd-name" value="connector"></div>
       </div>
       <div class="fr">
-        <div class="f"><label>Generate Mode</label><select id="i-pd-mode"><option value="run">run</option><option value="quadlet">quadlet</option></select><div class="h">Controls generate only; deploy is always quadlet + systemctl.</div></div>
         <div class="f"><label>Quadlet Scope</label><select id="i-pd-scope"><option value="auto">auto</option><option value="user">user</option><option value="system">system</option></select></div>
+        <div class="f"><label>Quadlet Directory</label><input id="i-pd-qdir" placeholder="(default for the resolved scope)"></div>
       </div>
       <div class="fr">
-        <div class="f"><label>Quadlet Directory</label><input id="i-pd-qdir" placeholder="(default for the resolved scope)"></div>
         <div class="f"><label>Restart Policy</label><input id="i-pd-restart" value="unless-stopped"></div>
       </div>
       <div class="sub-h">Published Ports</div>
@@ -379,7 +378,7 @@ details[open]>summary::before{content:"- "}
       <div class="sub-h">Credentials</div>
       <div class="h">Derived automatically from the connection fields above and mounted at /app/external/var/secrets; nothing to configure here.</div>
       <div class="sub-h">Mounts</div>
-      <div class="tgl"><input type="checkbox" id="i-pd-stores"><label for="i-pd-stores">Bind-mount the TLS stores</label></div>
+      <div class="h">The TLS stores are bind-mounted at /app/external/classpath/truststores whenever tls.*.file is set; nothing to configure here.</div>
       <div class="tgl"><input type="checkbox" id="i-pd-libs-on" onchange="togOpt('i-pd-libs-on','pd-libs-f')"><label for="i-pd-libs-on">Bind-mount an IBM MQ jar directory</label></div>
       <div class="opt-fields" id="pd-libs-f"><div class="f"><label>Host Directory</label><input id="i-pd-libs-dir" placeholder="./libs"></div></div>
     </div>
@@ -1059,12 +1058,11 @@ function readModel(){
   } : null;
 
   // project-name is docker-only, so it extends readCtr here rather than living
-  // in it -- the same shape podman uses below for mode/quadlet.
+  // in it -- the same shape podman uses below for quadlet.
   m.docker = C('i-dk-on') ? Object.assign(readCtr('dk', 'docker'), {
     projectName: V('i-dk-project') || 'solace-ibmmq-connectors'
   }) : null;
   m.podman = C('i-pd-on') ? Object.assign(readCtr('pd', 'podman'), {
-    mode: V('i-pd-mode') || 'run',
     quadlet: { scope: V('i-pd-scope') || 'auto', dir: V('i-pd-qdir') }
   }) : null;
   return m;
@@ -1093,13 +1091,11 @@ function readCtr(p, section){
     restart: V('i-' + p + '-restart') || 'unless-stopped',
     ports: Array.from(document.querySelectorAll('#' + p + '-ports .p-val')).map(i => i.value.trim()).filter(Boolean),
     cred: readCred(p),
-    stores: C('i-' + p + '-stores'),
     libsDir: C('i-' + p + '-libs-on') ? V('i-' + p + '-libs-dir') : ''
   };
 }
 
 // ===== env.yaml =====
-const STORES_MOUNT = '/app/external/classpath/truststores';
 const SECRETS_MOUNT = '/app/external/var/secrets';   // mirrors spec.SecretsMountPath
 
 function sideBody(s, ind, withDest){
@@ -1248,11 +1244,8 @@ function emitKube(k){
 
 function emitCtr(c){
   let y = `# ---- ${c.section} target ----\n${c.section}:\n` + kv('command', c.command, '  ');
-  if(c.section === 'podman'){
-    y += kv('mode', c.mode, '  ');
-    if(c.quadlet.scope !== 'auto' || c.quadlet.dir){
-      y += '  quadlet:\n' + kv('scope', c.quadlet.scope, '    ') + kv('dir', c.quadlet.dir, '    ');
-    }
+  if(c.section === 'podman' && (c.quadlet.scope !== 'auto' || c.quadlet.dir)){
+    y += '  quadlet:\n' + kv('scope', c.quadlet.scope, '    ') + kv('dir', c.quadlet.dir, '    ');
   }
   y += kv('name', c.name, '  ');
   // The compose project. Docker only: podman has no equivalent grouping.
@@ -1261,8 +1254,8 @@ function emitCtr(c){
   y += klist('ports', c.ports, '  ');
   // No secrets: block at all -- credentials are derived from the connection's
   // own client-username/-password (or user/password) fields and mounted at
-  // SECRETS_MOUNT by the deploy step.
-  if(c.stores) y += '  stores:\n' + kv('mount-path', STORES_MOUNT, '    ');
+  // SECRETS_MOUNT by the deploy step. No stores: block either: the tls.*.file
+  // stores are bind-mounted whenever they are set.
   if(c.libsDir) y += '  libs:\n' + kv('dir', c.libsDir, '    ');
   return y;
 }
@@ -1296,7 +1289,7 @@ function emitCommands(m){
     o += `solmq-conn-util remove   --platform docker     -e ${env}\n`;
   }
   if(m.podman){
-    o += `solmq-conn-util generate --platform podman     -e ${env} -o run-connector.sh\n`;
+    o += `solmq-conn-util generate --platform podman     -e ${env} -o ${m.podman.name}.container\n`;
     o += `solmq-conn-util deploy   --platform podman     -e ${env}\n`;
     o += `solmq-conn-util remove   --platform podman     -e ${env}\n`;
   }
@@ -1456,19 +1449,14 @@ function validateModel(m){
   if(m.podman){
     checkContainerTarget(add, warn, m, m.podman);
     checkExpansion(warn, ENV_FILE, 'podman.quadlet.dir', m.podman.quadlet.dir);
-    if(m.podman.mode !== 'run' && m.podman.mode !== 'quadlet'){
-      add(ENV_FILE, `podman.mode must be "run" or "quadlet" (got "${m.podman.mode}")`);
-    }
   }
   const tlsInUse = usesTLS(resolved);
   if(m.kube && tlsInUse && !m.kube.stores){
     warn(ENV_FILE, 'a TLS/mTLS connection exists but secrets.stores is omitted; the store files will be missing at runtime');
   }
-  [m.docker, m.podman].forEach(c => {
-    if(c && tlsInUse && !c.stores){
-      warn(ENV_FILE, `a TLS/mTLS connection exists but ${c.section}.stores is omitted; the store files will be missing at runtime`);
-    }
-  });
+  // docker/podman carry no equivalent warning: their store files are bind-mounted
+  // whenever tls.*.file is set, so "TLS configured but nothing mounted" cannot
+  // arise. Kubernetes still has to be told to build the Secret.
 
   // checkStatusUser: management security is always on, so this always runs --
   // no author-configured user may claim the reserved status account's name, as
@@ -1923,15 +1911,15 @@ function checkContainerTarget(add, warn, m, c){
       if(n < 1 || n > 65535) add(ENV_FILE, `${c.section}.ports ${i === 0 && parts.length === 2 ? 'host' : 'container'} port ${n} must be 1-65535`);
     });
   });
-  if(c.stores){
-    if(!m.tls.truststore) add(ENV_FILE, `${c.section}.stores requires tls.truststore`);
-    [['tls.truststore.file', m.tls.truststore], ['tls.keystore.file', m.tls.keystore]].forEach(([field, store]) => {
-      if(!store || !store.file) return;
-      if(!safeHostPath(store.file)){
-        add(ENV_FILE, `${c.section}.stores bind-mounts ${field} "${store.file}", which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
-      }
-    });
-  }
+  // The tls.*.file paths are always bind-mount sources for docker/podman, so they
+  // are always gated. Kubernetes embeds the store content in a Secret instead and
+  // never reaches this function.
+  [['tls.truststore.file', m.tls.truststore], ['tls.keystore.file', m.tls.keystore]].forEach(([field, store]) => {
+    if(!store || !store.file) return;
+    if(!safeHostPath(store.file)){
+      add(ENV_FILE, `${c.section} bind-mounts ${field} "${store.file}", which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
+    }
+  });
   if(c.libsDir && !safeHostPath(c.libsDir)){
     add(ENV_FILE, `${c.section}.libs.dir "${c.libsDir}" contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
   }
@@ -2983,13 +2971,13 @@ function sampleModel(){
       section: 'docker', command: 'docker', name: 'connector',
       projectName: 'solace-ibmmq-connectors',
       restart: 'unless-stopped', ports: ['8090'],
-      cred: null, stores: true, libsDir: ''
+      cred: null, libsDir: ''
     },
     podman: {
       section: 'podman', command: 'podman', name: 'connector',
       restart: 'unless-stopped', ports: ['8090'],
-      cred: null, stores: true, libsDir: '',
-      mode: 'run', quadlet: { scope: 'auto', dir: '' }
+      cred: null, libsDir: '',
+      quadlet: { scope: 'auto', dir: '' }
     }
   };
 }
@@ -3046,7 +3034,7 @@ function fillWf(card, w){
 function clearForm(){
   ['conns-list', 'wfs-list', 'users-list', 'dk-ports', 'pd-ports'].forEach(id => { $(id).innerHTML = ''; });
   ['i-ts-on', 'i-ks-on', 'i-mgmt-on', 'i-sec-on', 'i-k8s-on', 'i-dk-on', 'i-pd-on',
-   'i-sl-on', 'i-k8s-svc', 'i-dk-stores', 'i-pd-stores', 'i-dk-libs-on', 'i-pd-libs-on'].forEach(id => setC(id, false));
+   'i-sl-on', 'i-k8s-svc', 'i-dk-libs-on', 'i-pd-libs-on'].forEach(id => setC(id, false));
   ['i-ts-pass-env', 'i-ks-pass-env', 'i-le-user-env', 'i-le-pass-env',
    'i-img-user-env', 'i-img-pass-env'].forEach(id => setC(id, true));
   ['i-log', 'i-soldef', 'i-le-queue', 'i-le-fo', 'i-le-props', 'i-k8s-name', 'i-k8s-ns',
@@ -3130,11 +3118,10 @@ function loadSample(){
     setV('i-' + p + '-cmd', c.command);
     setV('i-' + p + '-name', c.name); setV('i-' + p + '-restart', c.restart);
     c.ports.forEach(v => addPort(p + '-ports', v));
-    setC('i-' + p + '-stores', true);
   });
   // Both docker-only and podman-only keys are set outside the shared loop above.
   setV('i-dk-project', m.docker.projectName);
-  setV('i-pd-mode', m.podman.mode); setV('i-pd-scope', m.podman.quadlet.scope);
+  setV('i-pd-scope', m.podman.quadlet.scope);
 
   applyAllToggles();
   // conn-ref pickers are populated after the connections exist; re-apply the refs.

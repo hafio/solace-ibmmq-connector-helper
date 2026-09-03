@@ -102,10 +102,11 @@ func TestTargetMounts(t *testing.T) {
 		Keystore:   &spec.Store{File: "certs/k.jks"},
 	}
 	res := Resolver{Abs: func(p string) string { return "/abs/" + p }}
-	// The store bind-mount target is always the fixed in-container dir; the
-	// supplied stores.MountPath ("/mnt") is deliberately ignored (a non-default
-	// value is rejected in validate). Only the host Source comes from res.Abs.
-	sm, lm := targetMounts(tls, &spec.StoresMount{MountPath: "/mnt"}, &spec.LibsMount{Dir: "libs", MountPath: "/libs"}, res)
+	// The store bind-mount target is always the fixed in-container dir; only the
+	// host Source comes from res.Abs. Stores are not opt-in -- a configured
+	// tls.*.file is mounted because application.yml already points at the mounted
+	// path.
+	sm, lm := targetMounts(tls, &spec.LibsMount{Dir: "libs"}, res)
 	if len(sm) != 2 {
 		t.Fatalf("store mounts=%d want 2", len(sm))
 	}
@@ -115,12 +116,18 @@ func TestTargetMounts(t *testing.T) {
 	if sm[1].Target != spec.DefaultStoresMountPath+"/k.jks" {
 		t.Errorf("store mount 1 = %+v", sm[1])
 	}
-	if lm == nil || lm.Source != "/abs/libs" || lm.Target != "/libs" {
+	// The libs target is the fixed image path too; only Dir is the operator's.
+	if lm == nil || lm.Source != "/abs/libs" || lm.Target != spec.DefaultLibsMountPath {
 		t.Errorf("libs mount = %+v", lm)
 	}
-	// Opt-out: nil stores and libs yield nothing (bind mounts are opt-in).
-	if sm2, lm2 := targetMounts(tls, nil, nil, res); sm2 != nil || lm2 != nil {
-		t.Errorf("nil sections should yield no mounts: %v %v", sm2, lm2)
+	// No TLS at all is now the only way to get no store mounts, and libs stays
+	// opt-in: it has a host dir to name.
+	if sm2, lm2 := targetMounts(spec.TLSConfig{}, nil, res); sm2 != nil || lm2 != nil {
+		t.Errorf("no TLS and no libs should yield no mounts: %v %v", sm2, lm2)
+	}
+	// A store present but with no file set is skipped rather than mounted empty.
+	if sm3, _ := targetMounts(spec.TLSConfig{Truststore: &spec.Store{}}, nil, res); sm3 != nil {
+		t.Errorf("a store with no file should yield no mount: %v", sm3)
 	}
 }
 
@@ -451,8 +458,6 @@ docker:
   restart: unless-stopped
   ports:
     - 8090
-  stores:
-    mount-path: /app/external/classpath/truststores
 `
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
 	plan, errs, _ := GenerateDocker(req, Resolver{})
@@ -512,14 +517,13 @@ docker:
 	}
 }
 
-func TestGeneratePodmanRunAndQuadlet(t *testing.T) {
+func TestGeneratePodmanQuadlet(t *testing.T) {
 	envData := `timezone: UTC
 image:
   name: solace/connector
   tag: "9.9"
 podman:
   command: podman
-  mode: run
   name: solmq-connector
   restart: unless-stopped
   ports:
@@ -528,13 +532,15 @@ podman:
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
 	res := Resolver{Env: func(string) (string, bool) { return "v", true }}
 
-	// mode: run -> a run script, no quadlet unit.
 	plan, errs, _ := GeneratePodman(req, res, PodmanOpts{})
 	if len(errs) > 0 {
-		t.Fatalf("run: unexpected errors: %v", errs)
+		t.Fatalf("unexpected errors: %v", errs)
 	}
-	if plan.Mode != spec.PodmanModeRun || plan.RunScript == "" || plan.Unit != (podmangen.Unit{}) {
-		t.Errorf("run plan mode=%q script=%d unit=%+v", plan.Mode, len(plan.RunScript), plan.Unit)
+	if plan.Unit == (podmangen.Unit{}) {
+		t.Error("no quadlet unit rendered")
+	}
+	if plan.Unit.Filename != "solmq-connector.container" {
+		t.Errorf("unit filename = %q", plan.Unit.Filename)
 	}
 	if plan.AppYAML.Name != "solmq-connector-application.yml" {
 		t.Errorf("app yaml = %+v", plan.AppYAML)
@@ -545,28 +551,59 @@ podman:
 	if len(plan.Secrets) != 4 {
 		t.Fatalf("secrets = %+v, want 4 entries", plan.Secrets)
 	}
-	// The run script loads each secret into podman's store, namespaced by the
-	// container, before any `podman run`; it never carries the value itself.
+	// Each secret is mounted from podman's store by its namespaced store name, at
+	// an absolute target under the secrets mount rather than podman's default
+	// /run/secrets. The value itself never reaches the unit.
 	for _, s := range plan.Secrets {
 		store := PodmanSecretStoreName("solmq-connector", s.Stable)
-		if !strings.Contains(plan.RunScript, "podman secret create "+store) {
-			t.Errorf("run script missing secret-create for %q:\n%s", store, plan.RunScript)
-		}
-		if !strings.Contains(plan.RunScript, "--secret "+store+",type=mount,target="+spec.SecretsMountPath+"/"+s.Stable) {
-			t.Errorf("run script missing --secret mount for %q:\n%s", store, plan.RunScript)
+		want := "Secret=" + store + ",type=mount,target=" + spec.SecretsMountPath + "/" + s.Stable
+		if !strings.Contains(plan.Unit.Content, want) {
+			t.Errorf("unit missing secret directive %q:\n%s", want, plan.Unit.Content)
 		}
 	}
+}
 
-	// ForceQuadlet -> a quadlet unit, no run script (deploy path).
-	q, errs, _ := GeneratePodman(req, res, PodmanOpts{ForceQuadlet: true, BaseDir: "/base"})
+// TestGeneratePodmanRejectsModeKey pins the removed podman.mode key. Both former
+// values error: generate emits the quadlet unit either way, so a section asking
+// for the old run script is told rather than silently given something else.
+func TestGeneratePodmanRejectsModeKey(t *testing.T) {
+	for _, mode := range []string{"run", "quadlet"} {
+		t.Run(mode, func(t *testing.T) {
+			envData := `image:
+  name: solace/connector
+  tag: "9.9"
+podman:
+  command: podman
+  mode: ` + mode + `
+  name: solmq-connector
+`
+			req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
+			res := Resolver{Env: func(string) (string, bool) { return "v", true }}
+			_, errs, _ := GeneratePodman(req, res, PodmanOpts{})
+			if !issuesContain(errs, "podman.mode is no longer configured") {
+				t.Errorf("mode %q should be rejected, got %v", mode, errs)
+			}
+		})
+	}
+}
+
+// TestGeneratePodmanNoModeKeyIsClean is the other half: an omitted mode: must not
+// trip the rejection. It guards the removed default in applyPodmanDefaults -- were
+// that still setting the field, every section would fail the check above for a
+// value the operator never wrote.
+func TestGeneratePodmanNoModeKeyIsClean(t *testing.T) {
+	envData := `image:
+  name: solace/connector
+  tag: "9.9"
+podman:
+  command: podman
+  name: solmq-connector
+`
+	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
+	res := Resolver{Env: func(string) (string, bool) { return "v", true }}
+	_, errs, _ := GeneratePodman(req, res, PodmanOpts{})
 	if len(errs) > 0 {
-		t.Fatalf("quadlet: unexpected errors: %v", errs)
-	}
-	if q.Mode != spec.PodmanModeQuadlet || q.Unit == (podmangen.Unit{}) || q.RunScript != "" {
-		t.Errorf("quadlet plan mode=%q unit=%+v script=%d", q.Mode, q.Unit, len(q.RunScript))
-	}
-	if len(q.Secrets) != 4 {
-		t.Errorf("quadlet secrets = %+v, want 4 entries", q.Secrets)
+		t.Errorf("an omitted mode: must be clean, got %v", errs)
 	}
 }
 
@@ -706,7 +743,7 @@ func TestGenerateDockerCarriesStatusScript(t *testing.T) {
 // script, and the on-disk mount path is BaseDir-resolved exactly like
 // AppYAML.
 func TestGeneratePodmanCarriesStatusScript(t *testing.T) {
-	envData := "image:\n  name: img\n  tag: v1\npodman:\n  command: podman\n  mode: run\n  name: solmq-connector\n"
+	envData := "image:\n  name: img\n  tag: v1\npodman:\n  command: podman\n  name: solmq-connector\n"
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
 	res := Resolver{Env: func(string) (string, bool) { return "v", true }, Rand: fixedStatusRand}
 
@@ -720,12 +757,14 @@ func TestGeneratePodmanCarriesStatusScript(t *testing.T) {
 	if !strings.Contains(plan.StatusScript.Data, "USER_NAME="+spec.StatusUserName) {
 		t.Errorf("StatusScript.Data missing the rendered script:\n%s", plan.StatusScript.Data)
 	}
-	// Same BaseDir resolution as AppYAML (pathIn), not a bare name.
-	if want := "/base/solmq-connector-application.yml"; !strings.Contains(plan.RunScript, want) {
-		t.Errorf("run script missing BaseDir-resolved AppYAML mount %q:\n%s", want, plan.RunScript)
+	// Same BaseDir resolution as AppYAML (pathIn), not a bare name -- systemd
+	// starts the unit with no useful cwd, so a relative Volume= source would not
+	// resolve.
+	if want := "Volume=/base/solmq-connector-application.yml"; !strings.Contains(plan.Unit.Content, want) {
+		t.Errorf("unit missing BaseDir-resolved AppYAML volume %q:\n%s", want, plan.Unit.Content)
 	}
-	if want := "/base/solmq-connector-status:" + statusscript.ContainerPath; !strings.Contains(plan.RunScript, want) {
-		t.Errorf("run script missing BaseDir-resolved status mount %q:\n%s", want, plan.RunScript)
+	if want := "Volume=/base/solmq-connector-status:" + statusscript.ContainerPath; !strings.Contains(plan.Unit.Content, want) {
+		t.Errorf("unit missing BaseDir-resolved status volume %q:\n%s", want, plan.Unit.Content)
 	}
 }
 

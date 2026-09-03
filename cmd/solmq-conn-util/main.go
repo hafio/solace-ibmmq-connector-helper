@@ -1,7 +1,7 @@
 // Command solmq-conn-util generates and deploys the Solace PubSub+ Connector for IBM
 // MQ from a single env.yaml: it consolidates a folder of per-workflow YAML files
 // into an application.yml and, per platform, into Kubernetes manifests, a docker
-// compose file, or podman run/quadlet units -- and can apply, tear down, check the
+// compose file, or a podman quadlet unit -- and can apply, tear down, check the
 // status of, or read the logs of those by shelling out to kubectl/oc, docker, or
 // podman/systemctl.
 //
@@ -414,10 +414,7 @@ func genPodman(envPath, out string) int {
 	if len(errs) > 0 {
 		return failFast(errs)
 	}
-	if plan.Mode == spec.PodmanModeQuadlet {
-		return emit(out, plan.Unit.Content)
-	}
-	return emit(out, plan.RunScript)
+	return emit(out, plan.Unit.Content)
 }
 
 // ---- deploy / remove ---------------------------------------------------------
@@ -622,9 +619,9 @@ func actPodman(o actionOpts, r runner.Runner) int {
 		return errExit(serr)
 	}
 	res := resolver(envDir)
-	// deploy/remove are always quadlet; BaseDir bakes absolute on-disk paths into
-	// the units so systemd resolves them regardless of cwd.
-	plan, errs, warns := gen.GeneratePodman(req, res, gen.PodmanOpts{ForceQuadlet: true, BaseDir: sc.Dir}, extraAllowed...)
+	// BaseDir bakes absolute on-disk paths into the unit so systemd resolves them
+	// regardless of cwd.
+	plan, errs, warns := gen.GeneratePodman(req, res, gen.PodmanOpts{BaseDir: sc.Dir}, extraAllowed...)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
