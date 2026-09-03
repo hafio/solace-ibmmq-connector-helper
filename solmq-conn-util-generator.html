@@ -366,6 +366,7 @@ details[open]>summary::before{content:"- "}
         <div class="f"><label>Container Name</label><input id="i-pd-name" value="connector"></div>
       </div>
       <div class="fr">
+        <div class="f"><label>Base Directory</label><input id="i-pd-base" placeholder="/opt/solmq-connector"><div class="h">Required. Host dir the rendered application.yml, status script and logback config are written to and bind-mounted from. Relative paths resolve against env.yaml. Separate from the quadlet directory, which places the unit itself.</div></div>
         <div class="f"><label>Quadlet Scope</label><select id="i-pd-scope"><option value="auto">auto</option><option value="user">user</option><option value="system">system</option></select></div>
         <div class="f"><label>Quadlet Directory</label><input id="i-pd-qdir" placeholder="(default for the resolved scope)"></div>
       </div>
@@ -1063,6 +1064,7 @@ function readModel(){
     projectName: V('i-dk-project') || 'solace-ibmmq-connectors'
   }) : null;
   m.podman = C('i-pd-on') ? Object.assign(readCtr('pd', 'podman'), {
+    baseDir: V('i-pd-base'),
     quadlet: { scope: V('i-pd-scope') || 'auto', dir: V('i-pd-qdir') }
   }) : null;
   return m;
@@ -1244,8 +1246,11 @@ function emitKube(k){
 
 function emitCtr(c){
   let y = `# ---- ${c.section} target ----\n${c.section}:\n` + kv('command', c.command, '  ');
-  if(c.section === 'podman' && (c.quadlet.scope !== 'auto' || c.quadlet.dir)){
-    y += '  quadlet:\n' + kv('scope', c.quadlet.scope, '    ') + kv('dir', c.quadlet.dir, '    ');
+  if(c.section === 'podman'){
+    y += kv('base-dir', c.baseDir, '  ');
+    if(c.quadlet.scope !== 'auto' || c.quadlet.dir){
+      y += '  quadlet:\n' + kv('scope', c.quadlet.scope, '    ') + kv('dir', c.quadlet.dir, '    ');
+    }
   }
   y += kv('name', c.name, '  ');
   // The compose project. Docker only: podman has no equivalent grouping.
@@ -1449,6 +1454,12 @@ function validateModel(m){
   if(m.podman){
     checkContainerTarget(add, warn, m, m.podman);
     checkExpansion(warn, ENV_FILE, 'podman.quadlet.dir', m.podman.quadlet.dir);
+    if(!m.podman.baseDir){
+      add(ENV_FILE, 'podman.base-dir is required: it names the host directory the rendered application.yml and status script are written to and bind-mounted from. Relative paths resolve against env.yaml');
+    } else if(!safeHostPath(m.podman.baseDir)){
+      add(ENV_FILE, `podman.base-dir "${m.podman.baseDir}" contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
+    }
+    checkExpansion(warn, ENV_FILE, 'podman.base-dir', m.podman.baseDir);
   }
   const tlsInUse = usesTLS(resolved);
   if(m.kube && tlsInUse && !m.kube.stores){
@@ -2977,6 +2988,7 @@ function sampleModel(){
       section: 'podman', command: 'podman', name: 'connector',
       restart: 'unless-stopped', ports: ['8090'],
       cred: null, libsDir: '',
+      baseDir: '/opt/solmq-connector',
       quadlet: { scope: 'auto', dir: '' }
     }
   };
@@ -3121,7 +3133,7 @@ function loadSample(){
   });
   // Both docker-only and podman-only keys are set outside the shared loop above.
   setV('i-dk-project', m.docker.projectName);
-  setV('i-pd-scope', m.podman.quadlet.scope);
+  setV('i-pd-base', m.podman.baseDir); setV('i-pd-scope', m.podman.quadlet.scope);
 
   applyAllToggles();
   // conn-ref pickers are populated after the connections exist; re-apply the refs.

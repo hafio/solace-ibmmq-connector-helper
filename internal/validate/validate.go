@@ -1287,6 +1287,17 @@ func checkPodman(add func(string, string, ...any), ctx Context) {
 	if p.Mode != "" {
 		add(fileEnv, "podman.mode is no longer configured: generate emits the .container quadlet unit that deploy and remove install. Remove podman.mode")
 	}
+	// base-dir is required, not defaulted: it is where the mounted application.yml
+	// and status script are written, and the path is baked into the unit's Volume=
+	// lines. There is no safe default -- the quadlet directory would put generated
+	// data among systemd's own units, and a guess would be silently wrong on a host
+	// where it is unwritable. Better to be told once than to find files somewhere
+	// unexpected.
+	if p.BaseDir == "" {
+		add(fileEnv, "podman.base-dir is required: it names the host directory the rendered application.yml and status script are written to and bind-mounted from. Relative paths resolve against env.yaml")
+	} else if !safeHostPath(p.BaseDir) {
+		add(fileEnv, "podman.base-dir %q contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", p.BaseDir)
+	}
 	if q := p.Quadlet; q != nil {
 		switch q.Scope {
 		case spec.QuadletScopeAuto, spec.QuadletScopeUser, spec.QuadletScopeSystem:

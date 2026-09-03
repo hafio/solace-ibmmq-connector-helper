@@ -524,6 +524,7 @@ image:
   tag: "9.9"
 podman:
   command: podman
+  base-dir: /opt/solmq
   name: solmq-connector
   restart: unless-stopped
   ports:
@@ -532,7 +533,7 @@ podman:
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
 	res := Resolver{Env: func(string) (string, bool) { return "v", true }}
 
-	plan, errs, _ := GeneratePodman(req, res, PodmanOpts{})
+	plan, errs, _ := GeneratePodman(req, res)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -574,12 +575,13 @@ func TestGeneratePodmanRejectsModeKey(t *testing.T) {
   tag: "9.9"
 podman:
   command: podman
+  base-dir: /opt/solmq
   mode: ` + mode + `
   name: solmq-connector
 `
 			req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
 			res := Resolver{Env: func(string) (string, bool) { return "v", true }}
-			_, errs, _ := GeneratePodman(req, res, PodmanOpts{})
+			_, errs, _ := GeneratePodman(req, res)
 			if !issuesContain(errs, "podman.mode is no longer configured") {
 				t.Errorf("mode %q should be rejected, got %v", mode, errs)
 			}
@@ -597,11 +599,12 @@ func TestGeneratePodmanNoModeKeyIsClean(t *testing.T) {
   tag: "9.9"
 podman:
   command: podman
+  base-dir: /opt/solmq
   name: solmq-connector
 `
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
 	res := Resolver{Env: func(string) (string, bool) { return "v", true }}
-	_, errs, _ := GeneratePodman(req, res, PodmanOpts{})
+	_, errs, _ := GeneratePodman(req, res)
 	if len(errs) > 0 {
 		t.Errorf("an omitted mode: must be clean, got %v", errs)
 	}
@@ -740,14 +743,14 @@ func TestGenerateDockerCarriesStatusScript(t *testing.T) {
 
 // TestGeneratePodmanCarriesStatusScript pins the podman wiring:
 // PodmanPlan.StatusScript names <name>-status and carries the rendered
-// script, and the on-disk mount path is BaseDir-resolved exactly like
-// AppYAML.
+// script, and the on-disk mount path is resolved under podman.base-dir exactly
+// like AppYAML.
 func TestGeneratePodmanCarriesStatusScript(t *testing.T) {
-	envData := "image:\n  name: img\n  tag: v1\npodman:\n  command: podman\n  name: solmq-connector\n"
+	envData := "image:\n  name: img\n  tag: v1\npodman:\n  command: podman\n  base-dir: /base\n  name: solmq-connector\n"
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
 	res := Resolver{Env: func(string) (string, bool) { return "v", true }, Rand: fixedStatusRand}
 
-	plan, errs, _ := GeneratePodman(req, res, PodmanOpts{BaseDir: "/base"})
+	plan, errs, _ := GeneratePodman(req, res)
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -797,7 +800,7 @@ func TestGenerateMissingTargetSection(t *testing.T) {
 		{"docker", "docker target requires a 'docker:' section in env.yaml",
 			func(r Request, res Resolver) []Issue { _, e, _ := GenerateDocker(r, res); return e }},
 		{"podman", "podman target requires a 'podman:' section in env.yaml",
-			func(r Request, res Resolver) []Issue { _, e, _ := GeneratePodman(r, res, PodmanOpts{}); return e }},
+			func(r Request, res Resolver) []Issue { _, e, _ := GeneratePodman(r, res); return e }},
 	}
 	for _, c := range cases {
 		req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}

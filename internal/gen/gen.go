@@ -350,18 +350,16 @@ type NamedDoc struct {
 	Data string
 }
 
-// PodmanOpts tunes podman generation. BaseDir, when set, makes the on-disk file
-// paths (application.yml, env-file) absolute under it so systemd quadlet units
-// reference real locations; empty BaseDir keeps base names for a preview.
-type PodmanOpts struct {
-	BaseDir string
-}
-
 // PodmanPlan carries the rendered quadlet unit plus the on-disk material a deploy
 // must write before activating it.
 type PodmanPlan struct {
-	Unit    podmangen.Unit // the .container quadlet unit
-	AppYAML NamedDoc       // application.yml (write to disk)
+	Unit podmangen.Unit // the .container quadlet unit
+	// BaseDir is the resolved absolute directory the three documents below belong
+	// in, from podman.base-dir. It is carried on the plan rather than recomputed
+	// by each caller so what deploy writes and what remove deletes cannot drift
+	// from the paths already baked into the unit's Volume= lines.
+	BaseDir string
+	AppYAML NamedDoc // application.yml (write to disk)
 	// StatusScript is the rendered status script (write to disk): like
 	// AppYAML, a container cannot inline file content, so it too has to be a
 	// bind-mounted file rather than embedded in the quadlet unit.
@@ -380,7 +378,7 @@ type PodmanPlan struct {
 //
 // extraAllowed threads deploy/remove's --allow-command values into the
 // podman.command allowlist check; plain `generate podman` calls this with none.
-func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...string) (plan PodmanPlan, errs, warns []Issue) {
+func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan PodmanPlan, errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
 	p := e.Podman
 	if p == nil {
@@ -408,6 +406,12 @@ func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...st
 
 	plan.Secrets = b.model.Secrets
 
+	// base-dir is resolved the way every other host path in the spec is, against
+	// env.yaml, so a relative value still reaches the unit as an absolute path --
+	// systemd starts the unit with no useful cwd, and podman would read a bare
+	// source as a named volume rather than a bind mount.
+	plan.BaseDir = res.abs(p.BaseDir)
+
 	sm, lm := targetMounts(e.Defaults.TLS, p.Libs, res)
 	appName := p.Name + "-application.yml"
 	statusName := p.Name + "-status"
@@ -416,7 +420,7 @@ func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...st
 	if sl := e.Defaults.Syslog; sl != nil {
 		logbackName := p.Name + "-" + logback.FileName
 		plan.Logback = NamedDoc{Name: logbackName, Data: logback.XML(sl.Protocol)}
-		logbackPath = pathIn(opts.BaseDir, logbackName)
+		logbackPath = pathIn(plan.BaseDir, logbackName)
 	}
 	plan.StatusScript = NamedDoc{Name: statusName, Data: statusscript.Render(e.Defaults.EffectiveManagementPort(), spec.StatusUserName)}
 	plan.Service = PodmanServiceName(p.Name)
@@ -430,9 +434,9 @@ func GeneratePodman(r Request, res Resolver, opts PodmanOpts, extraAllowed ...st
 			Name:             p.Name,
 			Image:            e.Image.Ref(),
 			Timezone:         e.Timezone,
-			AppYAMLPath:      pathIn(opts.BaseDir, appName),
+			AppYAMLPath:      pathIn(plan.BaseDir, appName),
 			MQTLS:            b.model.MQTLS,
-			StatusScriptPath: pathIn(opts.BaseDir, statusName),
+			StatusScriptPath: pathIn(plan.BaseDir, statusName),
 			LogbackPath:      logbackPath,
 			LeaderMode:       e.Defaults.LeaderElection.EffectiveMode(),
 		},

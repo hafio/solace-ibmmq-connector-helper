@@ -453,6 +453,31 @@ func TestCheckPodmanModeAndScope(t *testing.T) {
 	}
 }
 
+// TestCheckPodmanBaseDirRequired pins the one podman key with no default. It is
+// where the mounted application.yml and status script are written, and the path
+// is baked into the unit's Volume= lines, so there is nothing safe to guess.
+func TestCheckPodmanBaseDirRequired(t *testing.T) {
+	p := podmanOK()
+	p.BaseDir = ""
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true}); !hasErr(e, "podman.base-dir is required") {
+		t.Errorf("an omitted base-dir must be rejected, got %v", e)
+	}
+	// It reaches a Volume= line unquoted, so it takes the same host-path gate as
+	// libs.dir and the tls.*.file stores.
+	p2 := podmanOK()
+	p2.BaseDir = "/opt/my dir"
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p2, CheckPodman: true}); !hasErr(e, "podman.base-dir") {
+		t.Errorf("an unsafe base-dir must be rejected, got %v", e)
+	}
+	// A relative value is accepted: it resolves against env.yaml at render time,
+	// exactly as libs.dir and tls.*.file do.
+	p3 := podmanOK()
+	p3.BaseDir = "./data"
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p3, CheckPodman: true}); hasErr(e, "base-dir") {
+		t.Errorf("a relative base-dir should be accepted, got %v", e)
+	}
+}
+
 // TestCheckLibsMountPathRemoved pins the last of the fixed-path keys. dir stays --
 // the host side is genuinely the operator's choice -- but mount-path is rejected
 // for both sections, because the image launches with /app/external/libs literally
@@ -573,7 +598,7 @@ func TestConnectionDefinitionValidation(t *testing.T) {
 }
 
 func podmanOK() *spec.Podman {
-	return &spec.Podman{Command: "podman", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}, Quadlet: &spec.Quadlet{Scope: spec.QuadletScopeAuto}}
+	return &spec.Podman{Command: "podman", Name: "c", BaseDir: "/opt/solmq", Ports: []spec.Port{{Host: 8090, Container: 8090}}, Quadlet: &spec.Quadlet{Scope: spec.QuadletScopeAuto}}
 }
 
 func TestCheckContainerNameRejected(t *testing.T) {

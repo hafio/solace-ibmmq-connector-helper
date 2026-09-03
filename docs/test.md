@@ -3,7 +3,7 @@
 Every test in the suite, grouped by package and expanded to individual cases, so you can
 see what behavior is covered and jump to the test that covers it. This is a living
 document: when a test or case is added, removed, or renamed, update the matching row in
-the same change (S5/S6). For build and release details see [DEVELOPMENT.md](DEVELOPMENT.md);
+the same change. For build and release details see [DEVELOPMENT.md](DEVELOPMENT.md);
 for using the tool, see [userguide.md](userguide.md).
 
 Run the suite with `./scripts/dev.sh test` (`.\scripts\dev.ps1 test` on Windows);
@@ -42,12 +42,13 @@ measure coverage with the `cov` task.
 - **The exec seam** (`internal/runner`) is faked by `fakeRunner`, which records the argv
   and stdin crossing the boundary instead of starting a process; the real `os/exec` path
   is exercised through the `TestHelperProcess` child-process pattern.
-- **Columns**: a `-` in the Case column means the test is not table-driven and runs once;
-  otherwise Case lists the test's subtest names in table order.
+- **Columns**: a `-` in the Case column means the test runs once; otherwise Case carries
+  the subtest name or the case's label/input value, in source order where the test defines
+  one.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 738 test functions, 1010 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 737 test functions, 1005 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -65,7 +66,7 @@ Tests: [scan_test.go](../internal/scan/scan_test.go)
 | TestScanEmptyPatternDefaultsToStar | - | empty pattern behaves as '*', matches a.yaml |
 | TestScanErrorMissingDir | - | scanning nonexistent directory returns an error |
 | TestScanPatternWildcards | workflow-* | trailing star matches workflow-0.yaml and workflow-1.yaml only |
-| TestScanPatternWildcards | *hoc* | mid-string star matches only adhoc.yaml |
+| TestScanPatternWildcards | `*hoc*` | mid-string star matches only adhoc.yaml |
 | TestScanPatternWildcards | *-1.yaml | leading star matches only workflow-1.yaml |
 | TestScanPatternNoMatchIsEmptyNotError | - | non-matching pattern 'nope*' yields empty results, no error |
 | TestScanRejectsNonStarMetachars | [bad | pattern with bracket metachar is rejected with error |
@@ -78,8 +79,8 @@ Tests: [scan_test.go](../internal/scan/scan_test.go)
 | TestMatchStar | pre*,prefix.yaml | trailing star prefix match -> true |
 | TestMatchStar | *.yaml,x.yaml | leading star suffix match -> true |
 | TestMatchStar | *.yaml,x.yml | leading star suffix mismatch -> false |
-| TestMatchStar | a*b*c,axxbyyc | multiple stars match interspersed segments -> true |
-| TestMatchStar | a*b*c,axxc | multiple stars but missing required segment -> false |
+| TestMatchStar | `a*b*c,axxbyyc` | multiple stars match interspersed segments -> true |
+| TestMatchStar | `a*b*c,axxc` | multiple stars but missing required segment -> false |
 | TestMatchStar | **,anything | consecutive stars still match any name -> true |
 | TestIsYAML | a.yaml | isYAML true for .yaml extension |
 | TestIsYAML | a.yml | isYAML true for .yml extension |
@@ -115,13 +116,13 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestParseWorkflowAmbiguousSystemAndDest | solace and mq both set | HasSystem returns false when both systems present |
 | TestParseWorkflowAmbiguousSystemAndDest | queue and topic both set | DestKind is empty string when queue+topic ambiguous |
 | TestParseWorkflowSyntaxError | - | malformed yaml returns non-nil error |
-| TestParseDefaultsFull | - | parses tls stores, management port 8090 with exposure health (not a configurable key, but still parsed so validate can reject it), security enabled false with 1 user, leader-election standalone, logging/solace-defaults nodes captured |
+| TestParseDefaultsFull | - | parses tls stores, management port 8090 with exposure health (not a configurable key, but parsed anyway so validate can reject it), security enabled false with 1 user, leader-election standalone, logging/solace-defaults nodes captured |
 | TestParseSecurityUserRoles | absent / one / several | security.users[].roles parses to no roles (the connector's read-only default), a single role, and several in authored order |
 | TestParseDefaultsSecurityEnabledKeyOmittedStaysNil | - | security.enabled is not a configurable key: an omitted key parses to Security.Enabled nil rather than being defaulted |
 | TestParseDefaultsEmpty | - | empty input yields a zero-valued Management (Management{}), Security.Enabled nil with no users, and TLS.Truststore nil |
 | TestParseDefaultsError | - | malformed tls yaml returns non-nil error |
 | TestParseKubernetesReplicasDefault | - | deployment without replicas defaults Replicas to 1 |
-| TestParseKubernetesFull | - | parses replicas 2, service enabled port 8090, credentials create name, stores create present; source and variables set on credentials.create still parse structurally so RemovedKeys can report them |
+| TestParseKubernetesFull | - | parses replicas 2, service enabled port 8090, credentials create name, stores create present; source and variables set on credentials.create parse structurally regardless, so RemovedKeys can report them |
 | TestParseKubernetesError | - | deployment as sequence instead of map returns non-nil error |
 | TestParseKubernetesResources | - | parses deployment resources CPU '1' and Memory 1Gi |
 | TestParseKubernetesLoggingLibsDefaults | syslog and libs download present | syslog Protocol defaults to udp and libs download Image defaults to busybox:1.37 |
@@ -131,7 +132,7 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestWorkflowsFromRawDefaultWhenAbsent | - | workflows section absent defaults dir '.' and file pattern '*' |
 | TestWorkflowsFromRawDirOverride | - | dir override /custom/dir applied, file pattern stays default '*' |
 | TestWorkflowsFromRawFilePatternOverride | - | file_pattern override *.yaml applied, dir stays default '.' |
-| TestParseEnvUnknownKeyIgnored | - | unknown top-level key is silently ignored, no error, docker section still parses |
+| TestParseEnvUnknownKeyIgnored | - | unknown top-level key is silently ignored, no error, docker section parses normally |
 | TestParseEnvWrongScalarTypeErrors | - | non-integer management.port errors, message contains 'cannot unmarshal' |
 | TestParseEnvPortsValid | bare int 8090 | parses Host=8090 Container=8090 String()='8090:8090' |
 | TestParseEnvPortsValid | host:container 8080:8090 | parses Host=8080 Container=8090 String()='8080:8090' |
@@ -142,7 +143,7 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestParseEnvPortsInvalid | mapping node {a: 1} | error 'env.yaml: ports entry must be an integer or "host:container", got a !!map' |
 | TestApplyDockerDefaultsFillsMissing | - | docker defaults command/name/project-name/restart applied, ports stay empty (publishing is opt-in), stores/libs stay nil |
 | TestApplyDockerDefaultsOverrideWins | - | explicit command/name/project-name/restart/ports override defaults exactly as given; a custom name does not drag project-name with it |
-| TestApplyPodmanDefaultsFillsMissing | - | podman defaults command/name/restart applied, ports stay empty (publishing is opt-in), Quadlet non-nil with scope auto and empty dir, and mode left empty -- it is a removed key, so defaulting it would trip validate for every section |
+| TestApplyPodmanDefaultsFillsMissing | - | podman defaults command/name/restart applied, ports stay empty (publishing is opt-in), Quadlet non-nil with scope auto and empty dir, and mode left empty -- validate rejects podman.mode, so defaulting it would trip validate for every section |
 | TestApplyPodmanDefaultsOverrideWins | - | explicit command/name/restart/ports/quadlet scope+dir override defaults exactly |
 | TestRemovedMountKeysDecodeButAreNotDefaulted | - | libs dir kept verbatim while mount-path is left empty (defaulting it would trip validate's rejection for a value nobody wrote), and a present stores: still decodes non-nil so validate can name it |
 | TestPortDefaultsFollowManagementPort | - | management.port 9091 with docker/podman/kubernetes present: kubernetes Service.Port defaults to {9091,9091}; docker/podman publish nothing with ports: omitted |
@@ -170,12 +171,9 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestStoreSecretNilSafe | - | nil *Store yields an empty Cred; literal and -env stores yield the matching Cred side |
 | TestUserSecretLiteralAndEnv | - | a security user's Secret() carries the literal or the -env variable, matching what was set |
 | TestCredCreateRemovedKeys | - | RemovedKeys reports each of source, variables, values-file alone and all three in order; a nil receiver and a bare create.name report none |
-
-| Test | Case | Verifies |
-|------|------|----------|
 | TestImageRef | hub / private registry / digest / trailing slash / no tag / no name / nil | Ref() assembles repo/name:tag, drops an unset repo, and joins a sha256: tag with `@` so a digest pin is a reference an engine accepts |
 | TestImageRegistry | hub fallback / private / nil / trailing slash | the auths key is the registry host, falling back to Docker Hub's v1 URL -- a Hub namespace lives in name and never reaches the lookup |
-| TestRetiredPerPlatformImageStillParses | - | kubernetes.deployment.image, docker.image and podman.image still parse into their retained fields, which is what lets validate reject them instead of yaml dropping them silently |
+| TestRetiredPerPlatformImageStillParses | - | kubernetes.deployment.image, docker.image and podman.image parse into their fields, which is what lets validate reject them instead of yaml dropping them silently |
 | TestImagePullSecretCreateDefaultsFalse | absent / explicit true | create defaults to false so naming a Secret only references it; an explicit true is honoured |
 | TestParseEnvTopLevelSyslog | present / absent | logging.syslog parses beside logging.level at the top level, protocol defaults to udp, and an absent block stays nil (presence is what turns syslog on) |
 
@@ -213,7 +211,7 @@ Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [cons
 | TestNodeToProps | nil node | nodeToProps returns nil |
 | TestBuildMQmTLSBundle | mq TLS side with cipher and keyAlias plus solace target | MQTLS true, 1 bundle, HasKeystore true, KeyAlias mc, KeystoreTyp PKCS12, TruststoreTyp JKS |
 | TestBuildCipherConflictWarning | two mq sources with different ciphers C1/C2 | warnings contain conflicting cipher |
-| TestBuildMessageLoopWarning | same side used as source and target dest *same* | warnings contain message loop |
+| TestBuildMessageLoopWarning | same side used as source and target dest `SAME` | warnings contain message loop |
 | TestBuildSolaceTopicSourceEmitsConsumerTopic | solace topic source -> mq queue target | input-0 solace binding is consumer with DestType topic |
 | TestBuildStorePathsRawVsMount | mount=false (config) | TruststoreLoc reflects env.yaml path verbatim ./certs/t.jks |
 | TestBuildStorePathsRawVsMount | mount=true (deploy) | TruststoreLoc rewritten to /app/external/classpath/truststores/t.jks |
@@ -263,7 +261,7 @@ Tests: [tls_test.go](../internal/tls/tls_test.go)
 
 ## internal/yamlwriter
 
-The indentation-aware line writer every generated artifact is built from. Four packages carried private copies that drifted; one definition keeps their indentation identical.
+The indentation-aware line writer every generated artifact is built from, keeping indentation consistent across every artifact it renders.
 
 Tests: [yamlwriter_test.go](../internal/yamlwriter/yamlwriter_test.go)
 
@@ -308,9 +306,6 @@ Tests: [render_test.go](../internal/render/render_test.go)
 | TestApplicationSkipsBundleWithoutTruststore | - | tls: true with no tls.truststore emits no ssl bundle or ssl-bundle reference, keeps MQTLS set, and warns |
 | TestApplicationConfigImport | ConfigImport set / empty | Application() leads with spring.config.import when Model.ConfigImport is set, and omits the block entirely when it is empty |
 | TestApplicationSecurityUserRoles | - | a roles-bearing user renders a block-style roles sequence under its password; a role-less user and the reserved solmq-status account emit no roles key at all, keeping pre-roles output byte-identical |
-
-| Test | Case | Verifies |
-|------|------|----------|
 | TestRetiredPerPlatformImageRejected | kubernetes / docker / podman | each per-platform image key errors, and the message names the top-level image: block to use instead |
 | TestImageBlockRequired | absent / no name / no tag / unsafe repo, name, tag | the top-level block is required once a platform is in play, tag included (an untagged image resolves to :latest and pins nothing), and the fields that reach an argv are charset-checked |
 | TestImageBlockRequired | bad pass-env name / either credential set both ways | the registry account (`user`/`pass`) goes through the shared checkCred, so it gets the same literal-xor-env rule and variable-name check as every other credential |
@@ -370,9 +365,6 @@ Tests: [statusscript_test.go](../internal/statusscript/statusscript_test.go)
 | TestRenderReportsHealthComponents | - | the per-component health breakdown: a newline before every `{"status"` puts each component's status at the start of a line and its name at the end of the line above, so the name is carried forward in $pending (guarded with `${pending:-}` for set -u); the block prints only when something parsed |
 | TestRenderReportsJavaConfigAndHeap | - | the three details-level lines from outside the report endpoints: `java -version` (stderr redirected, folded to "openjdk 17.0.9" or passed through raw), the config the report was read from, and heap used/max tagged `area:heap`; each guarded so an absent source drops its line, a negative maximum is left out, and the byte arithmetic is deliberately *not done* here (busybox would read Jackson's 4.32013312E8 as 4) |
 | TestRenderHeaderNamesEveryReportedFact | - | the script's own header names what it reports, since it is the first thing someone running the script by hand reads |
-
-| Test | Case | Verifies |
-|------|------|----------|
 | TestOSStreamDeliversOutputBeforeExitAndCancelIsCleanEnd | - | the child prints one line then blocks far longer than the test waits, so seeing that line proves output is not buffered until exit; cancelling then ends the run and reports nil, because a follow the operator stopped did not fail |
 | TestOSStreamKeepsStdoutAndStderrApart | - | Stream's two writers stay separate where Run merges into one, so `logs > app.log` captures the log and leaves the platform's diagnostics on the terminal |
 | TestOSStreamReportsAFailureThatWasNotCancelled | - | an uncancelled non-zero exit is still an error, and output written before it still reaches the writer |
@@ -466,12 +458,9 @@ Tests: [podmangen_test.go](../internal/podmangen/podmangen_test.go)
 | TestLeaderLabelsPerMode | active_standby | the unit carries le-mode active_standby and withholds role: active |
 | TestStatusScriptMountNestsAfterLibs | - | the status script volume is declared after the libs volume, so it nests rather than being shadowed |
 | TestStatusScriptMountOmittedWhenPathEmpty | - | an empty StatusScriptPath omits the status volume entirely, rather than mounting an empty source |
-
-| Test | Case | Verifies |
-|------|------|----------|
 | TestImagePullSecretStates | no block / name alone / created | imagePullSecrets is absent, rendered without a Secret, or rendered with one -- the middle case is what stops an apply overwriting a Secret the operator built |
 | TestImagePullSecretPayloadIsOpaqueToDeploy | - | deploy places the already-encoded payload verbatim and the registry password appears nowhere outside it |
-| TestEnvBlockOmittedWhenEmpty | nothing to emit | env: is omitted entirely rather than rendered with nothing beneath it, now that the timezone is one optional top-level key |
+| TestEnvBlockOmittedWhenEmpty | nothing to emit | env: is omitted entirely rather than rendered with nothing beneath it, since the timezone is one optional top-level key |
 | TestEnvBlockOmittedWhenEmpty | TZ only / MQTLS only | either entry alone opens the block, and no timezone means no TZ entry |
 | TestQuadletSyslogMountsAndSetsEnv | - | podman cannot inline file content, so the unit bind-mounts the logback file read-only via Volume= and sets the three LOGGING_SYSLOG_* vars via Environment= |
 | TestSyslogAbsentEmitsNoMountOrEnv | - | no block, no mount, no env |
@@ -667,7 +656,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckDocker | valid-docker | valid docker section passes with no errors |
 | TestCheckDocker | missing-image-empty-cmd-bad-port | errors docker.image required, command must not be empty, and port 0 must be 1-65535 |
 | TestCheckDocker | unsafe-command | docker command with semicolon errors unsafe character |
-| TestCheckDocker | stores-removed | a present docker.stores errors docker.stores is no longer configured |
+| TestCheckDocker | stores-removed | a present docker.stores errors `docker.stores is no longer configured` |
 | TestCheckDocker | libs-no-dir | docker libs set without dir errors docker.libs.dir is required |
 | TestCheckLibsMountPathRemoved | docker custom / podman fixed / dir alone | libs.mount-path is rejected for both sections whatever its value -- the fixed one included, since the key decides nothing -- while libs with dir alone passes |
 | TestCheckDocker | checkdocker-false-gate | docker section not checked when CheckDocker is false |
@@ -680,9 +669,11 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckDockerPodmanSecretsRemoved | podman.secrets set | a podman section with a `.secrets` block errors naming podman.secrets as not a configurable section |
 | TestCheckDockerPodmanSecretsRemoved | nil secrets | omitting `.secrets` trips no such error |
 | TestCheckPodmanModeAndScope | valid-podman | valid podman section passes with no errors |
-| TestCheckPodmanModeAndScope | run / quadlet / swarm | every value of the removed podman.mode errors podman.mode is no longer configured -- quadlet included, since it is now the only artifact and the key decides nothing |
+| TestCheckPodmanModeAndScope | run / quadlet / swarm | every value of podman.mode errors `podman.mode is no longer configured` -- quadlet included, since it is the only artifact and the key decides nothing |
 | TestCheckPodmanModeAndScope | bad-scope | podman quadlet scope 'root' errors scope must be auto, user, or system |
-| TestCheckPodmanStoresRemoved | present / nil | a present podman.stores errors podman.stores is no longer configured; omitting it trips no such error |
+| TestCheckPodmanStoresRemoved | present / nil | a present podman.stores errors `podman.stores is no longer configured`; omitting it trips no such error |
+| TestCheckPodmanBaseDirRequired | omitted | `podman.base-dir is required` -- it is baked into the unit's Volume= lines, so there is no safe default to guess |
+| TestCheckPodmanBaseDirRequired | unsafe / relative | a whitespace-bearing base-dir is rejected by the same host-path gate as libs.dir; a relative one is accepted and resolves against env.yaml at render time |
 | TestCheckCommandMultiToken | safe-multi-token | docker command with extra safe tokens has no unsafe-character error |
 | TestCheckCommandMultiToken | unsafe-token | docker command with $(evil) token errors unsafe character |
 | TestCheckDeployCommandAcceptReject | kubectl / oc / kubectl with flags / docker with flag / podman / kubectl.exe / sudo podman with extraAllowed | accept matrix: bare allowlisted argv[0], flag-shaped args, .exe-stripped comparison, and a chained binary approved via extraAllowed all pass |
@@ -731,7 +722,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckContainerNameRejected | Bad_Name | rejected for both docker.name and podman.name |
 | TestCheckContainerNameRejected | valid-default-name | solmq-connector accepted with no docker.name error |
 | TestDockerPodmanTLSNeedsNoStoresOptIn | docker / podman | a TLS workflow with no stores: block warns about nothing -- the store files are bind-mounted whenever tls.*.file is set, so the old "will be missing at runtime" case cannot arise |
-| TestDockerPodmanStorePathAlwaysGated | docker / podman | an unsafe character in tls.truststore.file is rejected with no stores: block present, since those paths are now always bind-mount sources |
+| TestDockerPodmanStorePathAlwaysGated | docker / podman | an unsafe character in tls.truststore.file is rejected with no stores: block present, since those paths are always bind-mount sources |
 | TestDockerPodmanStorePathAlwaysGated | kubernetes | the same path is not gated for kubernetes, which embeds the store content in a Secret rather than naming a host path |
 | TestUsesTLS | solace-tcps-host | solace side with tcps host returns usesTLS true |
 | TestUsesTLS | mq-tls-true-no-tcps | no solace side, mq tls true returns usesTLS true |
@@ -835,9 +826,6 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestGoldenConfig | - | generated config output matches testdata/golden/application.yml byte-for-byte, one instance |
 | TestGoldenKubernetesCreate | - | generated kubernetes manifests (namespace, configmap incl. status script, secret, stores, pv, pvc, deployment with secrets-volume/stores/syslog/libs mounts and le-mode/role labels, service) match golden fixture byte-for-byte |
 | TestGoldenKubernetesNoSecrets | - | generated manifests without secrets/syslog/libs (namespace, configmap incl. status script, deployment, service) match golden fixture byte-for-byte |
-
-| Test | Case | Verifies |
-|------|------|----------|
 | TestDockerConfigJSON | private registry / docker hub fallback | the payload is an auths map keyed by registry carrying the account plus the base64 user:password the engines send |
 | TestDockerConfigJSONEscapesAwkwardValues | - | a password carrying quotes, a backslash or JSON of its own round-trips as data rather than reshaping the document -- which is why it is marshalled, not concatenated |
 | TestResolvePullSecret | reference only | resolves to the name alone and never reads the registry password |
@@ -901,9 +889,6 @@ Tests: [libs_test.go](../internal/libs/libs_test.go), [maven_test.go](../interna
 | TestDownloadVersionRejectsPathEscape | - | a `--version` value containing a path escape is rejected before any network access |
 | TestDownloadSetPathAlwaysResolvesEvenWhenFilesExist | - | unlike `--url` (TestDownloadSkipsExistingWithoutForce), the mq/syslog Set path always attempts Maven resolution first -- even with every plausible target file already on disk -- because it cannot know the target filenames without resolving the closure first |
 | TestSetNames | - | SetNames() returns the exact ordered [mq, syslog] list the CLI layer gates against |
-
-| Test | Case | Verifies |
-|------|------|----------|
 | TestCompareVersions | patch / lexical-trap / major / prerelease suffix / date-like / short segments / equal / empty | compareVersions orders numeric segments correctly, ranks a pre-release suffix lower, and is antisymmetric under argument swap |
 | TestCompareVersions | Final / RELEASE / GA equal the plain release | Maven treats those words as aliases of the empty qualifier, so 4.1.135.Final and 4.1.135 are the same version rather than one outranking the other |
 | TestCompareVersions | release qualifier below a number, above a prerelease; SP above the release | pins the aligned-segment case, where strings.Compare would otherwise make "Final" beat "1" and read 1.0.Final as newer than 1.0.1 |
@@ -915,7 +900,6 @@ Tests: [libs_test.go](../internal/libs/libs_test.go), [maven_test.go](../interna
 | TestLatestStableAllPreReleaseVersionsIsError | - | every listed version being a pre-release is an error, never a silent pre-release pick |
 | TestLatestStableUnreachableMetadataIsError | - | an unreachable maven-metadata.xml is an error |
 | TestResolveClosureMQJakarta | - | the verified com.ibm.mq.jakarta.client closure resolves to seed + BC trio + jakarta.jms-api + org.json:json at the versions the seed's POM declares |
-| TestResolveClosureMQJavax | - | the verified com.ibm.mq.allclient closure resolves to seed + BC trio + javax.jms-api + org.json:json |
 | TestResolveClosureSyslogResolvesParentProperties | - | the verified logstash-logback-encoder:9.0 -> jackson-databind:3.0.1 case: jackson-databind's own version-less dependencies are resolved through its parent jackson-base's <properties>, none marked Fallback |
 | TestResolveClosureAppliesScopeOptionalTypeFilter | - | test/provided/system/import scope, optional=true, and type=pom dependencies are all excluded from the closure; plain compile/runtime deps survive |
 | TestResolveClosureDependencyVersionFromDependencyManagement | - | a version-less dependency resolves from its parent's <dependencyManagement> |
@@ -936,9 +920,6 @@ Tests: [libs_test.go](../internal/libs/libs_test.go), [maven_test.go](../interna
 | TestResolveParentChainDetectsCycle | - | a parent-POM cycle (a -> b -> a) is detected and errors rather than looping forever |
 | TestResolveParentChainExceedsMaxDepth | - | a parent chain past maxParentDepth (with no cycle) is capped with an error |
 | TestJarURL | - | jarURL assembles the Maven Central path from group/artifact/version exactly |
-
-| Test | Case | Verifies |
-|------|------|----------|
 | TestSplitJarBasename | hyphenated / dotted / short date-like / hyphen-in-version / Final qualifier / alpha qualifier / underscore in version / no digit-led hyphen / plain | splitJarBasename recovers (artifact, version) from a real jar filename across every naming convention lib-list actually contains, and refuses a name with no digit-led hyphen to split on |
 | TestSplitJarBasename | classifier stripped (netty native, sources) | a trailing classifier is not part of the version and is dropped, so the entry parses instead of being rejected whole |
 | TestValidateImageVersionQualifiers | accepted / rejected | Final/RELEASE/GA/SP join numerics and pre-release qualifiers as orderable, while genuine garbage (9zzzzzzzzzzz, a bare classifier, an unknown word) stays rejected -- the gate exists so a stale entry cannot compare as newer than a real release |
@@ -1087,6 +1068,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestDeployDockerSeamChildEnvCarriesCredentials | - | preflight call carries no env; the real `up` call (index 1) carries the resolved literal and -env credentials as STABLE=value pairs |
 | TestRemoveDockerSeam | - | exit 0, 2 runner calls (preflight then down) argv [docker compose -f <compose> down] |
 | TestDeployPodmanSeamWritesUnitsAndStarts | - | exit 0, a leading podman info preflight call, then app yaml and container unit written to quadlet dir, systemctl daemon-reload then start calls |
+| TestDeployPodmanSplitsBaseDirFromQuadletDir | distinct dirs | the mounted application.yml and status script go to podman.base-dir (created on demand) and NOT to the quadlet dir; only the .container unit goes to the quadlet dir, and the unit's Volume= names the base-dir path. The shared podmanEnv helper points both at one directory, so this is the only test that would catch them being wired together |
 | TestRemovePodmanSeamStopsRemovesReloads | - | exit 0, a leading podman info preflight call, then systemctl stop then daemon-reload calls, unit and app yaml files removed |
 | TestPlatformFlagHitOverridesInference | - | an explicit `--platform` is used even when another section is also present in env.yaml |
 | TestPlatformFlagMissingSectionIsLoudError | - | a `--platform` value with no matching section fails loud, naming both the requested and the present sections, before the runner is invoked |
@@ -1143,12 +1125,12 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestAutoCompleteDispatchPrintsScript | bash / zsh / fish / powershell | `auto-complete <shell>` exits 0, writes the script to stdout, and never reaches the runner |
 | TestCompletionGoldenInSync | bash / zsh / fish / powershell | each rendered script equals its snapshot under cmd/solmq-conn-util/testdata/completions; -update rewrites them |
 | TestCompletionCoversModel | bash / zsh / fish / powershell | every modeled verb, target, flag spelling and verb alias reaches every shell (fish exempts a verb with no targets/posarg/flags, e.g. version, which has nothing beyond word 1 to normalize), with descriptions in the three shells that show them |
-| TestCompletionOnlyDownloadJarHasSets | - | pins the third command level to exactly where the model puts it today: no target other than download/jar carries a non-empty Sets list |
+| TestCompletionOnlyDownloadJarHasSets | - | pins the third command level to exactly where the model puts it: no target other than download/jar carries a non-empty Sets list |
 | TestCompletionThirdLevelOffersSets | bash / zsh / fish / powershell | once "download jar" (or alias "dl jar") is typed, every renderer offers the mq/syslog sets by name and description |
 | TestCompletionThirdLevelUnlocksPosArg | bash / zsh / fish / powershell | the trailing [dir] positional is offered only after all three words (verb, target, set) are typed, never after just "download jar" |
 | TestCompletionRecognizesFlagAliases | bash / zsh / powershell | every spelling flag.Parse accepts (-e, --e, -env, `--env`) is in the value-skipping table, so a value is never mistaken for a positional |
 | TestCompletionDownloadFlagsDescribed | - | all four download flags (`--url`, `--version`, `--omit-lib-file`, `--include-provided`) are modeled by exact Long spelling, with the description reaching every shell that carries one (bash compgen word lists carry none) |
-| TestCompletionOmitLibFileCompletesFiles | bash / zsh / fish / powershell | `--omit-lib-file` completes file paths in every shell, the same value kind -e/`--env` already gets |
+| TestCompletionOmitLibFileCompletesFiles | bash / zsh / fish / powershell | `--omit-lib-file` completes file paths in every shell, the same value kind `-e`, `--env` already gets |
 | TestCompletionShellStructure | bash / zsh / fish / powershell | each script keeps the registration line that makes it load, and the zsh script opens with #compdef |
 | TestCompletionVerbAliasesResolveToCanonical | bash / zsh / fish / powershell | each shell's own alias-normalization construct ($verb= case arm, __fish_seen_subcommand_from, $verbAlias[...]) maps every verb alias to its canonical verb name (same fish exemption as TestCompletionCoversModel) |
 | TestCompletionVerbAliasesNotOfferedAtWordOne | bash / zsh / fish / powershell | no verb alias appears in the position-1 candidate list (compgen -W, the zsh verbs array, the __fish_use_subcommand lines, the powershell $verbs array) -- recognized everywhere, but never offered on TAB |
@@ -1162,7 +1144,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 
 ### logs
 
-The `logs` verb shares status's platform resolution and instance discovery (instances.go), so these cases concentrate on what is its own: the per-platform argv, the combinations it refuses, and the fact that every operator-supplied name is rejected before a process starts. Like the status cases they pin argv AND call count, since discovery is one query for every instance.
+The `logs` verb shares status's platform resolution and instance discovery (instances.go), so these cases concentrate on what is its own: the per-platform argv, the combinations it refuses, and the fact that every operator-supplied name is rejected before a process starts. Like the status cases they pin argv and call count, since discovery is one query for every instance.
 
 | Test | Case | Verifies |
 |------|------|----------|
@@ -1176,7 +1158,7 @@ The `logs` verb shares status's platform resolution and instance discovery (inst
 | TestLogsFollowReadsTheOneInstance | - | the accepted case: -f reaches the argv and a clean end is exit 0 |
 | TestLogsRejectsUnsafeNamesBeforeAnyCall | pod / container / namespace | an unsafe name exits 1 saying why, with zero calls -- the preflight probe included, so a rejected name is never even observed by the platform |
 | TestLogsSinceAndTailAreValidatedAtParse | since not a duration / since not positive / since with a metacharacter / tail not a number / tail above the ceiling / tail negative | the two flags carrying a value into an argv are validated at parse, exit 2, nothing runs |
-| TestLogsUnexpectedPositionalArgument | - | logs has no target word, so a bare word exits 2 naming `--pod`/`--container` rather than being guessed at |
+| TestLogsUnexpectedPositionalArgument | - | logs has no target word, so a bare word exits 2 naming `--pod`, `--container` rather than being guessed at |
 | TestLogsPlatformMenuWhenSeveralSectionsArePresent | - | an env.yaml with two platform sections cannot resolve itself, so the menu decides; the answer picks the binary and the deployment selector/namespace discovery uses |
 | TestLogsPlatformFlagSkipsTheMenu | - | `--platform` is the first step of the resolution order, so it wins before promptLine is consulted, and the instance still comes from that section |
 | TestLogsWithoutEnvFileNeedsAnExplicitPlatform | - | the explicit-target exception: instance plus `--platform` needs no env.yaml, while without `--platform` the missing file is reported by name and nothing runs |
@@ -1226,7 +1208,7 @@ The `cli` verb reaches its instance through the same resolution `status` and `lo
 | TestCliPropagatesTheSessionExitStatus | - | `exit 3` in the session exits 3, the one departure from the 0/1/2 contract |
 | TestCliSessionThatCouldNotStartIsAnError | - | a session that never began is exit 1 and names the instance, keeping it apart from a session that ran and failed |
 | TestCliRejectsWhatCannotMeanAnything | bare word / separator with no command / two pods / two containers / unsafe command token / unsafe instance name | each refused before any process starts, with a message naming what to do instead; the glob case says where a shell metacharacter can be written instead |
-| TestCliPickerCarriesTheCommandBehindTheSeparator | - | the picker keeps the in-container command after its `--` and therefore after the `--pod` being suggested, so a pasted line still parses |
+| TestCliPickerCarriesTheCommandBehindTheSeparator | - | the picker keeps the in-container command after its `--` and therefore after the `--pod` being suggested, so a pasted line parses correctly |
 | TestCliIndexSelectsFromTheSortedList | - | an index selects out of the same sorted order status and logs print, so a number copied off one verb means the same instance in another |
 | TestCliPreflightFailureOpensNothing | - | an unreachable engine is reported once, up front, and no session is attempted |
 

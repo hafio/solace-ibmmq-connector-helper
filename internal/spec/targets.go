@@ -197,8 +197,18 @@ type Quadlet struct {
 // Podman is the parsed podman section of env.yaml. generate renders a .container
 // quadlet unit; deploy/remove install and tear that same unit down via systemctl.
 type Podman struct {
-	Command  string       `yaml:"command"` // default podman
-	Mode     string       `yaml:"mode"`    // removed; non-empty is a validation error
+	Command string `yaml:"command"` // default podman
+	Mode    string `yaml:"mode"`    // removed; non-empty is a validation error
+	// BaseDir is the host directory the mounted files live in: the rendered
+	// application.yml, the status script, and the logback config when syslog is
+	// configured. Required -- a quadlet unit cannot inline file content, so these
+	// have to exist somewhere the operator chose, and the path is baked into the
+	// unit's Volume= lines.
+	//
+	// It is separate from quadlet.dir, which places the unit itself: systemd only
+	// scans its own generator directories, while these files can live anywhere.
+	// Relative values resolve against env.yaml, as tls.*.file and libs.dir do.
+	BaseDir  string       `yaml:"base-dir"`
 	Quadlet  *Quadlet     `yaml:"quadlet"`
 	Image    string       `yaml:"image"` // removed; non-empty is a validation error (see Docker)
 	Name     string       `yaml:"name"`

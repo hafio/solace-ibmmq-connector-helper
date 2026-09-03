@@ -409,7 +409,7 @@ func genPodman(envPath, out string) int {
 	if err != nil {
 		return errExit(err)
 	}
-	plan, errs, warns := gen.GeneratePodman(req, resolver(envDir), gen.PodmanOpts{})
+	plan, errs, warns := gen.GeneratePodman(req, resolver(envDir))
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
@@ -619,9 +619,7 @@ func actPodman(o actionOpts, r runner.Runner) int {
 		return errExit(serr)
 	}
 	res := resolver(envDir)
-	// BaseDir bakes absolute on-disk paths into the unit so systemd resolves them
-	// regardless of cwd.
-	plan, errs, warns := gen.GeneratePodman(req, res, gen.PodmanOpts{BaseDir: sc.Dir}, extraAllowed...)
+	plan, errs, warns := gen.GeneratePodman(req, res, extraAllowed...)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
@@ -654,15 +652,20 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	// written 0600 rather than world/group-readable. The status script and the
 	// unit carry no secret of their own -- the script only reads one back out,
 	// the unit only stable secret names -- so 0644 is right for both.
-	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.AppYAML.Name), plan.AppYAML.Data, 0o600); err != nil {
+	// The three mounted documents go to podman.base-dir, the same directory whose
+	// paths are already baked into the unit's Volume= lines. Only the unit itself
+	// goes to the quadlet directory, which is the one place systemd scans.
+	// WriteFile creates the parent, so a base-dir that does not exist yet is made
+	// rather than being an error the operator has to pre-empt.
+	if err := runner.WriteFile(filepath.Join(plan.BaseDir, plan.AppYAML.Name), plan.AppYAML.Data, 0o600); err != nil {
 		return errExit(err)
 	}
 	if plan.Logback.Name != "" {
-		if err := runner.WriteFile(filepath.Join(sc.Dir, plan.Logback.Name), plan.Logback.Data, 0o644); err != nil {
+		if err := runner.WriteFile(filepath.Join(plan.BaseDir, plan.Logback.Name), plan.Logback.Data, 0o644); err != nil {
 			return errExit(err)
 		}
 	}
-	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.StatusScript.Name), plan.StatusScript.Data, 0o644); err != nil {
+	if err := runner.WriteFile(filepath.Join(plan.BaseDir, plan.StatusScript.Name), plan.StatusScript.Data, 0o644); err != nil {
 		return errExit(err)
 	}
 	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.Unit.Filename), plan.Unit.Content, 0o644); err != nil {
@@ -674,11 +677,13 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 
 func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r runner.Runner, extraAllowed []string) int {
 	out, rerr := runner.PodmanRemove(r, sc, []string{plan.Service}, []string{plan.Unit.Filename})
-	// Best-effort cleanup of the files we generated.
-	_ = os.Remove(filepath.Join(sc.Dir, plan.AppYAML.Name))
-	_ = os.Remove(filepath.Join(sc.Dir, plan.StatusScript.Name))
+	// Best-effort cleanup of the files we generated, from the base-dir they were
+	// written to. The directory itself is left alone: the operator chose it and it
+	// may hold things this tool did not put there.
+	_ = os.Remove(filepath.Join(plan.BaseDir, plan.AppYAML.Name))
+	_ = os.Remove(filepath.Join(plan.BaseDir, plan.StatusScript.Name))
 	if plan.Logback.Name != "" {
-		_ = os.Remove(filepath.Join(sc.Dir, plan.Logback.Name))
+		_ = os.Remove(filepath.Join(plan.BaseDir, plan.Logback.Name))
 	}
 	// Credentials are removed from podman's store last, after the units that
 	// referenced them are gone. Leaving credential material behind is worth

@@ -1,4 +1,4 @@
-# solmq-conn-util -- User Guide
+# solmq-conn-util user guide
 
 `solmq-conn-util` turns a folder of small, per-workflow YAML files plus one `env.yaml`
 into one consolidated `application.yml` for the **Solace PubSub+ Connector for IBM
@@ -39,10 +39,10 @@ documentation index; this guide is the complete reference.
 7. [Connector defaults (`env.yaml` top level)](#7-connector-defaults-envyaml-top-level)
    1. [The reserved status account (`solmq-status`)](#71-the-reserved-status-account-solmq-status)
 8. [Platform sections (`kubernetes:`, `docker:`, `podman:`)](#8-platform-sections-kubernetes-docker-podman)
-   1. [Image and timezone (shared by every platform)](#80-image-and-timezone-shared-by-every-platform)
-   2. [kubernetes](#81-kubernetes)
-   3. [docker](#82-docker)
-   4. [podman](#83-podman)
+   0. [Image and timezone (shared by every platform)](#80-image-and-timezone-shared-by-every-platform)
+   1. [kubernetes](#81-kubernetes)
+   2. [docker](#82-docker)
+   3. [podman](#83-podman)
 9. [Secrets model](#9-secrets-model)
    1. [Declaring a credential](#91-declaring-a-credential)
    2. [Mount names](#92-mount-names)
@@ -211,8 +211,8 @@ reference verbatim and says so ([section 5.1](#51-variable-expansion-var)).
 
 The first argument is a **verb**. `generate` takes an optional second argument,
 `config` (short `cfg`), which emits `application.yml`. The platform for
-`generate`/`deploy`/`remove`/`status`/`logs`/`cli` comes from `--platform`, never
-from a positional argument, resolved in this order:
+`generate`/`deploy`/`remove`/`status`/`logs`/`cli` comes from `--platform`,
+resolved in this order:
 
 1. `--platform`, if given -- it must name a section actually present in
    `env.yaml`, or the run fails loudly.
@@ -240,20 +240,20 @@ solmq-conn-util status (sts)   <container|application|all> [-d] [-w] [--all] [--
                                                                    Report each instance: the engine's view (container), the connector's own (application), or both (all)
 solmq-conn-util logs (lg)      [--follow] [--previous] [--tail N] [--since d] [--timestamps] [--platform kubernetes|docker|podman] [-e env.yaml] [--pod name|index] [--container name|index] [--namespace ns] [--command name] [--allow-command name]
                                                                    Print one instance's log -- the lines behind what status reports (section 13)
-solmq-conn-util cli            [--pod name|index] [--container name|index] [--namespace ns] [--platform kubernetes|docker|podman] [-e env.yaml] [-- command ...]
+solmq-conn-util cli            [--pod name|index] [--container name|index] [--namespace ns] [--platform kubernetes|docker|podman] [-e env.yaml] [--command name] [--allow-command name] [-- command ...]
                                                                    Open a shell inside one instance, or run one command in it (section 14)
-solmq-conn-util version (ver)                                     Print the utility name, version, Go version and OS/arch
-solmq-conn-util validate (vld)      [-e env.yaml]                 Lint the whole env.yaml + workflows
-solmq-conn-util examples (eg) [dir] [-f]                          Write a starter env.yaml + workflows
-solmq-conn-util auto-complete bash|zsh|fish|powershell            Print a shell completion script (section 1.1)
+solmq-conn-util version (ver)                                      Print the utility name, version, Go version and OS/arch
+solmq-conn-util validate (vld)      [-e env.yaml]                  Lint the whole env.yaml + workflows
+solmq-conn-util examples (eg) [dir] [-f]                           Write a starter env.yaml + workflows
+solmq-conn-util auto-complete bash|zsh|fish|powershell             Print a shell completion script (section 1.1)
 solmq-conn-util download (dl) jar mq|syslog [dir] [-e env.yaml] [--version v] [--omit-lib-file file] [--include-provided] [--url u] [-f]
                                                                    Fetch IBM MQ or syslog jars from Maven Central into a local directory (section 10)
 ```
 
 > [!NOTE]
 > **The in-binary help is deliberately shorter than this section.**
-> `solmq-conn-util -h` lists one line per command; the arguments, flags, and
-> examples live on each command's own page, printed by
+> `solmq-conn-util -h` lists one line per verb; the arguments, flags, and
+> examples live on each verb's own page, printed by
 > `solmq-conn-util help <command>` or `<command> -h` (stdout, exit 0 -- the same
 > page follows a usage mistake on stderr with exit 2). The short aliases in the
 > table below work everywhere but appear only here and in
@@ -285,6 +285,9 @@ Every verb has exactly one short alias, except `cli`, `auto-complete` and `help`
 | `download` | `dl` |
 | `auto-complete` | none |
 | `help` | none (still answers to `-h`, `--help`) |
+
+The generated [abbreviation.md](abbreviation.md) lists every alias and short
+flag spelling in one place, byte-gated against the CLI itself.
 
 An alias is recognized everywhere the full verb is, including shell completion
 (`solmq-conn-util dp <TAB>` completes `deploy`'s own flags and targets) -- but
@@ -583,7 +586,7 @@ permitted (two Solace patterns emit an advisory **warning**, see
 | Field | Required | Notes |
 |-------|----------|-------|
 | `conn-name` | yes | `host(port)` -- comma-separate for multi-instance QMs, e.g. `h1(1414),h2(1414)` |
-| `queue-manager` | yes | |
+| `queue-manager` | yes | _(none)_ |
 | `channel` | yes | server-connection channel |
 | `user` | no | omit for cert-based or channel (MCA) auth |
 | `password` | no | prefer the `password-env` twin ([section 9.1](#91-declaring-a-credential)); omit when not using password auth |
@@ -688,11 +691,10 @@ Management security and its account are non-negotiable, not configurable:
 
 `security.enabled` and `management.exposure` are not configurable keys: an
 `env.yaml` carrying either is rejected with an error naming the key.
-`management.port` stays configurable and is always
-emitted (default `8090`); the kubernetes `service.port` defaults to it rather
-than to a hardcoded `8090` ([section 8](#8-platform-sections-kubernetes-docker-podman)).
-docker and podman publish only the ports you list -- omitting `ports:` publishes
-none. `security.users` also stays -- see below.
+`management.port` is a configurable key and is always
+emitted (default `8090`); the kubernetes `service.port` defaults to it when
+unset ([section 8](#8-platform-sections-kubernetes-docker-podman)).
+`security.users` is documented below.
 
 The leader-election **session** block (`leader-election.session:`) renders to
 `solace.connector.management.session`. Two shapes are rejected:
@@ -700,12 +702,6 @@ The leader-election **session** block (`leader-election.session:`) renders to
 session is a connection, not a binding -- the management queue is
 `leader-election.queue`, one level up), and setting `conn-ref:` and `session:`
 together (they are alternatives -- set exactly one).
-
-The session block renders a full Solace connection, not a stripped one:
-`solace-defaults` is merged into it exactly as into a binder, and its own
-`api-properties` follow the tool-managed TLS keys. If
-you run `active_*` with a `solace-defaults` block, your next `generate` produces
-a different `application.yml` and your next `deploy` rolls the pods.
 
 ```yaml
 connections:                     # reusable connections, referenced by conn-ref (section 6.6)
@@ -774,7 +770,7 @@ solace-defaults:
 | `tls.keystore` | `file`, `password`, `type` | the single shared keystore; required only for mTLS (`key-alias`) |
 | `logging.level` | `<logger>: <level>` | verbatim, order preserved -> `logging.level` |
 | `logging.syslog` | `host`, `port`, `protocol` | optional; ships log lines to syslog **on every platform**, in addition to the console. Emits a `logback-spring.xml` (a ConfigMap key on kubernetes, an inlined compose config on docker, a mounted file on podman) plus `LOGGING_SYSLOG_*` env vars, appname = the instance name. `protocol` is `udp` (default) or `tcp` -- **tcp requires the `logstash-logback-encoder` jar on the connector classpath** (provide it via `libs`; fetch it with `solmq-conn-util download jar syslog`, [section 10](#10-download-jar)) |
-| `management` | `port` | -> `management.server.port`; always emitted, default `8090`. The docker/podman published port and the kubernetes `service.port` ([section 8](#8-platform-sections-kubernetes-docker-podman)) now default to it too |
+| `management` | `port` | -> `management.server.port`; always emitted, default `8090`. The docker/podman published port and the kubernetes `service.port` ([section 8](#8-platform-sections-kubernetes-docker-podman)) default to it |
 | `management` | `health-show-details` | -> `management.endpoint.health.show-details` |
 | `security` | `users` | list of `{ name, password` (or `password-env`)`, roles }` -> `solace.connector.security`; adds accounts on top of the tool's own reserved one ([section 7.1](#71-the-reserved-status-account-solmq-status)); the tool always injects a read-only probing account itself, so this key is for an `admin` account, the only way to POST to `/actuator/workflows` |
 | `security` | `users[].roles` | optional list of connector authority names, passed through verbatim. **Omit it for a read-only (GET-only) account** -- an empty list is the connector's own default; add `admin` for read/write. Not an allowlist: an unrecognized but well-formed name is accepted, since the connector owns the vocabulary. An empty entry, or one containing whitespace or shell metacharacters, is rejected. The tool never adds a role itself, which is exactly what keeps the reserved `solmq-status` account read-only |
@@ -793,7 +789,9 @@ documents `session.*` as the same interface as `solace.java.*`. TLS is wired fro
 shared stores, `solace-defaults` is merged into it exactly as into a binder, and its own
 `api-properties` follow the tool-managed TLS keys. When its broker tuple is one the
 workflows already bind, it shares that binder's credential secrets rather than mounting a
-second copy ([section 9.2](#92-mount-names)).
+second copy ([section 9.2](#92-mount-names)). Adding or changing a `solace-defaults`
+block on this session therefore changes the rendered config too: the next `generate`
+produces a different `application.yml`, and the next `deploy` rolls the pods.
 
 **TLS is shared:** there is exactly one truststore and one keystore, referenced by
 every TLS connection (Solace via api-properties, MQ via an ssl-bundle). Different
@@ -844,8 +842,8 @@ block yourself, and in every leader-election mode.
 Each platform section is optional, at the top level of `env.yaml`. `generate`
 renders the resolved platform's artifacts, `deploy` renders and applies them, and
 `remove` tears them down -- the platform comes from `--platform` or the resolution
-order in [section 3](#3-commands), never from a positional argument. A run whose
-resolved section is absent errors (deploying to docker needs a `docker:` section).
+order in [section 3](#3-commands). A run whose resolved section is absent errors
+(deploying to docker needs a `docker:` section).
 
 **The `command:` field** names the CLI each platform shells out to (default `kubectl`
 / `docker` / `podman`). Put any extra global arguments inside it -- e.g. `command:
@@ -978,8 +976,8 @@ image:
 | `user` / `user-env` | registry account, needed only when the tool builds a pull secret ([section 9](#9-secrets-model)) |
 | `pass` / `pass-env` | its password. A literal/`-env` pair like every other credential here ([section 9.1](#91-declaring-a-credential)): give one form or the other, never both. Prefer `-env` -- this file is meant to be safe to commit |
 
-The container timezone moved the same way, and for the same reason -- it was
-three keys deciding one thing:
+The container timezone is declared the same way, at the top level, for the
+same reason:
 
 ```yaml
 timezone: Asia/Singapore   # -> the container's TZ env var
@@ -1193,17 +1191,30 @@ Requires **podman 4.5+**.
 - `user` / `system`: force one; `quadlet.dir` overrides the directory for the
   resolved scope.
 
+**`base-dir` is required** and is a different directory from the quadlet one. The
+quadlet directory holds the `.container` unit, because that is the only place
+systemd scans; `base-dir` holds the three files the unit bind-mounts -- the rendered
+`application.yml`, the status script, and the logback config when syslog is
+configured. A relative value resolves against `env.yaml`, as `tls.*.file` and
+`libs.dir` do, and `deploy` creates the directory if it does not exist. There is no
+default: the path is baked into the unit's `Volume=` lines, and a guess would put
+generated data among systemd's own units or somewhere unwritable.
+
 `deploy --platform podman` loads the credentials into podman's secret store, writes
 the units, then `systemctl [--user] daemon-reload` and `start`;
-`remove --platform podman` `stop`s, removes the units, reloads, and removes the
-secrets.
+`remove --platform podman` `stop`s, removes the units, reloads, removes the
+secrets, and deletes the three files it wrote under `base-dir` (the directory
+itself is left alone).
 
 ```yaml
 podman:
   command: podman
+  base-dir: /opt/solmq-connector # REQUIRED; where the mounted application.yml,
+                                 # status script and logback config are written
   quadlet:
     scope: auto                  # auto | user | system
     dir: ""                      # overrides the default dir for the resolved scope
+                                 # -- the UNIT only; base-dir holds the files
   name: solmq-connector
   restart: unless-stopped
   ports:
@@ -1232,8 +1243,8 @@ Every in-container path is fixed by the image, so no section configures one.
 `/app/external/libs`, which the connector already launches with on its classpath;
 the truststore/keystore are bind-mounted onto `/app/external/classpath/truststores`
 whenever `tls.*.file` is set. Accordingly neither section takes a `secrets:`, a
-`stores:` or a `libs.mount-path` key -- setting any of them is an error naming what
-replaced it, which for the last two is nothing at all. `project-name`
+`stores:` or a `libs.mount-path` key -- setting any of them is a rejected key,
+since docker and podman fix those paths themselves and take no such option. `project-name`
 is **not** shared: it names a compose project, and podman has no equivalent
 grouping, so the key exists only under `docker:`.
 
@@ -1414,8 +1425,6 @@ from the connection fields, so there is nothing to configure. Setting one is an
 error, as is a `kubernetes.secrets.credentials.create` carrying a `source`,
 `variables`, or `values-file` key.
 
----
-
 ### 9.4 Registry credentials (pulling the image)
 
 Everything above is about credentials the **connector** reads. Pulling the image
@@ -1455,6 +1464,8 @@ logging the host in first:
 docker login registry.internal
 podman login registry.internal
 ```
+
+---
 
 ## 10. `download jar`
 
@@ -1803,10 +1814,9 @@ Secret volume for kubernetes, a bind mount onto that same fixed dir for docker/p
 three platforms always carry the rendered status script
 ([section 12](#12-status-the-container-the-connector-or-both)) at
 `/app/external/.status-script` inside the container -- a **sibling** of the
-`libs/`, `spring/` and `classpath/` mounts, deliberately not inside one. It used
-to live at `/app/external/libs/status`, where mounting your own jar directory
-onto `libs` shadowed it. There is no option to omit it
--- and always set the static label `solace-connector/le-mode` to the instance's
+`libs/`, `spring/` and `classpath/` mounts, deliberately not inside one. There
+is no option to omit it, and the deploy artifact always sets the static label
+`solace-connector/le-mode` to the instance's
 leader-election mode (`standalone` / `active_active` / `active_standby`). A second
 label, `solace-connector/role: active`, is added only for `standalone` and
 `active_active`, where the deploy artifact itself already determines which
@@ -1870,8 +1880,8 @@ solmq-conn-util status all          # both, container first
 > `status all` is usually what a human wants interactively.
 
 The platform resolves exactly as it does for `generate`/`deploy`/`remove`
-([section 3](#3-commands)), and the instances are discovered the same way as
-before: every pod matching the deployment's `app=<name>` selector on kubernetes,
+([section 3](#3-commands)), and the instances are discovered the same way:
+every pod matching the deployment's `app=<name>` selector on kubernetes,
 or the configured container name on docker/podman, unless you narrow it with
 repeatable `--pod` / `--container` -- or widen it with `--all` (below).
 
@@ -1979,9 +1989,9 @@ whole report is built from.
 ### 12.3 First run: installing the script
 
 Every artifact `generate`/`deploy` produces already carries the status script
-([section 11](#11-what-gets-generated)), but an instance that predates this
-feature, or one this tool never deployed, may not have it installed. The first
-time an application view finds it missing, it asks once:
+([section 11](#11-what-gets-generated)), but an instance without the script
+installed -- one this tool never deployed, for example -- may not have it yet.
+The first time an application view finds it missing, it asks once:
 
 ```text
 status script missing on solmq-connector-7d9f8c6b5-x2n4q -- install it now? [y/N]
@@ -1990,8 +2000,9 @@ status script missing on solmq-connector-7d9f8c6b5-x2n4q -- install it now? [y/N
 Answer `y` to install it on every missing instance for this run, or pass
 `--install` up front to skip the prompt. Declining (or a blank answer) skips
 those instances and `status` exits 1. **The prompt refuses to block when stdin is
-not a TTY** -- a CI job must pass `--install` (or ensure the script is already
-installed), or the run fails immediately with that guidance instead of hanging.
+not a TTY** ([section 3](#3-commands)) -- a CI job must pass `--install` (or ensure
+the script is already installed), or the run fails immediately with that
+guidance instead of hanging.
 `--install`, `--user` and `--management-port` steer that script, so they apply to
 the `application` and `all` views only; passing one with `container` is a usage
 error (exit 2) rather than a flag that silently does nothing.
@@ -2071,9 +2082,8 @@ On the application side:
 | `health components` | the per-component statuses in the health document -- which dependency is up and which is not |
 
 Each line is dropped when its source answers nothing, rather than reported as
-missing. If a line you expect is absent on an instance that predates this
-feature, its installed script is older than this build: reinstall it with
-`--install`.
+missing. If a line you expect is absent, the installed script may be out of
+date: reinstall it with `--install`.
 
 > [!TIP]
 > **Reading the script by hand?** The `heap:` line it prints carries **raw
@@ -2220,8 +2230,8 @@ own log commands ([section 13.6](#136-the-manual-alternative)).
 
 ### 12.10 Instances this tool did not deploy
 
-`status` also works against a **foreign** instance -- one deployed by hand, or by
-an older version of this tool. The container view needs nothing from it at all;
+`status` also works against a **foreign** instance -- one this tool did not
+deploy. The container view needs nothing from it at all;
 the application view needs the status script and a reachable actuator account
 (`solmq-status`, [section 7.1](#71-the-reserved-status-account-solmq-status)).
 Combine `--platform` with explicit `--pod`/`--container` targets, or `--all`, and
@@ -2456,12 +2466,9 @@ or by index, 0-2 in the order listed:
   solmq-conn-util cli --platform kubernetes -e env.yaml --pod 0
 ```
 
-`--pod` and `--container` name the instance and each may be given once; a second
-is refused rather than silently losing the first. Either accepts an **index** as
-well as a name -- `--pod 0` is the first instance in the listed order, which is
-alphabetical by name and the same order `status` and `logs` use, so a number
-copied off one verb means the same instance in another. A name always wins, so an
-instance genuinely called `0` is still reachable by name.
+`--pod` and `--container` work the same way here as in
+[section 13.4](#134-choosing-the-instance)'s picker: one value each, by name
+or by index, and the indices match across verbs.
 
 When a one-shot command is given, the picker keeps it behind its `--`, after the
 flag it is telling you to add:
@@ -2574,8 +2581,8 @@ container is called something else, is not reachable with `cli` -- reach it with
   docker compose's own project-name rule, which would also accept an underscore
   and a trailing hyphen -- one grammar for every name in the spec is worth more
   than those two spellings.
-- Multi-binder syntax is always used and the `undefined` binder is always emitted --
-  this is expected, not a bug.
+- **Multi-binder syntax is always used.** The `undefined` binder is always
+  emitted -- this is expected, not a bug.
 - **A teardown deletes in reverse document order, and the libs PersistentVolume goes
   with the release.** `remove` reverses the manifest set `deploy` applies before
   piping it to `<command> delete -f -` -- deleting in creation order would deadlock,

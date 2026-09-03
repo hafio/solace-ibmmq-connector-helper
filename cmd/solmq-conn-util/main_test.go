@@ -2175,16 +2175,21 @@ docker:
 // podmanEnv renders a minimal-but-valid podman: section with the unit dir
 // overridden to a test-owned location (the default user-scope dir lives under the
 // real home directory). ToSlash keeps the Windows temp path valid YAML.
+//
+// base-dir is pointed at that same directory so the callers asserting on written
+// files can keep looking in one place. The two are independent in the schema --
+// TestDeployPodmanSplitsBaseDirFromQuadletDir is what proves that.
 func podmanEnv(quadletDir string) string {
 	return fmt.Sprintf(`
 podman:
   command: podman
   name: solmq-conn
+  base-dir: %[1]s
   ports:
     - 8090
   quadlet:
     scope: user
-    dir: %s
+    dir: %[1]s
 `, filepath.ToSlash(quadletDir))
 }
 
@@ -2197,11 +2202,12 @@ func podmanEnvSudo(quadletDir string) string {
 podman:
   command: sudo podman
   name: solmq-conn
+  base-dir: %[1]s
   ports:
     - 8090
   quadlet:
     scope: user
-    dir: %s
+    dir: %[1]s
 `, filepath.ToSlash(quadletDir))
 }
 
@@ -2307,6 +2313,57 @@ tls:
 		if !strings.Contains(stdout, "Volume="+want) {
 			t.Errorf("missing absolute mount %q in:\n%s", want, stdout)
 		}
+	}
+}
+
+// TestDeployPodmanSplitsBaseDirFromQuadletDir pins the split podman.base-dir
+// introduces: the three mounted documents go where the operator asked, and only
+// the .container unit goes to the quadlet directory, which is the one place
+// systemd scans. The shared podmanEnv helper points both at one directory, so
+// this is the only test that would catch them being wired together.
+func TestDeployPodmanSplitsBaseDirFromQuadletDir(t *testing.T) {
+	f := useFakeRunner(t)
+	dir := t.TempDir()
+	quadletDir := t.TempDir()
+	baseDir := filepath.Join(t.TempDir(), "made-on-demand")
+	write(t, dir, "env.yaml", sharedEnv+fmt.Sprintf(`
+podman:
+  command: podman
+  name: solmq-conn
+  base-dir: %s
+  quadlet:
+    scope: user
+    dir: %s
+`, filepath.ToSlash(baseDir), filepath.ToSlash(quadletDir)))
+	write(t, dir, "10.yaml", validWF)
+
+	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+		t.Fatalf("exit=%d, calls=%+v", code, f.calls)
+	}
+	// base-dir did not exist: WriteFile creates it rather than failing.
+	for _, name := range []string{"solmq-conn-application.yml", "solmq-conn-status"} {
+		if _, err := os.Stat(filepath.Join(baseDir, name)); err != nil {
+			t.Errorf("%s should be written to base-dir: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(quadletDir, name)); err == nil {
+			t.Errorf("%s must not be written to the quadlet dir", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(quadletDir, "solmq-conn.container")); err != nil {
+		t.Errorf("the unit belongs in the quadlet dir: %v", err)
+	}
+	// The unit's mounts must name base-dir, or the files it points at are not the
+	// ones deploy just wrote.
+	unit, rerr := os.ReadFile(filepath.Join(quadletDir, "solmq-conn.container"))
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	// pathIn joins with "/" and keeps the separator style the spec was written in,
+	// so the unit carries the ToSlash form above rather than the OS-native one the
+	// Stat calls used. Both name the same file; only the unit's spelling is
+	// asserted here, because that is what systemd and podman will read.
+	if want := "Volume=" + filepath.ToSlash(baseDir) + "/solmq-conn-application.yml"; !strings.Contains(string(unit), want) {
+		t.Errorf("unit missing %q:\n%s", want, unit)
 	}
 }
 
