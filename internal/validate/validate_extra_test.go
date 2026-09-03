@@ -445,11 +445,18 @@ func TestCheckPodmanModeAndScope(t *testing.T) {
 			t.Errorf("mode %q should be rejected, got %v", mode, e)
 		}
 	}
-	// Bad quadlet scope.
-	p2 := podmanOK()
-	p2.Quadlet = &spec.Quadlet{Scope: "root"}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p2, CheckPodman: true}); !hasErr(e, "podman.quadlet.scope must be auto, user, or system") {
-		t.Errorf("want bad-scope error, got %v", e)
+	// The quadlet: block is removed entirely -- both keys. scope only ever worked
+	// when it agreed with the invoking uid, which is now the sole input, and dir
+	// could only move the unit somewhere systemd does not scan. A present block
+	// of any shape is rejected.
+	pq := podmanOK()
+	pq.Quadlet = &spec.Quadlet{}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: pq, CheckPodman: true}); !hasErr(e, "podman.quadlet is no longer configured") {
+		t.Errorf("a present quadlet: block should be rejected, got %v", e)
+	}
+	// Omitting it -- the only remaining shape -- trips no such error.
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); hasErr(e, "quadlet") {
+		t.Errorf("an omitted quadlet: should be clean, got %v", e)
 	}
 }
 
@@ -630,7 +637,7 @@ func TestConnectionDefinitionValidation(t *testing.T) {
 }
 
 func podmanOK() *spec.Podman {
-	return &spec.Podman{Command: "podman", Name: "c", BaseDir: "/opt/solmq", Ports: []spec.Port{{Host: 8090, Container: 8090}}, Quadlet: &spec.Quadlet{Scope: spec.QuadletScopeAuto}}
+	return &spec.Podman{Command: "podman", Name: "c", BaseDir: "/opt/solmq", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
 }
 
 func TestCheckContainerNameRejected(t *testing.T) {

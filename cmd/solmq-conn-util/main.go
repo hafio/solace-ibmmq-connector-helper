@@ -614,7 +614,7 @@ func actPodman(o actionOpts, r runner.Runner) int {
 	if e.Podman == nil {
 		return errExit(fmt.Errorf("env.yaml has no podman: section to %s", action))
 	}
-	sc, serr := runner.ResolveQuadletScope(e.Podman.Quadlet.Scope, e.Podman.Quadlet.Dir)
+	sc, serr := runner.ResolveQuadletScope()
 	if serr != nil {
 		return errExit(serr)
 	}

@@ -143,8 +143,8 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestParseEnvPortsInvalid | mapping node {a: 1} | error 'env.yaml: ports entry must be an integer or "host:container", got a !!map' |
 | TestApplyDockerDefaultsFillsMissing | - | docker defaults command/name/project-name/restart applied, ports stay empty (publishing is opt-in), stores/libs stay nil |
 | TestApplyDockerDefaultsOverrideWins | - | explicit command/name/project-name/restart/ports override defaults exactly as given; a custom name does not drag project-name with it |
-| TestApplyPodmanDefaultsFillsMissing | - | podman defaults command/name/restart applied, ports stay empty (publishing is opt-in), Quadlet non-nil with scope auto and empty dir, and mode left empty -- validate rejects podman.mode, so defaulting it would trip validate for every section |
-| TestApplyPodmanDefaultsOverrideWins | - | explicit command/name/restart/ports/quadlet scope+dir override defaults exactly |
+| TestApplyPodmanDefaultsFillsMissing | - | podman defaults command/name/restart applied, ports stay empty (publishing is opt-in), and both removed keys left alone: mode empty and Quadlet nil. Defaulting either would trip validate's rejection for something the operator never wrote, and nothing dereferences Quadlet any more -- the unit dir comes from the invoking uid |
+| TestApplyPodmanDefaultsOverrideWins | - | explicit command/name/restart/ports override defaults exactly, and a present quadlet: block still decodes non-nil so validate can reject it by name |
 | TestRemovedMountKeysDecodeButAreNotDefaulted | - | libs dir kept verbatim while mount-path is left empty (defaulting it would trip validate's rejection for a value nobody wrote), and a present stores: still decodes non-nil so validate can name it |
 | TestPortDefaultsFollowManagementPort | - | management.port 9091 with docker/podman/kubernetes present: kubernetes Service.Port defaults to {9091,9091}; docker/podman publish nothing with ports: omitted |
 | TestPortDefaultsFallBackWhenManagementPortUnset | - | no management.port set: kubernetes service.port falls back to {DefaultMgmtPort,DefaultMgmtPort} (8090); docker/podman still publish nothing |
@@ -508,10 +508,8 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestKubernetesUnknownAction | - | unknown action rejected, error returned, zero calls made |
 | TestDockerUpAndDown | - | deploy runs compose up -d, remove runs compose down, correct argv each |
 | TestDockerRejectsUnsafeCommand | - | unsafe command rejected, error returned, zero calls made |
-| TestResolveQuadletScope | system scope | UserMode false and Dir equals quadletSystem |
-| TestResolveQuadletScope | user scope | UserMode true and Dir has quadletUserSub suffix |
-| TestResolveQuadletScope | user scope with dir override | Dir equals override /custom/dir |
-| TestResolveQuadletScope | bogus scope | unknown scope returns error |
+| TestResolveQuadletScope | follows euid | UserMode tracks `os.Geteuid() != 0`, and the directory pairs with it: user mode under the home dir, system mode at quadletSystem. Asserts the pairing rather than one fixed answer, since the answer legitimately differs for a root run |
+| TestResolveQuadletScope | home redirect | in user mode the dir tracks HOME/USERPROFILE, which is what lets a test (or a relocated home) move it without a config key -- there is no scope or dir key any more |
 | TestPodmanDeployReloadThenStart | - | user mode issues daemon-reload then start with `--user` flag in order |
 | TestPodmanDeploySystemModeNoUserFlag | - | system mode issues systemctl daemon-reload without `--user` flag |
 | TestPodmanRemoveStopsRemovesReloads | - | stop then daemon-reload called and unit file removed from disk |
@@ -670,7 +668,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckDockerPodmanSecretsRemoved | nil secrets | omitting `.secrets` trips no such error |
 | TestCheckPodmanModeAndScope | valid-podman | valid podman section passes with no errors |
 | TestCheckPodmanModeAndScope | run / quadlet / swarm | every value of podman.mode errors `podman.mode is no longer configured` -- quadlet included, since it is the only artifact and the key decides nothing |
-| TestCheckPodmanModeAndScope | bad-scope | podman quadlet scope 'root' errors scope must be auto, user, or system |
+| TestCheckPodmanModeAndScope | quadlet present / omitted | a present podman.quadlet block of any shape errors `podman.quadlet is no longer configured`; omitting it is clean. Both keys are gone: scope only ever worked when it agreed with the invoking uid, and dir could only move the unit somewhere systemd does not scan |
 | TestCheckPodmanStoresRemoved | present / nil | a present podman.stores errors `podman.stores is no longer configured`; omitting it trips no such error |
 | TestCheckPodmanBaseDirRequired | omitted | `podman.base-dir is required` -- it is baked into the unit's Volume= lines, so there is no safe default to guess |
 | TestCheckPodmanBaseDirRequired | unsafe / relative | a whitespace-bearing base-dir is rejected by the same host-path gate as libs.dir; a relative one is accepted and resolves against env.yaml at render time |
@@ -1071,7 +1069,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestRemoveDockerSeam | - | exit 0, 2 runner calls (preflight then down) argv [docker compose -f <compose> down] |
 | TestDeployPodmanSeamWritesUnitsAndStarts | - | exit 0, a leading podman info preflight call, then app yaml and container unit written to quadlet dir, systemctl daemon-reload then start calls |
 | TestDeployPodmanMissingBaseDirFailsBeforeAnyWrite | - | a podman section with no base-dir exits non-zero, makes ZERO runner calls (not even the preflight probe) and writes no file. Being rejected is not enough on its own: the steps after validation have side effects outside the process -- secrets in podman's store, files on disk, systemctl -- so a late failure would leave a half-built deployment |
-| TestDeployPodmanSplitsBaseDirFromQuadletDir | distinct dirs | the mounted application.yml and status script go to podman.base-dir (created on demand) and NOT to the quadlet dir; only the .container unit goes to the quadlet dir, and the unit's Volume= names the base-dir path. The shared podmanEnv helper points both at one directory, so this is the only test that would catch them being wired together |
+| TestDeployPodmanSplitsBaseDirFromQuadletDir | distinct dirs | the mounted application.yml and status script go to podman.base-dir (created on demand) and NOT to the quadlet dir; only the .container unit goes to the quadlet dir -- which the spec cannot name, so the test redirects HOME to reach it -- and the unit's Volume= names the base-dir path |
 | TestRemovePodmanSeamStopsRemovesReloads | - | exit 0, a leading podman info preflight call, then systemctl stop then daemon-reload calls, unit and app yaml files removed |
 | TestPlatformFlagHitOverridesInference | - | an explicit `--platform` is used even when another section is also present in env.yaml |
 | TestPlatformFlagMissingSectionIsLoudError | - | a `--platform` value with no matching section fails loud, naming both the requested and the present sections, before the runner is invoked |

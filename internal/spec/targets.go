@@ -47,14 +47,6 @@ func (d *Defaults) EffectiveManagementPort() int {
 	return d.Management.Port
 }
 
-// Quadlet scopes. auto resolves at deploy time from the effective uid
-// (root -> system, otherwise user).
-const (
-	QuadletScopeAuto   = "auto"
-	QuadletScopeUser   = "user"
-	QuadletScopeSystem = "system"
-)
-
 // Container mount points inside the connector image (mirror the k8s layout so
 // application.yml keystore/truststore/libs paths are identical everywhere).
 const (
@@ -188,11 +180,23 @@ type Docker struct {
 	Libs        *LibsMount   `yaml:"libs"`
 }
 
-// Quadlet locates the systemd generator directory and its scope.
-type Quadlet struct {
-	Scope string `yaml:"scope"` // auto (default) | user | system
-	Dir   string `yaml:"dir"`   // overrides the default dir for the resolved scope
-}
+// Quadlet was the podman quadlet: block. The whole block is removed, both keys.
+//
+// scope selected user or system, and the only thing an explicit value could add
+// was the ability to disagree with the identity running the tool: `scope: system`
+// as a non-root operator targets a root-owned directory the process cannot
+// write, failing mid-deploy after the credentials were already in podman's secret
+// store. It now follows the effective uid, so the mismatch cannot be expressed.
+//
+// dir moved the unit file, but systemd only loads units from its own generator
+// directories -- so every value except the default pointed somewhere the unit
+// would never be read from, and it was the second way to create the same
+// permission mismatch. There is no directory left for an operator to choose.
+//
+// The type survives with no fields so an old env.yaml decodes into a non-nil
+// pointer and validate can reject it by name rather than yaml dropping it in
+// silence.
+type Quadlet struct{}
 
 // Podman is the parsed podman section of env.yaml. generate renders a .container
 // quadlet unit; deploy/remove install and tear that same unit down via systemctl.
@@ -209,8 +213,8 @@ type Podman struct {
 	// scans its own generator directories, while these files can live anywhere.
 	// Relative values resolve against env.yaml, as tls.*.file and libs.dir do.
 	BaseDir  string       `yaml:"base-dir"`
-	Quadlet  *Quadlet     `yaml:"quadlet"`
-	Image    string       `yaml:"image"` // removed; non-empty is a validation error (see Docker)
+	Quadlet  *Quadlet     `yaml:"quadlet"` // removed; non-nil is a validation error
+	Image    string       `yaml:"image"`   // removed; non-empty is a validation error (see Docker)
 	Name     string       `yaml:"name"`
 	Ports    []Port       `yaml:"ports"`
 	Restart  string       `yaml:"restart"`
@@ -260,10 +264,7 @@ func applyPodmanDefaults(p *Podman) {
 	if p.Restart == "" {
 		p.Restart = DefaultRestart
 	}
-	if p.Quadlet == nil {
-		p.Quadlet = &Quadlet{}
-	}
-	if p.Quadlet.Scope == "" {
-		p.Quadlet.Scope = QuadletScopeAuto
-	}
+	// Quadlet is deliberately NOT filled in when absent. It is a removed block
+	// that validate rejects when non-nil, so defaulting it to an empty struct
+	// would fail every section for a block the operator never wrote.
 }

@@ -342,30 +342,42 @@ func TestDockerRejectsUnsafeCommand(t *testing.T) {
 	}
 }
 
+// TestResolveQuadletScope pins the scope to the invoking user's effective uid,
+// which is the whole point of there no longer being a scope key: the mode and
+// the directory are derived from one fact, so they cannot disagree.
+//
+// It asserts the euid-consistent pairing rather than one fixed answer, because
+// the answer legitimately differs between a normal developer run and a run as
+// root (a CI container, say). What must always hold is that user mode goes with
+// the home directory and system mode with /etc.
 func TestResolveQuadletScope(t *testing.T) {
-	sys, err := ResolveQuadletScope(spec.QuadletScopeSystem, "")
+	sc, err := ResolveQuadletScope()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sys.UserMode || sys.Dir != quadletSystem {
-		t.Errorf("system scope = %+v", sys)
+	if sc.UserMode != (os.Geteuid() != 0) {
+		t.Errorf("UserMode = %v, want it to follow euid %d", sc.UserMode, os.Geteuid())
 	}
-	usr, err := ResolveQuadletScope(spec.QuadletScopeUser, "")
-	if err != nil {
-		t.Fatal(err)
+	if sc.UserMode {
+		if !strings.HasSuffix(filepath.ToSlash(sc.Dir), quadletUserSub) {
+			t.Errorf("user mode must resolve under the home dir, got %+v", sc)
+		}
+	} else if sc.Dir != quadletSystem {
+		t.Errorf("system mode must resolve to %q, got %+v", quadletSystem, sc)
 	}
-	if !usr.UserMode || !strings.HasSuffix(filepath.ToSlash(usr.Dir), quadletUserSub) {
-		t.Errorf("user scope = %+v", usr)
-	}
-	over, err := ResolveQuadletScope(spec.QuadletScopeUser, "/custom/dir")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if over.Dir != "/custom/dir" {
-		t.Errorf("dir override ignored: %+v", over)
-	}
-	if _, err := ResolveQuadletScope("bogus", ""); err == nil {
-		t.Fatal("unknown scope must be rejected")
+	// The user-mode directory tracks the home dir, which is what lets a test (and
+	// an operator with a relocated home) redirect it without a config key.
+	if sc.UserMode {
+		home := t.TempDir()
+		t.Setenv("HOME", home)        // unix
+		t.Setenv("USERPROFILE", home) // windows
+		moved, merr := ResolveQuadletScope()
+		if merr != nil {
+			t.Fatal(merr)
+		}
+		if want := filepath.Join(home, filepath.FromSlash(quadletUserSub)); moved.Dir != want {
+			t.Errorf("user dir = %q, want %q", moved.Dir, want)
+		}
 	}
 }
 

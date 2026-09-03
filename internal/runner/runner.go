@@ -553,34 +553,28 @@ type QuadletScope struct {
 	UserMode bool
 }
 
-// ResolveQuadletScope maps the configured scope (auto|user|system) and optional
-// dir override to a concrete directory and systemctl mode. auto resolves to
-// system for the root user (euid 0) and user otherwise. A dir override replaces
-// the default directory for the resolved scope but does not change the mode.
-func ResolveQuadletScope(scope, dirOverride string) (QuadletScope, error) {
+// ResolveQuadletScope derives both the unit directory and the systemctl mode
+// from the effective uid of whoever is running: system for root, user otherwise.
+//
+// It takes no arguments on purpose. These are the only two combinations an
+// operator can both write to and start -- root owns /etc/containers/systemd and
+// drives the system systemd, everyone else owns their own home and drives their
+// own instance -- and systemd loads units only from its own generator
+// directories, so there is no third directory worth naming. Making it
+// unconfigurable is what turns a permission mismatch from something to validate
+// against into something that cannot be expressed.
+func ResolveQuadletScope() (QuadletScope, error) {
 	var sc QuadletScope
-	switch scope {
-	case "", spec.QuadletScopeAuto:
-		sc.UserMode = os.Geteuid() != 0
-	case spec.QuadletScopeSystem:
-		sc.UserMode = false
-	case spec.QuadletScopeUser:
-		sc.UserMode = true
-	default:
-		return QuadletScope{}, fmt.Errorf("unknown quadlet scope %q (want auto, user, or system)", scope)
-	}
-	if sc.UserMode {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return QuadletScope{}, fmt.Errorf("resolving user quadlet dir: %w", err)
-		}
-		sc.Dir = filepath.Join(home, quadletUserSub)
-	} else {
+	sc.UserMode = os.Geteuid() != 0
+	if !sc.UserMode {
 		sc.Dir = quadletSystem
+		return sc, nil
 	}
-	if dirOverride != "" {
-		sc.Dir = dirOverride
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return QuadletScope{}, fmt.Errorf("resolving user quadlet dir: %w", err)
 	}
+	sc.Dir = filepath.Join(home, quadletUserSub)
 	return sc, nil
 }
 

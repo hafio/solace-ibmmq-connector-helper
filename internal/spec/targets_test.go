@@ -135,10 +135,11 @@ docker:
 	}
 }
 
-// applyPodmanDefaults must allocate a Quadlet even when the podman: section
-// omits quadlet: entirely -- cmd/solmq-conn-util/main.go dereferences it
-// unconditionally on the podman deploy path, so a nil Quadlet here would
-// later panic.
+// applyPodmanDefaults must leave Quadlet nil when the podman: section omits
+// quadlet:. The block is removed and validate rejects a non-nil one, so
+// allocating an empty struct here would fail every section for a block the
+// operator never wrote -- and nothing dereferences it any more: the unit
+// directory comes from the invoking uid, not from the spec.
 func TestApplyPodmanDefaultsFillsMissing(t *testing.T) {
 	data := []byte(`
 podman:
@@ -169,14 +170,8 @@ podman:
 	if len(p.Ports) != 0 {
 		t.Errorf("ports = %+v, want none when ports: is omitted", p.Ports)
 	}
-	if p.Quadlet == nil {
-		t.Fatal("quadlet should default to non-nil")
-	}
-	if p.Quadlet.Scope != QuadletScopeAuto {
-		t.Errorf("quadlet scope = %q want %q", p.Quadlet.Scope, QuadletScopeAuto)
-	}
-	if p.Quadlet.Dir != "" {
-		t.Errorf("quadlet dir = %q want empty", p.Quadlet.Dir)
+	if p.Quadlet != nil {
+		t.Errorf("quadlet = %+v, want nil: it is a removed block, and defaulting it non-nil would trip validate's rejection", p.Quadlet)
 	}
 }
 
@@ -193,6 +188,8 @@ podman:
     scope: system
     dir: /custom/dir
 `)
+	// The quadlet block is removed; it still has to decode to a non-nil pointer
+	// so validate can reject it by name rather than yaml dropping it in silence.
 	e, err := ParseEnv(data)
 	if err != nil {
 		t.Fatal(err)
@@ -208,8 +205,8 @@ podman:
 	if len(p.Ports) != 1 || p.Ports[0] != want {
 		t.Errorf("ports = %+v want [%+v]", p.Ports, want)
 	}
-	if p.Quadlet == nil || p.Quadlet.Scope != QuadletScopeSystem || p.Quadlet.Dir != "/custom/dir" {
-		t.Errorf("quadlet = %+v", p.Quadlet)
+	if p.Quadlet == nil {
+		t.Error("a present quadlet: must decode non-nil so validate can reject it")
 	}
 }
 

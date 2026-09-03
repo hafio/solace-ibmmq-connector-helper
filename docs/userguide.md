@@ -1193,21 +1193,24 @@ Requires **podman 4.5+**.
 > accepting a path rather than only a bare file name. This behavior has not
 > been confirmed against a real podman host.
 
-**Scope** (`quadlet.scope`) selects where units go and which systemd runs them:
+**Where the unit goes is not configurable.** It follows whoever runs the tool:
 
-- `auto` (default): root -> **system** (`/etc/containers/systemd/`, `systemctl`);
-  non-root -> **user** (`~/.config/containers/systemd/`, `systemctl --user`).
-- `user` / `system`: force one; `quadlet.dir` overrides the directory for the
-  resolved scope.
+- root -> **system-wide** (`/etc/containers/systemd/`, `systemctl`)
+- anyone else -> **their own** (`~/.config/containers/systemd/`, `systemctl --user`)
 
-**`base-dir` is required** and is a different directory from the quadlet one. The
-quadlet directory holds the `.container` unit, because that is the only place
-systemd scans; `base-dir` holds the three files the unit bind-mounts -- the rendered
-`application.yml`, the status script, and the logback config when syslog is
-configured. A relative value resolves against `env.yaml`, as `tls.*.file` and
-`libs.dir` do, and `deploy` creates the directory if it does not exist. There is no
-default: the path is baked into the unit's `Volume=` lines, and a guess would put
-generated data among systemd's own units or somewhere unwritable.
+Those are the only two combinations you can both write to and start, and systemd
+loads units from nowhere else -- so there is no third directory worth naming. Being
+unable to ask for the other one is the point: a `system` deployment driven by a
+non-root account used to fail part-way through, after the credentials were already
+in podman's secret store.
+
+**`base-dir` is required**, and is the one directory you do choose. It holds the
+files the unit bind-mounts -- the rendered `application.yml`, the status script, and
+the logback config when syslog is configured. A relative value resolves against
+`env.yaml`, as `tls.*.file` and `libs.dir` do, and `deploy` creates the directory if
+it does not exist. There is no default: the path is baked into the unit's `Volume=`
+lines, and a guess would put generated data among systemd's own units or somewhere
+unwritable.
 
 `deploy --platform podman` loads the credentials into podman's secret store, writes
 the units, then `systemctl [--user] daemon-reload` and `start`;
@@ -1219,11 +1222,9 @@ itself is left alone).
 podman:
   command: podman
   base-dir: /opt/solmq-connector # REQUIRED; where the mounted application.yml,
-                                 # status script and logback config are written
-  quadlet:
-    scope: auto                  # auto | user | system
-    dir: ""                      # overrides the default dir for the resolved scope
-                                 # -- the UNIT only; base-dir holds the files
+                                 # status script and logback config are written.
+                                 # The only dir you choose -- the unit goes where
+                                 # systemd loads it for the user running the tool
   name: solmq-connector
   restart: unless-stopped
   ports:

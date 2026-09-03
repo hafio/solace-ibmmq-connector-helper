@@ -895,7 +895,7 @@ func TestRemoveNonTTYFailsFastNamingTheFlag(t *testing.T) {
 // operator confirms "kubernetes" and loses production. On kubernetes that is the
 // namespace.
 func TestRemovePromptNamesWhatItWillDestroy(t *testing.T) {
-	quadlet := t.TempDir()
+	baseDir := t.TempDir()
 	for _, c := range []struct {
 		platform string
 		env      string
@@ -903,7 +903,7 @@ func TestRemovePromptNamesWhatItWillDestroy(t *testing.T) {
 	}{
 		{"kubernetes", kubeEnv, []string{"solmq-connector", "solace-connectors"}},
 		{"docker", dockerEnv, []string{"container"}},
-		{"podman", podmanEnv(quadlet), []string{"container", ".service"}},
+		{"podman", podmanEnv(baseDir), []string{"container", ".service"}},
 	} {
 		t.Run(c.platform, func(t *testing.T) {
 			f := useFakeRunner(t)
@@ -2172,43 +2172,54 @@ docker:
     - 8090
 `
 
-// podmanEnv renders a minimal-but-valid podman: section with the unit dir
-// overridden to a test-owned location (the default user-scope dir lives under the
-// real home directory). ToSlash keeps the Windows temp path valid YAML.
+// podmanQuadletHome points HOME/USERPROFILE at a temp directory and returns the
+// unit directory ResolveQuadletScope will derive from it.
 //
-// base-dir is pointed at that same directory so the callers asserting on written
-// files can keep looking in one place. The two are independent in the schema --
-// TestDeployPodmanSplitsBaseDirFromQuadletDir is what proves that.
-func podmanEnv(quadletDir string) string {
+// There is no config key for the unit directory any more -- it follows the
+// invoking user -- so redirecting the home is how a test keeps its units out of
+// the developer's real ~/.config. That means these tests exercise the actual
+// resolution path rather than an override, at the cost of only being meaningful
+// for a non-root run: as root the scope is system and the directory is /etc,
+// which a test has no business writing to. Hence the skip.
+func podmanQuadletHome(t *testing.T) string {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("the quadlet dir follows the invoking uid; as root it is /etc/containers/systemd")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)        // unix
+	t.Setenv("USERPROFILE", home) // windows
+	return filepath.Join(home, ".config", "containers", "systemd")
+}
+
+// podmanEnv renders a minimal-but-valid podman: section. base-dir is the one
+// directory the spec still names; the unit's own directory comes from the
+// invoking user (see podmanQuadletHome). ToSlash keeps the Windows temp path
+// valid YAML.
+func podmanEnv(baseDir string) string {
 	return fmt.Sprintf(`
 podman:
   command: podman
   name: solmq-conn
-  base-dir: %[1]s
+  base-dir: %s
   ports:
     - 8090
-  quadlet:
-    scope: user
-    dir: %[1]s
-`, filepath.ToSlash(quadletDir))
+`, filepath.ToSlash(baseDir))
 }
 
 // podmanEnvSudo mirrors podmanEnv but with a chained `sudo podman` command:
 // rejected outright (sudo is not on the podman allowlist) unless the caller
 // approves it via --allow-command sudo, which is the escape-hatch scenario
 // the flag exists for.
-func podmanEnvSudo(quadletDir string) string {
+func podmanEnvSudo(baseDir string) string {
 	return fmt.Sprintf(`
 podman:
   command: sudo podman
   name: solmq-conn
-  base-dir: %[1]s
+  base-dir: %s
   ports:
     - 8090
-  quadlet:
-    scope: user
-    dir: %[1]s
-`, filepath.ToSlash(quadletDir))
+`, filepath.ToSlash(baseDir))
 }
 
 func TestGenerateKubernetesStdout(t *testing.T) {
@@ -2317,24 +2328,22 @@ tls:
 }
 
 // TestDeployPodmanSplitsBaseDirFromQuadletDir pins the split podman.base-dir
-// introduces: the three mounted documents go where the operator asked, and only
-// the .container unit goes to the quadlet directory, which is the one place
-// systemd scans. The shared podmanEnv helper points both at one directory, so
-// this is the only test that would catch them being wired together.
+// introduces: the mounted documents go where the operator asked, and only the
+// .container unit goes to the quadlet directory, which is the one place systemd
+// scans and the one directory the spec cannot name -- it follows the invoking
+// user. The unit's Volume= lines must name base-dir, or they point at files
+// deploy did not write.
 func TestDeployPodmanSplitsBaseDirFromQuadletDir(t *testing.T) {
 	f := useFakeRunner(t)
 	dir := t.TempDir()
-	quadletDir := t.TempDir()
+	quadletDir := podmanQuadletHome(t)
 	baseDir := filepath.Join(t.TempDir(), "made-on-demand")
 	write(t, dir, "env.yaml", sharedEnv+fmt.Sprintf(`
 podman:
   command: podman
   name: solmq-conn
   base-dir: %s
-  quadlet:
-    scope: user
-    dir: %s
-`, filepath.ToSlash(baseDir), filepath.ToSlash(quadletDir)))
+`, filepath.ToSlash(baseDir)))
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
@@ -2379,15 +2388,12 @@ podman:
 func TestDeployPodmanMissingBaseDirFailsBeforeAnyWrite(t *testing.T) {
 	f := useFakeRunner(t)
 	dir := t.TempDir()
-	quadletDir := t.TempDir()
-	write(t, dir, "env.yaml", sharedEnv+fmt.Sprintf(`
+	quadletDir := podmanQuadletHome(t)
+	write(t, dir, "env.yaml", sharedEnv+`
 podman:
   command: podman
   name: solmq-conn
-  quadlet:
-    scope: user
-    dir: %s
-`, filepath.ToSlash(quadletDir)))
+`)
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code == 0 {
@@ -2396,8 +2402,10 @@ podman:
 	if len(f.calls) != 0 {
 		t.Errorf("nothing should reach the runner before the spec validates, got %+v", f.calls)
 	}
+	// The directory is only created by a write, so "does not exist" is the
+	// strongest form of "nothing was written".
 	ents, rerr := os.ReadDir(quadletDir)
-	if rerr != nil {
+	if rerr != nil && !os.IsNotExist(rerr) {
 		t.Fatal(rerr)
 	}
 	if len(ents) != 0 {
@@ -2526,32 +2534,36 @@ func TestRemoveDockerSeam(t *testing.T) {
 
 func TestDeployPodmanSeamWritesUnitsAndStarts(t *testing.T) {
 	f := useFakeRunner(t)
-	quadletDir := t.TempDir()
+	quadletDir := podmanQuadletHome(t)
+	baseDir := t.TempDir()
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", sharedEnv+podmanEnv(quadletDir))
+	write(t, dir, "env.yaml", sharedEnv+podmanEnv(baseDir))
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
-	// The app yaml, the status script, and the quadlet unit all land in the
-	// (overridden) quadlet dir. application.yml now carries a live credential
-	// (the reserved status account's password), so it is 0600; the status
-	// script and unit carry no secret of their own, so both stay 0644.
-	wantModes := map[string]os.FileMode{
-		"solmq-conn-application.yml": 0o600,
-		"solmq-conn-status":          0o644,
-		"solmq-conn.container":       0o644,
+	// The two mounted documents go to base-dir and the unit to the quadlet dir
+	// the invoking user resolves to. application.yml carries a live credential
+	// (the reserved status account's password), so it is 0600; the status script
+	// and unit carry no secret of their own, so both stay 0644.
+	wantModes := map[string]struct {
+		dir  string
+		mode os.FileMode
+	}{
+		"solmq-conn-application.yml": {baseDir, 0o600},
+		"solmq-conn-status":          {baseDir, 0o644},
+		"solmq-conn.container":       {quadletDir, 0o644},
 	}
-	for name, wantMode := range wantModes {
-		info, err := os.Stat(filepath.Join(quadletDir, name))
+	for name, want := range wantModes {
+		info, err := os.Stat(filepath.Join(want.dir, name))
 		if err != nil {
-			t.Errorf("%s not written to quadlet dir: %v", name, err)
+			t.Errorf("%s not written to %s: %v", name, want.dir, err)
 			continue
 		}
 		// Unix perms are not faithfully reproduced on the windows-2025 CI runner.
-		if runtime.GOOS != "windows" && info.Mode().Perm() != wantMode {
-			t.Errorf("%s mode = %v, want %v", name, info.Mode().Perm(), wantMode)
+		if runtime.GOOS != "windows" && info.Mode().Perm() != want.mode {
+			t.Errorf("%s mode = %v, want %v", name, info.Mode().Perm(), want.mode)
 		}
 	}
 	// validWF's four credentials (mq user/password, solace
@@ -2584,18 +2596,24 @@ func TestDeployPodmanSeamWritesUnitsAndStarts(t *testing.T) {
 
 func TestRemovePodmanSeamStopsRemovesReloads(t *testing.T) {
 	f := useFakeRunner(t)
-	quadletDir := t.TempDir()
+	quadletDir := podmanQuadletHome(t)
+	baseDir := t.TempDir()
 	dir := t.TempDir()
 	// remove asks before it tears down; this test is about the argv that
 	// follows, so it answers yes. The prompt itself is covered in section g.
 	withPromptAnswer(t, "y")
-	write(t, dir, "env.yaml", sharedEnv+podmanEnv(quadletDir))
+	write(t, dir, "env.yaml", sharedEnv+podmanEnv(baseDir))
 	write(t, dir, "10.yaml", validWF)
-	// Pre-seed the files a deploy would have written; remove must clear all
-	// three: the unit, the generated app yaml, and the status script.
+	// Pre-seed the files a deploy would have written, in the two directories it
+	// writes them to; remove must clear all three. The quadlet dir is under a
+	// redirected HOME that does not exist yet, and write() does not create
+	// parents -- deploy gets that for free from runner.WriteFile's MkdirAll.
+	if err := os.MkdirAll(quadletDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	write(t, quadletDir, "solmq-conn.container", "[Container]\n")
-	write(t, quadletDir, "solmq-conn-application.yml", "x\n")
-	write(t, quadletDir, "solmq-conn-status", "#!/bin/sh\n")
+	write(t, baseDir, "solmq-conn-application.yml", "x\n")
+	write(t, baseDir, "solmq-conn-status", "#!/bin/sh\n")
 
 	if code := dispatch([]string{"remove", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
@@ -2621,9 +2639,13 @@ func TestRemovePodmanSeamStopsRemovesReloads(t *testing.T) {
 			t.Errorf("call %d argv = %v, want %v", i, f.calls[i].argv, w)
 		}
 	}
-	for _, name := range []string{"solmq-conn.container", "solmq-conn-application.yml", "solmq-conn-status"} {
-		if _, err := os.Stat(filepath.Join(quadletDir, name)); !os.IsNotExist(err) {
-			t.Errorf("%s should be removed by the remove verb", name)
+	for _, f := range []struct{ dir, name string }{
+		{quadletDir, "solmq-conn.container"},
+		{baseDir, "solmq-conn-application.yml"},
+		{baseDir, "solmq-conn-status"},
+	} {
+		if _, err := os.Stat(filepath.Join(f.dir, f.name)); !os.IsNotExist(err) {
+			t.Errorf("%s should be removed by the remove verb", f.name)
 		}
 	}
 }
@@ -2685,9 +2707,12 @@ func TestAllowCommandFlagRejectedOnGenerateAndValidate(t *testing.T) {
 // approves it. Passing the flag twice with the same value also covers that it
 // is genuinely repeatable (flag.Value.Set called more than once).
 func TestAllowCommandFlagRepeatableThreadsToRunner(t *testing.T) {
-	quadletDir := t.TempDir()
+	// The approved run completes a deploy, so the unit directory has to be
+	// redirected away from the developer's real ~/.config.
+	podmanQuadletHome(t)
+	baseDir := t.TempDir()
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", sharedEnv+podmanEnvSudo(quadletDir))
+	write(t, dir, "env.yaml", sharedEnv+podmanEnvSudo(baseDir))
 	write(t, dir, "10.yaml", validWF)
 	envPath := filepath.Join(dir, "env.yaml")
 
@@ -2775,17 +2800,24 @@ func TestDeployDockerPreflightFailureStopsBeforeWrite(t *testing.T) {
 func TestDeployPodmanPreflightFailureStopsBeforeWrite(t *testing.T) {
 	f := useFakeRunner(t)
 	f.err = fmt.Errorf("podman unreachable")
-	quadletDir := t.TempDir()
+	quadletDir := podmanQuadletHome(t)
+	baseDir := t.TempDir()
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", sharedEnv+podmanEnv(quadletDir))
+	write(t, dir, "env.yaml", sharedEnv+podmanEnv(baseDir))
 	write(t, dir, "10.yaml", validWF)
 
 	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
 	}
-	for _, name := range []string{"solmq-conn-application.yml", "solmq-conn-status", "solmq-conn.container"} {
-		if _, err := os.Stat(filepath.Join(quadletDir, name)); !os.IsNotExist(err) {
-			t.Errorf("%s must not be written when preflight fails", name)
+	// Nothing lands in either directory: the documents would have gone to
+	// base-dir and the unit to the quadlet dir, and preflight runs before both.
+	for _, w := range []struct{ dir, name string }{
+		{baseDir, "solmq-conn-application.yml"},
+		{baseDir, "solmq-conn-status"},
+		{quadletDir, "solmq-conn.container"},
+	} {
+		if _, err := os.Stat(filepath.Join(w.dir, w.name)); !os.IsNotExist(err) {
+			t.Errorf("%s must not be written when preflight fails", w.name)
 		}
 	}
 	if len(f.calls) != 1 {

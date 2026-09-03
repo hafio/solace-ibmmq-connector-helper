@@ -1310,12 +1310,14 @@ func checkPodman(add func(string, string, ...any), ctx Context) {
 	} else if !safeHostPath(p.BaseDir) {
 		add(fileEnv, "podman.base-dir %q contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", p.BaseDir)
 	}
-	if q := p.Quadlet; q != nil {
-		switch q.Scope {
-		case spec.QuadletScopeAuto, spec.QuadletScopeUser, spec.QuadletScopeSystem:
-		default:
-			add(fileEnv, "podman.quadlet.scope must be auto, user, or system (got %q)", q.Scope)
-		}
+	// The whole block is gone, both keys. scope followed the invoking uid in every
+	// case that actually worked, and dir could only move the unit somewhere
+	// systemd does not scan -- each was a way to ask for a directory the operator
+	// could not write or systemd would not read. Rejected rather than ignored: an
+	// operator who wrote either was relying on something that only worked when it
+	// happened to agree with their uid.
+	if p.Quadlet != nil {
+		add(fileEnv, "podman.quadlet is no longer configured: the unit directory follows the user running solmq-conn-util -- root deploys system-wide to /etc/containers/systemd, anyone else to their own ~/.config/containers/systemd, which are the only directories systemd loads units from. Remove the podman.quadlet section")
 	}
 }
 

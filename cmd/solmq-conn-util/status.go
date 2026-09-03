@@ -553,11 +553,11 @@ func (c *statusCollector) applyPodmanRestarts(rep *statusreport.Report) {
 	if c.platform != validate.PlatformPodman {
 		return
 	}
-	scope, dir := "", ""
-	if c.env != nil && c.env.Podman != nil && c.env.Podman.Quadlet != nil {
-		scope, dir = c.env.Podman.Quadlet.Scope, c.env.Podman.Quadlet.Dir
-	}
-	sc, err := runner.ResolveQuadletScope(scope, dir)
+	// Nothing is read from env.yaml here: the scope follows the invoking user, so
+	// it lands on the same directory and the same systemd instance a deploy by
+	// that user would have used. status can run with no env.yaml at all (see
+	// loadStatusEnv), and this now needs none.
+	sc, err := runner.ResolveQuadletScope()
 	if err != nil {
 		return
 	}
