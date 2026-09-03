@@ -2367,6 +2367,44 @@ podman:
 	}
 }
 
+// TestDeployPodmanMissingBaseDirFailsBeforeAnyWrite pins the loud failure for the
+// one required podman key. Being rejected is not enough on its own: the rejection
+// has to land before deploy has done anything, because the steps that follow are
+// the ones with side effects outside this process -- credentials placed in podman's
+// secret store, then files written to disk, then systemctl. A late failure would
+// leave a half-built deployment behind.
+//
+// So this asserts a non-zero exit AND zero runner calls -- not even the preflight
+// probe -- AND that nothing was written to the quadlet directory.
+func TestDeployPodmanMissingBaseDirFailsBeforeAnyWrite(t *testing.T) {
+	f := useFakeRunner(t)
+	dir := t.TempDir()
+	quadletDir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+fmt.Sprintf(`
+podman:
+  command: podman
+  name: solmq-conn
+  quadlet:
+    scope: user
+    dir: %s
+`, filepath.ToSlash(quadletDir)))
+	write(t, dir, "10.yaml", validWF)
+
+	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code == 0 {
+		t.Fatal("a podman section with no base-dir must not deploy")
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("nothing should reach the runner before the spec validates, got %+v", f.calls)
+	}
+	ents, rerr := os.ReadDir(quadletDir)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if len(ents) != 0 {
+		t.Errorf("no file should be written on a rejected deploy, got %d", len(ents))
+	}
+}
+
 // ---- deploy / remove: docker and podman seams -------------------------------------
 
 func TestDeployDockerSeamWritesComposeAndRuns(t *testing.T) {

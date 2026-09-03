@@ -342,9 +342,9 @@
     "semantic_hash": ""
   },
   "docs/test.md": {
-    "mtime": 1788417861.5854788,
-    "seen": 1788418149.6249273,
-    "ast_hash": "61dabbf19a3321b155a6cc868370d0f7",
+    "mtime": 1788423895.19074,
+    "seen": 1788427502.6242082,
+    "ast_hash": "fcca71ac1d831244698dc780a36c2e6e",
     "semantic_hash": ""
   },
   "docs/commands.md": {
@@ -432,9 +432,9 @@
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/main_test.go": {
-    "mtime": 1788416115.5587535,
-    "seen": 1788417154.60863,
-    "ast_hash": "85038d48ae1162a3dc8f79a602cc06ec",
+    "mtime": 1788423882.16281,
+    "seen": 1788427502.6241097,
+    "ast_hash": "360178d8f81558f4df33da71595085c2",
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/testdata/completions/solmq-conn-util.bash": {
