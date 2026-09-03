@@ -1,7 +1,7 @@
 # solmq-conn-util -- development guide
 
 Building, testing, releasing, and design notes for `solmq-conn-util`. For using the
-tool, see [userguide.md](../userguide.md); for a quick start, [README.md](../README.md).
+tool, see [userguide.md](userguide.md); for a quick start, [README.md](../README.md).
 
 ## Build
 
@@ -173,8 +173,8 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
 - **Layered core.** The CLI (`cmd/solmq-conn-util`) is a thin shell over `internal/gen`, which
   ties parse -> validate -> consolidate -> render together. Packages: `scan`, `spec`,
   `consolidate`, `tls`, `render`, `deploy`, `dockergen`, `podmangen`, `runner`, `validate`,
-  `examples`, `gen`.
-- **Deploy exec layer.** `internal/runner` shells out to the CLI named by each target's
+  `examples`, `gen`, `libs`, `statusscript`, `statusreport`, `yamlwriter`, `logback`.
+- **Deploy exec layer.** `internal/runner` shells out to the CLI named by each section's
   `command:` through an `os/exec` argv slice -- never `sh -c`. Every config-derived token is
   validated against a safe charset before it reaches argv (shell metacharacters and control
   chars are rejected with an actionable error), and on top of that

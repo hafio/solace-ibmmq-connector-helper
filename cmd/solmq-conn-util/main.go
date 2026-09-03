@@ -1296,8 +1296,23 @@ func loadEnv(envPath string) (gen.Request, *spec.Env, string, error) {
 	if err != nil {
 		return gen.Request{}, nil, "", err
 	}
+	// envDir is grounded absolutely, not left as the operator spelled -e. It is
+	// what every host path in a generated artifact resolves against (Resolver.Abs
+	// -> absPath), and those land in a podman quadlet Volume= or a compose
+	// volumes: entry. `-e env.yaml` would otherwise give envDir "." and emit
+	// `Volume=certs/truststore.jks:...`, which systemd cannot resolve -- it runs
+	// the unit with no useful cwd -- and which podman reads as a NAMED VOLUME when
+	// the source has no ./ or / prefix, silently mounting an empty volume over the
+	// truststore or the libs directory instead of failing.
+	//
+	// Abs only fails when the process has no working directory, which is also when
+	// the relative form would be meaningless; keep the raw dir in that case rather
+	// than substituting a wrong one.
 	envDir := filepath.Dir(envPath)
-	absEnv, _ := filepath.Abs(envPath)
+	absEnv, err := filepath.Abs(envPath)
+	if err == nil {
+		envDir = filepath.Dir(absEnv)
+	}
 	wfDir := e.Workflows.Dir
 	if !filepath.IsAbs(wfDir) {
 		wfDir = filepath.Join(envDir, wfDir)

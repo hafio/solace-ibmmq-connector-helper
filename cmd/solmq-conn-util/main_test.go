@@ -2266,6 +2266,50 @@ func TestGeneratePodmanQuadletStdout(t *testing.T) {
 	}
 }
 
+// TestGeneratePodmanVolumeSourcesAreAbsolute pins the host side of every Volume=
+// line against the way an operator actually invokes the tool: `-e env.yaml` from
+// the file's own directory, which used to leave envDir as "." and emit
+// `Volume=certs/truststore.jks:...`.
+//
+// A relative source is not a near-miss in a quadlet unit. systemd starts the unit
+// with no useful cwd, and podman reads a source with no ./ or / prefix as a NAMED
+// VOLUME -- so `Volume=libs:/app/external/libs:ro` silently mounts an empty volume
+// over the jars instead of failing, and the connector dies looking for classes
+// that were never mounted. The relative spelling has to be impossible to emit,
+// which is why this asserts on the rendered unit rather than on absPath.
+func TestGeneratePodmanVolumeSourcesAreAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+`
+tls:
+  truststore:
+    file: ./certs/truststore.jks
+    password: ts
+    type: JKS
+`+podmanEnv(t.TempDir())+"  libs:\n    dir: ./libs\n")
+	write(t, dir, "10.yaml", validWF)
+	t.Chdir(dir)
+
+	var code int
+	stdout := captureStdout(t, func() {
+		code = run([]string{"generate", "--platform", "podman", "-e", "env.yaml"})
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	// Only the two operator-supplied host paths are asserted. The application.yml
+	// and status-script sources are deliberately bare names here: `generate`
+	// passes an empty BaseDir for a portable preview, and only `deploy` resolves
+	// them against the quadlet directory it writes them into.
+	for _, want := range []string{
+		filepath.Join(dir, "certs", "truststore.jks") + ":/app/external/classpath/truststores/truststore.jks:ro",
+		filepath.Join(dir, "libs") + ":/app/external/libs:ro",
+	} {
+		if !strings.Contains(stdout, "Volume="+want) {
+			t.Errorf("missing absolute mount %q in:\n%s", want, stdout)
+		}
+	}
+}
+
 // ---- deploy / remove: docker and podman seams -------------------------------------
 
 func TestDeployDockerSeamWritesComposeAndRuns(t *testing.T) {

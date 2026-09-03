@@ -16,7 +16,7 @@ All YAML shown here uses block style. Flow style (`{ }` / `[ ]`) also parses, bu
 `${VAR}` placeholders are invalid inside YAML flow `{ }`, so block style is
 recommended everywhere.
 
-New here? Start with the [README.md](README.md) -- it has the quick tour and the
+New here? Start with the [README.md](../README.md) -- it has the quick tour and the
 documentation index; this guide is the complete reference.
 
 ## Contents
@@ -94,7 +94,7 @@ binaries are named like `solmq-conn-util-linux-amd64`, `solmq-conn-util-darwin-a
 `solmq-conn-util-windows-amd64.exe`). The examples below write it as
 `solmq-conn-util`, which assumes it is on your `PATH`; if it is not, run it from
 the current directory with a leading `./` (`.\solmq-conn-util.exe` on Windows).
-To build from source, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+To build from source, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ```sh
 solmq-conn-util                                    # no arguments: print usage
@@ -179,7 +179,7 @@ the `examples` command.
 ### 2.1 The spec generator (no editor required)
 
 If you would rather fill in a form than hand-write YAML, open
-[solmq-conn-util-generator.html](solmq-conn-util-generator.html) in any browser -- it is a
+[solmq-conn-util-generator.html](../solmq-conn-util-generator.html) in any browser -- it is a
 single self-contained page, so there is nothing to install and no server to run.
 It builds the whole spec folder for you:
 
@@ -257,7 +257,7 @@ solmq-conn-util download (dl) jar mq|syslog [dir] [-e env.yaml] [--version v] [-
 > `solmq-conn-util help <command>` or `<command> -h` (stdout, exit 0 -- the same
 > page follows a usage mistake on stderr with exit 2). The short aliases in the
 > table below work everywhere but appear only here and in
-> [docs/commands.md](docs/commands.md), never in terminal help.
+> [commands.md](commands.md), never in terminal help.
 
 `status` requires a **target word** (`container`, `application` or `all`; short
 `cnt`, `app`) naming which half of the state to report -- see
@@ -308,7 +308,7 @@ outside this tool; `dk` and `pm` are this tool's own, which is why they are
 listed here rather than left to be guessed.
 
 The full command tree -- with an example for every command -- is the generated
-reference at [docs/commands.md](docs/commands.md).
+reference at [commands.md](commands.md).
 
 | Flag | Applies to | Meaning |
 |------|-----------|---------|
@@ -510,7 +510,7 @@ msg-vpn: ${VPN:prod}          # ${VAR:default} -- default used when VAR is unset
   runtime, not by `solmq-conn-util` at generate time.
 - **The generator page cannot expand.** A browser has no access to the
   environment `solmq-conn-util` will run in, so
-  [solmq-conn-util-generator.html](solmq-conn-util-generator.html) previews a `${VAR}`
+  [solmq-conn-util-generator.html](../solmq-conn-util-generator.html) previews a `${VAR}`
   verbatim and raises an advisory saying the generated file may differ. The
   `env.yaml` it writes is still correct -- expansion happens when you generate,
   not when you author.
@@ -1173,8 +1173,10 @@ docker:
 
 `generate --platform podman` emits a `.container` quadlet unit; `deploy` / `remove`
 install and tear down that same unit through **systemctl**. Because a quadlet unit
-cannot inline file content, `generate`/`deploy` also write the rendered
-`application.yml` next to the unit and bind-mount it in. Credentials do not
+cannot inline file content, **`deploy`** also writes the rendered `application.yml`
+next to the unit and bind-mounts it in. `generate` writes nothing to disk, so its
+unit is a preview: the `application.yml` and status-script mounts name files that do
+not exist yet, and it is not meant to be installed by hand. Credentials do not
 go on disk: `deploy` loads each into **podman's secret store** and the unit mounts
 it at an absolute target (`Secret=<name>,type=mount,target=/app/external/var/secrets/<KEY>`).
 Requires **podman 4.5+**.
@@ -1623,7 +1625,7 @@ re-run the command to see what your seed actually resolves today.
 
 The list this command compares against is a flat file of jar filenames, one
 per line -- the format
-[`internal/libs/imagelibs/solace-pubsub-connector-ibmmq-2.13.0.list`](internal/libs/imagelibs/solace-pubsub-connector-ibmmq-2.13.0.list)
+[`internal/libs/imagelibs/solace-pubsub-connector-ibmmq-2.13.0.list`](../internal/libs/imagelibs/solace-pubsub-connector-ibmmq-2.13.0.list)
 (the tracked source of the **embedded default**, captured from
 `solace/solace-pubsub-connector-ibmmq:2.13.0` and describing every release from
 2.10.0 on) shows firsthand. Its header records both the probe command and the
@@ -1837,10 +1839,10 @@ read from the environment ([section 9.3](#93-how-each-platform-delivers-them)), 
 mounts for stores/libs, and the `solace-connector/le-mode`/`role`
 labels above on the service. **`generate --platform podman` -> a `.container`
 quadlet unit**; because it cannot inline file content, the rendered
-`application.yml` **and** the status script are each written to disk next to the
-unit and bind-mounted in read-only (credentials go to the platform's secret store,
-not to disk -- see [section 9](#9-secrets-model)), with the same labels applied
-via `Label=`.
+`application.yml` **and** the status script are bind-mounted in read-only rather
+than embedded, and **`deploy`** is what writes them to disk next to the unit
+(credentials go to the platform's secret store, not to disk -- see
+[section 9](#9-secrets-model)), with the same labels applied via `Label=`.
 
 ---
 

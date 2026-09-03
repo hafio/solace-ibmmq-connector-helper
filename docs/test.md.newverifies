@@ -562,8 +562,8 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestEngineInspectJSONFailureNamesTheTargets | - | a failure names the containers it was asked about |
 | TestEngineImageInspectJSONArgv | - | `image inspect <ref>`, where the registry digest lives (the container's own inspect does not carry it) |
 | TestEngineStatsArgv | - | `stats --no-stream --format <template>`: the four tab-separated template fields docker and podman render identically, and --no-stream so the call cannot stream forever |
-| TestEngineListArgv | - | `ps --all --no-trunc --format <template>` for `--all` discovery, including stopped containers -- an instance that died is what such a search is for |
-| TestSystemctlNRestarts | user scope / system scope / unknown unit answers nothing / no systemd on this host | `systemctl [--user] show <unit> -p NRestarts --value`, the only truthful restart count under quadlet; an empty or unreadable answer is an error so the caller can fall back to the container's own counter |
+| TestEngineListArgv | - | `ps `--all` --no-trunc --format <template>` for `--all` discovery, including stopped containers -- an instance that died is what such a search is for |
+| TestSystemctlNRestarts | user scope / system scope / unknown unit answers nothing / no systemd on this host | `systemctl [`--user`] show <unit> -p NRestarts --value`, the only truthful restart count under quadlet; an empty or unreadable answer is an error so the caller can fall back to the container's own counter |
 | TestScriptInstalledArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | ScriptInstalled execs the marker-echoing probe through each platform's exec form, `-n <namespace>` only for kubernetes when given |
 | TestScriptInstalledReadsMarkers | present / absent / marker among engine chatter / present despite a non-zero exit | the answer comes from the marker on stdout, so a marker is believed even when the engine also reported a non-zero exit |
 | TestScriptInstalledUnreachableTargetIsError | engine error with no marker / clean exit with no marker | no marker at all means the probe never ran, so it errors rather than silently reporting absent |
@@ -1025,7 +1025,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestExitCodeContract | help short -h | run([-h]) returns exit code 0 |
 | TestExitCodeContract | help long --help | run([`--help`]) returns exit code 0 |
 | TestExitCodeContract | help word | run([help]) returns exit code 0 |
-| TestExitCodeContract | 5 requested-help spellings | `status -h`, `deploy --help`, `-h` among a verb's flags (routed as flag.ErrHelp), `help status`, and `help sts` each exit 0 -- requested help is never an error, wherever it is asked |
+| TestExitCodeContract | 5 requested-help spellings | `status -h`, `deploy `--help``, `-h` among a verb's flags (routed as flag.ErrHelp), `help status`, and `help sts` each exit 0 -- requested help is never an error, wherever it is asked |
 | TestExitCodeContract | help with an unknown command | run([help, bogus]) returns exit code 2 |
 | TestExitCodeContract | unknown flag -nope | run returns exit code 2 for unrecognized flag |
 | TestExitCodeContract | missing env file | run returns exit code 1 when env file does not exist |
@@ -1112,7 +1112,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestStatusDockerContainerViewIsOneInspect | - | one inspect answers every docker target and carries the compose project too; docker reports HEALTH where kubernetes reports READY |
 | TestStatusPodmanRestartCountComesFromSystemd | - | the quadlet truth: the count in the table comes from `systemctl show ... NRestarts`, not from podman's own counter |
 | TestStatusPodmanRestartCountFallsBackWhenSystemdCannotAnswer | - | a container systemd knows nothing about keeps the container's own counter, and nothing fails |
-| TestStatusAllSearchesByImage | kubernetes searches every namespace / docker lists then inspects the matches | `--all` finds instances by image reference: `--all-namespaces` plus a client-side filter on kubernetes (with a NAMESPACE column), `ps --all` then an inspect of only the matches on docker |
+| TestStatusAllSearchesByImage | kubernetes searches every namespace / docker lists then inspects the matches | `--all` finds instances by image reference: `--all-namespaces` plus a client-side filter on kubernetes (with a NAMESPACE column), `ps `--all`` then an inspect of only the matches on docker |
 | TestStatusAllWithNoMatchIsActionable | - | an empty search names the image it looked for, since there is no env.yaml in play to point at |
 | TestStatusApplicationViewRunsTheScriptAndRendersItsFacts | - | the exact application block: the unchanged banner, values aligned in one column, right-aligned workflow ids, and no container table |
 | TestStatusApplicationDetailsAddsTheEnrichmentLines | - | one script run, two levels of report: `--details` renders uptime/version/java/config/heap (raw bytes rendered to 412Mi of 1Gi) and the health components, and the basic level renders none of them |

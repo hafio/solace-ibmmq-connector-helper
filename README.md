@@ -10,27 +10,27 @@ so splitting them across connectors stays your decision.
 
 - **One config file.** `env.yaml` holds the connector defaults, workflow
   discovery, and a per-platform (`kubernetes:` / `docker:` / `podman:`) deploy
-  section ([section 8](userguide.md#8-platform-sections-kubernetes-docker-podman)).
+  section ([section 8](docs/userguide.md#8-platform-sections-kubernetes-docker-podman)).
 - **Reusable connections**: define `connections.<name>` once in `env.yaml`,
   reference it with `conn-ref`; identical connections dedup into shared
-  **[binders](userguide.md#66-reusable-connections-conn-ref)**.
+  **[binders](docs/userguide.md#66-reusable-connections-conn-ref)**.
 - Auto-numbers workflows by sorted filename, derives destination-types from
   `queue:`/`topic:`, and auto-names a
-  **[durable subscription](userguide.md#64-destinations-durable-names-passthrough)**
+  **[durable subscription](docs/userguide.md#64-destinations-durable-names-passthrough)**
   for every MQ topic source.
-- Implements **[leader-election](userguide.md#7-connector-defaults-envyaml-top-level)**
+- Implements **[leader-election](docs/userguide.md#7-connector-defaults-envyaml-top-level)**
   (`standalone` / `active_active` / `active_standby`).
-- Wires **[TLS + mTLS](userguide.md#7-connector-defaults-envyaml-top-level)**
+- Wires **[TLS + mTLS](docs/userguide.md#7-connector-defaults-envyaml-top-level)**
   for both Solace and MQ from one shared truststore/keystore.
-- **[One secrets model](userguide.md#9-secrets-model) everywhere**: each
+- **[One secrets model](docs/userguide.md#9-secrets-model) everywhere**: each
   credential is declared as a literal or an `-env` variable name and mounted
   as a file under `/app/external/var/secrets/` -- a Kubernetes Secret volume,
   a compose environment-provider secret, or a podman secret, never an
   environment variable and never written to disk as a value. The one
   exception is the tool's own reserved `solmq-status` account, whose password
   is rendered as a literal by design
-  ([section 7.1](userguide.md#71-the-reserved-status-account-solmq-status)).
-- **[`status`](userguide.md#12-status-the-container-the-connector-or-both)
+  ([section 7.1](docs/userguide.md#71-the-reserved-status-account-solmq-status)).
+- **[`status`](docs/userguide.md#12-status-the-container-the-connector-or-both)
   reports each instance from either side**: `status container` reads the
   engine from outside (state, restarts, age, the image actually running),
   `status application` execs into each instance and reads its own actuator
@@ -38,7 +38,7 @@ so splitting them across connectors stays your decision.
   `-d` adds node, CPU/memory, digest and referenced objects; `--all` finds
   every connector instance by image name; `--output json` emits the same
   facts as one document.
-- **[`download jar`](userguide.md#10-download-jar) fetches the IBM MQ client
+- **[`download jar`](docs/userguide.md#10-download-jar) fetches the IBM MQ client
   jars (or the syslog encoder jar)** from Maven Central over HTTPS,
   sha1-verified, into a local directory for the `libs.dir`/`libs.pvc`/
   `libs.download` deploy options. It is image-aware: a jar the connector
@@ -47,7 +47,7 @@ so splitting them across connectors stays your decision.
   deploying to a different one needs its own list.
 
 Every term above links straight through to where
-[userguide.md](userguide.md) explains it in full.
+[userguide.md](docs/userguide.md) explains it in full.
 
 ## Quick start
 
@@ -65,7 +65,7 @@ The sample set is four cross-platform (MQ/Solace) workflows that together cover
 every connection style -- referenced vs. inline, reused vs. single-use -- across
 mTLS, TLS-only, and plaintext transports, plus an MQ topic source exercising the
 auto-named durable subscription. Full breakdown:
-[section 4](userguide.md#4-examples).
+[section 4](docs/userguide.md#4-examples).
 
 Prefer a form to a text editor? Open
 [solmq-conn-util-generator.html](solmq-conn-util-generator.html) in a browser (no server, no
@@ -77,7 +77,7 @@ set as a zip.
 
 One `env.yaml` plus one workflow file in a folder (`specs/` here -- any name
 works; this is a hand-written pair, not the four-workflow set `examples`
-writes into `./examples`, [section 4](userguide.md#4-examples))
+writes into `./examples`, [section 4](docs/userguide.md#4-examples))
 are a complete spec. `specs/env.yaml` sets the workflow discovery and a
 reusable connection:
 
@@ -117,7 +117,7 @@ solmq-conn-util generate config -e specs/env.yaml -o application.yml  # ...or wr
 ```
 
 Add a `kubernetes:` section
-([section 8](userguide.md#8-platform-sections-kubernetes-docker-podman)) and
+([section 8](docs/userguide.md#8-platform-sections-kubernetes-docker-podman)) and
 `solmq-conn-util generate --platform kubernetes -e
 specs/env.yaml` emits the full manifest set (Namespace, ConfigMap, Deployment,
 Service, Secrets). `solmq-conn-util deploy --platform kubernetes -e
@@ -129,7 +129,7 @@ specs/env.yaml` then applies it by piping the manifest to `kubectl`/`oc`.
 > The platform is a flag, not a positional argument (`--platform kubernetes`),
 > resolved from `env.yaml` when it has exactly one platform section, or from an
 > interactive menu otherwise -- see
-> [userguide.md section 3](userguide.md#3-commands). CI and scripts must pass
+> [userguide.md section 3](docs/userguide.md#3-commands). CI and scripts must pass
 > `--platform` explicitly: the menu refuses to block when stdin is not a TTY.
 
 | Verb | Aliases | What it does |
@@ -145,10 +145,11 @@ specs/env.yaml` then applies it by piping the manifest to `kubectl`/`oc`.
 | `examples` | `eg` | Write a starter env.yaml + workflows |
 | `download` | `dl` | Download IBM MQ or syslog encoder jars and their dependencies |
 | `auto-complete` | _(none)_ | Print a completion script for one shell |
-| `help` | _(none)_ | Print this summary, or the help page of one command |
+| `help` | _(none)_ | Print the CLI usage summary, or the help page of one verb |
 
 Full flag reference and synopses: [docs/commands.md](docs/commands.md); every
-alias, target word, and platform short form: [docs/abbreviation.md](docs/abbreviation.md).
+alias, target word, platform short form, and flag abbreviation:
+[docs/abbreviation.md](docs/abbreviation.md).
 
 `generate` fails fast: it stops at the first error and writes nothing, and its
 output is buffered so a failed run never leaves a half-written `-o` file;
@@ -177,33 +178,33 @@ engine printed on stderr says which.
 Every kubernetes `exec` and `logs` this tool runs names its container
 explicitly (`-c connector`), so a pod carrying a sidecar cannot be entered or
 read by mistake; docker and podman default to the same name. Details and exit
-codes: [section 3](userguide.md#3-commands); the full generated command
+codes: [section 3](docs/userguide.md#3-commands); the full generated command
 reference: [docs/commands.md](docs/commands.md).
 
 Tab completion for all of the above: `solmq-conn-util auto-complete
 bash|zsh|fish|powershell` prints a script for your shell, rendered from the
 binary's own command model so it never drifts from the commands that binary
-accepts ([section 1.1](userguide.md#11-shell-completion)).
+accepts ([section 1.1](docs/userguide.md#11-shell-completion)).
 
 ## Documentation
 
-- [userguide.md](userguide.md) -- the complete user reference: commands
-  ([section 3](userguide.md#3-commands)), the sample set
-  ([section 4](userguide.md#4-examples)), the config file and workflow
-  discovery ([section 5](userguide.md#5-the-config-file-and-workflow-discovery)),
-  workflow files ([section 6](userguide.md#6-workflow-file)), the `env.yaml`
-  connector defaults ([section 7](userguide.md#7-connector-defaults-envyaml-top-level)),
+- [docs/userguide.md](docs/userguide.md) -- the complete user reference: commands
+  ([section 3](docs/userguide.md#3-commands)), the sample set
+  ([section 4](docs/userguide.md#4-examples)), the config file and workflow
+  discovery ([section 5](docs/userguide.md#5-the-config-file-and-workflow-discovery)),
+  workflow files ([section 6](docs/userguide.md#6-workflow-file)), the `env.yaml`
+  connector defaults ([section 7](docs/userguide.md#7-connector-defaults-envyaml-top-level)),
   the platform sections -- kubernetes/docker/podman
-  ([section 8](userguide.md#8-platform-sections-kubernetes-docker-podman)),
-  the secrets model ([section 9](userguide.md#9-secrets-model)),
-  `download jar` ([section 10](userguide.md#10-download-jar)), what gets
-  generated ([section 11](userguide.md#11-what-gets-generated)), status
-  ([section 12](userguide.md#12-status-the-container-the-connector-or-both)),
+  ([section 8](docs/userguide.md#8-platform-sections-kubernetes-docker-podman)),
+  the secrets model ([section 9](docs/userguide.md#9-secrets-model)),
+  `download jar` ([section 10](docs/userguide.md#10-download-jar)), what gets
+  generated ([section 11](docs/userguide.md#11-what-gets-generated)), status
+  ([section 12](docs/userguide.md#12-status-the-container-the-connector-or-both)),
   reading instance logs
-  ([section 13](userguide.md#13-logs-the-lines-behind-the-state)), opening a
+  ([section 13](docs/userguide.md#13-logs-the-lines-behind-the-state)), opening a
   shell inside an instance
-  ([section 14](userguide.md#14-cli-a-shell-inside-the-instance)), and
-  gotchas ([section 15](userguide.md#15-notes-and-gotchas)).
+  ([section 14](docs/userguide.md#14-cli-a-shell-inside-the-instance)), and
+  gotchas ([section 15](docs/userguide.md#15-notes-and-gotchas)).
 - [docs/commands.md](docs/commands.md) -- the full command tree / reference,
   generated from the command model and gated against drift.
 - [docs/abbreviation.md](docs/abbreviation.md) -- every short spelling the CLI
