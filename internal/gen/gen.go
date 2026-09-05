@@ -343,8 +343,8 @@ func stableNames(refs []consolidate.SecretRef) []string {
 	return out
 }
 
-// NamedDoc is one on-disk document (podman writes application.yml files to the
-// unit/script directory because a container cannot inline file content).
+// NamedDoc is one on-disk document (podman writes application.yml files to
+// podman.base-dir because a container cannot inline file content).
 type NamedDoc struct {
 	Name string
 	Data string

@@ -85,7 +85,7 @@ func renderAbbreviationDoc() string {
 	add("[DEVELOPMENT.md](DEVELOPMENT.md#testing) to regenerate.")
 	add("")
 
-	add("## Command abbreviations")
+	add("## Verb abbreviations")
 	add("")
 	rows := make([]abbrevRow, 0, len(cliVerbs))
 	for _, v := range cliVerbs {
@@ -120,8 +120,9 @@ func renderAbbreviationDoc() string {
 	add("## Platform abbreviations")
 	add("")
 	if f, ok := abbrevFlagByShort(platformFlagName); ok {
-		add("Accepted as a " + platformSpan + " value by " + f.AppliesTo + ", alongside the")
-		add("canonical names.")
+		add("Accepted as a " + platformSpan + " value, alongside the canonical names, by:")
+		add("")
+		add(f.AppliesTo + ".")
 		add("")
 	}
 	rows = nil
@@ -148,7 +149,7 @@ func renderAbbreviationDoc() string {
 	add("")
 	add("- An abbreviation is accepted wherever its canonical word is, but is never")
 	add("  offered as a completion candidate and never shown in terminal help, so each")
-	add("  menu and help page keeps exactly one spelling per command.")
+	add("  menu and help page keeps exactly one spelling per verb, target and platform.")
 	add("- " + bt + "help" + bt + " also answers to " + bt + "-h" + bt + " and " + bt + "--help" + bt + ". Those are flag spellings of the verb,")
 	add("  not model aliases, which is why they are not in the table above.")
 	add("- The platform short spellings are curated, not a prefix rule: only " + bt + "kubernetes" + bt)

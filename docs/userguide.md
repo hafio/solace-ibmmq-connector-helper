@@ -254,7 +254,7 @@ solmq-conn-util download (dl) jar mq|syslog [dir] [-e env.yaml] [--version v] [-
 > **The in-binary help is deliberately shorter than this section.**
 > `solmq-conn-util -h` lists one line per verb; the arguments, flags, and
 > examples live on each verb's own page, printed by
-> `solmq-conn-util help <command>` or `<command> -h` (stdout, exit 0 -- the same
+> `solmq-conn-util help <verb>` or `<verb> -h` (stdout, exit 0 -- the same
 > page follows a usage mistake on stderr with exit 2). The short aliases in the
 > table below work everywhere but appear only here and in
 > [commands.md](commands.md), never in terminal help.
@@ -278,13 +278,13 @@ Every verb has exactly one short alias, except `cli`, `auto-complete` and `help`
 | `remove` | `rm` |
 | `status` | `sts` |
 | `logs` | `lg` |
-| `cli` | none (already three characters) |
+| `cli` | _(none)_ (already three characters) |
 | `version` | `ver` |
 | `validate` | `vld` |
 | `examples` | `eg` |
 | `download` | `dl` |
-| `auto-complete` | none |
-| `help` | none (still answers to `-h`, `--help`) |
+| `auto-complete` | _(none)_ |
+| `help` | _(none)_ (still answers to `-h`, `--help`) |
 
 The generated [abbreviation.md](abbreviation.md) lists every alias and short
 flag spelling in one place, byte-gated against the CLI itself.
@@ -847,7 +847,8 @@ order in [section 3](#3-commands). A run whose resolved section is absent errors
 
 **A deployment is identified by its configured name.** Every platform section
 names its deployment -- `kubernetes.deployment.name`, `docker.name`,
-`podman.name`, each a DNS-1123 label -- and everything the tool does keys on
+`podman.name`, each a DNS-1123 label (docker and podman default to `connector`
+when the key is omitted) -- and everything the tool does keys on
 that name: `deploy` creates the objects that carry it (on kubernetes the
 Deployment, its `app=<name>` selector and the derived `<name>-config`; on
 docker the compose service and container; on podman the container and its
@@ -1180,18 +1181,24 @@ docker:
 
 `generate --platform podman` emits a `.container` quadlet unit; `deploy` / `remove`
 install and tear down that same unit through **systemctl**. Because a quadlet unit
-cannot inline file content, **`deploy`** also writes the rendered `application.yml`
-next to the unit and bind-mounts it in. `generate` writes nothing to disk, so its
-unit is a preview: the `application.yml` and status-script mounts name files that do
-not exist yet, and it is not meant to be installed by hand. Credentials do not
-go on disk: `deploy` loads each into **podman's secret store** and the unit mounts
-it at an absolute target (`Secret=<name>,type=mount,target=/app/external/var/secrets/<KEY>`).
-Requires **podman 4.5+**.
-
-> [!WARNING]
-> The absolute `target=` path relies on a `type=mount` secret's `target=`
-> accepting a path rather than only a bare file name. This behavior has not
-> been confirmed against a real podman host.
+cannot inline file content, **`deploy`** also writes the rendered `application.yml`,
+the status script, and the logback config (when syslog is configured) under
+**`base-dir`** (below) and bind-mounts them in -- only the unit itself goes to the
+quadlet directory. `generate` writes nothing to disk, so its unit is a preview: the
+`application.yml` and status-script mounts name files that do not exist yet, and it
+is not meant to be installed by hand. Credentials do not go on disk: `deploy` loads
+each into **podman's secret store** and the unit mounts every one back in
+(`Secret=<name>-<KEY>,type=mount,target=/app/external/var/secrets/<KEY>`). A
+`type=mount` secret materializes as one file inside the container, and `target=`
+says where. The full path is the load-bearing part: given only a bare file name,
+podman places a mount secret in its own `/run/secrets` directory, while the
+generated `application.yml` imports credentials only from
+`/app/external/var/secrets/` -- the one directory every platform shares -- so the
+unit names that path outright and each secret lands exactly where the import
+looks. Requires **podman 4.5+** (the tool's floor; the path-valued `target=`
+form itself needs podman 4.x or newer). To check delivery on a running
+instance, `cli` in and list `/app/external/var/secrets/`: one file per
+credential.
 
 **Where the unit goes is not configurable.** It follows whoever runs the tool:
 
@@ -1199,24 +1206,27 @@ Requires **podman 4.5+**.
 - anyone else -> **their own** (`~/.config/containers/systemd/`, `systemctl --user`)
 
 Those are the only two combinations you can both write to and start, and systemd
-loads units from nowhere else -- so there is no third directory worth naming. Being
-unable to ask for the other one is the point: a `system` deployment driven by a
-non-root account used to fail part-way through, after the credentials were already
-in podman's secret store.
+loads units from nowhere else -- so there is no third directory worth naming. There
+is no directory to choose, so a deploy can never target one the running account
+cannot write to. Setting `podman.quadlet` or `podman.mode` in `env.yaml` is
+rejected outright: `validate` reports an error naming whichever key was set.
 
 **`base-dir` is required**, and is the one directory you do choose. It holds the
 files the unit bind-mounts -- the rendered `application.yml`, the status script, and
-the logback config when syslog is configured. A relative value resolves against
-`env.yaml`, as `tls.*.file` and `libs.dir` do, and `deploy` creates the directory if
-it does not exist. There is no default: the path is baked into the unit's `Volume=`
-lines, and a guess would put generated data among systemd's own units or somewhere
-unwritable.
+the logback config when syslog is configured. `application.yml` is written file
+mode `0600` (it carries the `solmq-status` account's literal password); the status
+script, the logback config, and the unit itself are `0644`. A relative value
+resolves against `env.yaml`, as `tls.*.file` and `libs.dir` do, and `deploy`
+creates the directory if it does not exist. There is no default: the path is baked
+into the unit's `Volume=` lines, and a guess would put generated data among
+systemd's own units or somewhere unwritable.
 
-`deploy --platform podman` loads the credentials into podman's secret store, writes
-the units, then `systemctl [--user] daemon-reload` and `start`;
-`remove --platform podman` `stop`s, removes the units, reloads, removes the
-secrets, and deletes the three files it wrote under `base-dir` (the directory
-itself is left alone).
+`deploy --platform podman` loads the credentials into the secret store first, then
+writes the files under `base-dir` and the unit, then `systemctl [--user]
+daemon-reload` and `start`; `remove --platform podman` `stop`s, removes the unit,
+reloads, deletes the files under `base-dir` (two, or three when syslog is
+configured; the directory itself is left alone), and removes the secrets last,
+once the unit that referenced them is gone.
 
 ```yaml
 podman:
@@ -1413,10 +1423,10 @@ names until deploying to a platform does.
   name is only ever supplied by `deploy`.
 - **podman**: `deploy` loads each credential into **podman's secret store**
   (values on stdin, never in argv) and units mount them with
-  `Secret=<name>,type=mount,target=/app/external/var/secrets/<KEY>`. Store entries
-  are namespaced by the container name, since that store is shared across every
-  project on the host. `remove` removes them. Requires **podman 4.5+** ([section
-  8.3](#83-podman) has the caveat on the absolute `target=` path specifically).
+  `Secret=<name>-<KEY>,type=mount,target=/app/external/var/secrets/<KEY>`. Store
+  entries are namespaced by the container name, since that store is shared across
+  every project on the host. `remove` removes them. Requires **podman 4.5+**
+  ([section 8.3](#83-podman) explains the absolute `target=` path).
 
 The stores wiring is separate and follows its own naming rule: the shared
 truststore/keystore is base64-embedded into a Kubernetes Secret mounted at
@@ -1859,10 +1869,11 @@ read from the environment ([section 9.3](#93-how-each-platform-delivers-them)), 
 mounts for stores/libs, and the `solace-connector/le-mode`/`role`
 labels above on the service. **`generate --platform podman` -> a `.container`
 quadlet unit**; because it cannot inline file content, the rendered
-`application.yml` **and** the status script are bind-mounted in read-only rather
-than embedded, and **`deploy`** is what writes them to disk next to the unit
-(credentials go to the platform's secret store, not to disk -- see
-[section 9](#9-secrets-model)), with the same labels applied via `Label=`.
+`application.yml`, the status script, **and** the logback config when syslog is
+configured are bind-mounted in read-only rather than embedded, and **`deploy`** is
+what writes them to `base-dir` ([section 8.3](#83-podman)) -- credentials go to the
+platform's secret store, not to disk (see [section 9](#9-secrets-model)) -- with
+the same labels applied via `Label=`.
 
 ---
 
@@ -1882,7 +1893,7 @@ solmq-conn-util status all          # both, container first
 |------|-------|---------|-----------|
 | `container` | `cnt` | Is it up? How often has it died? Which image is it actually running? | Outside the container: read-only `kubectl get` / `docker inspect` / `podman inspect` |
 | `application` | `app` | Is this the active instance? Is it healthy? Are the workflows running? | Inside the container: the generated status script, querying the instance's own Spring actuator |
-| `all` | none | Both, with the container table first | Both of the above |
+| `all` | _(none)_ | Both, with the container table first | Both of the above |
 
 > [!NOTE]
 > The target word is required (see [section 3](#3-commands)). A script that
@@ -2582,9 +2593,10 @@ container is called something else, is not reachable with `cli` -- reach it with
   Multi-line passthrough values keep their block form.
 - **The safe-charset gate covers more than `command:`.** `image`, `restart` and
   the top-level `timezone`, the `tls.*.file` paths the docker/podman sections
-  bind-mount, `libs.dir`, the kubernetes Secret names, and `libs.pvc.create.nfs.*`
-  are all rejected when they carry whitespace, quotes, control characters, or shell
-  metacharacters -- each one lands unquoted in a generated script, unit, or manifest.
+  bind-mount, `libs.dir`, `podman.base-dir`, the kubernetes Secret names, and
+  `libs.pvc.create.nfs.*` are all rejected when they carry whitespace, quotes,
+  control characters, or shell metacharacters -- each one lands unquoted in a
+  generated script, unit, or manifest.
 - **`name` and `docker.project-name` are held to DNS-1123, not to that gate.** Both
   are labels rather than argv tokens, so they must be lowercase alphanumerics and
   hyphens starting and ending alphanumeric. That is deliberately stricter than

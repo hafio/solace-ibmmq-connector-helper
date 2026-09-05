@@ -42,6 +42,35 @@ func TestCommandsDocInSync(t *testing.T) {
 	}
 }
 
+// TestInvocationTargetArgs is the regression gate for the resolved-target
+// invocation: once status's target word is given, its own placeholder
+// (statusTargetArgBracket) must not be re-appended from Args, while the
+// verb-level invocation with no target still shows it -- that line is the one
+// place a reader who has not yet picked a target needs to see the choices.
+func TestInvocationTargetArgs(t *testing.T) {
+	var status cliVerb
+	for _, v := range cliVerbs {
+		if v.Name == "status" {
+			status = v
+		}
+	}
+	if status.Name == "" {
+		t.Fatal("status verb not found in cliVerbs")
+	}
+	if got := invocation(status, ""); !strings.Contains(got, statusTargetArgBracket) {
+		t.Errorf("invocation(status, \"\") = %q, want it to contain %q", got, statusTargetArgBracket)
+	}
+	for _, tg := range status.Targets {
+		got := invocation(status, tg.Name)
+		if strings.Contains(got, statusTargetArgBracket) {
+			t.Errorf("invocation(status, %q) = %q, must not repeat the resolved placeholder %q", tg.Name, got, statusTargetArgBracket)
+		}
+		if !strings.HasPrefix(got, "solmq-conn-util status "+tg.Name+" ") {
+			t.Errorf("invocation(status, %q) = %q, want it to start with the resolved target", tg.Name, got)
+		}
+	}
+}
+
 // TestCommandsModelMatchesUsage anchors the summary page to the model and to
 // its own promises: one line per command carrying the model's description,
 // detail deferred to the per-command pages, no aliases (md-only, by decision),
@@ -80,7 +109,7 @@ func TestCommandsModelMatchesUsage(t *testing.T) {
 	assertNoAliases(t, "usage()", u)
 	assertHelpWidth(t, "usage()", u)
 
-	if !strings.Contains(u, "help <command>") {
+	if !strings.Contains(u, "help <verb>") {
 		t.Errorf("usage() should point at the per-command pages, got:\n%s", u)
 	}
 }

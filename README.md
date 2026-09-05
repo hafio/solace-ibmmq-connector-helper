@@ -53,7 +53,7 @@ Every term above links straight through to where
 
 Grab the release binary for your platform (`solmq-conn-util-linux-amd64`,
 `solmq-conn-util-darwin-arm64`, `solmq-conn-util-windows-amd64.exe`, ...) -- no
-install, nothing else to run -- or build from source (Go 1.24+; see
+install, nothing else to run -- or build from source (Go 1.27+; see
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)), then:
 
 ```sh
@@ -126,9 +126,8 @@ specs/env.yaml` then applies it by piping the manifest to `kubectl`/`oc`.
 ## Commands
 
 > [!IMPORTANT]
-> The platform is a flag, not a positional argument (`--platform kubernetes`),
-> resolved from `env.yaml` when it has exactly one platform section, or from an
-> interactive menu otherwise -- see
+> The platform comes from the `--platform` flag, from `env.yaml` when it has
+> exactly one platform section, or from an interactive menu otherwise -- see
 > [userguide.md section 3](docs/userguide.md#3-commands). CI and scripts must pass
 > `--platform` explicitly: the menu refuses to block when stdin is not a TTY.
 
@@ -144,7 +143,7 @@ specs/env.yaml` then applies it by piping the manifest to `kubectl`/`oc`.
 | `validate` | `vld` | Lint the whole env.yaml + workflows |
 | `examples` | `eg` | Write a starter env.yaml + workflows |
 | `download` | `dl` | Download IBM MQ or syslog encoder jars and their dependencies |
-| `auto-complete` | _(none)_ | Print a completion script for one shell |
+| `auto-complete` | _(none)_ | Print a shell completion script |
 | `help` | _(none)_ | Print the CLI usage summary, or the help page of one verb |
 
 Full flag reference and synopses: [docs/commands.md](docs/commands.md); every

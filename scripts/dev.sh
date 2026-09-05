@@ -121,7 +121,8 @@ task_cov() {
 # reachable from called code -- all actionable -- so a non-zero exit stops the
 # run. NOT `go run ...@version`: that form ignores this go.mod, so the scanner
 # is built by whatever toolchain its own module asks for, and a govulncheck
-# built with go1.25 refuses to load packages from a module declaring go 1.26.
+# built with an older Go refuses to load packages from a module declaring a
+# newer go directive.
 # `go tool` builds it in this module, on this toolchain, at the version go.mod
 # pins -- which is also what stops an unpinned scanner arriving mid-release.
 task_scan() {

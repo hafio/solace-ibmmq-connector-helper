@@ -5,7 +5,7 @@ tool, see [userguide.md](userguide.md); for a quick start, [README.md](../README
 
 ## Build
 
-Requires Go 1.24+ (developed against 1.26). Dependency: `gopkg.in/yaml.v3` only.
+Requires Go 1.27+ (the `go` directive in `go.mod`). Dependency: `gopkg.in/yaml.v3` only.
 
 ```sh
 # from the repo root
@@ -62,7 +62,13 @@ asserted byte-for-byte by the tests (`internal/gen/golden_test.go`).
 
 [`test.md`](test.md) is the full test catalogue -- every test, grouped by package and
 expanded to individual cases. Keep it in sync: a test or case added, removed, or renamed
-updates the matching row in the same change.
+updates the matching row in the same change. `TestTestCatalogSnapshotInSync`
+(`cmd/solmq-conn-util/testcatalog_test.go`) gates the doc's own "_Snapshot: N test
+functions, M case rows across P packages._" line against the repo: it recounts `func Test`
+declarations across every `*_test.go` file, the doc's own case rows, and its package
+sections, and fails naming whichever count drifted. There is no `-update` flag for it --
+the rows above the snapshot line are hand-written prose, not a rendered model, so a human
+edits the line by hand after fixing the rows.
 
 [`commands.md`](commands.md) is the **generated** command reference and
 [`abbreviation.md`](abbreviation.md) the **generated** lookup of every short spelling, both
@@ -114,16 +120,24 @@ It carries a JavaScript port of `validate.Run`, `consolidate.Build`, `render.App
 the consolidated `application.yml` in the browser. That port is a second implementation and
 can drift, so the page embeds a copy of [`testdata/golden/application.yml`](../testdata/golden/application.yml)
 in a `<script type="text/plain" id="golden">` block and its **Self-test** button diffs the
-shipped sample set against it. Three rules follow:
+shipped sample set against it. A second `<script type="text/plain" id="golden-findings">`
+block holds the findings `gen.Validate` reports for that same golden spec folder
+(`testdata/golden/specs`), and Self-test also diffs the JS `validateModel` port's findings
+against it -- so Self-test checks rule parity as well as the rendered bytes. Both blocks
+are kept in sync by `TestGeneratorPageGoldenInSync` and `TestGeneratorPageFindingsGoldenInSync`
+(`internal/gen/htmlgolden_test.go`), regenerated the same way: `go test ./internal/gen -run
+<TestName> -update-html-golden`. Three rules follow:
 
-- Changing the golden file means refreshing the embedded copy in the same change.
-- Changing `consolidate`, `render`, `tls` or the durable-name derivation means re-running
-  Self-test (open the page, **Load sample**, **Self-test**) and porting the change.
+- Changing the golden file or the golden spec folder means refreshing the matching embedded
+  copy (`-update-html-golden`) in the same change.
+- Changing `validate.Run`, `consolidate.Build`, `render.Application`, `tls.SolaceProps` or the
+  durable-name derivation means re-running Self-test (open the page, **Load sample**,
+  **Self-test**) and porting the change.
 - Changing the **env.yaml schema** -- adding, moving or retiring a key -- means porting it
   to the page too: the form field, `readModel`, `emitEnv` and the `validate` mirror, plus
-  `sampleModel` and the load path. Self-test only diffs `application.yml`, so it cannot
-  catch a schema change on the deploy sections; a page left behind emits configs the CLI
-  rejects. The image and timezone hoist is the worked example.
+  `sampleModel` and the load path. Self-test's findings diff catches a drift in the ported
+  rule itself, but not a schema change that never triggers one -- a page left behind can
+  still emit configs the CLI rejects. The image and timezone hoist is the worked example.
 
 The port has no automated syntax gate, but it is plain JavaScript in one `<script>` block,
 so it can be checked outside a browser:
@@ -187,13 +201,21 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
   which reports it. Credential
   env-files are written `0600` and never logged. Kubernetes manifests are piped on
   **stdin** (`apply -f -`), not argv.
-- **Teardown reverses the manifest order.** `remove` pipes the same document set
-  `deploy` renders, reversed, to `<command> delete -f -`. kubectl deletes documents
+- **Teardown reverses the manifest order.** `remove` pipes the document set `deploy`
+  renders -- minus the Namespace document, which is handled as its own confirmed
+  step -- reversed, to `<command> delete -f -`. kubectl deletes documents
   in file order and waits for each one to go, so creation order deadlocks whenever a
   `libs.pvc.create` PVC precedes the Deployment that mounts it: `kubernetes.io/pvc-protection`
   holds the claim while a pod still mounts it, and the Deployment that owns that pod
   is queued behind it in the file. Reversed, the workload goes first and everything
   it holds is free by the time its turn comes.
+- **base-dir vs quadlet-dir split (podman).** The spec names `podman.base-dir`, and that
+  is where the rendered `application.yml`, status script, and logback config land. The
+  unit directory is deliberately not configurable: systemd only scans
+  `/etc/containers/systemd` (root) or `~/.config/containers/systemd` (everyone else), so
+  the deploy derives it from the invoking uid and writes only the `.container` unit
+  there -- a spec key could only ever name a directory systemd ignores or the account
+  cannot write.
 - **Streaming seam.** `runner.Runner` is one method (`Run`) and fully buffered: it returns
   only once the process has exited, with stdout and stderr merged into one string for error
   context. `runner.Streamer` is the optional second capability for the case that cannot

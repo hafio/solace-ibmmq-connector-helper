@@ -590,6 +590,17 @@ logging:
     root: INFO
     com.solace.connector: INFO</script>
 
+<!-- Expected internal/validate findings for the SAME golden spec folder
+     (testdata/golden/specs) the application.yml block above renders --
+     what `solmq-conn-util validate` reports for it, kept in sync by
+     TestGeneratorPageFindingsGoldenInSync (internal/gen/htmlgolden_test.go).
+     One line per finding: "ERROR <issue>" / "WARN <issue>", errors first,
+     <issue> being "<file>: <msg>" or a bare "<msg>" when the finding has no
+     file. The golden spec validates clean today, so this block is empty.
+     Refresh via:
+       go test ./internal/gen -run TestGeneratorPageFindingsGoldenInSync -update-html-golden -->
+<script type="text/plain" id="golden-findings"></script>
+
 <script>
 // ===== DOM helpers =====
 const $ = id => document.getElementById(id);
@@ -2882,18 +2893,47 @@ function normStatusPassword(text){
   return text.replace(/(- name: solmq-status\n\s*password: )\S+/, '$1STATUS_PASSWORD');
 }
 
+// formatFindings renders errs then warns as "ERROR <issue>" / "WARN <issue>"
+// lines, <issue> being "file: msg" (or a bare "msg" when file is falsy) --
+// the same line format internal/gen's htmlgolden_test.go uses to fill the
+// id="golden-findings" block from internal/validate, so selfTest can diff
+// this JS port's findings against it byte-for-byte.
+function formatFindings(errs, warns){
+  const line = (tag, i) => tag + ' ' + (i.file ? i.file + ': ' : '') + i.msg + '\n';
+  return errs.map(e => line('ERROR', e)).join('') + warns.map(w => line('WARN', w)).join('');
+}
+
 function selfTest(){
   // The embedded block carries no trailing newline (it would otherwise be part of
   // the markup); render.Application emits exactly one, so restore it before diffing.
   const golden = normStatusPassword($('golden').textContent.replace(/\r\n/g, '\n').replace(/\n*$/, '') + '\n');
   const m = sampleModel();
   const got = normStatusPassword(buildConfig(m).out || '');
-  if(got === golden){ toast('Self-test PASS: sample matches the golden application.yml'); return; }
-  const g = golden.split('\n'), o = got.split('\n');
-  let i = 0;
-  while(i < Math.max(g.length, o.length) && g[i] === o[i]) i++;
-  toast(`Self-test FAIL at line ${i + 1}`);
-  console.error('self-test: line ' + (i + 1) + '\n  want: ' + JSON.stringify(g[i]) + '\n  got:  ' + JSON.stringify(o[i]));
+  if(got !== golden){
+    const g = golden.split('\n'), o = got.split('\n');
+    let i = 0;
+    while(i < Math.max(g.length, o.length) && g[i] === o[i]) i++;
+    toast(`Self-test FAIL at line ${i + 1}`);
+    console.error('self-test: line ' + (i + 1) + '\n  want: ' + JSON.stringify(g[i]) + '\n  got:  ' + JSON.stringify(o[i]));
+    return;
+  }
+
+  // Rule parity: the same sample's findings, diffed against the golden-findings
+  // block TestGeneratorPageFindingsGoldenInSync keeps in sync with
+  // internal/validate. A mismatch here means this JS port and the Go rules
+  // disagree on the same input, not that the application.yml preview is wrong.
+  const v = validateModel(m);
+  const wantF = ($('golden-findings').textContent || '').replace(/\r\n/g, '\n').replace(/\n*$/, '') + '\n';
+  const gotF = (formatFindings(v.errs, v.warns) || '').replace(/\n*$/, '') + '\n';
+  if(gotF !== wantF){
+    const g = wantF.split('\n'), o = gotF.split('\n');
+    let i = 0;
+    while(i < Math.max(g.length, o.length) && g[i] === o[i]) i++;
+    toast(`Self-test FAIL (findings) at line ${i + 1}`);
+    console.error('self-test findings: line ' + (i + 1) + '\n  want: ' + JSON.stringify(g[i]) + '\n  got:  ' + JSON.stringify(o[i]));
+    return;
+  }
+  toast('Self-test PASS: sample matches the golden application.yml and findings');
 }
 
 // ===== Sample spec (mirrors internal/examples/files) =====

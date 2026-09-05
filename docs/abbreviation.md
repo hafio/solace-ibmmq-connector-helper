@@ -15,7 +15,7 @@ command model in
 [`cmd/solmq-conn-util/commands.go`](../cmd/solmq-conn-util/commands.go); see
 [DEVELOPMENT.md](DEVELOPMENT.md#testing) to regenerate.
 
-## Command abbreviations
+## Verb abbreviations
 
 | Short | Stands for | What it does |
 |-------|------------|--------------|
@@ -41,8 +41,9 @@ The second (or third) word of a command, after the verb.
 
 ## Platform abbreviations
 
-Accepted as a `--platform` value by `generate`/`deploy`/`remove`/`status`/`logs`/`cli`, alongside the
-canonical names.
+Accepted as a `--platform` value, alongside the canonical names, by:
+
+`generate`/`deploy`/`remove`/`status`/`logs`/`cli`.
 
 | Short | Stands for |
 |-------|------------|
@@ -58,7 +59,7 @@ example `--platform`) is in the [commands.md flag table](commands.md#flags).
 | Short | Stands for | Applies to | Meaning |
 |-------|------------|------------|---------|
 | `-d` | `--details` | `status` | add the enrichment lines each view can report: worker node, CPU/memory use against allocation, image digest and referenced components; app version, java version, config path and heap |
-| `-e` | `--env` | all except `examples`/`download` | config file, relative or absolute path (default: `env.yaml`) |
+| `-e` | `--env` | all except `examples`/`version`/`auto-complete`/`help` | config file, relative or absolute path (default: `env.yaml`) |
 | `-f` | `--force` | `examples`/`download` | overwrite existing files |
 | `-o` | `--out` | `generate` | write output to a file (default: stdout) |
 | `-w` | `--watch` | `status` | re-render the report every 5s until interrupted (Ctrl-C) |
@@ -67,7 +68,7 @@ example `--platform`) is in the [commands.md flag table](commands.md#flags).
 
 - An abbreviation is accepted wherever its canonical word is, but is never
   offered as a completion candidate and never shown in terminal help, so each
-  menu and help page keeps exactly one spelling per command.
+  menu and help page keeps exactly one spelling per verb, target and platform.
 - `help` also answers to `-h` and `--help`. Those are flag spellings of the verb,
   not model aliases, which is why they are not in the table above.
 - The platform short spellings are curated, not a prefix rule: only `kubernetes`

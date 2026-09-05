@@ -78,8 +78,10 @@ const omitLibFileFlagName = "--omit-lib-file"
 // connector image already provides a jar, disabling omission entirely.
 const includeProvidedFlagName = "--include-provided"
 
-// versionSpan, omitLibFileSpan and includeProvidedSpan are the markdown code
-// spans for the three flags above, reused across the download Detail text.
+// urlSpan, versionSpan, omitLibFileSpan and includeProvidedSpan are the
+// markdown code spans for the four flags above, reused across the download
+// Detail text.
+const urlSpan = bt + urlFlagName + bt
 const versionSpan = bt + versionFlagName + bt
 const omitLibFileSpan = bt + omitLibFileFlagName + bt
 const includeProvidedSpan = bt + includeProvidedFlagName + bt
@@ -132,6 +134,12 @@ var (
 // is what keeps the two in step instead.
 const statusTargetArgBracket = "<" + statusTargetContainer + "|" + statusTargetApplication + "|" + statusTargetAll + ">"
 
+// statusFlagArgs is status's own flags, spelled once. Args (the no-target
+// usage line) prepends statusTargetArgBracket to this; TargetArgs (a resolved
+// target's own invocation line) is just this, so the target word is not
+// followed by the placeholder it already answered.
+const statusFlagArgs = "[" + detailsFlagName + "] [" + watchFlagName + "] [" + allFlagName + "] [" + outputFlagName + " table|json] [" + installFlagName + "] " + platformArgBracket + " [-e env.yaml] [" + podFlagName + " name] [" + containerFlagName + " name] [" + namespaceFlagName + " ns] [" + managementPortFlagName + " port] [" + userFlagName + " name] [" + commandFlagName + " name] [" + allowCommandFlagName + " name]"
+
 // Flag spans for the status Detail text, mirroring allowCommandSpan's shape so
 // each flag is spelled once in code.
 var (
@@ -141,21 +149,22 @@ var (
 	outputSpan  = bt + outputFlagName + bt
 )
 
-// platformResolutionDetail explains how generate/deploy/remove/status/logs pick
-// a platform when --platform is not given. Rendered once as the doc's "Platform
-// resolution" section; the five verbs' Detail text carries
+// platformResolutionDetail explains how generate/deploy/remove/status/logs/cli
+// pick a platform when --platform is not given. Rendered once as the doc's
+// "Platform resolution" section; the six verbs' Detail text carries
 // platformResolutionPointer instead of restating it, so the resolution order is
 // described in exactly one place.
 const platformResolutionDetail = "The platform is resolved in order: " + platformSpan + " (which accepts the short spellings " + bt + "kube" + bt + ", " + bt + "dk" + bt + " and " + bt + "pm" + bt + "), if given; otherwise the single " +
 	bt + "kubernetes:" + bt + "/" + bt + "docker:" + bt + "/" + bt + "podman:" + bt +
 	" section in env.yaml, when exactly one is present; otherwise an interactive menu, when more than one is present. A " +
-	platformSpan + " value with no matching section in env.yaml is a loud error, and so are zero sections. " +
+	platformSpan + " value with no matching section in env.yaml is a loud error, and so are zero sections.\n\n" +
 	bt + "status" + bt + ", " + bt + "logs" + bt + " and " + bt + "cli" + bt + " are the exception, and only when the operator has already named the instances themselves (" + bt + podFlagName + bt + "/" + bt + containerFlagName + bt + ", or " + bt + allFlagName + bt + " under " + bt + "status" + bt + ") alongside an explicit " + platformSpan +
-	": there is then nothing left to read from env.yaml, so a missing file and a section-less platform are both fine -- which is how an instance this tool never deployed is reached. The menu -- and " +
+	": there is then nothing left to read from env.yaml, so a missing file and a section-less platform are both fine -- which is how an instance this tool never deployed is reached.\n\n" +
+	"The menu -- and " +
 	bt + "status" + bt + "'s install confirmation, and " + bt + "remove" + bt + "'s teardown confirmation -- never block when stdin is not a TTY; all three fail with the same guidance (naming the flag that skips them) instead of hanging."
 
 // platformResolutionPointer is the one-line cross-reference each platform verb's
-// Detail ends with instead of restating platformResolutionDetail five times.
+// Detail ends with instead of restating platformResolutionDetail six times.
 const platformResolutionPointer = "For how the platform is picked, see [Platform resolution](#platform-resolution)."
 
 // Flag value kinds (cliFlag.Arg): what a flag's value completes to in the shell
@@ -186,8 +195,8 @@ const (
 type cliFlag struct {
 	Short, Long, AppliesTo, Meaning string
 	Arg                             string // value kind for completion: argNone/argFile/argName
-	// Usage is the terse one-liner terminal help shows (`help <command>` and
-	// `<command> -h`). Meaning above stays the full prose for docs/commands.md;
+	// Usage is the terse one-liner terminal help shows (`help <verb>` and
+	// `<verb> -h`). Meaning above stays the full prose for docs/commands.md;
 	// two texts on purpose, because a paragraph that reads well in a reference
 	// table drowns a help page. Plain ASCII, no backticks, no trailing period.
 	Usage string
@@ -219,6 +228,15 @@ type cliVerb struct {
 	TreeSuffix         string // command-tree bullet suffix; takes priority over an auto-rendered Targets arrow (generate needs both a suffix and Targets)
 	PosArg             string // positional-argument kind for completion: posNone/posDir
 	Flags              []string
+	// TargetArgs, when set, stands in for Args once a real target word is
+	// already given (a resolved target's own invocation line): status's
+	// target word is itself one of the choices Args spells out
+	// (statusTargetArgBracket), so appending Args after the word would
+	// re-append the placeholder the word already answered. Empty (every verb
+	// but status) means Args is reused unchanged, which is correct wherever
+	// the target word is not one of several choices Args itself enumerates
+	// (generate's "config", download's "jar"/"mq"/"syslog").
+	TargetArgs string
 	// Synopsis is the short invocation the terminal help prints ("status
 	// <container|application|all> [flags]") -- Args above stays the full
 	// spelled-out form for docs/commands.md. No aliases: those are md-only.
@@ -234,7 +252,7 @@ type cliVerb struct {
 }
 
 var cliFlags = []cliFlag{
-	{Short: "-e", Long: "--env", AppliesTo: "all except " + bt + "examples" + bt + "/" + bt + "download" + bt, Meaning: "config file, relative or absolute path (default: " + bt + "env.yaml" + bt + ")", Arg: argFile, Usage: "config file (default: env.yaml)"},
+	{Short: "-e", Long: "--env", AppliesTo: "all except " + bt + "examples" + bt + "/" + bt + "version" + bt + "/" + bt + "auto-complete" + bt + "/" + bt + "help" + bt, Meaning: "config file, relative or absolute path (default: " + bt + "env.yaml" + bt + ")", Arg: argFile, Usage: "config file (default: env.yaml)"},
 	{Short: "-o", Long: "--out", AppliesTo: bt + "generate" + bt, Meaning: "write output to a file (default: stdout)", Arg: argFile, Usage: "write output to a file (default: stdout)"},
 	{Short: "-f", Long: "--force", AppliesTo: bt + "examples" + bt + "/" + bt + "download" + bt, Meaning: "overwrite existing files", Arg: argNone, Usage: "overwrite existing files"},
 	// argName, not argFile: the value must be a bare, PATH-resolved binary name
@@ -244,7 +262,7 @@ var cliFlags = []cliFlag{
 	// argName: the model has no enumerated-value kind (only argNone/argFile/
 	// argName), so this value offers no shell suggestions even though it is one
 	// of three fixed words. Adding a kind means teaching all four renderers.
-	{Short: platformFlagName, Long: platformFlagName, AppliesTo: bt + "generate" + bt + "/" + bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "the platform: " + bt + "kubernetes" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " (short: " + bt + "kube" + bt + ", " + bt + "dk" + bt + ", " + bt + "pm" + bt + "; default: resolved from env.yaml, or an interactive menu -- see Platform resolution)", Arg: argName, Usage: "kubernetes, docker, or podman (short: kube, dk, pm; default: from env.yaml, or a menu)"},
+	{Short: platformFlagName, Long: platformFlagName, AppliesTo: bt + "generate" + bt + "/" + bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "the platform: " + bt + "kubernetes" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " (short: " + bt + "kube" + bt + ", " + bt + "dk" + bt + ", " + bt + "pm" + bt + "; default: resolved from env.yaml, or an interactive menu -- see [Platform resolution](commands.md#platform-resolution))", Arg: argName, Usage: "kubernetes, docker, or podman (short: kube, dk, pm; default: from env.yaml, or a menu)"},
 	// argName, not argFile: a URL is not a filesystem path, so offering file
 	// suggestions would suggest exactly the wrong kind of value.
 	{Short: urlFlagName, Long: urlFlagName, AppliesTo: bt + "download" + bt, Meaning: "exact URL to download instead of Maven resolution; repeatable; when given, no resolution happens at all", Arg: argName, Usage: "exact URL to download instead of Maven resolution (repeatable)"},
@@ -279,7 +297,8 @@ var cliVerbs = []cliVerb{
 		Summary:    "Render the artifacts for the resolved platform to stdout or a file",
 		Example:    "solmq-conn-util generate --platform kubernetes -e env.yaml -o k8s.yaml",
 		TreeSuffix: bt + "[config]" + bt + " " + bt + platformArgBracket + bt,
-		Detail:     "Renders artifacts and prints them to stdout (or " + bt + "-o" + bt + "). Fails fast: stops at the first error and writes nothing; output is buffered, so a failed run never leaves a half-written " + bt + "-o" + bt + " file. The " + bt + "config" + bt + " positional renders " + bt + "application.yml" + bt + " from env.yaml and never involves a platform (" + platformSpan + " is ignored); leaving it off renders the resolved platform's artifacts instead. " + platformResolutionPointer,
+		Detail: "Renders artifacts and prints them to stdout (or " + bt + "-o" + bt + "). Fails fast: stops at the first error and writes nothing; output is buffered, so a failed run never leaves a half-written " + bt + "-o" + bt + " file.\n\n" +
+			"The " + bt + "config" + bt + " positional renders " + bt + "application.yml" + bt + " from env.yaml and never involves a platform (" + platformSpan + " is ignored); leaving it off renders the resolved platform's artifacts instead. " + platformResolutionPointer,
 		Targets: []cliTarget{
 			{Name: "config", Aliases: []string{"cfg"}, Summary: "Emit application.yml", Example: "solmq-conn-util generate config -e env.yaml -o application.yml"},
 		},
@@ -291,7 +310,8 @@ var cliVerbs = []cliVerb{
 		Summary:    "Generate for a platform, then apply it",
 		Example:    "solmq-conn-util deploy --platform kubernetes -e env.yaml",
 		TreeSuffix: bt + platformArgBracket + bt,
-		Detail:     "Generates for the platform, then applies it by shelling out to the section's " + cmdFieldSpan + " (" + bt + "kubectl" + bt + "/" + bt + "oc" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " + " + bt + "systemctl" + bt + ") through an argv slice -- never a shell. The env file must contain the matching section. " + cmdFieldSpan + "'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); " + allowCommandSpan + " approves an extra binary for this invocation (e.g. a " + bt + "sudo" + bt + " prefix). Before anything is written or applied, a read-only preflight probe (login/permission check) must succeed, or the run stops with a login hint. " + platformResolutionPointer,
+		Detail: "Generates for the platform, then applies it by shelling out to the section's " + cmdFieldSpan + " (" + bt + "kubectl" + bt + "/" + bt + "oc" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " + " + bt + "systemctl" + bt + ") through an argv slice -- never a shell. The env file must contain the matching section.\n\n" +
+			cmdFieldSpan + "'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); " + allowCommandSpan + " approves an extra binary for this invocation (e.g. a " + bt + "sudo" + bt + " prefix). Before anything is written or applied, a read-only preflight probe (login/permission check) must succeed, or the run stops with a login hint. " + platformResolutionPointer,
 	},
 	{
 		Name: "remove", Args: platformArgBracket + " [" + noPromptFlagName + "] [-e env.yaml] [" + allowCommandFlagName + " name]",
@@ -300,16 +320,16 @@ var cliVerbs = []cliVerb{
 		Summary:    "Tear down what deploy created for a platform",
 		Example:    "solmq-conn-util remove --platform kubernetes -e env.yaml",
 		TreeSuffix: bt + platformArgBracket + bt + " " + bt + "[" + noPromptFlagName + "]" + bt,
-		Detail: "Tears down what " + bt + "deploy" + bt + " created for the platform, the same way (via the section's " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", and the same read-only preflight probe before anything is torn down). " +
+		Detail: "Tears down what " + bt + "deploy" + bt + " created for the platform, the same way (via the section's " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", and the same read-only preflight probe before anything is torn down). " + platformResolutionPointer + "\n\n" +
 			"Because it is the one verb that destroys rather than creates, it asks for confirmation first, naming what it is about to tear down -- the deployment and its namespace on kubernetes, the container on docker/podman -- so a run pointed at the wrong " + bt + "env.yaml" + bt + " is caught before anything is deleted. " +
 			"Answering anything but " + bt + "y" + bt + "/" + bt + "yes" + bt + " cancels and exits 0, having touched nothing at all: the question comes before even the preflight probe. " +
-			noPromptSpan + " skips the prompt, which is what a script or CI job passes -- without it a non-TTY run fails fast with that hint rather than hanging on a read that will never return. " +
+			noPromptSpan + " skips the prompt, which is what a script or CI job passes -- without it a non-TTY run fails fast with that hint rather than hanging on a read that will never return.\n\n" +
 			"On kubernetes the namespace is handled separately, and never as part of the manifest delete: deleting a Namespace cascades to every object inside it, including workloads this tool never deployed. " +
-			"So once the teardown succeeds, " + bt + "remove" + bt + " looks at what is left in the namespace. Anything this release does not own -- another deployment, a stateful set, a volume claim, a secret -- is listed and the namespace is kept. Only a namespace with nothing else in it is offered for removal, as its own separate question. " +
-			"That is an invariant rather than a default: no flag removes a namespace that still holds someone else's work. The cluster namespaces (" + bt + "default" + bt + ", " + bt + "kube-system" + bt + ", " + bt + "kube-public" + bt + ", " + bt + "kube-node-lease" + bt + ") are never removed either, and a check that cannot run leaves the namespace alone rather than assuming it is empty. " + platformResolutionPointer,
+			"So once the teardown succeeds, " + bt + "remove" + bt + " looks at what is left in the namespace. Anything this release does not own -- another deployment, a stateful set, a volume claim, a secret -- is listed and the namespace is kept. Only a namespace with nothing else in it is offered for removal, as its own separate question.\n\n" +
+			"That is an invariant rather than a default: no flag removes a namespace that still holds someone else's work. The cluster namespaces (" + bt + "default" + bt + ", " + bt + "kube-system" + bt + ", " + bt + "kube-public" + bt + ", " + bt + "kube-node-lease" + bt + ") are never removed either, and a check that cannot run leaves the namespace alone rather than assuming it is empty.",
 	},
 	{
-		Name: "status", Args: statusTargetArgBracket + " [" + detailsFlagName + "] [" + watchFlagName + "] [" + allFlagName + "] [" + outputFlagName + " table|json] [" + installFlagName + "] " + platformArgBracket + " [-e env.yaml] [" + podFlagName + " name] [" + containerFlagName + " name] [" + namespaceFlagName + " ns] [" + managementPortFlagName + " port] [" + userFlagName + " name] [" + commandFlagName + " name] [" + allowCommandFlagName + " name]",
+		Name: "status", Args: statusTargetArgBracket + " " + statusFlagArgs, TargetArgs: statusFlagArgs,
 		Flags:  []string{detailsFlagShort, watchFlagShort, allFlagName, outputFlagName, installFlagName, platformFlagName, "-e", podFlagName, containerFlagName, namespaceFlagName, managementPortFlagName, userFlagName, commandFlagName, allowCommandFlagName},
 		PosArg: posNone, Aliases: []string{"sts"},
 		Synopsis:   "status <container|application|all> [flags]",
@@ -319,10 +339,10 @@ var cliVerbs = []cliVerb{
 			bt + "container" + bt + " is what the container engine knows, read from outside through read-only " + bt + "kubectl" + bt + "/" + bt + "docker" + bt + "/" + bt + "podman" + bt + " queries -- state, restarts, age and the image actually running, in one table per platform; " +
 			bt + "application" + bt + " is what the connector knows about itself, read from inside by running the generated status script in each instance -- leader-election mode and state, health, and per-workflow state; " +
 			bt + "all" + bt + " reports both, container first, since a container that is not running is the reason the application half is missing. " +
-			"Each word has a short spelling (" + bt + "cnt" + bt + ", " + bt + "app" + bt + "); the word itself is required, and " + bt + "status" + bt + " on its own prints this list. " +
-			detailsSpan + " adds the enrichment lines to whichever view is being printed: worker node, CPU and memory use against allocation, the image digest, and the objects the workload references (secrets, config maps, volume claims, mounts) on the container side; app version, java version, the configuration file the report was read from, and JVM heap use on the application side. The one sampling query it needs (" + bt + "kubectl top" + bt + ", " + bt + "docker stats" + bt + ") is why those lines are opt-in: on kubernetes it also needs a metrics API in the cluster, and reports a note instead of the lines when there is none. " +
+			"Each word has a short spelling (" + bt + "cnt" + bt + ", " + bt + "app" + bt + "); the word itself is required, and " + bt + "status" + bt + " on its own prints this list.\n\n" +
+			detailsSpan + " adds the enrichment lines to whichever view is being printed: worker node, CPU and memory use against allocation, the image digest, and the objects the workload references (secrets, config maps, volume claims, mounts) on the container side; app version, java version, the configuration file the report was read from, and JVM heap use on the application side. The one sampling query it needs (" + bt + "kubectl top" + bt + ", " + bt + "docker stats" + bt + ") is why those lines are opt-in: on kubernetes it also needs a metrics API in the cluster, and reports a note instead of the lines when there is none.\n\n" +
 			watchSpan + " re-renders the report every 5s until interrupted. " + outputSpan + " " + bt + "json" + bt + " emits one machine-readable document per run instead of the tables, carrying every fact either view collected. " +
-			allSpan + " ignores the instance names in " + bt + "env.yaml" + bt + " and reports every connector instance it can find by image name (" + bt + statusreport.ImageMatch + bt + ") -- across every namespace on kubernetes, and every container, running or not, on docker/podman. " +
+			allSpan + " ignores the instance names in " + bt + "env.yaml" + bt + " and reports every connector instance it can find by image name (" + bt + statusreport.ImageMatch + bt + ") -- across every namespace on kubernetes, and every container, running or not, on docker/podman.\n\n" +
 			"For the application views, " + bt + installFlagName + bt + " installs the status script without asking where it is missing; without it, a declined install prompt just skips the instances that lack it. " +
 			bt + podFlagName + bt + " and " + bt + containerFlagName + bt + " (both repeatable) narrow which instances are reported; " + bt + namespaceFlagName + bt + " overrides the kubernetes namespace and " + bt + managementPortFlagName + bt + " the actuator port; " + bt + userFlagName + bt + " names the read-only actuator account the script authenticates as, for an instance whose config does not carry the reserved " + bt + spec.StatusUserName + bt + " account. " + bt + commandFlagName + bt + " overrides the platform CLI binary used to reach each instance, and " + allowCommandSpan + " approves an extra one, the same as deploy/remove. " + platformResolutionPointer,
 		Targets: []cliTarget{
@@ -352,13 +372,13 @@ var cliVerbs = []cliVerb{
 		Example:    "solmq-conn-util logs " + tailFlagName + " 100 -e env.yaml",
 		TreeSuffix: bt + "[" + followFlagName + "]" + bt + " " + bt + "[" + previousFlagName + "]" + bt + " " + bt + platformArgBracket + bt,
 		Detail: "Prints what one connector instance of the resolved platform has written, read through the same read-only " + bt + "kubectl" + bt + "/" + bt + "docker" + bt + "/" + bt + "podman" + bt + " path " + bt + "status" + bt + " uses -- the same " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", and the same preflight probe -- and discovering the same instances from " + bt + "env.yaml" + bt + ", so the two verbs can never disagree about which ones they mean. " +
-			"It is the answer to the question " + bt + "status" + bt + " leaves open: that view reports a restart count and an exit code, and this one reports the lines that preceded them. " +
+			"It is the answer to the question " + bt + "status" + bt + " leaves open: that view reports a restart count and an exit code, and this one reports the lines that preceded them.\n\n" +
 			"One instance is read per run. When discovery finds several and none was named, nothing is read: the matching instances are listed on stdout as commands that can be pasted back verbatim, carrying the flags already typed, and the run exits 0. " +
 			bt + podFlagName + bt + " and " + bt + containerFlagName + bt + " name the instance, and each may be given once -- a second is refused rather than silently losing the first. " +
-			"Either accepts an **index** as well as a name: " + bt + podFlagName + " 0" + bt + " is the first instance in the listed order, which is alphabetical by name and the same order " + bt + "status" + bt + " prints. A name always wins, so an instance genuinely called " + bt + "0" + bt + " is still reachable by name. " +
+			"Either accepts an **index** as well as a name: " + bt + podFlagName + " 0" + bt + " is the first instance in the listed order, which is alphabetical by name and the same order " + bt + "status" + bt + " prints. A name always wins, so an instance genuinely called " + bt + "0" + bt + " is still reachable by name.\n\n" +
 			previousSpan + " is the pairing that matters most -- it reads what the previous container printed before it died, which is the only place a crash loop explains itself; kubernetes keeps that log, docker and podman do not, so it is refused there rather than quietly ignored. " +
 			followSpan + " keeps the log open and prints new lines until interrupted (Ctrl-C, which is a clean exit, not a failure). " +
-			tailSpan + " limits how far back the read starts (" + bt + tailFlagName + " all" + bt + " is the default), " + sinceSpan + " limits it by age, and " + timestampsSpan + " prefixes each line with the time the platform recorded. " +
+			tailSpan + " limits how far back the read starts (" + bt + tailFlagName + " all" + bt + " is the default), " + sinceSpan + " limits it by age, and " + timestampsSpan + " prefixes each line with the time the platform recorded.\n\n" +
 			bt + namespaceFlagName + bt + " overrides the kubernetes namespace, " + bt + commandFlagName + bt + " overrides the platform CLI binary, and " + allowCommandSpan + " approves an extra one, the same as status. " +
 			"The log itself goes to stdout and everything else to stderr, so " + bt + "logs > app.log" + bt + " captures the log and nothing but. " + platformResolutionPointer,
 	},
@@ -371,14 +391,14 @@ var cliVerbs = []cliVerb{
 		Example:    "solmq-conn-util cli -e env.yaml",
 		TreeSuffix: bt + "[-- command ...]" + bt + " " + bt + platformArgBracket + bt,
 		Detail: "Opens an interactive shell inside one connector instance of the resolved platform, reached through the same read-only " + bt + "kubectl" + bt + "/" + bt + "docker" + bt + "/" + bt + "podman" + bt + " path " + bt + "status" + bt + " and " + bt + "logs" + bt + " use -- the same " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", the same preflight probe, and the same instance discovery from " + bt + "env.yaml" + bt + ", so the three verbs can never disagree about which instance they mean. " +
-			"It is where the questions " + bt + "status" + bt + " and " + bt + "logs" + bt + " cannot answer get settled: whether the truststore really mounted, what is actually in " + bt + "/app/external/libs" + bt + ", which " + bt + "application.yml" + bt + " the process is running. " +
+			"It is where the questions " + bt + "status" + bt + " and " + bt + "logs" + bt + " cannot answer get settled: whether the truststore really mounted, what is actually in " + bt + "/app/external/libs" + bt + ", which " + bt + "application.yml" + bt + " the process is running. " + platformResolutionPointer + "\n\n" +
 			"Everything after " + bt + "--" + bt + " is run in the instance instead of a shell, non-interactively, which is the form for a script -- an interactive run with no terminal on stdin is refused with that as the next step rather than opening a session nobody can type into. " +
-			"The shell is " + bt + "sh" + bt + ": the connector image is Alpine, so its userland is busybox and there is no " + bt + "bash" + bt + " to ask for. " +
+			"The shell is " + bt + "sh" + bt + ": the connector image is Alpine, so its userland is busybox and there is no " + bt + "bash" + bt + " to ask for.\n\n" +
 			"One instance is reached per run. When discovery finds several and none was named, nothing is opened: the matching instances are listed on stdout as commands that can be pasted back verbatim, carrying the flags already typed, and the run exits 0. " +
 			bt + podFlagName + bt + " and " + bt + containerFlagName + bt + " name the instance, each may be given once, and either accepts an **index** as well as a name -- " + bt + podFlagName + " 0" + bt + " is the first instance in the listed order, alphabetical by name and the same order " + bt + "status" + bt + " prints. A name always wins. " +
-			"On kubernetes the container is always named explicitly (" + bt + "-c " + spec.ConnectorContainerName + bt + "), so a pod carrying a sidecar cannot be entered by mistake; a pod with no such container is refused by the platform rather than guessed at. " +
+			"On kubernetes the container is always named explicitly (" + bt + "-c " + spec.ConnectorContainerName + bt + "), so a pod carrying a sidecar cannot be entered by mistake; a pod with no such container is refused by the platform rather than guessed at.\n\n" +
 			"Every token of a " + bt + "--" + bt + " command is held to the same safe charset as every other value that reaches an argv, because " + bt + "cli" + bt + " runs an argv and never a shell line: a pipe, a redirect or a glob has to be written inside the session instead. " +
-			"**Exit status** is the one place " + bt + "cli" + bt + " leaves the usual contract: once the session or command is running, whatever it exited with is passed straight back. The engines give no way to be more precise -- " + bt + "kubectl exec" + bt + " reports an unreachable pod and a command that exited non-zero with the same status -- so a non-zero " + bt + "cli" + bt + " exit means one of the two, and the message the engine printed on stderr is what says which. " + platformResolutionPointer,
+			"**Exit status** is the one place " + bt + "cli" + bt + " leaves the usual contract: once the session or command is running, whatever it exited with is passed straight back. The engines give no way to be more precise -- " + bt + "kubectl exec" + bt + " reports an unreachable pod and a command that exited non-zero with the same status -- so a non-zero " + bt + "cli" + bt + " exit means one of the two, and the message the engine printed on stderr is what says which.",
 	},
 	{
 		Name: "version", Args: "", Flags: nil, PosArg: posNone, Aliases: []string{"ver"},
@@ -405,18 +425,18 @@ var cliVerbs = []cliVerb{
 		Synopsis: "download jar <mq|syslog> [dir] [flags]",
 		Blurb:    "Download IBM MQ or syslog encoder jars and their dependencies",
 		Detail: "Downloads a fixed set of jars and their dependencies into a directory. All three words -- " +
-			bt + "jar" + bt + ", then " + bt + libs.SetMQ + bt + " or " + bt + libs.SetSyslog + bt + " -- are required; a missing or unknown word is a loud error listing the valid words. " +
+			bt + "download" + bt + ", then " + bt + "jar" + bt + ", then " + bt + libs.SetMQ + bt + " or " + bt + libs.SetSyslog + bt + " -- are required; a missing or unknown word is a loud error listing the valid words. " +
 			bt + libs.SetMQ + bt + " seeds from the IBM MQ client jar; " + bt + libs.SetSyslog + bt + " seeds from the logstash syslog encoder jar. " +
-			"The " + bt + libs.SetMQ + bt + " seed is the Jakarta build of the client, and there is no flag to change it: the connector image is a Jakarta stack, so the javax build could only ever produce a classpath that fails at run time. " +
-			bt + "-e" + bt + " is read for one thing only: the " + bt + "image" + bt + " block, so the command can say when the jar list it omits against does not describe the image being deployed. It reads no credentials, no platform and no workflows, and a missing env.yaml is not an error -- download is the command you run before you have a deployment. " +
+			"The " + bt + libs.SetMQ + bt + " seed is the Jakarta build of the client, and there is no flag to change it: the connector image is a Jakarta stack, so the javax build could only ever produce a classpath that fails at run time.\n\n" +
+			bt + "-e" + bt + " is read for one thing only: the " + bt + "image" + bt + " block, so the command can say when the jar list it omits against does not describe the image being deployed. It reads no credentials, no platform and no workflows, and a missing env.yaml is not an error -- download is the verb you run before you have a deployment.\n\n" +
 			"The seed artifact resolves to its latest stable release, or to the exact release named by " + versionSpan + " when given; an empty value means latest stable, the same as leaving the flag off. Every dependency version instead comes from the Maven POM chain of the resolved seed release. " +
-			bt + urlFlagName + bt + " (repeatable) overrides all of that: when given, exactly those URLs are downloaded and no Maven resolution happens. " +
+			urlSpan + " (repeatable) overrides all of that: when given, exactly those URLs are downloaded and no Maven resolution happens.\n\n" +
 			"By default, an artifact resolved through Maven is omitted when the connector image already ships that jar, matched by artifact base name, at a version equal to or newer than the one resolved here; every omission is reported, never silent. The seed artifact -- the jar the command was run to fetch in the first place -- is never a candidate for omission no matter what the omit file says about it, so the command stays useful against an older image that lacks it entirely, and a stale or hostile omit file can never cause the one jar that matters to be skipped. " +
-			omitLibFileSpan + " replaces the embedded jar list (captured from the shipped connector image) with one captured from a different image, so the comparison runs against that image instead; it REPLACES the embedded list completely rather than merging with it, so an omit file containing nothing omits nothing. " +
+			omitLibFileSpan + " replaces the embedded jar list (captured from the shipped connector image) with one captured from a different image, so the comparison runs against that image instead; it replaces the embedded list completely rather than merging with it, so an omit file containing nothing omits nothing. " +
 			includeProvidedSpan + " disables omission entirely and downloads the whole closure regardless of what the image already has. " +
-			"Omission never applies to an explicit " + urlFlagName + ": the operator named that URL directly, so it is always downloaded verbatim and never second-guessed. " +
-			"Matching is by jar artifact base name plus version, since a jar filename carries no groupId; this is why Jackson 3 (" + bt + "tools.jackson.core" + bt + ") still downloads for the " + bt + libs.SetSyslog + bt + " set even though the image already ships Jackson 2: its 3.x versions compare higher than the 2.x copies the image carries, so the version comparison still gets the right answer. " +
-			"The destination is the trailing " + bt + "[dir]" + bt + " positional (default " + bt + "./libs" + bt + "); " + bt + "env.yaml" + bt + " is never read and there is no " + bt + "-e" + bt + " flag. " +
+			"Omission never applies to an explicit " + urlSpan + ": the operator named that URL directly, so it is always downloaded verbatim and never second-guessed.\n\n" +
+			"Matching is by jar artifact base name plus version, since a jar filename carries no groupId; this is why Jackson 3 (" + bt + "tools.jackson.core" + bt + ") still downloads for the " + bt + libs.SetSyslog + bt + " set even though the image already ships Jackson 2: its 3.x versions compare higher than the 2.x copies the image carries, so the version comparison still gets the right answer.\n\n" +
+			"The destination is the trailing " + bt + "[dir]" + bt + " positional (default " + bt + "./libs" + bt + "). " +
 			"Every jar is checked against the sha1 digest the repository publishes beside it before it is written, catching a truncated or corrupted transfer; that is integrity, not authenticity -- it is not proof against a compromised repository. https is still required on the initial URL and on every redirect hop. An existing file is skipped unless " + bt + "-f" + bt + " is given, exactly like " + bt + "examples" + bt + ".",
 		Targets: []cliTarget{
 			{
@@ -432,7 +452,7 @@ var cliVerbs = []cliVerb{
 		Name: "auto-complete", Args: "", Flags: nil, PosArg: posNone,
 		Synopsis: "auto-complete <bash|zsh|fish|powershell>",
 		Blurb:    "Print a shell completion script",
-		Detail:   "Prints a completion script for the named shell on stdout, for you to source or drop into the shell's completion directory (see the per-shell examples below). The script is rendered from the same command model as this help, so the completion a binary prints always matches the commands that binary accepts.",
+		Detail:   "Prints a completion script for the named shell on stdout, for you to source or drop into the shell's completion directory (see the per-shell examples below). The script is rendered from the same command model as this help, so the completion a binary prints always matches the verbs that binary accepts.",
 		Targets: []cliTarget{
 			{Name: "bash", Summary: "Print the bash completion script", Example: "solmq-conn-util auto-complete bash > /etc/bash_completion.d/solmq-conn-util"},
 			{Name: "zsh", Summary: "Print the zsh completion script", Example: "solmq-conn-util auto-complete zsh > ~/.zsh/completions/_solmq-conn-util"},
@@ -441,11 +461,11 @@ var cliVerbs = []cliVerb{
 		},
 	},
 	{
-		Name: "help", Args: "[command]", Flags: nil, TreeSuffix: "(" + bt + "-h" + bt + ", " + bt + "--help" + bt + ")", PosArg: posNone,
-		Synopsis: "help [command]",
-		Summary:  "Print this summary, or the help page of one command",
+		Name: "help", Args: "[verb]", Flags: nil, TreeSuffix: "(" + bt + "-h" + bt + ", " + bt + "--help" + bt + ")", PosArg: posNone,
+		Synopsis: "help [verb]",
+		Summary:  "Print this summary, or the help page of one verb",
 		Example:  "solmq-conn-util help status",
-		Detail:   "Prints the command summary (same as " + bt + "-h" + bt + " / " + bt + "--help" + bt + "). With a command name, prints that command's own page -- its arguments, flags, and examples -- exactly like " + bt + "<command> -h" + bt + ". Requested help goes to stdout and exits 0; the same pages printed after a usage mistake go to stderr with exit 2.",
+		Detail:   "Prints the command summary (same as " + bt + "-h" + bt + " / " + bt + "--help" + bt + "). With a verb name, prints that verb's own page -- its arguments, flags, and examples -- exactly like " + bt + "<verb> -h" + bt + ". Requested help goes to stdout and exits 0; the same pages printed after a usage mistake go to stderr with exit 2.",
 	},
 }
 
@@ -488,16 +508,26 @@ func flagsLine(v cliVerb) string {
 
 // invocation builds "solmq-conn-util <verb> [words...] [args]", skipping any
 // empty word -- invocation(v, "") (no target) and invocation(v, tg.Name,
-// s.Name) (download/jar's three-level form) share the same helper.
+// s.Name) (download/jar's three-level form) share the same helper. Once a
+// real word is given, TargetArgs stands in for Args when the verb sets one:
+// status's target word is itself one of the choices Args spells out
+// (statusTargetArgBracket), so appending Args after the word would re-append
+// the placeholder the word already answered.
 func invocation(v cliVerb, words ...string) string {
 	s := "solmq-conn-util " + v.Name
+	targeted := false
 	for _, w := range words {
 		if w != "" {
 			s += " " + w
+			targeted = true
 		}
 	}
-	if v.Args != "" {
-		s += " " + v.Args
+	args := v.Args
+	if targeted && v.TargetArgs != "" {
+		args = v.TargetArgs
+	}
+	if args != "" {
+		s += " " + args
 	}
 	return s
 }
@@ -538,8 +568,11 @@ func renderCommandsDoc() string {
 	add("")
 	add("The full " + bt + "solmq-conn-util" + bt + " command tree. The first argument is a **verb**.")
 	add(bt + "generate" + bt + " takes an optional second argument, " + bt + "config" + bt + ", to render")
-	add(bt + "application.yml" + bt + " instead of a platform's artifacts. " + bt + "generate" + bt + ", " + bt + "deploy" + bt + ",")
-	add(bt + "remove" + bt + ", and " + bt + "status" + bt + " all accept " + bt + platformFlagName + bt + " to pick a **platform**")
+	add(bt + "application.yml" + bt + " instead of a platform's artifacts.")
+	if f, ok := abbrevFlagByShort(platformFlagName); ok {
+		add(f.AppliesTo + " all accept")
+		add(bt + platformFlagName + bt + " to pick a **platform**")
+	}
 	add("(" + bt + "kubernetes" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + ") instead of resolving it from")
 	add(bt + "env.yaml" + bt + ". Every short spelling in here is also listed on its own, keyed")
 	add("by the abbreviation, in [abbreviation.md](abbreviation.md). Generated from the")
@@ -629,8 +662,15 @@ func renderCommandsDoc() string {
 			add("Alias: " + strings.Join(aliasSpans, ", ") + ".")
 			add("")
 		}
-		add(v.Detail)
-		add("")
+		// A Detail with topic-scoped paragraphs carries "\n\n" between them
+		// (generate, deploy, remove, status, logs, cli, download); splitting
+		// here keeps each one its own markdown paragraph instead of one wall
+		// of text. A Detail with no "\n\n" renders exactly as before: one
+		// paragraph.
+		for _, p := range strings.Split(v.Detail, "\n\n") {
+			add(p)
+			add("")
+		}
 		if fl := flagsLine(v); fl != "" {
 			add(fl)
 			add("")
@@ -671,8 +711,8 @@ func renderCommandsDoc() string {
 
 // verbUsage renders one command's own help page from the model: description,
 // invocation, target words, the command's flags with their terse Usage texts,
-// and an example. This page is the routing target for `help <command>`,
-// `<command> -h`, and the "run 'solmq-conn-util help <command>'" hint after a
+// and an example. This page is the routing target for `help <verb>`,
+// `<verb> -h`, and the "run 'solmq-conn-util help <verb>'" hint after a
 // usage error -- the detail deferred from the main summary lands here.
 //
 // Like the summary, it shows no aliases: the short spellings keep working but
@@ -829,7 +869,7 @@ func resolveTarget(verb, name string) string {
 
 // usageText is the in-binary help summary: one line per command, description
 // from the model, nothing else -- everything more belongs to the command's own
-// page (`help <command>` / `<command> -h`), which is where the old page's
+// page (`help <verb>` / `<verb> -h`), which is where the old page's
 // 30-line flag table and full argument forms went. Rendered from cliVerbs so
 // it cannot drift, kept narrow enough never to wrap in a 100-column terminal
 // (TestCommandsModelMatchesUsage gates the width), and deliberately free of
@@ -844,12 +884,12 @@ func usageText() string {
 	}
 	var b strings.Builder
 	b.WriteString("solmq-conn-util -- generate, deploy, and check the Solace PubSub+ Connector for IBM MQ\n")
-	b.WriteString("\nUsage:\n  solmq-conn-util <command> [arguments] [flags]\n")
+	b.WriteString("\nUsage:\n  solmq-conn-util <verb> [arguments] [flags]\n")
 	b.WriteString("\nCommands:\n")
 	for _, v := range cliVerbs {
 		b.WriteString("  " + pad(v.Name, width) + "  " + plainText(verbBlurb(v)) + "\n")
 	}
-	b.WriteString("\nRun 'solmq-conn-util help <command>' (or '<command> -h') for its arguments, flags, and examples.\n")
+	b.WriteString("\nRun 'solmq-conn-util help <verb>' (or '<verb> -h') for its arguments, flags, and examples.\n")
 	return b.String()
 }
 
