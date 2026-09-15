@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -4224,6 +4225,467 @@ func TestStatusAllSortsRowsAlphabetically(t *testing.T) {
 	}
 	if i, j := strings.Index(stdout, "alpha"), strings.Index(stdout, "zeta"); i < 0 || j < 0 || i > j {
 		t.Errorf("rows must be sorted by name so an index means the same thing in both verbs, got:\n%s", stdout)
+	}
+}
+
+// ---- progress: the spinner, and --verbose steps ---------------------------------
+//
+// The surface is stderr-only, so the cases here always assert two things: what
+// the operator sees while collection runs, and that stdout is untouched by it.
+// The report is the artifact, and a `1>` capture has to be byte-identical with
+// and without a terminal to spin on.
+
+// withStderrTerminal injects an answer for the stderrIsTerminal seam so a test
+// can ask for the spinner: go test's own stderr is a pipe, which would otherwise
+// make the default rendering unreachable. withTerminal is the stdin counterpart.
+func withStderrTerminal(t *testing.T, yes bool) {
+	t.Helper()
+	prev := stderrIsTerminal
+	stderrIsTerminal = func() bool { return yes }
+	t.Cleanup(func() { stderrIsTerminal = prev })
+}
+
+// withProgressClock pins progressNow to a clock that advances by step on every
+// read, so an elapsed time is arithmetic rather than timing: each step reports
+// exactly one step's worth whatever the machine was doing. Atomic because the
+// frame goroutine reads the same clock.
+func withProgressClock(t *testing.T, step time.Duration) {
+	t.Helper()
+	prev := progressNow
+	base := time.Date(2026, 8, 18, 4, 0, 0, 0, time.UTC)
+	var reads int64
+	progressNow = func() time.Time {
+		return base.Add(time.Duration(atomic.AddInt64(&reads, 1)) * step)
+	}
+	t.Cleanup(func() { progressNow = prev })
+}
+
+// withProgressFrameRate replaces the spinner's tick. A case wants one of two
+// extremes: an hour, so only the draws the call itself makes are captured, or a
+// millisecond, so the goroutine's own redraw is observable without a sleep.
+func withProgressFrameRate(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := progressFrameRate
+	progressFrameRate = d
+	t.Cleanup(func() { progressFrameRate = prev })
+}
+
+// progressErase is what blanking a live line of n columns looks like on the
+// wire: back to column 0, n spaces, back again. Spelled out here so the
+// expectations below read as sequences of draws and erases.
+func progressErase(n int) string { return "\r" + strings.Repeat(" ", n) + "\r" }
+
+// pipeReader is an os.Pipe with an incremental drain, for the one case
+// captureStderr cannot serve: the spinner's goroutine writes while the call
+// under test is still running, so the test has to see what has been written so
+// far rather than only the total.
+type pipeReader struct {
+	w     *os.File
+	seen  string
+	chunk chan string
+}
+
+func newPipeReader(t *testing.T) *pipeReader {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &pipeReader{w: w, chunk: make(chan string, 64)}
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, rerr := r.Read(buf)
+			if n > 0 {
+				p.chunk <- string(buf[:n])
+			}
+			if rerr != nil {
+				close(p.chunk)
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		_ = w.Close()
+		_ = r.Close()
+	})
+	return p
+}
+
+// waitFor accumulates writes until want appears and returns everything seen so
+// far. Bounded rather than a sleep: what it waits for is a goroutine's next
+// tick, and a fixed sleep would be both slower and flakier.
+func (p *pipeReader) waitFor(t *testing.T, want string) string {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for !strings.Contains(p.seen, want) {
+		select {
+		case c, ok := <-p.chunk:
+			if !ok {
+				t.Fatalf("the stream closed before %q appeared, got:\n%q", want, p.seen)
+			}
+			p.seen += c
+		case <-deadline:
+			t.Fatalf("timed out waiting for %q, got:\n%q", want, p.seen)
+		}
+	}
+	return p.seen
+}
+
+// TestNewProgressPicksOneRendering pins the precedence the flags were settled
+// with: --watch owns the screen, --verbose is an explicit request and so does
+// not need a terminal, and only the spinner does.
+func TestNewProgressPicksOneRendering(t *testing.T) {
+	cases := []struct {
+		name string
+		opts statusOpts
+		tty  bool
+		want progressMode
+	}{
+		{"watch beats verbose and a terminal", statusOpts{watch: watchFlag{on: true}, verbose: true}, true, progressOff},
+		{"verbose prints without a terminal", statusOpts{verbose: true}, false, progressSteps},
+		{"a terminal gets the spinner", statusOpts{}, true, progressSpinner},
+		{"no terminal and no verbose: nothing", statusOpts{}, false, progressOff},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			withStderrTerminal(t, c.tty)
+			if got := newProgress(c.opts, os.Stderr).mode; got != c.want {
+				t.Errorf("mode=%d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
+// TestStderrIsTerminalReportsAPipe covers the real probe every other case
+// injects over: a redirected stderr is not a screen, which is what keeps a
+// rewritten line out of `2>steps.log`.
+func TestStderrIsTerminalReportsAPipe(t *testing.T) {
+	var got bool
+	captureStderr(t, func() { got = stderrIsTerminal() })
+	if got {
+		t.Error("a pipe is not a terminal")
+	}
+}
+
+// TestProgressOffAndNilWriteNothing is the rule every call site depends on:
+// nothing branches on the mode, so both the nil receiver and progressOff have to
+// be silent -- and pause still has to run what it was given.
+func TestProgressOffAndNilWriteNothing(t *testing.T) {
+	var nilp *progress
+	paused := 0
+	out := captureStderr(t, func() {
+		nilp.step("preflight")
+		nilp.pause(func() { paused++ })
+		nilp.stop()
+
+		off := &progress{w: os.Stderr, mode: progressOff}
+		off.step("preflight")
+		off.pause(func() { paused++ })
+		off.stop()
+	})
+	if out != "" {
+		t.Errorf("nothing should reach stderr, got %q", out)
+	}
+	if paused != 2 {
+		t.Errorf("pause must still run its function, ran %d/2", paused)
+	}
+}
+
+// TestProgressSpinnerRewritesOneLineAndErases pins the whole rendering as bytes:
+// one line, rewritten in place, and erased when the step ends -- no ANSI, so it
+// needs no VT processing, and nothing on stdout.
+func TestProgressSpinnerRewritesOneLineAndErases(t *testing.T) {
+	withProgressFrameRate(t, time.Hour) // only the draws step and stop make themselves
+	withProgressClock(t, 0)             // a pinned clock: no seconds counter in this case
+	var p *progress
+	stdout := captureStdout(t, func() {
+		stderr := captureStderr(t, func() {
+			p = &progress{w: os.Stderr, mode: progressSpinner}
+			p.step("list pods")
+			p.step("read service solmq-connector")
+			p.stop()
+			p.stop() // idempotent: the second one has nothing left to end
+		})
+		const first, second = "- list pods", "- read service solmq-connector"
+		want := "\r" + first + progressErase(len(first)) + "\r" + second + progressErase(len(second))
+		if stderr != want {
+			t.Errorf("stderr:\n%q\nwant:\n%q", stderr, want)
+		}
+	})
+	if stdout != "" {
+		t.Errorf("the spinner must never reach stdout, got %q", stdout)
+	}
+	// stop joined the goroutine rather than leaving it to draw over whatever is
+	// written next -- which in this suite includes a swapped-back os.Stderr.
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.quit != nil || p.joined != nil {
+		t.Error("stop must leave no frame goroutine running")
+	}
+}
+
+// TestProgressSpinnerGoroutineAdvancesAndCountsSeconds is the one case that has
+// to watch the live line while it is still live, so it writes to its own pipe:
+// captureStderr only hands back what was written in total.
+func TestProgressSpinnerGoroutineAdvancesAndCountsSeconds(t *testing.T) {
+	withProgressFrameRate(t, time.Millisecond)
+	withProgressClock(t, 600*time.Millisecond)
+	const label = "status script pod-a 1/2"
+	pr := newPipeReader(t)
+	p := &progress{w: pr.w, mode: progressSpinner}
+
+	p.step(label)
+	// The second frame is the goroutine's work, not step's own first draw.
+	pr.waitFor(t, "\\ "+label)
+	// And once the step passes a second the counter appears -- whole seconds, so
+	// what an operator watches is a number that changes once a second.
+	pr.waitFor(t, label+"  1s")
+
+	p.stop()
+	fmt.Fprint(pr.w, "the report")
+	seen := pr.waitFor(t, "the report")
+	// Whatever width the line had reached, the bytes before the report are an
+	// erase: spaces, then back to column 0.
+	if before := seen[:strings.LastIndex(seen, "the report")]; !strings.HasSuffix(before, " \r") {
+		t.Errorf("the live line should be blanked before the report, got:\n%q", before)
+	}
+}
+
+// TestProgressPauseHandsBackTheStream pins the ordering the install prompt
+// needs: the live line is gone before the question is asked, no frame is drawn
+// over it while it waits for an answer, and the next step opens a fresh line.
+func TestProgressPauseHandsBackTheStream(t *testing.T) {
+	withProgressFrameRate(t, time.Hour)
+	withProgressClock(t, 0)
+	const probe = "- install probe pod-a 1/1"
+	const runs = "- status script pod-a 1/1"
+	const question = "install the status script on pod-a? [y/N] "
+	stderr := captureStderr(t, func() {
+		p := &progress{w: os.Stderr, mode: progressSpinner}
+		p.step("install probe pod-a 1/1")
+		p.pause(func() { fmt.Fprint(os.Stderr, question) })
+		p.step("status script pod-a 1/1")
+		p.stop()
+	})
+	want := "\r" + probe + progressErase(len(probe)) + question + "\r" + runs + progressErase(len(runs))
+	if stderr != want {
+		t.Errorf("stderr:\n%q\nwant:\n%q", stderr, want)
+	}
+}
+
+// TestProgressStepsPauseFinishesTheStepFirst is the same handover under
+// --verbose: the step ends before the question, so its line reports the time the
+// call took rather than the time the operator took to answer.
+func TestProgressStepsPauseFinishesTheStepFirst(t *testing.T) {
+	withProgressClock(t, 600*time.Millisecond)
+	const question = "install the status script on pod-a? [y/N] "
+	stderr := captureStderr(t, func() {
+		p := &progress{w: os.Stderr, mode: progressSteps}
+		p.step("install probe pod-a 1/1")
+		p.pause(func() { fmt.Fprint(os.Stderr, question) })
+		p.stop()
+	})
+	want := "step: install probe pod-a 1/1 0.6s\n" + question
+	if stderr != want {
+		t.Errorf("stderr:\n%q\nwant:\n%q", stderr, want)
+	}
+}
+
+// TestProgressElapsedShapes pins the two shapes a step's duration is printed in.
+// The negative case is not hypothetical: progressNow is a var, and a clock that
+// goes backwards should read as no time at all rather than as a minus sign.
+func TestProgressElapsedShapes(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{-time.Second, "0.0s"},
+		{0, "0.0s"},
+		{300 * time.Millisecond, "0.3s"},
+		{4100 * time.Millisecond, "4.1s"},
+		{59500 * time.Millisecond, "59.5s"},
+		{time.Minute, "1m00s"},
+		{125 * time.Second, "2m05s"},
+	}
+	for _, c := range cases {
+		if got := progressElapsed(c.d); got != c.want {
+			t.Errorf("progressElapsed(%s)=%s, want %s", c.d, got, c.want)
+		}
+	}
+}
+
+// TestProgressTrimElidesTheMiddle covers the one-row cap. The tail is the half
+// that has to survive: it carries the instance and its i/N, which is what says
+// the run is advancing rather than stuck on the same exec.
+func TestProgressTrimElidesTheMiddle(t *testing.T) {
+	const full = "status script solmq-connector-7d9f8c-x2n4q 1/2"
+	for _, c := range []struct {
+		name  string
+		label string
+		width int
+		want  string
+	}{
+		{"shorter than the line", "list pods", 20, "list pods"},
+		{"exactly the line", "list pods", 9, "list pods"},
+		{"middle elided, both ends kept", "abcdefghij", 9, "abc...hij"},
+		{"odd remainder favours the head", "abcdefghij", 8, "abc...ij"},
+		{"a real label keeps its i/N", full, 20, "status sc...2n4q 1/2"},
+		{"no room for the elision", "abcdefghij", 3, "abc"},
+		{"one column", "abcdefghij", 1, "a"},
+		{"no columns", "abcdefghij", 0, ""},
+		{"negative, which the head and tail widths can produce", "abcdefghij", -4, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := progressTrim(c.label, c.width)
+			if got != c.want {
+				t.Errorf("progressTrim(%q, %d) = %q, want %q", c.label, c.width, got, c.want)
+			}
+			if len(got) > c.width && c.width >= 0 {
+				t.Errorf("%q is wider than the %d columns asked for", got, c.width)
+			}
+		})
+	}
+}
+
+// TestProgressSpinnerNeverExceedsOneRow is why the trim exists: a line that
+// wraps leaves a row above the cursor that \r cannot reach, so the erase would
+// leave residue for the report to land under. Nothing the spinner writes --
+// neither a draw nor the blanking that follows it -- may be wider than the cap.
+func TestProgressSpinnerNeverExceedsOneRow(t *testing.T) {
+	withProgressFrameRate(t, time.Hour)
+	withProgressClock(t, 0)
+	label := "status script " + strings.Repeat("a", 100) + " 12/34"
+	stderr := captureStderr(t, func() {
+		p := &progress{w: os.Stderr, mode: progressSpinner}
+		p.step("%s", label) // step is printf-like, and this label is built, not constant
+		p.stop()
+	})
+	for _, seg := range strings.Split(stderr, "\r") {
+		if len(seg) > progressLineWidth {
+			t.Errorf("segment is %d columns, over the %d cap:\n%q", len(seg), progressLineWidth, seg)
+		}
+	}
+	if !strings.Contains(stderr, "...") || !strings.Contains(stderr, "12/34") {
+		t.Errorf("the label should be elided with its i/N kept, got:\n%q", stderr)
+	}
+}
+
+// TestStatusVerboseNamesEverySlowCall is the point of --verbose on a slow
+// environment: one durable line per call, in the order they were made, each with
+// the time it took -- and nothing on stdout for a parser to trip over.
+func TestStatusVerboseNamesEverySlowCall(t *testing.T) {
+	withProgressClock(t, 600*time.Millisecond)
+	withStderrTerminal(t, false) // --verbose prints whether or not there is a screen
+	q := &queueRunner{resp: []queuedResp{
+		{"", nil},                                // preflight
+		{podsJSON, nil},                          // get pods
+		{runner.ScriptPresentMarker + "\n", nil}, // pod-a probe
+		{runner.ScriptPresentMarker + "\n", nil}, // pod-b probe
+		{appReport, nil},                         // pod-a run
+		{appReport, nil},                         // pod-b run
+	}}
+	var code int
+	var stderr string
+	stdout := captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			code = dispatch([]string{"status", "app", "-v", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
+		})
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	var steps []string
+	for _, ln := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(ln, "step: ") {
+			steps = append(steps, ln)
+		}
+	}
+	// No "resolve instance names" line: both --pod values here are names, and
+	// resolveIndexes only enumerates when an index was typed, so there is no call
+	// for a step to name.
+	want := []string{
+		"step: preflight 0.6s",
+		"step: list pods 0.6s",
+		"step: install probe pod-a 1/2 0.6s",
+		"step: install probe pod-b 2/2 0.6s",
+		"step: status script pod-a 1/2 0.6s",
+		"step: status script pod-b 2/2 0.6s",
+	}
+	if !reflect.DeepEqual(steps, want) {
+		t.Errorf("steps:\n%s\nwant:\n%s", strings.Join(steps, "\n"), strings.Join(want, "\n"))
+	}
+	if strings.Contains(stdout, "step: ") {
+		t.Errorf("no step line may reach stdout, got:\n%s", stdout)
+	}
+}
+
+// TestStatusVerboseUnderWatchSaysWhichWins keeps the pair from being silently
+// ignored. They do not contradict each other -- the redraw simply owns the
+// screen -- so this is a note rather than a refusal, said out loud either way.
+func TestStatusVerboseUnderWatchSaysWhichWins(t *testing.T) {
+	for _, spelling := range []string{"-v", "--verbose"} {
+		t.Run(spelling, func(t *testing.T) {
+			// The note is the last thing checkStatusFlags does, so reaching it
+			// means every refusal passed -- which would otherwise drop this case
+			// into the redraw loop. A failing preflight is what ends the run
+			// instead: it is the first call actStatus makes, before the loop.
+			f := &fakeRunner{err: fmt.Errorf("no cluster")}
+			var code int
+			stderr := captureStderr(t, func() {
+				code = dispatch([]string{"status", "container", "-w", spelling, "--platform", "kubernetes", "--pod", "pod-a"}, f)
+			})
+			if code != 1 {
+				t.Fatalf("exit=%d, want 1", code)
+			}
+			if !strings.Contains(stderr, "note: --verbose prints no steps under --watch") {
+				t.Errorf("the winner should be named, got:\n%s", stderr)
+			}
+			if len(f.calls) != 1 {
+				t.Errorf("only the preflight probe should run, got %d calls", len(f.calls))
+			}
+		})
+	}
+}
+
+// TestStatusStdoutIsIdenticalWithAndWithoutTheSpinner is the stream contract the
+// whole feature rests on: the document is the artifact, so a redirected stdout
+// cannot depend on whether there was a terminal to spin on.
+func TestStatusStdoutIsIdenticalWithAndWithoutTheSpinner(t *testing.T) {
+	withProgressFrameRate(t, time.Hour)
+	withProgressClock(t, 0)
+	run := func(t *testing.T, tty bool) (string, string) {
+		withStderrTerminal(t, tty)
+		q := &queueRunner{resp: []queuedResp{
+			{"", nil},
+			{onePodJSON, nil},
+			{runner.ScriptPresentMarker + "\n", nil},
+			{appReport, nil},
+		}}
+		var out string
+		errs := captureStderr(t, func() {
+			out = captureStdout(t, func() {
+				if code := dispatch([]string{"status", "app", "--output", "json", "--platform", "kubernetes", "--pod", "pod-a"}, q); code != 0 {
+					t.Fatalf("exit=%d, want 0", code)
+				}
+			})
+		})
+		return out, errs
+	}
+	spinning, frames := run(t, true)
+	quiet, silence := run(t, false)
+	if spinning != quiet {
+		t.Errorf("stdout differs with the spinner on:\n%q\nwithout:\n%q", spinning, quiet)
+	}
+	if !strings.Contains(frames, "\r- ") {
+		t.Errorf("the terminal case should have spun, got:\n%q", frames)
+	}
+	if silence != "" {
+		t.Errorf("a redirected stderr should stay empty, got:\n%q", silence)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(spinning), &doc); err != nil {
+		t.Errorf("the document must still parse with the spinner on: %v", err)
 	}
 }
 

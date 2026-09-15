@@ -48,7 +48,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 751 test functions, 1025 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 764 test functions, 1041 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -996,7 +996,7 @@ Tests: [statusreport_test.go](../internal/statusreport/statusreport_test.go), [p
 
 ## cmd/solmq-conn-util
 
-The CLI shell -- flag parsing, the exit-code contract, the generate/validate/examples/auto-complete commands, verb aliases, and the deploy/remove/status/logs/cli seams for all three engines. The completion tests also gate the four generated shell scripts against the command model, and the doc tests gate the two generated markdown references against it.
+The CLI shell -- flag parsing, the exit-code contract, the generate/validate/examples/auto-complete commands, verb aliases, and the deploy/remove/status/logs/cli seams for all three engines. The progress tests cover the other half of a status run -- the stderr spinner and the `--verbose` step lines -- including the guarantee that stdout does not change when either is drawn. The completion tests also gate the four generated shell scripts against the command model, and the doc tests gate the two generated markdown references against it.
 
 Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.go](../cmd/solmq-conn-util/commands_doc_test.go), [abbreviation_doc_test.go](../cmd/solmq-conn-util/abbreviation_doc_test.go), [completion_test.go](../cmd/solmq-conn-util/completion_test.go), [testcatalog_test.go](../cmd/solmq-conn-util/testcatalog_test.go)
 
@@ -1117,6 +1117,22 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestStatusTargetValidationRejectsBadPodAndNamespace | bad pod name / bad namespace | an unsafe `--pod` or `--namespace` value is rejected via validate.SafeToken before any exec |
 | TestStatusManagementPortBounds | -1 / 65536 | an out-of-range `--management-port` is rejected before any exec |
 | TestStatusNoPodsFoundNamesTheSelector | - | discovery with nothing matching names the selector, the namespace, and `--pod` -- the things an operator would fix |
+| TestNewProgressPicksOneRendering | watch beats verbose and a terminal | `--watch` owns the screen, so its redraw wins over both `--verbose` and a terminal, and the run reports no steps at all |
+| TestNewProgressPicksOneRendering | verbose prints without a terminal | `--verbose` is an explicit request, so the step lines are printed into a pipe too -- a `2>steps.log` capture is the point of the flag |
+| TestNewProgressPicksOneRendering | a terminal gets the spinner | the default rendering, chosen only from stderr being a character device, since an in-place rewrite means nothing in a file |
+| TestNewProgressPicksOneRendering | no terminal and no verbose: nothing | a redirected run with no flag writes no progress at all, so a captured stderr carries only diagnostics |
+| TestStderrIsTerminalReportsAPipe | - | the real probe body every other case injects around: the pipe captureStderr installs is not a character device, so the seam answers false rather than being assumed |
+| TestProgressOffAndNilWriteNothing | - | a nil receiver and progressOff are silent on both streams, which is what lets every call site be one unconditional line; `pause` still runs its fn in both, so suppressed progress cannot suppress the install confirmation |
+| TestProgressSpinnerRewritesOneLineAndErases | - | the exact bytes of the spinner: one carriage-return-prefixed line per step, the erase blanking the widest line written before the next label, nothing on stdout, `stop` idempotent, and the frame goroutine joined with its channels cleared |
+| TestProgressSpinnerGoroutineAdvancesAndCountsSeconds | - | the ticker advances the frame in place and appends the whole-second counter once a step passes 1s; after `stop` the next write starts on a blanked line, so the report cannot land on spinner residue |
+| TestProgressPauseHandsBackTheStream | - | the live line is erased before the install question is asked on the same stream, and the next step draws afterwards, so the prompt is never overwritten by a frame |
+| TestProgressStepsPauseFinishesTheStepFirst | - | under `--verbose` the step in flight is closed out before the question, so its elapsed time is the time the call took and not the time the operator took to answer |
+| TestProgressElapsedShapes | -1s / 0 / 300ms / 4.1s / 59.5s / 1m / 2m05s | tenths below a minute and `NmSSs` above it, with a negative clock reading clamped to 0.0s rather than printed |
+| TestProgressTrimElidesTheMiddle | shorter than the line / exactly the line / middle elided / odd remainder / a real label / no room for the elision / one column / no columns / negative | a label wider than the row is cut in the middle so the call at the front and the `i/N` at the end both survive, and the result never exceeds the columns asked for -- narrower than `...` the label is cut hard, and at zero or less nothing is drawn |
+| TestProgressSpinnerNeverExceedsOneRow | - | a 120-character label still leaves every `\r`-delimited segment -- the draws and the blanking alike -- inside the 79-column cap, with the elision and the `i/N` both still present, because a line that wrapped would leave a row the carriage return cannot reach |
+| TestStatusVerboseNamesEverySlowCall | - | `status application -v` over two instances prints exactly one `step:` line per slow call, in call order (preflight, list pods, then install probe and status script per instance with i/N), each carrying its elapsed time, and none of it on stdout -- and no `resolve instance names` line, since both `--pod` values are names rather than indexes so no enumeration is made |
+| TestStatusVerboseUnderWatchSaysWhichWins | -v / --verbose | both spellings reach the field and print the precedence note on stderr rather than a usage error -- the flags do not conflict, one just wins; the note is the last thing the flag checks do, so what ends this run instead is a failing preflight (exit 1, that probe the only call made) |
+| TestStatusStdoutIsIdenticalWithAndWithoutTheSpinner | - | the stream contract the feature rests on: `status application --output json` yields byte-identical stdout with and without a terminal (and still parses), while only the terminal run writes a spinner to stderr |
 | TestVersionOutputShape | - | `version` prints `solmq-conn-util <version> <go version> <GOOS>/<GOARCH>`, exit 0; the package-level version var defaults to "dev" in an un-injected test build |
 | TestAbsPath | absolute input | absPath returns input unchanged when already absolute |
 | TestAbsPath | relative input | absPath joins relative path onto base dir |

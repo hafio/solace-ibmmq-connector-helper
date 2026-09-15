@@ -94,6 +94,8 @@ const (
 	detailsFlagName        = "--details"
 	watchFlagShort         = "-w"
 	watchFlagName          = "--watch"
+	verboseFlagShort       = "-v"
+	verboseFlagName        = "--verbose"
 	allFlagName            = "--all"
 	outputFlagName         = "--output"
 	podFlagName            = "--pod"
@@ -138,13 +140,14 @@ const statusTargetArgBracket = "<" + statusTargetContainer + "|" + statusTargetA
 // usage line) prepends statusTargetArgBracket to this; TargetArgs (a resolved
 // target's own invocation line) is just this, so the target word is not
 // followed by the placeholder it already answered.
-const statusFlagArgs = "[" + detailsFlagName + "] [" + watchFlagName + "] [" + allFlagName + "] [" + outputFlagName + " table|json] [" + installFlagName + "] " + platformArgBracket + " [-e env.yaml] [" + podFlagName + " name] [" + containerFlagName + " name] [" + namespaceFlagName + " ns] [" + managementPortFlagName + " port] [" + userFlagName + " name] [" + commandFlagName + " name] [" + allowCommandFlagName + " name]"
+const statusFlagArgs = "[" + detailsFlagName + "] [" + watchFlagName + "] [" + verboseFlagName + "] [" + allFlagName + "] [" + outputFlagName + " table|json] [" + installFlagName + "] " + platformArgBracket + " [-e env.yaml] [" + podFlagName + " name] [" + containerFlagName + " name] [" + namespaceFlagName + " ns] [" + managementPortFlagName + " port] [" + userFlagName + " name] [" + commandFlagName + " name] [" + allowCommandFlagName + " name]"
 
 // Flag spans for the status Detail text, mirroring allowCommandSpan's shape so
 // each flag is spelled once in code.
 var (
 	detailsSpan = bt + detailsFlagShort + bt + "/" + bt + detailsFlagName + bt
 	watchSpan   = bt + watchFlagShort + bt + "/" + bt + watchFlagName + bt
+	verboseSpan = bt + verboseFlagShort + bt + "/" + bt + verboseFlagName + bt
 	allSpan     = bt + allFlagName + bt
 	outputSpan  = bt + outputFlagName + bt
 )
@@ -273,6 +276,7 @@ var cliFlags = []cliFlag{
 	{Short: noPromptFlagName, Long: noPromptFlagName, AppliesTo: bt + "remove" + bt, Meaning: "tear down without asking anything -- what a script or CI job passes, since the prompts refuse to read a non-TTY rather than hang. It covers both questions: the teardown confirmation, and whether to remove a namespace that turned out to be empty. It cannot authorise more than that: a namespace holding anything this release does not own is never removed, with or without it", Arg: argNone, Usage: "tear down without asking for confirmation"},
 	{Short: detailsFlagShort, Long: detailsFlagName, AppliesTo: bt + "status" + bt, Meaning: "add the enrichment lines each view can report: worker node, CPU/memory use against allocation, image digest and referenced components; app version, java version, config path and heap", Arg: argNone, Usage: "add node, cpu/memory, digest, components; application version, java, config, heap"},
 	{Short: watchFlagShort, Long: watchFlagName, AppliesTo: bt + "status" + bt, Meaning: "re-render the report every 5s until interrupted (Ctrl-C)", Arg: argNone, Usage: "re-render the report every 5s until interrupted"},
+	{Short: verboseFlagShort, Long: verboseFlagName, AppliesTo: bt + "status" + bt, Meaning: "print one line per collection step, naming the call and how long it took, instead of the spinner a terminal gets by default. Both go to stderr, never to stdout, so the report stays byte-identical either way; the step lines are printed whether or not stderr is a terminal, which is what makes " + bt + "2>steps.log" + bt + " useful for finding which call is slow. Nothing is printed under " + bt + watchFlagName + bt, Arg: argNone, Usage: "print one line per collection step with its elapsed time, instead of the spinner"},
 	{Short: allFlagName, Long: allFlagName, AppliesTo: bt + "status" + bt, Meaning: "reach every connector instance found by image name (" + bt + statusreport.ImageMatch + bt + ") instead of the ones " + bt + "env.yaml" + bt + " describes -- every namespace on kubernetes, every container on docker/podman; cannot be combined with " + bt + podFlagName + bt + "/" + bt + containerFlagName + bt, Arg: argNone, Usage: "reach every instance found by image name instead of the ones env.yaml describes"},
 	{Short: outputFlagName, Long: outputFlagName, AppliesTo: bt + "status" + bt, Meaning: "output format: " + bt + "table" + bt + " (default) or " + bt + "json" + bt + ", one machine-readable document per run; " + bt + "json" + bt + " cannot be combined with " + bt + watchFlagName + bt, Arg: argName, Usage: "table (default) or json"},
 	{Short: podFlagName, Long: podFlagName, AppliesTo: bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "the kubernetes pod to reach, by name or by index into the listed order (alphabetical, the order " + bt + "status" + bt + " prints); a name always wins over the index reading. Repeatable on " + bt + "status" + bt + "; on " + bt + "logs" + bt + " and " + bt + "cli" + bt + ", which reach one instance, it may be given once. Default: every running pod on " + bt + "status" + bt + ", and on " + bt + "logs" + bt + "/" + bt + "cli" + bt + " the matching instances are listed instead. No effect on docker/podman", Arg: argName, Usage: "the kubernetes pod, by name or index (repeatable on status, once on logs)"},
@@ -330,7 +334,7 @@ var cliVerbs = []cliVerb{
 	},
 	{
 		Name: "status", Args: statusTargetArgBracket + " " + statusFlagArgs, TargetArgs: statusFlagArgs,
-		Flags:  []string{detailsFlagShort, watchFlagShort, allFlagName, outputFlagName, installFlagName, platformFlagName, "-e", podFlagName, containerFlagName, namespaceFlagName, managementPortFlagName, userFlagName, commandFlagName, allowCommandFlagName},
+		Flags:  []string{detailsFlagShort, watchFlagShort, verboseFlagShort, allFlagName, outputFlagName, installFlagName, platformFlagName, "-e", podFlagName, containerFlagName, namespaceFlagName, managementPortFlagName, userFlagName, commandFlagName, allowCommandFlagName},
 		PosArg: posNone, Aliases: []string{"sts"},
 		Synopsis:   "status <container|application|all> [flags]",
 		Blurb:      "Report each instance: container (engine), application (connector), or all",
@@ -342,6 +346,7 @@ var cliVerbs = []cliVerb{
 			"Each word has a short spelling (" + bt + "cnt" + bt + ", " + bt + "app" + bt + "); the word itself is required, and " + bt + "status" + bt + " on its own prints this list.\n\n" +
 			detailsSpan + " adds the enrichment lines to whichever view is being printed: worker node, CPU and memory use against allocation, the image digest, and the objects the workload references (secrets, config maps, volume claims, mounts) on the container side; app version, java version, the configuration file the report was read from, and JVM heap use on the application side. The one sampling query it needs (" + bt + "kubectl top" + bt + ", " + bt + "docker stats" + bt + ") is why those lines are opt-in: on kubernetes it also needs a metrics API in the cluster, and reports a note instead of the lines when there is none.\n\n" +
 			watchSpan + " re-renders the report every 5s until interrupted. " + outputSpan + " " + bt + "json" + bt + " emits one machine-readable document per run instead of the tables, carrying every fact either view collected. " +
+			"Collection can take a while -- the application views make two container calls per instance, and the script inside each one makes seven -- so a spinner on stderr names the step being waited on whenever stderr is a terminal, and " + verboseSpan + " replaces it with one durable line per step carrying how long that step took, which is how a slow environment is diagnosed. Neither ever reaches stdout, and neither appears under " + watchSpan + ". " +
 			allSpan + " ignores the instance names in " + bt + "env.yaml" + bt + " and reports every connector instance it can find by image name (" + bt + statusreport.ImageMatch + bt + ") -- across every namespace on kubernetes, and every container, running or not, on docker/podman.\n\n" +
 			"For the application views, " + bt + installFlagName + bt + " installs the status script without asking where it is missing; without it, a declined install prompt just skips the instances that lack it. " +
 			bt + podFlagName + bt + " and " + bt + containerFlagName + bt + " (both repeatable) narrow which instances are reported; " + bt + namespaceFlagName + bt + " overrides the kubernetes namespace and " + bt + managementPortFlagName + bt + " the actuator port; " + bt + userFlagName + bt + " names the read-only actuator account the script authenticates as, for an instance whose config does not carry the reserved " + bt + spec.StatusUserName + bt + " account. " + bt + commandFlagName + bt + " overrides the platform CLI binary used to reach each instance, and " + allowCommandSpan + " approves an extra one, the same as deploy/remove. " + platformResolutionPointer,

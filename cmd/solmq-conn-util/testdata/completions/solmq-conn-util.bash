@@ -70,7 +70,7 @@ _solmq_conn_util_flags() {
     generate) printf '--platform -e --env -o --out' ;;
     deploy) printf '--platform -e --env --allow-command' ;;
     remove) printf '--no-prompt --platform -e --env --allow-command' ;;
-    status) printf '-d --details -w --watch --all --output --install --platform -e --env --pod --container --namespace --management-port --user --command --allow-command' ;;
+    status) printf '-d --details -w --watch -v --verbose --all --output --install --platform -e --env --pod --container --namespace --management-port --user --command --allow-command' ;;
     logs) printf '--follow --previous --tail --since --timestamps --platform -e --env --pod --container --namespace --command --allow-command' ;;
     cli) printf '--platform -e --env --pod --container --namespace --command --allow-command' ;;
     validate) printf '-e --env' ;;

@@ -790,6 +790,19 @@ var stdinIsTerminal = func() bool {
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
+// stderrIsTerminal is the same probe for the other end: whether there is a
+// screen to draw a progress line on. Deliberately separate from
+// stdinIsTerminal, because the two answers differ in exactly the cases that
+// matter -- `status app > report.txt` still has a terminal to spin on, and
+// `status app 2>steps.log` still has an operator to prompt.
+//
+// A var for stdinIsTerminal's reason: go test's own stderr is a pipe, so a
+// hard-coded probe would make the spinner unreachable from a test.
+var stderrIsTerminal = func() bool {
+	fi, err := os.Stderr.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
 // readStdinLine refuses to read when stdin is not a character device (a
 // script, a CI job, or anything else that is not an interactive terminal) so
 // a non-interactive invocation fails fast with actionable guidance instead of

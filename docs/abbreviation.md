@@ -62,6 +62,7 @@ example `--platform`) is in the [commands.md flag table](commands.md#flags).
 | `-e` | `--env` | all except `examples`/`version`/`auto-complete`/`help` | config file, relative or absolute path (default: `env.yaml`) |
 | `-f` | `--force` | `examples`/`download` | overwrite existing files |
 | `-o` | `--out` | `generate` | write output to a file (default: stdout) |
+| `-v` | `--verbose` | `status` | print one line per collection step, naming the call and how long it took, instead of the spinner a terminal gets by default. Both go to stderr, never to stdout, so the report stays byte-identical either way; the step lines are printed whether or not stderr is a terminal, which is what makes `2>steps.log` useful for finding which call is slow. Nothing is printed under `--watch` |
 | `-w` | `--watch` | `status` | re-render the report every 5s until interrupted (Ctrl-C) |
 
 ## Notes

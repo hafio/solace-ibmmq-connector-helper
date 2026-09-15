@@ -66,9 +66,10 @@ documentation index; this guide is the complete reference.
     5. [`--all`: find every instance by image](#125---all-find-every-instance-by-image)
     6. [`-w` / `--watch`](#126--w----watch)
     7. [`--output json`](#127---output-json)
-    8. [What the exit code means, and what each view costs](#128-what-the-exit-code-means-and-what-each-view-costs)
-    9. [The manual alternative](#129-the-manual-alternative)
-    10. [Instances this tool did not deploy](#1210-instances-this-tool-did-not-deploy)
+    8. [The spinner, and `-v` / `--verbose`](#128-the-spinner-and--v----verbose)
+    9. [What the exit code means, and what each view costs](#129-what-the-exit-code-means-and-what-each-view-costs)
+    10. [The manual alternative](#1210-the-manual-alternative)
+    11. [Instances this tool did not deploy](#1211-instances-this-tool-did-not-deploy)
 13. [Logs: the lines behind the state](#13-logs-the-lines-behind-the-state)
     1. [`--previous` -- why a restarting instance died](#131---previous----why-a-restarting-instance-died)
     2. [`--follow` -- keeping one open](#132---follow----keeping-one-open)
@@ -326,6 +327,7 @@ reference at [commands.md](commands.md).
 | `--allow-command` | `deploy`/`remove`/`status`/`logs`/`cli` | approve an extra command binary beyond the `command:` allowlist; repeatable |
 | `-d`, `--details` | `status` | add the enrichment lines to whichever view is printed: worker node, CPU/memory use against allocation, image digest and referenced components; app version, java version, config path and heap ([section 12.4](#124--d----details)) |
 | `-w`, `--watch` | `status` | re-render the report every 5s until interrupted ([section 12.6](#126--w----watch)) |
+| `-v`, `--verbose` | `status` | print one line per collection step on stderr, naming the call and how long it took, instead of the spinner a terminal gets by default; printed with or without a terminal, and nothing is printed under `--watch` ([section 12.8](#128-the-spinner-and--v----verbose)) |
 | `--all` | `status` | report every connector instance found by image name instead of the ones `env.yaml` describes -- every namespace on kubernetes, every container on docker/podman; cannot be combined with `--pod`/`--container` ([section 12.5](#125---all-find-every-instance-by-image)) |
 | `--output` | `status` | `table` (default) or `json`, one machine-readable document per run; cannot be combined with `--watch` ([section 12.7](#127---output-json)) |
 | `--install` | `status` | install the status script on every instance without prompting; applies to the `application`/`all` views |
@@ -348,7 +350,7 @@ var, a deploy command that failed), **2** a usage error (missing/unknown verb or
 target, unknown flag, or a flag combination that cannot mean anything).
 `status`'s own exit code is about whether every instance could be reached and
 run, not whether each is active, and an engine query that degrades never changes
-it -- see [section 12.8](#128-what-the-exit-code-means-and-what-each-view-costs).
+it -- see [section 12.9](#129-what-the-exit-code-means-and-what-each-view-costs).
 
 - **`generate config`** reads the workflow files + the connector defaults from
   `env.yaml` and prints `application.yml`. It **fails fast**: it stops at the first
@@ -2198,7 +2200,87 @@ disagree:
   stdout stays parseable. Exit codes are unchanged.
 - `--output json` cannot be combined with `--watch` (exit 2).
 
-### 12.8 What the exit code means, and what each view costs
+### 12.8 The spinner, and `-v` / `--verbose`
+
+A `status` run does not print anything until it has collected everything, and on
+a real environment that collection is not fast: the preflight probe, one list
+call, then -- for the `application` and `all` views -- a probe and a script run
+inside every instance, with seven sequential actuator calls inside each script
+run ([section 12.9](#129-what-the-exit-code-means-and-what-each-view-costs) has
+the full cost). Tens of seconds of silence is a normal run, and silence is
+indistinguishable from a hang.
+
+So the run says what it is waiting on, in one of two ways:
+
+**By default, a spinner.** One line on stderr, rewritten in place, naming the
+step in flight and counting whole seconds once the step passes one:
+
+```text
+/ status script solmq-connector-7d9f8c6b5-x2n4q 1/2  4s
+```
+
+The `1/2` is what tells you the run is advancing rather than stuck on the same
+instance. The line is erased before the report is written, so nothing of it
+survives in the terminal or in a captured stream. It appears only when stderr is
+a terminal -- a rewritten line is meaningless in a file -- and it is drawn with a
+carriage return and spaces, no ANSI at all, so it works in a plain `conhost`
+window as well as in Windows Terminal.
+
+The line is capped at 79 columns and a longer label is trimmed in the middle with
+`...`, keeping the call at the front and the `i/N` at the end and dropping the
+middle of the instance name. That is not cosmetic: a line that wrapped would
+leave a row above the cursor that a carriage return cannot reach, and the erase
+would leave residue for the report to land under. The `-v` lines below are
+ordinary lines, never trimmed -- they may wrap, and nothing has to erase them.
+
+**With `-v` / `--verbose`, one durable line per step**, printed when the step
+ends, each carrying how long it took:
+
+```text
+$ solmq-conn-util status application -v
+step: preflight 0.4s
+step: list pods 0.3s
+step: install probe solmq-connector-7d9f8c6b5-x2n4q 1/2 1.9s
+step: install probe solmq-connector-7d9f8c6b5-k9m2p 2/2 1.7s
+step: status script solmq-connector-7d9f8c6b5-x2n4q 1/2 4.1s
+step: status script solmq-connector-7d9f8c6b5-k9m2p 2/2 3.8s
+=== kubernetes  prod / solmq-connector-7d9f8c6b5-x2n4q ===
+...
+```
+
+Those elapsed times are the answer to "why is this environment slow": they name
+the call that is spending the time, which is usually one exec attach or the
+script's actuator round trips rather than the tool. Unlike the spinner, the step
+lines are printed whether or not stderr is a terminal, which is what makes
+
+```console
+solmq-conn-util status application -v 2>steps.log
+```
+
+useful -- the report on stdout, the timings in a file you can keep.
+
+Both renderings write to **stderr and only to stderr**. The report is the
+artifact and it owns stdout ([section 12.7](#127---output-json)), so
+`status --output json > report.json` produces the same bytes with a spinner, with
+`-v`, and with neither, and a `| jq .` still parses. Nothing about progress
+changes an exit code.
+
+`--watch` prints no progress at all, in either mode: the redraw already clears
+and rewrites the whole screen every tick, and step lines would scroll underneath
+it. `--verbose` together with `--watch` is not an error -- one simply wins -- so
+the run says so once and carries on:
+
+```text
+note: --verbose prints no steps under --watch -- the redraw owns the screen
+```
+
+| Run | stderr is a terminal | stderr is redirected |
+|-----|----------------------|----------------------|
+| default | spinner, erased before the report | nothing |
+| `-v` / `--verbose` | one `step:` line per call | one `step:` line per call |
+| `-w` / `--watch` | nothing | nothing |
+
+### 12.9 What the exit code means, and what each view costs
 
 `status`'s own exit code is about whether every instance could be **reached and
 run**, never about which instance is active or whether anything is healthy:
@@ -2221,7 +2303,10 @@ same way.
 Every engine query is read-only and goes out as a validated argv slice, never a
 shell string ([section 8](#8-platform-sections-kubernetes-docker-podman)'s rules
 apply here too). They are deliberately **one call for many instances**, so the
-cost barely grows with the replica count:
+cost barely grows with the replica count. `-v` prints one line per call in this
+table with its elapsed time ([section
+12.8](#128-the-spinner-and--v----verbose)), which is the quickest way to find
+which of them a slow environment is spending its time in:
 
 | View | kubernetes | docker | podman |
 |------|-----------|--------|--------|
@@ -2230,7 +2315,7 @@ cost barely grows with the replica count:
 | `-d` adds | 1 `top pod` for the run + 1 `get` per distinct referenced object | 1 `stats --no-stream` + 1 `image inspect` per distinct image | same as docker |
 | `--all` adds | nothing (the same list call, cluster-wide) | 1 `ps` before the inspect | 1 `ps` before the inspect |
 
-### 12.9 The manual alternative
+### 12.10 The manual alternative
 
 `status`'s application half is a thin wrapper around a script the connector
 container can run on its own. To check an instance yourself, without the CLI:
@@ -2267,7 +2352,7 @@ them a basic report shows and which need `--details`. Running it by hand shows
 all of them. `logs` has the same kind of manual alternative for the platform's
 own log commands ([section 13.6](#136-the-manual-alternative)).
 
-### 12.10 Instances this tool did not deploy
+### 12.11 Instances this tool did not deploy
 
 `status` also works against a **foreign** instance -- one this tool did not
 deploy. The container view needs nothing from it at all;
@@ -2445,7 +2530,7 @@ a usage error. The picker above is a success (0), not a failure.
 `logs` does nothing you could not do by hand; it just already knows the
 namespace, the pod names, and which container inside them is the connector.
 `status` has the same kind of manual alternative for its own report
-([section 12.9](#129-the-manual-alternative)):
+([section 12.10](#1210-the-manual-alternative)):
 
 ```sh
 kubectl logs <pod> -n <namespace> -c connector --tail 100

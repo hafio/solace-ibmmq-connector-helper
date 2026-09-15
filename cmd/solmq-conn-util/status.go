@@ -119,10 +119,11 @@ func (w *watchFlag) Set(s string) error {
 // separated from how it was spelled, so actStatus and the collectors take a
 // value rather than a dozen positional arguments.
 type statusOpts struct {
-	view  statusreport.View
-	level statusreport.Level
-	json  bool
-	watch watchFlag
+	view    statusreport.View
+	level   statusreport.Level
+	json    bool
+	watch   watchFlag
+	verbose bool
 
 	envPath  string
 	install  bool
@@ -166,6 +167,9 @@ func runStatus(args []string, r runner.Runner) int {
 	watchUsage := fmt.Sprintf("re-render the report every %ds until interrupted", watchDefaultSeconds)
 	fs.Var(&watch, "watch", watchUsage)
 	fs.Var(&watch, "w", watchUsage)
+	const verboseUsage = "print one line per collection step, with its elapsed time, instead of the spinner"
+	verbose := fs.Bool("verbose", false, verboseUsage)
+	fs.BoolVar(verbose, "v", false, verboseUsage)
 
 	pos, err := collectFlagsAndDirs(fs, args)
 	if err != nil {
@@ -178,7 +182,7 @@ func runStatus(args []string, r runner.Runner) int {
 	}
 
 	opts := statusOpts{
-		view: view, json: *output == outputJSON, watch: watch,
+		view: view, json: *output == outputJSON, watch: watch, verbose: *verbose,
 		envPath: *env, install: *install, platform: *platform,
 		pods: pods, conts: containers, ns: *namespace, port: *port,
 		user: *user, command: *command, allow: *allow, all: *all,
@@ -259,6 +263,17 @@ func checkStatusFlags(o statusOpts, output string) int {
 			}
 		}
 	}
+	if o.verbose && o.watch.on {
+		// Not refused, unlike the json pair above: these two do not contradict
+		// each other, one simply wins. The redraw owns the screen, so step lines
+		// would scroll under a report that is cleared and rewritten every tick.
+		// Said out loud so the flag is not silently ignored.
+		//
+		// Last in this function on purpose: every check above exits 2, and a note
+		// describing how a run will look reads as nonsense in front of an error
+		// saying that run is not happening.
+		fmt.Fprintf(os.Stderr, "note: %s prints no steps under %s -- the redraw owns the screen\n", verboseFlagName, watchFlagName)
+	}
 	return 0
 }
 
@@ -300,17 +315,31 @@ func actStatus(o statusOpts, r runner.Runner) int {
 		return errExit(fmt.Errorf("--management-port %d must be 1-65535", o.port))
 	}
 
+	// Progress starts here rather than in the collector, because the first thing
+	// an operator waits on is the preflight probe below -- up to a few seconds of
+	// dead air before anything else has run. Deferred stop, so no error return
+	// between here and the report can leave a spinner on screen.
+	prog := newProgress(o, os.Stderr)
+	defer prog.stop()
+
 	// Reuse the read-only preflight probe before touching anything, same as
 	// deploy/remove. The action argument only steers kubernetes' can-i verb
 	// (docker/podman ignore it); status never creates or deletes a deployment,
 	// so deploy's "create" is used as the closer of the two existing checks.
+	prog.step("preflight")
 	if code, ok := preflight(r, runner.ActionDeploy, sess.platform, sess.command, sess.ns, o.allow); !ok {
 		return code
 	}
 
 	// An index is resolved to a real name here, once, so every query below sees
 	// only names. It costs one extra enumeration and only when an index was
-	// actually typed -- resolveIndexes returns the names untouched otherwise.
+	// actually typed -- resolveIndexes returns the names untouched otherwise,
+	// which is why the step is announced on that same condition rather than on a
+	// name having been given: a step naming a call that is never made is worse
+	// than no step.
+	if anyIndex(o.pods) || anyIndex(o.conts) {
+		prog.step("resolve instance names")
+	}
 	pods, perr := resolveIndexes(r, sess, o.pods, o.all)
 	if perr != nil {
 		return errExit(perr)
@@ -321,7 +350,7 @@ func actStatus(o statusOpts, r runner.Runner) int {
 	}
 	o.pods, o.conts = pods, conts
 
-	c := &statusCollector{opts: o, platform: sess.platform, cmdArgv: sess.cmdArgv, env: sess.env, r: r}
+	c := &statusCollector{opts: o, platform: sess.platform, cmdArgv: sess.cmdArgv, env: sess.env, r: r, prog: prog}
 	if o.watch.on {
 		return watchStatus(o, c)
 	}
@@ -339,6 +368,11 @@ type statusCollector struct {
 	cmdArgv  []string
 	env      *spec.Env
 	r        runner.Runner
+
+	// prog names the step each slow call is on while the operator waits. Built
+	// once in actStatus, since the first step is the preflight probe that runs
+	// before this collector exists.
+	prog *progress
 
 	// promptedInstall records that the one install confirmation this run is
 	// allowed has already been asked. A watch loop must not re-prompt on every
@@ -366,6 +400,11 @@ func (c *statusCollector) session() instanceSession {
 // -- never which instance is active, and never whether an engine query
 // degraded (that is a note in the report).
 func (c *statusCollector) collect() (statusreport.Report, bool, error) {
+	// The last step ends here rather than in renderOnce, so the live line is
+	// erased before the report's first byte reaches the terminal -- on every path
+	// out, including a collection error.
+	defer c.prog.stop()
+
 	rep := statusreport.Report{Platform: c.platform, Namespace: c.opts.ns}
 	var err error
 	switch c.platform {
@@ -401,6 +440,7 @@ func (c *statusCollector) collectKubernetes(rep *statusreport.Report) error {
 	}
 	rep.Group = group
 
+	c.prog.step("list pods")
 	doc, err := runner.KubernetesPodsJSON(c.r, c.cmdArgv, o.ns, selector, o.pods, o.all)
 	if err != nil {
 		return err
@@ -424,12 +464,14 @@ func (c *statusCollector) collectKubernetes(rep *statusreport.Report) error {
 	// failure, since the per-pod facts above are the report.
 	if c.wantsContainerFacts() && !o.all && c.env != nil && c.env.Kubernetes != nil {
 		name := c.env.Kubernetes.Deployment.Name
+		c.prog.step("read deployment %s", name)
 		if doc, derr := runner.KubernetesGetJSON(c.r, c.cmdArgv, o.ns, "deployment", name); derr != nil {
 			rep.Notes = append(rep.Notes, fmt.Sprintf("could not read deployment %s: %v", name, derr))
 		} else if w, werr := statusreport.ParseDeployment(doc); werr == nil {
 			rep.Workload = w
 		}
 		if c.env.Kubernetes.Service.Enabled {
+			c.prog.step("read service %s", name)
 			if doc, serr := runner.KubernetesGetJSON(c.r, c.cmdArgv, o.ns, "service", name); serr == nil {
 				rep.Workload, _ = statusreport.MergeService(rep.Workload, doc)
 			}
@@ -439,6 +481,7 @@ func (c *statusCollector) collectKubernetes(rep *statusreport.Report) error {
 	if o.level != statusreport.LevelDetails || !c.wantsContainerFacts() {
 		return nil
 	}
+	c.prog.step("sample resource use")
 	if out, terr := runner.KubernetesTop(c.r, c.cmdArgv, o.ns, selector, o.pods, o.all); terr != nil {
 		// The metrics API is an optional cluster add-on, so its absence is a
 		// note against the resource lines rather than a failed run.
@@ -477,6 +520,7 @@ func (c *statusCollector) checkComponents(rep *statusreport.Report) {
 				seen[k] = *comp
 				continue
 			}
+			c.prog.step("check %s %s", comp.Kind, comp.Name)
 			doc, err := runner.KubernetesGetJSON(c.r, c.cmdArgv, inst.Namespace, comp.Kind, comp.Name)
 			if err != nil {
 				comp.Status = "MISSING"
@@ -499,12 +543,18 @@ func (c *statusCollector) collectEngine(rep *statusreport.Report) error {
 	if o.all {
 		match = statusreport.ImageMatch
 	}
+	if o.all {
+		// Only --all enumerates: without it the names come from env.yaml and no
+		// call is made, so announcing a step would name a wait that never happens.
+		c.prog.step("list containers")
+	}
 	names, notes, nerr := engineNames(c.r, c.session(), o.conts, o.all)
 	rep.Notes = append(rep.Notes, notes...)
 	if nerr != nil {
 		return nerr
 	}
 
+	c.prog.step("inspect containers")
 	doc, err := runner.EngineInspectJSON(c.r, c.cmdArgv, names)
 	if err != nil {
 		return err
@@ -534,6 +584,7 @@ func (c *statusCollector) collectEngine(rep *statusreport.Report) error {
 	// image, not the container), so it belongs to the level that pays for
 	// enrichment. On kubernetes it arrives free in the pod document either way.
 	c.applyDigests(rep)
+	c.prog.step("sample resource use")
 	if out, serr := runner.EngineStats(c.r, c.cmdArgv, names); serr != nil {
 		rep.Notes = append(rep.Notes, fmt.Sprintf("no resource usage: %v", serr))
 	} else {
@@ -566,6 +617,7 @@ func (c *statusCollector) applyPodmanRestarts(rep *statusreport.Report) {
 		if inst.Container == nil {
 			continue
 		}
+		c.prog.step("read restart count %s %d/%d", inst.Name, i+1, len(rep.Instances))
 		n, nerr := runner.SystemctlNRestarts(c.r, sc, gen.PodmanServiceName(inst.Name))
 		if nerr != nil {
 			continue
@@ -594,6 +646,7 @@ func (c *statusCollector) applyDigests(rep *statusreport.Report) {
 				digests[ref] = ""
 				continue
 			}
+			c.prog.step("read image digest %s", ref)
 			if doc, err := runner.EngineImageInspectJSON(c.r, c.cmdArgv, ref); err == nil {
 				d = statusreport.ParseImageDigest(doc)
 			}
@@ -708,6 +761,7 @@ func (c *statusCollector) collectApplication(rep *statusreport.Report) bool {
 	present := map[int]bool{}
 	for i := range rep.Instances {
 		inst := &rep.Instances[i]
+		c.prog.step("install probe %s %d/%d", inst.Name, i+1, len(rep.Instances))
 		ok, err := runner.ScriptInstalled(c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerPath)
 		if err != nil {
 			inst.Error = fmt.Sprintf("could not check for the status script: %v", err)
@@ -725,7 +779,13 @@ func (c *statusCollector) collectApplication(rep *statusreport.Report) bool {
 		doInstall := c.opts.install
 		if !doInstall && !c.promptedInstall {
 			c.promptedInstall = true
-			answer, cerr := confirmInstall(instanceNames(rep, missing))
+			// Paused around the prompt: the question goes to stderr too (see
+			// readStdinLine), so a spinner frame drawn under it would overwrite it.
+			var answer bool
+			var cerr error
+			c.prog.pause(func() {
+				answer, cerr = confirmInstall(instanceNames(rep, missing))
+			})
 			if cerr != nil {
 				// The prompt could not be asked at all (stdin is not a TTY). That
 				// cannot be resolved for these instances, but the ones that already
@@ -739,13 +799,14 @@ func (c *statusCollector) collectApplication(rep *statusreport.Report) bool {
 				doInstall = answer
 			}
 		}
-		for _, i := range missing {
+		for n, i := range missing {
 			inst := &rep.Instances[i]
 			if !doInstall {
 				inst.Error = "the status script is not installed, and the install prompt was declined"
 				failed = true
 				continue
 			}
+			c.prog.step("install script %s %d/%d", inst.Name, n+1, len(missing))
 			if _, err := runner.InstallScript(c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerDir, statusscript.ContainerPath, script); err != nil {
 				inst.Error = fmt.Sprintf("could not install the status script: %v", err)
 				failed = true
@@ -755,15 +816,25 @@ func (c *statusCollector) collectApplication(rep *statusreport.Report) bool {
 		}
 	}
 
+	// i/N counts the instances the script is actually run on, not every instance
+	// in the report: one whose probe failed, or whose install was declined, never
+	// gets a call, and counting it would leave a gap in the sequence the operator
+	// is watching for movement.
+	ran, total := 0, len(present)
 	for i := range rep.Instances {
 		inst := &rep.Instances[i]
 		if !present[i] {
 			continue
 		}
+		ran++
 		// The script always exits 0 and puts its findings in the output, so an
 		// error here is the exec failing rather than a standby instance -- report
 		// it against this instance and keep going, so one unreachable instance
 		// does not hide the rest.
+		//
+		// This is the run's dominant cost: one exec per instance, and seven
+		// sequential actuator calls inside each one.
+		c.prog.step("status script %s %d/%d", inst.Name, ran, total)
 		out, err := runner.RunStatusScript(c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerPath)
 		if err != nil {
 			inst.Error = fmt.Sprintf("could not run the status script: %v", err)
