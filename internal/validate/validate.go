@@ -239,8 +239,8 @@ func checkTargets(add, warn func(string, string, ...any), ctx Context, resolved 
 }
 
 // checkSide validates one workflow side. A conn-ref side is strict (only the
-// destination); an inline side is checked as a full connection tuple. Both emit
-// the EDA advisories for Solace topic-source / queue-destination.
+// destination); an inline side is checked as a full connection tuple. Both reject a
+// Solace topic source and emit the EDA advisory for a Solace queue destination.
 func checkSide(add, warn func(string, string, ...any), env func(string) (string, bool), file, which string, s spec.Side, isSource, haveKeystore bool, conns map[string]spec.Side) {
 	if !s.HasSystem() {
 		add(file, "%s must specify exactly one of 'solace:' or 'mq:'", which)
@@ -250,6 +250,15 @@ func checkSide(add, warn func(string, string, ...any), env func(string) (string,
 	if s.DestKind == "" {
 		add(file, "%s (%s) must specify exactly one of 'queue:' or 'topic:'", which, s.System)
 		return
+	}
+	// A Solace topic cannot be a source: the connector's Solace consumer binds to an
+	// endpoint, and neither a bare topic nor a topic endpoint is one. This is an error
+	// rather than an advisory because the config generates, deploys and starts cleanly
+	// and then simply never consumes -- nothing downstream says so. Checked before the
+	// conn-ref branch below so it covers referenced and inline sides alike, and without
+	// returning so the remaining side checks still report in the same pass.
+	if isSource && s.System == spec.SystemSolace && s.DestKind == spec.DestTopic {
+		add(file, "%s solace: topic %q cannot be consumed from -- a Solace source must be a queue; create a queue subscribed to %q on the broker and name that queue in 'queue:' instead", which, s.Dest, s.Dest)
 	}
 	if s.ConnRef != "" {
 		if s.SetsConnFields() {
@@ -389,15 +398,12 @@ func checkTuple(add func(string, string, ...any), file, label string, s spec.Sid
 	}
 }
 
-// edaAdvisory emits the event-driven-architecture warnings (allowed, not errors):
-// a Solace topic source is a non-durable subscription; a Solace queue destination
-// is point-to-point.
+// edaAdvisory emits the event-driven-architecture warning (allowed, not an error):
+// a Solace queue destination is point-to-point. The Solace topic source it used to
+// warn about is now rejected outright in checkSide, so nothing is advisory there.
 func edaAdvisory(warn func(string, string, ...any), file string, s spec.Side, isSource bool) {
 	if s.System != spec.SystemSolace {
 		return
-	}
-	if isSource && s.DestKind == spec.DestTopic {
-		warn(file, "source solace: topic %q as a source is a direct, non-durable subscription (at-most-once) — events published while this connector is down are lost. EDA guaranteed-delivery favors consuming from a queue subscribed to the topic, decoupling producer and consumer availability", s.Dest)
 	}
 	if !isSource && s.DestKind == spec.DestQueue {
 		warn(file, "target solace: producing to queue %q is point-to-point and couples this flow to one endpoint. EDA favors publishing to a topic and letting the broker fan out to subscribed queues, so producers stay unaware of consumers (loose coupling)", s.Dest)

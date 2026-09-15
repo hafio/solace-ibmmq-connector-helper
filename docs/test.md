@@ -48,7 +48,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 749 test functions, 1023 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 751 test functions, 1025 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -212,7 +212,7 @@ Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [cons
 | TestBuildMQmTLSBundle | mq TLS side with cipher and keyAlias plus solace target | MQTLS true, 1 bundle, HasKeystore true, KeyAlias mc, KeystoreTyp PKCS12, TruststoreTyp JKS |
 | TestBuildCipherConflictWarning | two mq sources with different ciphers C1/C2 | warnings contain conflicting cipher |
 | TestBuildMessageLoopWarning | same side used as source and target dest `SAME` | warnings contain message loop |
-| TestBuildSolaceTopicSourceEmitsConsumerTopic | solace topic source -> mq queue target | input-0 solace binding is consumer with DestType topic |
+| TestBuildSolaceTopicSourceEmitsConsumerTopic | solace topic source -> mq queue target | input-0 solace binding is consumer with DestType topic; consolidate renders whatever it is given, so this stays covered even though validate now rejects the combination |
 | TestBuildStorePathsRawVsMount | mount=false (config) | TruststoreLoc reflects env.yaml path verbatim ./certs/t.jks |
 | TestBuildStorePathsRawVsMount | mount=true (deploy) | TruststoreLoc rewritten to /app/external/classpath/truststores/t.jks |
 | TestBuildLeaderElection | dangling conn-ref missing | le non-nil with Mode/Queue set but Session nil, no guard warning |
@@ -576,7 +576,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestMissingSourceTarget | - | workflow with neither side set errors missing 'source' and missing 'target' |
 | TestExactlyOneSystem | - | side with empty system errors exactly one of 'solace:' or 'mq:' |
 | TestExactlyOneDestination | - | side with empty dest-kind errors exactly one of 'queue:' or 'topic:' |
-| TestSolaceTopicSourceWarnsNotErrors | - | solace topic source allowed with no errors, warns non-durable subscription |
+| TestSolaceTopicSourceIsError | - | solace topic source errors cannot be consumed from, and no longer emits the retired non-durable-subscription advisory |
 | TestConnNameFormat | - | bad mq conn-name errors host(port) format message |
 | TestKeyAliasNeedsKeystore | - | solace key-alias without keystore errors no keystore defined |
 | TestKeyAliasConflict | - | same solace tuple with different key-alias errors conflicting key-alias |
@@ -616,7 +616,8 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckCredRejectsReservedPrefix | MY_GEN_PASSWORD / _MY_PASSWORD / SOL_PASSWORD | accepted -- only a name *starting* with the prefix is reserved |
 | TestCheckCredLiteralLooksLikeEnvRefWarns | - | a literal credential containing ${ warns naming the -env key to use instead; the value is still used as a literal |
 | TestSolaceQueueDestinationWarnsNotErrors | - | mq source to solace queue target allowed, warns point-to-point |
-| TestIdiomaticSolaceCombosNoEDAWarn | - | idiomatic solace topic-target/queue-source combos emit no EDA warnings |
+| TestIdiomaticSolaceCombosNoEDAWarn | - | idiomatic solace topic-target/queue-source combos emit no errors and no EDA warnings |
+| TestConnRefSolaceTopicSourceIsError | - | conn-ref solace source with a topic errors cannot be consumed from, so the rejection is not inline-only |
 | TestConnRefStrictOnlyDestination | - | conn-ref side also setting host errors may set only queue/topic |
 | TestConnRefUnknownAndSystemMismatch | unknown-ref | conn-ref to undefined connection errors is not defined under connections |
 | TestConnRefUnknownAndSystemMismatch | system-mismatch | mq side referencing solace connection errors is a solace connection but referenced under mq |
@@ -764,7 +765,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 
 ## internal/examples
 
-Write the shipped starter files (create/skip/force) and prove they generate config.
+Write the shipped starter files (create/skip/force), prove they generate config, and pin the workflow copies shared with the golden fixtures.
 
 Tests: [examples_test.go](../internal/examples/examples_test.go)
 
@@ -775,6 +776,7 @@ Tests: [examples_test.go](../internal/examples/examples_test.go)
 | TestWriteCreatesSkipsForces | force-rewrite | force write rewrites all files, restoring workflow-0.yaml to embedded original content over junk |
 | TestWriteMkdirError | - | Write returns error when target dir path is under a regular file |
 | TestShippedExamplesGenerateConfig | - | embedded example set written to disk generates config via gen.Config with no errors and at least one non-empty rendered application.yml |
+| TestWorkflowExamplesMatchGoldenSpecs | workflow-0..3 | the four workflow files are byte-identical to testdata/golden/specs (go:embed cannot share one copy); env.yaml is excluded, it diverges on purpose |
 
 ## internal/gen
 

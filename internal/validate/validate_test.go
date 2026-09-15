@@ -78,14 +78,15 @@ func TestExactlyOneDestination(t *testing.T) {
 	}
 }
 
-func TestSolaceTopicSourceWarnsNotErrors(t *testing.T) {
-	// A Solace topic source is now allowed, but flagged with an EDA advisory.
+func TestSolaceTopicSourceIsError(t *testing.T) {
+	// The connector's Solace consumer binds to an endpoint, so a topic source is
+	// rejected outright -- not merely flagged with the EDA advisory it used to carry.
 	errs, warns := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("t", spec.DestTopic, ""), vMQ("MQ", spec.DestQueue, false))}, Defaults: &spec.Defaults{}})
-	if len(errs) != 0 {
-		t.Fatalf("Solace topic source should be allowed now, got errors %v", errs)
+	if !hasErr(errs, "cannot be consumed from") {
+		t.Fatalf("want an error for a Solace topic source, got %v", errs)
 	}
-	if !hasErr(warns, "non-durable subscription") {
-		t.Fatalf("want EDA warning for a Solace topic source, got %v", warns)
+	if hasErr(warns, "non-durable subscription") {
+		t.Fatalf("the topic-source advisory should be gone, not emitted alongside the error: %v", warns)
 	}
 }
 

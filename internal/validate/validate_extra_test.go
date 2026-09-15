@@ -179,7 +179,9 @@ func TestSolaceQueueDestinationWarnsNotErrors(t *testing.T) {
 }
 
 func TestIdiomaticSolaceCombosNoEDAWarn(t *testing.T) {
-	// Idiomatic pair: publish to a Solace topic (target), consume from a Solace queue (source).
+	// Idiomatic pair: publish to a Solace topic (target), consume from a Solace queue
+	// (source). The queue source is also the supported counterpart to
+	// TestSolaceTopicSourceIsError, so this doubles as its clean case.
 	errs, warns := Run(Context{Workflows: []spec.Workflow{
 		wf("0.yaml", vMQ("MQ", spec.DestQueue, false), vSolace("evt/out", spec.DestTopic, "")),
 		wf("1.yaml", vSolace("Q.IN", spec.DestQueue, ""), vMQ("MQ2", spec.DestQueue, false)),
@@ -187,8 +189,19 @@ func TestIdiomaticSolaceCombosNoEDAWarn(t *testing.T) {
 	if len(errs) != 0 {
 		t.Fatalf("idiomatic combos should have no errors, got %v", errs)
 	}
-	if hasErr(warns, "non-durable subscription") || hasErr(warns, "point-to-point") {
+	if hasErr(warns, "point-to-point") {
 		t.Errorf("idiomatic combos should emit no EDA warnings, got %v", warns)
+	}
+}
+
+func TestConnRefSolaceTopicSourceIsError(t *testing.T) {
+	// The topic-source rejection sits before checkSide's conn-ref branch returns, so
+	// a referenced side is caught too -- not just an inline one.
+	d := connDefaults()
+	src := spec.Side{System: spec.SystemSolace, ConnRef: "edge", DestKind: spec.DestTopic, Dest: "evt/in"}
+	errs, _ := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", src, vMQ("M", spec.DestQueue, false))}, Defaults: d})
+	if !hasErr(errs, "cannot be consumed from") {
+		t.Fatalf("want a topic-source error on a conn-ref side, got %v", errs)
 	}
 }
 

@@ -1,6 +1,7 @@
 package examples
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,37 @@ func TestShippedExamplesGenerateConfig(t *testing.T) {
 	}
 	if strings.TrimSpace(out) == "" {
 		t.Fatal("rendered application.yml is empty")
+	}
+}
+
+// goldenSpecsDir is internal/gen's golden fixture set, relative to this package.
+const goldenSpecsDir = "../../testdata/golden/specs"
+
+// TestWorkflowExamplesMatchGoldenSpecs pins the one piece of duplication between
+// the embedded example set and internal/gen's golden fixtures: the four
+// workflow-*.yaml files are byte-identical copies. They cannot be a single file
+// because //go:embed (examples.go) cannot reach outside this package directory,
+// so the copies are deliberate -- but nothing else stops them drifting apart,
+// which would leave `examples` shipping workflows the golden suite never renders.
+//
+// env.yaml is deliberately NOT compared: the two diverge on purpose (the example
+// teaches and carries docker:/podman:, the golden exercises syslog + libs PVC for
+// branch coverage). TestShippedExamplesGenerateConfig above is what guards the
+// example env.yaml instead.
+func TestWorkflowExamplesMatchGoldenSpecs(t *testing.T) {
+	for _, name := range []string{"workflow-0.yaml", "workflow-1.yaml", "workflow-2.yaml", "workflow-3.yaml"} {
+		embedded, err := files.ReadFile("files/" + name) // embed.FS always uses '/'
+		if err != nil {
+			t.Fatalf("reading embedded files/%s: %v", name, err)
+		}
+		golden, err := os.ReadFile(filepath.Join(goldenSpecsDir, name))
+		if err != nil {
+			t.Fatalf("reading golden %s: %v", name, err)
+		}
+		if !bytes.Equal(embedded, golden) {
+			t.Errorf("internal/examples/files/%s and %s/%s have drifted apart; copy the intended version over the other, "+
+				"or if the divergence is deliberate, drop %s from this test and say why", name, goldenSpecsDir, name, name)
+		}
 	}
 }
 

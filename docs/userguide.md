@@ -34,7 +34,7 @@ documentation index; this guide is the complete reference.
    2. [`solace:` options](#62-solace-options)
    3. [`mq:` options](#63-mq-options)
    4. [Destinations, durable names, passthrough](#64-destinations-durable-names-passthrough)
-   5. [Event-driven guidance (warnings)](#65-event-driven-guidance-warnings)
+   5. [Event-driven guidance (errors and warnings)](#65-event-driven-guidance-errors-and-warnings)
    6. [Reusable connections (`conn-ref`)](#66-reusable-connections-conn-ref)
 7. [Connector defaults (`env.yaml` top level)](#7-connector-defaults-envyaml-top-level)
    1. [The reserved status account (`solmq-status`)](#71-the-reserved-status-account-solmq-status)
@@ -555,8 +555,9 @@ target:
 Rules per side: **exactly one system** (`solace:` or `mq:`) and **exactly one
 destination** (`queue:` or `topic:`). Any direction is allowed -- `mq->solace`,
 `solace->mq`, `mq->mq`, `solace->solace` -- and every queue/topic combination is
-permitted (two Solace patterns emit an advisory **warning**, see
-[section 6.5](#65-event-driven-guidance-warnings)). You never write
+permitted **except a Solace `topic:` as a `source`**, which is rejected; one further
+Solace pattern is allowed but emits an advisory **warning** (see
+[section 6.5](#65-event-driven-guidance-errors-and-warnings)). You never write
 `destination-type` or a durable name -- both are derived.
 
 ### 6.1 Top-level
@@ -577,7 +578,7 @@ permitted (two Solace patterns emit an advisory **warning**, see
 | `client-password` | no | prefer the `client-password-env` twin ([section 9.1](#91-declaring-a-credential)); omit for cert-only/OAuth auth |
 | `key-alias` | no | selects a client key from the shared keystore -> **mTLS**; requires a `tcps://` host and a keystore in `env.yaml` |
 | `queue` | one of | consume from / produce to a Solace queue |
-| `topic` | one of | Solace topic; also allowed as a `source`, but a topic source warns ([section 6.5](#65-event-driven-guidance-warnings)) |
+| `topic` | one of | Solace topic to **produce** to; **not valid on a `source`** -- a Solace source must be a `queue` ([section 6.5](#65-event-driven-guidance-errors-and-warnings)) |
 | `api-properties` | no | verbatim map -> `solace.java.api-properties`, and -> the leader-election `session.api-properties` when this connection is the management session |
 | `consumer` / `producer` | no | verbatim per-binding tuning |
 
@@ -607,6 +608,9 @@ permitted (two Solace patterns emit an advisory **warning**, see
 ### 6.4 Destinations, durable names, passthrough
 
 - The tool derives `destination-type` from whether you wrote `queue:` or `topic:`.
+- A **Solace `topic:` source** is rejected -- see [section 6.5](#65-event-driven-guidance-errors-and-warnings).
+  The two systems differ here: an MQ topic source is supported (next bullet), a Solace
+  one is not.
 - An **MQ `topic:` source** always gets an auto `durable-subscription-name` (guaranteed
   delivery). The name is a stable UUIDv5 (namespace
   `6ba7f4e2-9c1d-5a3b-8e47-2f9a0c7d13e5`, key = `conn-name || queue-manager || topic
@@ -615,26 +619,40 @@ permitted (two Solace patterns emit an advisory **warning**, see
 - `api-properties`, `additional-properties`, `consumer`, and `producer` are copied
   through **verbatim**, preserving key order and scalar quoting.
 
-### 6.5 Event-driven guidance (warnings)
+### 6.5 Event-driven guidance (errors and warnings)
 
-All four Solace<->MQ destination combinations are allowed. Two Solace patterns are
-still generated, but flagged with a **warning** (never an error), because they run
-against event-driven architecture (EDA) principles:
+One Solace destination combination is **rejected**, and one more is generated but
+flagged with a **warning**, because it runs against event-driven architecture (EDA)
+principles.
 
-- **Solace `topic:` as a `source`.** Consuming directly from a topic is a direct,
-  non-durable subscription (at-most-once): events published while this connector is
-  down are lost. EDA's guaranteed-delivery / durable-state principle favors binding
-  a Solace **queue** subscribed to the topic -- the broker persists events, so the
-  producer's uptime is decoupled from the consumer's and a restart never drops data.
-- **Solace `queue:` as a `destination`.** Producing to a queue is point-to-point and
-  couples the flow to one endpoint. EDA's publish-subscribe / loose-coupling
-  principle favors publishing to a **topic** and letting the broker route to any
-  subscribed queues, so producers stay unaware of consumers and new consumers can be
-  added without touching the producer.
+**Error -- Solace `topic:` as a `source`.** Not supported: the connector's Solace
+consumer binds to an *endpoint*, and a bare topic is not one (nor is a topic
+endpoint). Bind a Solace **queue** subscribed to the topic instead and name that queue
+in `queue:` -- the broker persists events there, so the producer's uptime is decoupled
+from the consumer's and a restart never drops data, which is EDA's
+guaranteed-delivery / durable-state principle anyway:
 
-Warnings never block generation -- use these patterns deliberately (for example,
-best-effort telemetry from a topic source, or a controlled point-to-point handoff to
-a queue). MQ topic/queue sources and destinations are never warned.
+```yaml
+source:
+  solace:
+    conn-ref: prod-solace
+    queue: Q.ORDERS.IN                    # a queue subscribed to orders/> on the broker
+```
+
+This is an error, not a warning, because the alternative fails silently: a topic
+source generates, deploys and starts cleanly, then never consumes, with nothing in the
+config or the connector's own output saying why.
+
+**Warning -- Solace `queue:` as a `destination`.** Producing to a queue is
+point-to-point and couples the flow to one endpoint. EDA's publish-subscribe /
+loose-coupling principle favors publishing to a **topic** and letting the broker route
+to any subscribed queues, so producers stay unaware of consumers and new consumers can
+be added without touching the producer.
+
+Warnings never block generation -- use that pattern deliberately (for example, a
+controlled point-to-point handoff to a queue). MQ topic/queue sources and destinations
+are never rejected or warned; an MQ `topic:` source is supported and gets an auto
+durable subscription ([section 6.4](#64-destinations-durable-names-passthrough)).
 
 ### 6.6 Reusable connections (`conn-ref`)
 

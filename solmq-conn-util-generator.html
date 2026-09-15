@@ -1503,6 +1503,11 @@ function checkSide(add, warn, file, which, s, isSource, haveKeystore, conns){
   if(!s.dest){
     add(file, `${which} (${s.system}) must specify exactly one of 'queue:' or 'topic:'`);
   }
+  // Mirrors validate.go's checkSide: a Solace topic cannot be a source, because the
+  // connector's Solace consumer binds to an endpoint and a bare topic is not one.
+  if(isSource && s.system === 'solace' && s.destKind === 'topic'){
+    add(file, `${which} solace: topic "${s.dest}" cannot be consumed from -- a Solace source must be a queue; create a queue subscribed to "${s.dest}" on the broker and name that queue in 'queue:' instead`);
+  }
   if(s.connRef){
     const conn = conns.find(c => c.name === s.connRef);
     if(!conn){
@@ -1648,11 +1653,10 @@ function checkSideExpansion(warn, file, label, s){
   checkExpansion(warn, file, `${label} ${s.destKind || 'destination'}`, s.dest);
 }
 
+// The Solace topic source this used to warn about is now an error in checkSide, so
+// only the queue-destination advisory is left.
 function edaAdvisory(warn, file, s, isSource){
   if(s.system !== 'solace') return;
-  if(isSource && s.destKind === 'topic'){
-    warn(file, `source solace: topic "${s.dest}" as a source is a direct, non-durable subscription (at-most-once) -- events published while this connector is down are lost. EDA guaranteed-delivery favors consuming from a queue subscribed to the topic, decoupling producer and consumer availability`);
-  }
   if(!isSource && s.destKind === 'queue'){
     warn(file, `target solace: producing to queue "${s.dest}" is point-to-point and couples this flow to one endpoint. EDA favors publishing to a topic and letting the broker fan out to subscribed queues, so producers stay unaware of consumers (loose coupling)`);
   }
