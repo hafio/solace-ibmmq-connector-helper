@@ -84,6 +84,9 @@ type Unit struct {
 // call below passes indent 0 to Line.
 type sw = yamlwriter.Writer
 
+// seconds spells a duration the way the quadlet Health* keys want it.
+func seconds(n int) string { return strconv.Itoa(n) + "s" }
+
 // leaderLabels returns the ordered (key, value) label pairs the unit carries.
 // The mode label is always present. The role label marks this
 // instance active only when that is knowable at render time: standalone
@@ -157,6 +160,25 @@ func RenderQuadlet(in Input) Unit {
 	}
 	if inst.LogbackPath != "" {
 		w.Line(0, "Volume="+inst.LogbackPath+":"+logback.ContainerPath+":ro")
+	}
+	// The healthcheck runs the status script in its --health mode, so it is
+	// emitted only when that script is actually mounted -- unlike compose,
+	// where the mount is unconditional. Without these keys podman populates no
+	// .State.Health and `status container` reports n/a in the HEALTH column.
+	//
+	// HealthOnFailure is deliberately left unset (podman defaults it to none):
+	// the check reports a verdict and never acts on it, matching the compose
+	// side and leaving what to do about an unhealthy instance to the operator.
+	// Podman drives the check from a transient systemd timer in whichever
+	// scope the unit lives in, so this works the same rootful and rootless.
+	//
+	// These keys need podman 4.5+, which is already this tool's floor.
+	if inst.StatusScriptPath != "" {
+		w.Line(0, "HealthCmd="+statusscript.HealthShell+" "+statusTarget+" "+statusscript.HealthArg)
+		w.Line(0, "HealthInterval="+seconds(statusscript.HealthIntervalSeconds))
+		w.Line(0, "HealthTimeout="+seconds(statusscript.HealthTimeoutSeconds))
+		w.Line(0, "HealthRetries="+strconv.Itoa(statusscript.HealthRetries))
+		w.Line(0, "HealthStartPeriod="+seconds(statusscript.HealthStartPeriodSeconds))
 	}
 	w.Line(0, "")
 

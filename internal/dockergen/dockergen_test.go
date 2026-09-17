@@ -6,6 +6,7 @@ import (
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 )
 
 // appYAML1 exercises nested keys, a blank line, and a trailing newline so the
@@ -82,6 +83,12 @@ services:
         target: /app/external/spring/config/application.yml
       - source: solmq-connector-status
         target: /app/external/.status-script
+    healthcheck:
+      test: ["CMD", "sh", "/app/external/.status-script", "--health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     volumes:
       - /abs/certs/truststore.jks:/app/external/classpath/truststores/truststore.jks:ro
       - /abs/libs:/app/external/libs:ro
@@ -151,6 +158,12 @@ func TestRenderFull_Minimal(t *testing.T) {
         target: /app/external/spring/config/application.yml
       - source: solmq-status
         target: /app/external/.status-script
+    healthcheck:
+      test: ["CMD", "sh", "/app/external/.status-script", "--health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 configs:
   solmq-app:
     content: |
@@ -331,6 +344,47 @@ func TestStatusScriptConfigSourceAndTarget(t *testing.T) {
 	}
 	if !strings.Contains(out, "  solmq-status:\n    content: |\n") {
 		t.Errorf("top-level solmq-status config entry missing:\n%s", out)
+	}
+}
+
+// TestHealthcheckRunsTheStatusScript covers the healthcheck block. Without it
+// docker populates no .State.Health, and `status container` can only report
+// n/a in the HEALTH column -- which is the defect this block exists to fix.
+//
+// Every field is built from the statusscript constants rather than a literal,
+// so the compose check, the quadlet Health* keys and the kubernetes readiness
+// probe cannot drift apart.
+func TestHealthcheckRunsTheStatusScript(t *testing.T) {
+	out := Render(Input{
+		Docker:   &spec.Docker{Name: "s"},
+		Instance: Instance{Name: "solmq", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
+	})
+
+	wantTest := `      test: ["CMD", "` + statusscript.HealthShell + `", "` + statusscript.ContainerPath + `", "` + statusscript.HealthArg + `"]` + "\n"
+	if !strings.Contains(out, wantTest) {
+		t.Errorf("healthcheck test line missing:\nwant %q\ngot:\n%s", wantTest, out)
+	}
+	for _, want := range []string{
+		"    healthcheck:\n",
+		"      interval: 30s\n",
+		"      timeout: 10s\n",
+		"      retries: 3\n",
+		"      start_period: 60s\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("healthcheck line %q missing:\n%s", want, out)
+		}
+	}
+	// The exec form, so compose's own interpolation has no shell string to
+	// reinterpret, and no restart behaviour: the check reports, the operator
+	// decides.
+	if strings.Contains(out, "CMD-SHELL") {
+		t.Errorf("healthcheck should use the exec form, not CMD-SHELL:\n%s", out)
+	}
+	// The check execs a path the configs block is what mounts, so the two can
+	// never be emitted apart.
+	if !strings.Contains(out, "target: "+statusscript.ContainerPath+"\n") {
+		t.Errorf("healthcheck references %s but nothing mounts it:\n%s", statusscript.ContainerPath, out)
 	}
 }
 

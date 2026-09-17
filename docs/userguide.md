@@ -1148,6 +1148,25 @@ of `/app/external/var/secrets` -- would be substituted by compose from the envir
 hands it, writing the plaintext credentials into the compose file. If you edit a
 generated compose file by hand, keep the doubling.
 
+The service also declares a **healthcheck**:
+
+```yaml
+    healthcheck:
+      test: ["CMD", "sh", "/app/external/.status-script", "--health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+```
+
+That is what fills `.State.Health` in `docker inspect` and what the `HEALTH`
+column of `status container` reports; without it docker has no check to run and
+the column can only read `n/a`. It is the exec form, so compose's interpolation
+has no shell string to reinterpret, and it runs the same `--health` mode the
+podman quadlet and the kubernetes readiness probe run, so the verdict means the
+same thing on all three platforms. Nothing restarts on a failure -- the check
+reports, and what to do about an unhealthy instance stays yours.
+
 Populate the `libs.dir` directory with `solmq-conn-util download jar mq`
 ([section 10](#10-download-jar)) before the first `deploy`.
 
@@ -1219,6 +1238,22 @@ looks. Requires **podman 4.5+** (the tool's floor; the path-valued `target=`
 form itself needs podman 4.x or newer). To check delivery on a running
 instance, `cli` in and list `/app/external/var/secrets/`: one file per
 credential.
+
+**The unit declares a healthcheck.** The `[Container]` section carries
+`HealthCmd=sh /app/external/.status-script --health`, plus `HealthInterval=30s`,
+`HealthTimeout=10s`, `HealthRetries=3` and `HealthStartPeriod=60s`. That is what
+fills `.State.Health` in `podman inspect` and what the `HEALTH` column of
+`status container` reports; without it podman has no check to run and the
+column can only read `n/a`. The keys are emitted only when the status script is
+mounted, since the check execs it, and they need **podman 4.5+** -- already the
+tool's floor.
+
+Podman runs the check from a transient **systemd timer** in whichever scope the
+unit itself lives in, so this behaves the same rootful and rootless and needs
+nothing beyond the session that `systemctl --user` already requires for a
+rootless unit. `HealthOnFailure=` is deliberately left unset (podman defaults it
+to `none`): the check reports a verdict and never restarts, kills or stops
+anything. What to do about an unhealthy instance stays yours.
 
 **Where the unit goes is not configurable.** It follows whoever runs the tool:
 
@@ -1870,8 +1905,15 @@ exists is a no-op), then a `ConfigMap` mounting `application.yml` at
 under its own `status` key, mounted at `/app/external/.status-script`, a `Deployment`
 (pod template carrying the `solace-connector/le-mode`/`role` labels above), an
 optional `Service`, the credentials/stores `Secret`s, and any libs
-`PersistentVolume`/`PersistentVolumeClaim`. Probes use a **tcpSocket**
-check on the management port (basic-auth protects `/actuator/*`).
+`PersistentVolume`/`PersistentVolumeClaim`. The two probes are deliberately
+different checks. **Liveness** is a `tcpSocket` check on the management port,
+because it decides whether kubelet restarts the container and a slow or
+flapping downstream must not turn into a restart loop. **Readiness** execs the
+status script's `--health` mode ([section 12.3](#123-first-run-installing-the-script)),
+so `READY` means the connector reported itself `UP` rather than merely that its
+port is open -- the same verdict the docker and podman healthchecks produce.
+It authenticates as the injected `solmq-status` account, since basic auth
+protects `/actuator/*`.
 When any MQ-TLS binder exists the Deployment sets
 `JAVA_TOOL_OPTIONS=-Dcom.ibm.mq.cfg.useIBMCipherMappings=false`. When
 the top-level `logging.syslog` is set, the ConfigMap also gets a `logback-spring.xml` key
@@ -1945,8 +1987,8 @@ cluster read alike. Two columns differ by platform, because the platforms do:
 |--------|---------|
 | `NAME` | The pod or container name -- what you would pass to `--pod`/`--container` |
 | `STATE` | `running`, `exited`, `waiting`, `restarting`, `paused` or `unknown`, normalised across the three engines, qualified by the engine's own reason (`CrashLoopBackOff`, `ImagePullBackOff`, `OOMKilled`) or by the exit code when that is all there is |
-| `READY` (kubernetes) | The readiness-probe verdict. `n/a` when the pod declares no readiness probe, since kubernetes then reports ready as soon as the container runs and the column would say nothing |
-| `HEALTH` (docker/podman) | The engine's **own healthcheck** verdict -- `healthy`/`unhealthy`/`starting` -- which is a different thing from the connector's `health:` line in the application view. `n/a` when the container defines no healthcheck, which is the usual case: the compose and quadlet artifacts this tool generates declare none, so the value only appears when the image itself carries a `HEALTHCHECK` |
+| `READY` (kubernetes) | The readiness-probe verdict. The Deployment this tool generates runs the status script's `--health` mode as its readiness probe, so ready means the connector reported itself `UP`, not merely that its actuator port is open. `n/a` when the pod declares no readiness probe, since kubernetes then reports ready as soon as the container runs and the column would say nothing |
+| `HEALTH` (docker/podman) | The engine's **own healthcheck** verdict -- `healthy`/`unhealthy`/`starting` -- which is a different thing from the connector's `health:` line in the application view, though both now read the same endpoint. The compose and quadlet artifacts this tool generates declare a healthcheck that runs the status script's `--health` mode, so a running instance reports a real verdict. `n/a` means the container declares no healthcheck at all: one created before this tool emitted one, one deployed without the status script mounted, or an image run by hand |
 | `RESTARTS` | How many times the container has restarted. On podman this comes from **systemd**, not from podman -- see the quadlet note below |
 | `AGE` | How long the container has been running |
 | `IMAGE` | The image reference the container is actually running |
@@ -2054,6 +2096,31 @@ error (exit 2) rather than a flag that silently does nothing.
 > printed, with the failure as a `status:` line in the body -- under the
 > container facts that explain it. That matters because the crash-looping
 > instance is exactly the one you most need to see.
+
+**The same script answers the engine's healthcheck.** Run with one argument,
+`--health`, it stops being a report and becomes a verdict:
+
+```text
+sh /app/external/.status-script --health
+```
+
+It queries `/actuator/health` once -- with the same account and password the
+report resolves, since the actuator is always behind the injected `solmq-status`
+account -- prints the status it saw, and **exits 0 only when that status is
+`UP`**. This is the one place the script departs from its always-exit-0
+contract, which is why it has to be asked for by name; nothing else ever passes
+it an argument, and `status` never does.
+
+It deliberately does none of the rest of the report: no leader-election call, no
+metrics, no `/actuator/info`, and no `java -version`. The full report makes seven
+actuator calls and starts a JVM, which is far too much to repeat on a timer
+inside a container that is already CPU- and memory-limited.
+
+The compose `healthcheck:` ([section 8.2](#82-docker)), the quadlet `HealthCmd=`
+([section 8.3](#83-podman)) and the kubernetes `readinessProbe` all run exactly
+this, which is why the `HEALTH` and `READY` columns mean the same thing on all
+three platforms. Because the mounted copy of the script is never executable on
+any platform, each of them passes it to `sh` rather than running it directly.
 
 ### 12.4 `-d` / `--details`
 

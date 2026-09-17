@@ -3481,7 +3481,8 @@ func TestStatusDockerContainerViewIsOneInspect(t *testing.T) {
 // recreates the container on restart, so its own counter reads 0 and systemd is
 // the only thing that remembers.
 func TestStatusPodmanRestartCountComesFromSystemd(t *testing.T) {
-	podmanInspect := `[{"Name":"solmq-connector","State":{"Status":"running","StartedAt":"2026-08-18T04:12:07Z"},
+	podmanInspect := `[{"Name":"solmq-connector","State":{"Status":"running","StartedAt":"2026-08-18T04:12:07Z",
+	  "Health":{"Status":"healthy","FailingStreak":0,"Log":[{"ExitCode":0,"Output":"UP\n"}]}},
 	  "RestartCount":0,"Config":{"Image":"solace/x:2.14.1"},"HostConfig":{}}]`
 	q := &queueRunner{resp: []queuedResp{
 		{"", nil},            // preflight: podman info
@@ -3497,6 +3498,12 @@ func TestStatusPodmanRestartCountComesFromSystemd(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "7") {
 		t.Errorf("the systemd count should reach the table, got:\n%s", stdout)
+	}
+	// The quadlet this tool generates declares a HealthCmd, so a running
+	// instance reports a real verdict rather than the n/a the column showed
+	// while no healthcheck was emitted at all.
+	if !strings.Contains(stdout, "healthy") {
+		t.Errorf("the podman healthcheck verdict should reach the HEALTH column, got:\n%s", stdout)
 	}
 	last := q.calls[len(q.calls)-1].argv
 	if last[0] != "systemctl" || !containsToken(last, "NRestarts") {
@@ -3524,6 +3531,12 @@ func TestStatusPodmanRestartCountFallsBackWhenSystemdCannotAnswer(t *testing.T) 
 	}
 	if !strings.Contains(stdout, "3") {
 		t.Errorf("the container's own count should remain, got:\n%s", stdout)
+	}
+	// This fixture declares no healthcheck, which is what a container created
+	// before the quadlet carried HealthCmd looks like: the column has to fall
+	// back rather than show an empty cell.
+	if !strings.Contains(stdout, statusreport.NotApplicable) {
+		t.Errorf("a container with no healthcheck should read %q, got:\n%s", statusreport.NotApplicable, stdout)
 	}
 }
 

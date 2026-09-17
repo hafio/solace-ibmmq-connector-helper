@@ -7,6 +7,7 @@ import (
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 )
 
 func baseKube() *spec.Kubernetes {
@@ -50,7 +51,7 @@ func TestRenderFull(t *testing.T) {
 		"kind: Deployment", "automountServiceAccountToken: false", "name: JAVA_TOOL_OPTIONS", "useIBMCipherMappings=false",
 		"solace-connector/le-mode: standalone", "solace-connector/role: active",
 		"- name: secrets", "mountPath: " + SecretsMountPath, "defaultMode: 0400",
-		"mountPath: /app/external/classpath/truststores", "livenessProbe:", "tcpSocket:", "readinessProbe:",
+		"mountPath: /app/external/classpath/truststores", "livenessProbe:", "tcpSocket:", "readinessProbe:", "exec:",
 		"mountPath: /app/external/.status-script", "subPath: status",
 		"requests:", "limits:", `cpu: "1"`, "memory: 1Gi",
 		"kind: Service", "targetPort: 8090",
@@ -165,10 +166,15 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 15
           readinessProbe:
-            tcpSocket:
-              port: 8090
+            exec:
+              command:
+                - sh
+                - /app/external/.status-script
+                - --health
             initialDelaySeconds: 15
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             requests:
               cpu: "1"
@@ -395,6 +401,71 @@ func TestRenderExistingSecrets(t *testing.T) {
 	}
 	if !strings.Contains(out, "secretName: my-creds") || !strings.Contains(out, "secretName: my-tls") {
 		t.Errorf("existing refs missing:\n%s", out)
+	}
+}
+
+// TestProbesSplitLivenessFromReadiness pins the deliberate asymmetry between
+// the two probes, which is the whole reason they are not the same check.
+//
+// Readiness execs the same --health check the compose and quadlet artifacts
+// run, so READY means the connector reports itself UP rather than merely that
+// its port is open, and the verdict means the same thing on all three
+// platforms.
+//
+// Liveness stays a tcpSocket probe, because it decides whether kubelet
+// restarts the container. Running the health check there would turn a slow or
+// flapping downstream into a restart loop.
+func TestProbesSplitLivenessFromReadiness(t *testing.T) {
+	out := Render(fullFixtureInput())
+
+	live := strings.Index(out, "livenessProbe:")
+	ready := strings.Index(out, "readinessProbe:")
+	if live == -1 || ready == -1 || ready < live {
+		t.Fatalf("expected livenessProbe then readinessProbe:\n%s", out)
+	}
+	if !strings.Contains(out[live:ready], "tcpSocket:") {
+		t.Errorf("livenessProbe must stay a tcpSocket probe, or a slow downstream becomes a restart loop:\n%s", out[live:ready])
+	}
+	if strings.Contains(out[live:ready], "exec:") {
+		t.Errorf("livenessProbe must not exec the health check:\n%s", out[live:ready])
+	}
+
+	readyBlock := out[ready:]
+	if end := strings.Index(readyBlock, "resources:"); end != -1 {
+		readyBlock = readyBlock[:end]
+	}
+	// Built from the shared constants, and passed to a shell: the ConfigMap
+	// mounts the script through a subPath, which never carries the execute
+	// bit, so exec'ing the path directly would fail with a permission error
+	// that reads as an unhealthy connector.
+	for _, want := range []string{
+		"exec:",
+		"command:",
+		"- " + statusscript.HealthShell,
+		"- " + statusscript.ContainerPath,
+		"- " + statusscript.HealthArg,
+	} {
+		if !strings.Contains(readyBlock, want) {
+			t.Errorf("readinessProbe missing %q:\n%s", want, readyBlock)
+		}
+	}
+	// kubernetes defaults timeoutSeconds to 1s, which an HTTP round trip plus
+	// a shell will lose -- an unset timeout reports a healthy connector as not
+	// ready. The cadence stays the probe's own rather than the slower engine
+	// interval, so a rollout is not dragged out.
+	for _, want := range []string{
+		"initialDelaySeconds: 15",
+		"periodSeconds: 10",
+		"timeoutSeconds: 5",
+		"failureThreshold: 3",
+	} {
+		if !strings.Contains(readyBlock, want) {
+			t.Errorf("readinessProbe missing %q:\n%s", want, readyBlock)
+		}
+	}
+	// The probe execs a path the pod's own volumeMounts are what provide.
+	if !strings.Contains(out, "mountPath: "+statusscript.ContainerPath) {
+		t.Errorf("readinessProbe execs %s but the pod does not mount it:\n%s", statusscript.ContainerPath, out)
 	}
 }
 

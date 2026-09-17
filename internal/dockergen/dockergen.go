@@ -176,6 +176,7 @@ func renderService(w *yw, in Input, inst Instance) {
 		w.Line(6, "- source: "+inst.Name+"-logback")
 		w.Line(8, "target: "+logback.ContainerPath)
 	}
+	renderHealthcheck(w)
 	// volumes: stores first, then libs; omit the key when there are neither.
 	if len(in.Stores) > 0 || in.Libs != nil {
 		w.Line(4, "volumes:")
@@ -187,6 +188,33 @@ func renderService(w *yw, in Input, inst Instance) {
 		}
 	}
 }
+
+// renderHealthcheck emits the service's healthcheck block: the status script
+// in its --health mode, which answers with an exit status instead of a report.
+// Without it the engine has no healthcheck to run and `status container`
+// reports n/a in the HEALTH column, since docker then populates no
+// .State.Health at all.
+//
+// It is emitted unconditionally because the status script's configs entry is
+// too (see renderService): compose always mounts the script, so the check can
+// always reach it. The test is the exec form rather than CMD-SHELL -- there is
+// no shell syntax here to need one, and the exec form cannot be reinterpreted
+// by compose's own interpolation.
+//
+// Deliberately no autoheal or restart behaviour hangs off this: the check
+// reports, and what to do about an unhealthy instance stays the operator's
+// call.
+func renderHealthcheck(w *yw) {
+	w.Line(4, "healthcheck:")
+	w.Line(6, `test: ["CMD", "`+statusscript.HealthShell+`", "`+statusscript.ContainerPath+`", "`+statusscript.HealthArg+`"]`)
+	w.Line(6, "interval: "+seconds(statusscript.HealthIntervalSeconds))
+	w.Line(6, "timeout: "+seconds(statusscript.HealthTimeoutSeconds))
+	w.Line(6, "retries: "+strconv.Itoa(statusscript.HealthRetries))
+	w.Line(6, "start_period: "+seconds(statusscript.HealthStartPeriodSeconds))
+}
+
+// seconds spells a duration the way compose wants it.
+func seconds(n int) string { return strconv.Itoa(n) + "s" }
 
 // renderContentConfig emits one top-level configs entry inlining payload as a
 // block scalar under content: -- the application.yml and the status script are

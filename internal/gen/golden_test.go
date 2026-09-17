@@ -414,10 +414,15 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 15
           readinessProbe:
-            tcpSocket:
-              port: 8090
+            exec:
+              command:
+                - sh
+                - /app/external/.status-script
+                - --health
             initialDelaySeconds: 15
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             requests:
               cpu: "1"

@@ -48,7 +48,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 764 test functions, 1041 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 770 test functions, 1047 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -332,9 +332,11 @@ Tests: [statusscript_test.go](../internal/statusscript/statusscript_test.go)
 | TestRenderSubstitution | defaults | Render substitutes PORT=8090 and USER_NAME=solmq-status; BASE and the leaderelection/workflows endpoints are built from $PORT at run time, not by Render |
 | TestRenderSubstitution | non-default port and user | Render substitutes PORT=19090 and USER_NAME=custom-mgmt-user |
 | TestRenderIsPureASCIINoCRLF | - | output has no carriage return, no byte over 127, and ends with a trailing newline |
-| TestRenderHeaderHasExecOneLiners | - | the header pins the kubectl/docker/podman exec one-liners, each built from ContainerPath |
+| TestRenderHeaderHasExecOneLiners | - | the header pins the kubectl/docker/podman exec one-liners and the `--health` invocation, each built from ContainerPath |
 | TestRenderPasswordResolution | - | the password-lookup chain references ContainerPath, SecretsDir and the from_configs account lookup, and no credential is embedded |
-| TestRenderAlwaysExitsZero | - | every exit in the script is `exit 0`, `set -e` is absent while `set -u` stays, the EXIT trap holds the contract, and active/standby are both quiet outcomes |
+| TestRenderAlwaysExitsZero | - | every exit in the report path is `exit 0` and the script's only `exit 1` is the healthcheck verdict, `set -e` is absent while `set -u` stays, the EXIT trap holds the contract, and active/standby are both quiet outcomes |
+| TestRenderHealthModeShortCircuits | - | `--health` sits below get() and the password it needs but above the exposure check that would exit 0, and makes exactly one actuator call -- no metrics, no /actuator/info, no JVM spawn, so it is cheap enough to run on a timer |
+| TestRenderHealthModeExitsOnVerdict | - | `--health` clears the EXIT trap before answering (or its non-zero status would be swallowed), exits 0 only on UP, and echoes the verdict to stdout without a `status:` prefix so the engine's health log carries it |
 | TestRenderSendsStatusToStdoutAndProblemsToStderr | - | the mode/state/health/workflow report lines go to stdout unredirected, and every `status:` diagnostic ends in `>&2` |
 | TestRenderAlignsWorkflowColumn | - | the workflows block is a bare header plus one indented row per workflow, with the ids right-aligned to the widest id present so every colon sits in the same column |
 | TestRenderReportsHealthUptimeAndVersion | endpoints | health, /actuator/metrics/process.uptime and /actuator/info are each read and rendered as their own report line |
@@ -351,7 +353,7 @@ Tests: [statusscript_test.go](../internal/statusscript/statusscript_test.go)
 | TestRenderVerifiesExposure | - | the has_entry membership check and the leaderelection/workflows exposure gate run before the first actuator request; an unexposed leaderelection stops the run on stderr (still exit 0), an unlocatable config only warns |
 | TestRenderSearchesSpringConfigLocations | - | the config search covers SPRING_CONFIG_LOCATION, SPRING_CONFIG_ADDITIONAL_LOCATION and SPRING_CONFIG_NAME, ConfigDir and its wildcard form, the ./ and ./config/ defaults, both YAML extensions, comma splitting with optional:/file: stripping, the classpath: skip, and runs before the exposure check and password lookup |
 | TestRenderEscapesUserForSedAddress | 7 names | USER_MATCH is regex-escaped for the sed address (dot, slash, brackets, star, backslash, anchors) while USER_NAME stays raw for the Authorization header |
-| TestFilenameAndPathConstants | - | the script's name and directory, and that ContainerPath is not nested inside the libs, spring/config or classpath mounts -- the nesting that made the libs mount shadow it |
+| TestFilenameAndPathConstants | - | the script's name and directory, that ContainerPath is not nested inside the libs, spring/config or classpath mounts -- the nesting that made the libs mount shadow it -- and the healthcheck contract the three renderers share (HealthArg, HealthShell, and a cadence whose timeout is below the interval and whose start period is above it) |
 | TestRenderReportsHealthComponents | - | the per-component health breakdown: a newline before every `{"status"` puts each component's status at the start of a line and its name at the end of the line above, so the name is carried forward in $pending (guarded with `${pending:-}` for set -u); the block prints only when something parsed |
 | TestRenderReportsJavaConfigAndHeap | - | the three details-level lines from outside the report endpoints: `java -version` (stderr redirected, folded to "openjdk 17.0.9" or passed through raw), the config the report was read from, and heap used/max tagged `area:heap`; each guarded so an absent source drops its line, a negative maximum is left out, and the byte arithmetic is deliberately *not done* here (busybox would read Jackson's 4.32013312E8 as 4) |
 | TestRenderHeaderNamesEveryReportedFact | - | the script's own header names what it reports, since it is the first thing someone running the script by hand reads |
@@ -377,6 +379,7 @@ Tests: [deploy_test.go](../internal/deploy/deploy_test.go), [imagepull_test.go](
 | TestRenderExistingSecrets | - | existing creds/tls secrets produce no Secret doc, referencing my-creds and secretName my-tls |
 | TestRenderConfigMapStatusScript | - | the ConfigMap always carries the status script under its own `status` key, alongside application.yml |
 | TestRenderStatusScriptMountAfterLibs | - | the single-file status mount is declared after the libs directory mount, so it is not shadowed, and carries `subPath: status` |
+| TestProbesSplitLivenessFromReadiness | - | liveness stays a tcpSocket check so a slow downstream cannot become a restart loop, while readiness execs `sh <ContainerPath> --health` with an explicit timeoutSeconds (kubernetes defaults it to 1s) against a path the pod actually mounts |
 | TestManagementPort | Defaults.Management.Port 9999 | ManagementPort returns 9999, ignoring Kube.Service.Port entirely |
 | TestManagementPort | empty Defaults | ManagementPort returns 8090 (the connector default) |
 | TestManagementPort | nil Defaults | ManagementPort returns 8090 (the connector default) |
@@ -422,6 +425,7 @@ Tests: [dockergen_test.go](../internal/dockergen/dockergen_test.go)
 | TestStoresOnlyAndLibsOnly | libs only | volumes block contains only the libs mount line |
 | TestSplitLinesNoTrailingNewline | - | app.yml lacking trailing newline still renders content line with no dropped element |
 | TestStatusScriptConfigSourceAndTarget | - | the service references a second `<name>-status` config and mounts it at /app/external/.status-script |
+| TestHealthcheckRunsTheStatusScript | - | the service declares a healthcheck built from the statusscript constants, in the exec form rather than CMD-SHELL, against the path the configs block mounts -- without it docker populates no .State.Health and the HEALTH column can only read n/a |
 | TestStatusScriptContentIsEscaped | - | the status script body is inlined under the status config's content: block, indented 6 spaces, blank line preserved as truly empty, and its shell `$` doubled |
 | TestContentEscapesDollarsForCompose | $VAR / ${VAR} / ${VAR:-default} / $(cmd) / $$ | each shape reaches the content block with every `$` doubled, so compose's interpolation pass delivers it unchanged instead of blanking it or rejecting the document |
 | TestContentEscapesDollarsForCompose | no lone `$` | dropping every `$$` pair from the rendered document leaves no `$` behind anywhere |
@@ -444,7 +448,8 @@ Tests: [podmangen_test.go](../internal/podmangen/podmangen_test.go)
 | TestLeaderLabelsPerMode | empty defaults to standalone / standalone / active_active | the unit carries the le-mode label and role: active |
 | TestLeaderLabelsPerMode | active_standby | the unit carries le-mode active_standby and withholds role: active |
 | TestStatusScriptMountNestsAfterLibs | - | the status script volume is declared after the libs volume, so it nests rather than being shadowed |
-| TestStatusScriptMountOmittedWhenPathEmpty | - | an empty StatusScriptPath omits the status volume entirely, rather than mounting an empty source |
+| TestStatusScriptMountOmittedWhenPathEmpty | - | an empty StatusScriptPath omits the status volume and the healthcheck that execs it, rather than mounting an empty source or declaring a check that cannot run |
+| TestHealthcheckRunsTheStatusScript | - | the unit declares HealthCmd and its cadence inside [Container], built from the statusscript constants, and leaves HealthOnFailure unset so the check reports without restarting anything |
 | TestQuadletSyslogMountsAndSetsEnv | - | podman cannot inline file content, so the unit bind-mounts the logback file read-only via Volume= and sets the three LOGGING_SYSLOG_* vars via Environment= |
 | TestSyslogAbsentEmitsNoMountOrEnv | - | no block, no mount, no env |
 
@@ -972,7 +977,7 @@ Tests: [statusreport_test.go](../internal/statusreport/statusreport_test.go), [p
 | TestObjectExists | secret / bound claim / pending claim / not a document / empty | a live object reports "present", a volume claim reports its own phase (the only status here that can be bad while the object exists) |
 | TestApplyTop | - | the connector's row wins over a sidecar's, a percentage appears only where a limit was read, and a pod the metrics API said nothing about keeps no usage |
 | TestParseInspectDocker | - | docker's leading slash stripped from the name, the compose project read off the container's own label in the same call, the configured image reference rather than the local id, the nanocpu/memory ceilings, the age, and mounts/networks as attached components |
-| TestParseInspectStatesAndHealthSpellings | exited / oom killed / restarting / paused / created / podman stopped cleanly / unknown status / podman Healthcheck key / no healthcheck | every engine status normalised, a clean stop reporting no exit code (a zero exit adds nothing to the state), both spellings of podman's healthcheck block, and n/a where no healthcheck is defined -- the usual case, since the generated compose and quadlet artifacts declare none |
+| TestParseInspectStatesAndHealthSpellings | exited / oom killed / restarting / paused / created / podman stopped cleanly / unknown status / podman Healthcheck key / podman Health key with a log / unhealthy / empty status / no healthcheck | every engine status normalised, a clean stop reporting no exit code (a zero exit adds nothing to the state), both spellings of podman's healthcheck block (including the current one, nesting a Log beside the status, which is what a quadlet HealthCmd produces), an unhealthy verdict passed through as the engine spells it, and n/a both where the block is absent and where it carries an empty status |
 | TestParseInspectFilterAndErrors | - | the `--all` image filter, an empty response, and an undecodable one |
 | TestParseImageDigest | - | the first RepoDigest is the registry digest; an image never pushed has none, which is not an error |
 | TestApplyStats | - | the engine's own percentages are taken as given (docker's memory string already carries both sides), and a container with no sample keeps no usage |
@@ -985,6 +990,7 @@ Tests: [statusreport_test.go](../internal/statusreport/statusreport_test.go), [p
 | TestRenderContainerViewBasic | - | the section banner, the column set, and the workload summary; the basic level carries neither the NODE column nor any detail block, and kubernetes reports READY rather than a HEALTH column |
 | TestRenderContainerViewDetails | - | the details block: digest, resource lines, the components table, and the image-expected line whose presence is itself the finding; an instance with no sample carries no resource lines at all |
 | TestRenderContainerViewDockerUsesHealthColumn | - | docker reports the engine's healthcheck verdict where kubernetes reports readiness, and has no NODE column |
+| TestRenderContainerViewPodmanReportsTheHealthVerdict | - | the podman half of that pair: a quadlet healthcheck's verdict reaches the table, a container declaring none still falls back to n/a rather than an empty cell, and podman gets no READY column |
 | TestRenderContainerViewAllNamespacesLeadsWithNamespace | - | instances spanning namespaces cannot share one banner, so each row leads with its own; one shared namespace rides in the banner instead |
 | TestRenderApplicationViewBasicAndDetails | - | the unchanged instance banner, the aligned basic lines, right-aligned workflow ids, enrichment only at the details level, and no container table in this view |
 | TestRenderFailedInstanceKeepsItsBlock | - | an instance whose script could not run still gets a banner with the failure as a body line, and the container table that explains it comes first |
@@ -1097,8 +1103,8 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestStatusContainerDetailsSamplesAndChecksComponents | - | `--details` adds one sampling call for the run and one presence check per distinct referenced object (deduplicated across pods), plus the NODE column, digest and resource lines |
 | TestStatusContainerDetailsWithoutMetricsServerDegradesToANote | - | a cluster with no metrics API costs the resource lines and nothing else: a note naming what to install, the table still printed, exit 0 |
 | TestStatusDockerContainerViewIsOneInspect | - | one inspect answers every docker target and carries the compose project too; docker reports HEALTH where kubernetes reports READY |
-| TestStatusPodmanRestartCountComesFromSystemd | - | the quadlet truth: the count in the table comes from `systemctl show ... NRestarts`, not from podman's own counter |
-| TestStatusPodmanRestartCountFallsBackWhenSystemdCannotAnswer | - | a container systemd knows nothing about keeps the container's own counter, and nothing fails |
+| TestStatusPodmanRestartCountComesFromSystemd | - | the quadlet truth: the count in the table comes from `systemctl show ... NRestarts`, not from podman's own counter, and the inspect fixture's current-shape Health block reaches the HEALTH column |
+| TestStatusPodmanRestartCountFallsBackWhenSystemdCannotAnswer | - | a container systemd knows nothing about keeps the container's own counter, nothing fails, and an inspect carrying no healthcheck still reads n/a |
 | TestStatusAllSearchesByImage | kubernetes searches every namespace / docker lists then inspects the matches | `--all` finds instances by image reference: `--all-namespaces` plus a client-side filter on kubernetes (with a NAMESPACE column), `ps --all` then an inspect of only the matches on docker |
 | TestStatusAllWithNoMatchIsActionable | - | an empty search names the image it looked for, since there is no env.yaml in play to point at |
 | TestStatusApplicationViewRunsTheScriptAndRendersItsFacts | - | the exact application block: the unchanged banner, values aligned in one column, right-aligned workflow ids, and no container table |

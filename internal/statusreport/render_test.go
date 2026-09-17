@@ -132,6 +132,40 @@ func TestRenderContainerViewDockerUsesHealthColumn(t *testing.T) {
 	}
 }
 
+// TestRenderContainerViewPodmanReportsTheHealthVerdict is the podman half of
+// the pair with the docker test above. The two platforms share one render
+// branch, so this pins that the verdict a quadlet's HealthCmd produces
+// actually reaches the table -- and that a container without a healthcheck
+// still falls back to n/a rather than an empty cell.
+func TestRenderContainerViewPodmanReportsTheHealthVerdict(t *testing.T) {
+	r := Report{
+		Platform: "podman",
+		Instances: []Instance{
+			{
+				Name: "solmq-connector", Group: "eg",
+				Container: &Container{State: StateRunning, Health: "healthy", Ready: NotApplicable, Age: "3d7h", Image: "solace/x:2.14.1"},
+			},
+			{
+				Name: "solmq-legacy", Group: "eg",
+				Container: &Container{State: StateRunning, Health: NotApplicable, Ready: NotApplicable, Age: "1h", Image: "solace/x:2.14.1"},
+			},
+		},
+	}
+	got := render(t, r, ViewContainer, LevelBasic)
+	if !strings.Contains(got, "HEALTH") {
+		t.Errorf("podman reports the engine healthcheck verdict, got:\n%s", got)
+	}
+	if !strings.Contains(got, "healthy") {
+		t.Errorf("the verdict the quadlet healthcheck produced is missing, got:\n%s", got)
+	}
+	if !strings.Contains(got, NotApplicable) {
+		t.Errorf("a container with no healthcheck must still read %q, got:\n%s", NotApplicable, got)
+	}
+	if strings.Contains(got, "READY") {
+		t.Errorf("podman has no readiness concept, got:\n%s", got)
+	}
+}
+
 func TestRenderContainerViewAllNamespacesLeadsWithNamespace(t *testing.T) {
 	// Under --all instances come from anywhere, so the run has no one namespace
 	// to put in the banner and each row carries its own.

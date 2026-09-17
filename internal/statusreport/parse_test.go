@@ -553,8 +553,17 @@ func TestParseInspectStatesAndHealthSpellings(t *testing.T) {
 		{"a status this tool has not seen", `[{"Name":"c","State":{"Status":"wat"},"Config":{"Image":"i"}}]`, StateUnknown, NotApplicable, "", false},
 		// podman has spelled the healthcheck block both ways across versions.
 		{"podman healthcheck key", `[{"Name":"c","State":{"Status":"running","Healthcheck":{"Status":"starting"}},"Config":{"Image":"i"}}]`, StateRunning, "starting", "", false},
-		// The compose and quadlet artifacts this tool generates declare no
-		// healthcheck, so this is the common case.
+		// Current podman uses docker's spelling and nests a Log beside the
+		// status, which is where the --health verdict the quadlet HealthCmd
+		// prints ends up. This is what a unit this tool generates now reports,
+		// so it is the case that matters most.
+		{"podman health key with a log", `[{"Name":"c","State":{"Status":"running","Health":{"Status":"healthy","FailingStreak":0,"Log":[{"ExitCode":0,"Output":"UP\n"}]}},"Config":{"Image":"i"}}]`, StateRunning, "healthy", "", false},
+		{"unhealthy is reported as the engine spells it", `[{"Name":"c","State":{"Status":"running","Health":{"Status":"unhealthy","FailingStreak":3}},"Config":{"Image":"i"}}]`, StateRunning, "unhealthy", "", false},
+		// An engine that carries the key but has not run the check yet says
+		// nothing, which must not read as a verdict.
+		{"health block with an empty status", `[{"Name":"c","State":{"Status":"running","Health":{"Status":""}},"Config":{"Image":"i"}}]`, StateRunning, NotApplicable, "", false},
+		// A container created before this tool emitted a healthcheck, or one
+		// whose artifact declares none, still has to report something.
 		{"no healthcheck at all", `[{"Name":"c","State":{"Status":"running"},"Config":{"Image":"i"}}]`, StateRunning, NotApplicable, "", false},
 	}
 	for _, c := range cases {

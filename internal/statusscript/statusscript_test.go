@@ -77,6 +77,9 @@ func TestRenderHeaderHasExecOneLiners(t *testing.T) {
 		"kubectl exec <pod> -- sh " + ContainerPath,
 		"docker exec <container> sh " + ContainerPath,
 		"podman exec <container> sh " + ContainerPath,
+		// The healthcheck is the one caller that passes an argument, so the
+		// header has to name it or the only non-zero exit looks unexplained.
+		"sh " + ContainerPath + " " + HealthArg,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing exec one-liner %q in:\n%s", want, out)
@@ -152,9 +155,14 @@ func TestRenderSearchesSpringConfigLocations(t *testing.T) {
 // instance or a misconfigured endpoint looking the same.
 func TestRenderAlwaysExitsZero(t *testing.T) {
 	out := Render(8090, "solmq-status")
+	first, block, rest := splitHealthBlock(t, out)
 
-	// Every exit in the script is an exit 0, including the early error returns.
-	for i, line := range strings.Split(out, "\n") {
+	// Every exit in the report path is an exit 0, including the early error
+	// returns. The healthcheck block is excluded because its whole job is to
+	// answer with an exit status; splitHealthBlock proves it is the only part
+	// of the script carved out here, and TestRenderHealthModeExitsOnVerdict
+	// pins what it exits with.
+	for i, line := range strings.Split(first+rest, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if !strings.HasPrefix(trimmed, "exit ") && !strings.Contains(trimmed, ") exit ") {
 			continue
@@ -162,7 +170,15 @@ func TestRenderAlwaysExitsZero(t *testing.T) {
 		if strings.Contains(trimmed, "exit 0") {
 			continue
 		}
-		t.Errorf("line %d exits non-zero: %q", i+1, trimmed)
+		t.Errorf("report-path line %d exits non-zero: %q", i+1, trimmed)
+	}
+	// And the carve-out is exactly one block: a second non-zero exit anywhere
+	// would mean some other path had quietly started reporting failure.
+	if n := strings.Count(out, "exit 1"); n != 1 {
+		t.Errorf("found %d `exit 1` in the script, want exactly 1 (the healthcheck verdict)", n)
+	}
+	if !strings.Contains(block, "exit 1") {
+		t.Errorf("the only non-zero exit is not the healthcheck verdict; block was:\n%s", block)
 	}
 	// set -e would abort mid-script with a non-zero status, so it must be off,
 	// while set -u stays on to catch a mistyped variable name.
@@ -180,6 +196,103 @@ func TestRenderAlwaysExitsZero(t *testing.T) {
 	// branch may report anything on stderr.
 	if !strings.Contains(out, "active | standby) ;;") {
 		t.Errorf("active and standby must both be quiet, normal outcomes:\n%s", out)
+	}
+}
+
+// splitHealthBlock cuts the rendered script into the part before the --health
+// branch, the branch itself, and the part after it. The branch is the script's
+// one deliberate departure from the always-exit-0 contract, so several tests
+// need to reason about it separately from the report path.
+func splitHealthBlock(t *testing.T, out string) (before, block, after string) {
+	t.Helper()
+
+	guard := `if [ "${1:-}" = "` + HealthArg + `" ]; then` + "\n"
+	i := strings.Index(out, guard)
+	if i < 0 {
+		t.Fatalf("no %s branch in:\n%s", HealthArg, out)
+	}
+	// The branch nests only if/fi, so the first line that is exactly "fi" ends
+	// it -- the inner `if [ "$H" = "UP" ]` closes with an indented "fi".
+	rel := strings.Index(out[i:], "\nfi\n")
+	if rel < 0 {
+		t.Fatalf("%s branch is never closed in:\n%s", HealthArg, out)
+	}
+	end := i + rel + len("\nfi\n")
+	return out[:i], out[i:end], out[end:]
+}
+
+// TestRenderHealthModeShortCircuits pins the reason the healthcheck can run on
+// a timer at all: it must answer with one call to /actuator/health and stop.
+// The full report makes seven actuator calls and spawns a JVM for
+// `java -version`, which is far too much to repeat every interval inside a
+// container that is already memory- and CPU-limited.
+//
+// It also pins the branch's position. The exposure check below it exits 0 when
+// leaderelection is unexposed, which a healthcheck would read as healthy, so
+// the branch has to sit above it -- and below get(), whose credentials it
+// needs, since the actuator is always behind the injected read-only account.
+func TestRenderHealthModeShortCircuits(t *testing.T) {
+	out := Render(8090, "solmq-status")
+	before, block, _ := splitHealthBlock(t, out)
+
+	// Below get() and the password resolution it depends on.
+	for _, want := range []string{"get() {", "PASS=$(from_configs"} {
+		if !strings.Contains(before, want) {
+			t.Errorf("%q must be resolved before the %s branch; it is not in:\n%s", want, HealthArg, before)
+		}
+	}
+	// Above the exposure check and the report's first query.
+	for _, notYet := range []string{`if [ -n "$CONFIGS" ]; then`, `$BASE/leaderelection`} {
+		if strings.Contains(before, notYet) {
+			t.Errorf("%q appears before the %s branch, so the branch cannot short-circuit it", notYet, HealthArg)
+		}
+	}
+	// One call, and only the health one.
+	if !strings.Contains(block, `get "$BASE/health"`) {
+		t.Errorf("the %s branch does not query /actuator/health:\n%s", HealthArg, block)
+	}
+	if n := strings.Count(block, "get \"$BASE/"); n != 1 {
+		t.Errorf("the %s branch makes %d actuator calls, want exactly 1:\n%s", HealthArg, n, block)
+	}
+	// None of the report's enrichment, above all not the JVM spawn.
+	for _, tooMuch := range []string{"metric ", "java -version", "$BASE/info", "$BASE/workflows"} {
+		if strings.Contains(block, tooMuch) {
+			t.Errorf("the %s branch does %q, which belongs to the report path only:\n%s", HealthArg, tooMuch, block)
+		}
+	}
+}
+
+// TestRenderHealthModeExitsOnVerdict pins what the engine actually reads. The
+// EXIT trap that guarantees the report's exit 0 would swallow a non-zero
+// verdict, so the branch has to clear it before answering; without that, every
+// container reports healthy forever.
+func TestRenderHealthModeExitsOnVerdict(t *testing.T) {
+	out := Render(8090, "solmq-status")
+	_, block, _ := splitHealthBlock(t, out)
+
+	trap := strings.Index(block, "trap - EXIT")
+	if trap < 0 {
+		t.Fatalf("the %s branch never clears the EXIT trap, so its exit status cannot escape:\n%s", HealthArg, block)
+	}
+	if e := strings.Index(block, "exit "); e >= 0 && e < trap {
+		t.Errorf("the %s branch exits before clearing the EXIT trap:\n%s", HealthArg, block)
+	}
+	// UP and nothing else is healthy: a DOWN, an OUT_OF_SERVICE or an
+	// unreachable actuator all have to come out non-zero.
+	if !strings.Contains(block, `if [ "$H" = "UP" ]; then`) {
+		t.Errorf("the %s branch does not gate its success on UP:\n%s", HealthArg, block)
+	}
+	if !strings.Contains(block, "exit 0") || !strings.Contains(block, "exit 1") {
+		t.Errorf("the %s branch must exit 0 on UP and 1 otherwise:\n%s", HealthArg, block)
+	}
+	// The engine keeps stdout in the container's health log, so the verdict is
+	// what a later inspect shows. It is a report line, not a diagnostic, so it
+	// must not carry the "status:" prefix the stderr convention reserves.
+	if !strings.Contains(block, `echo "${H:-unreachable}"`) {
+		t.Errorf("the %s branch does not report the verdict it saw:\n%s", HealthArg, block)
+	}
+	if strings.Contains(block, `echo "status:`) {
+		t.Errorf("the %s branch emits a status: diagnostic, which belongs on stderr:\n%s", HealthArg, block)
 	}
 }
 
@@ -388,6 +501,27 @@ func TestFilenameAndPathConstants(t *testing.T) {
 	}
 	if ConfigPath != "/app/external/spring/config/application.yml" {
 		t.Errorf("ConfigPath = %q, want %q", ConfigPath, "/app/external/spring/config/application.yml")
+	}
+	// The healthcheck contract the three deployment renderers build their
+	// commands from. HealthShell matters because the mounted script never
+	// carries the execute bit on any platform.
+	if HealthArg != "--health" {
+		t.Errorf("HealthArg = %q, want %q", HealthArg, "--health")
+	}
+	if HealthShell != "sh" {
+		t.Errorf("HealthShell = %q, want %q", HealthShell, "sh")
+	}
+	// A timeout at or past the interval would let one slow check overlap the
+	// next, and a start period shorter than the timeout budget the retries
+	// need would report a still-booting JVM as unhealthy.
+	if HealthTimeoutSeconds >= HealthIntervalSeconds {
+		t.Errorf("HealthTimeoutSeconds = %d must be below HealthIntervalSeconds = %d", HealthTimeoutSeconds, HealthIntervalSeconds)
+	}
+	if HealthRetries < 1 {
+		t.Errorf("HealthRetries = %d, want at least 1", HealthRetries)
+	}
+	if HealthStartPeriodSeconds <= HealthIntervalSeconds {
+		t.Errorf("HealthStartPeriodSeconds = %d should exceed HealthIntervalSeconds = %d", HealthStartPeriodSeconds, HealthIntervalSeconds)
 	}
 }
 

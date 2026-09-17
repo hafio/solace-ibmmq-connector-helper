@@ -31,6 +31,33 @@ const ContainerDir = "/app/external"
 // ContainerPath is the script's full path inside the container.
 const ContainerPath = ContainerDir + "/" + Filename
 
+// HealthArg switches the script from the report to the container engine's
+// healthcheck: one query of /actuator/health, answered as an exit status.
+const HealthArg = "--health"
+
+// HealthShell is what every platform invokes the script through. The mounted
+// copy is never executable -- a kubernetes ConfigMap subPath, a compose
+// configs entry and a podman bind mount all land it read-only without the
+// execute bit -- so the healthcheck passes it to a shell rather than running
+// it, the same way runner.RunStatusScript reaches it for the report.
+const HealthShell = "sh"
+
+// The engine healthcheck cadence, shared by the compose healthcheck block and
+// the quadlet Health* keys so the two artifacts cannot drift. Seconds, since
+// compose and podman both spell their durations the same way and kubernetes
+// (whose readiness probe runs the same check on its own rollout-sensitive
+// cadence) wants bare integers.
+//
+// The start period is generous because it covers JVM startup plus the
+// connector's own bindings: a container that is merely still booting must not
+// be reported unhealthy.
+const (
+	HealthIntervalSeconds    = 30
+	HealthTimeoutSeconds     = 10
+	HealthRetries            = 3
+	HealthStartPeriodSeconds = 60
+)
+
 // SecretsDir is where credentials are mounted, one file per name. The script
 // reads a ${...} password back out of it, so it has to be the same directory
 // the connector's own configtree import names -- hence the shared constant
@@ -63,11 +90,20 @@ const header = `#!/bin/sh
 #   docker exec <container> sh ` + ContainerPath + `
 #   podman exec <container> sh ` + ContainerPath + `
 #
-# Always exits 0. The report goes to stdout, anything that went wrong goes to
-# stderr, and neither is encoded in the exit status: an exec wrapper should be
-# able to treat a non-zero exit as "could not reach or run this instance"
+# The report always exits 0. It goes to stdout, anything that went wrong goes
+# to stderr, and neither is encoded in the exit status: an exec wrapper should
+# be able to treat a non-zero exit as "could not reach or run this instance"
 # without a standby instance or a misconfigured endpoint looking like that.
 # Read the "leader-election state:" line, not $?, to tell active from standby.
+#
+# The one exception is the container engine's healthcheck, which needs a
+# verdict rather than a report and so is asked for by name:
+#
+#   sh ` + ContainerPath + ` ` + HealthArg + `
+#
+# That mode prints the instance's own health status and exits 0 only when it
+# is UP. It is what the generated compose healthcheck, the quadlet HealthCmd
+# and the kubernetes readiness probe run; nothing else passes an argument.
 #
 # set -u catches a typo in a variable name; set -e is deliberately NOT used,
 # since a failing command must still reach the end and report on stderr. The
@@ -157,31 +193,6 @@ has_entry() {
   return 1
 }
 
-# An endpoint that is not exposed answers 404, which by the time it reaches
-# wget below is indistinguishable from a wrong port or a rejected credential.
-# Checking the config first turns that dead end into one actionable error. An
-# absent include list is a failure too, not an unknown: Spring then exposes
-# health alone.
-if [ -n "$CONFIGS" ]; then
-  # Scoping the first lookup under exposure keeps an unrelated include key from
-  # being mistaken for it. A hand-written config may inline the mapping instead,
-  # so fall back to any include value and strip a trailing flow-style brace.
-  EXPOSURE=$(from_configs '/^[[:space:]]*exposure:[[:space:]]*$/,$ {s/^[[:space:]]*include:[[:space:]]*//p;}')
-  if [ -z "$EXPOSURE" ]; then
-    EXPOSURE=$(from_configs 's/.*include:[[:space:]]*//p')
-  fi
-  EXPOSURE=$(printf %s "$EXPOSURE" | sed -e 's/}*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
-  if ! has_entry "$EXPOSURE" leaderelection; then
-    echo "status: leaderelection is not exposed by this instance -- management.endpoints.web.exposure.include is '${EXPOSURE:-unset, so only health is exposed}' in $CONFIG_LIST. Add leaderelection to that list, or regenerate and redeploy the config with solmq-conn-util, which always includes it." >&2
-    exit 0
-  fi
-  if ! has_entry "$EXPOSURE" workflows; then
-    echo "status: workflows is not in management.endpoints.web.exposure.include in $CONFIG_LIST, so per-workflow state is missing from this report" >&2
-  fi
-else
-  echo "status: found no application config ($CONFIG_NAME.yml or $CONFIG_NAME.yaml) in SPRING_CONFIG_LOCATION, SPRING_CONFIG_ADDITIONAL_LOCATION, ` + ConfigDir + `/, ./ or ./config/, so actuator exposure and the management account could not be checked before querying" >&2
-fi
-
 # The account password is read back from the same config the connector reads,
 # so the two always agree with no second copy to rotate. A ${...} value means
 # the config routes the password through the secrets model, so follow it to the
@@ -208,6 +219,51 @@ get() {
     wget -qO- "$1" 2>/dev/null
   fi
 }
+
+# --health is the container engine's healthcheck asking for a verdict rather
+# than the report: it answers with an exit status, so it clears the EXIT trap
+# the rest of this script relies on. It sits above the exposure check
+# deliberately -- that check exits 0 when leaderelection is unexposed, which a
+# healthcheck would read as healthy. Nothing below it runs in this mode: one
+# call to /actuator/health, no metrics, no info and no JVM spawn, so it stays
+# cheap enough for the engine to run it on a timer.
+if [ "${1:-}" = "` + HealthArg + `" ]; then
+  trap - EXIT
+  H=$(get "$BASE/health" | sed -n 's/^[^{]*{[[:space:]]*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+  # The engine keeps this line in the container's health log, so it is the
+  # verdict a later inspect shows. That makes it the report, not a diagnostic,
+  # which is why it goes to stdout with no "status:" prefix.
+  echo "${H:-unreachable}"
+  if [ "$H" = "UP" ]; then
+    exit 0
+  fi
+  exit 1
+fi
+
+# An endpoint that is not exposed answers 404, which by the time it reaches
+# wget below is indistinguishable from a wrong port or a rejected credential.
+# Checking the config first turns that dead end into one actionable error. An
+# absent include list is a failure too, not an unknown: Spring then exposes
+# health alone.
+if [ -n "$CONFIGS" ]; then
+  # Scoping the first lookup under exposure keeps an unrelated include key from
+  # being mistaken for it. A hand-written config may inline the mapping instead,
+  # so fall back to any include value and strip a trailing flow-style brace.
+  EXPOSURE=$(from_configs '/^[[:space:]]*exposure:[[:space:]]*$/,$ {s/^[[:space:]]*include:[[:space:]]*//p;}')
+  if [ -z "$EXPOSURE" ]; then
+    EXPOSURE=$(from_configs 's/.*include:[[:space:]]*//p')
+  fi
+  EXPOSURE=$(printf %s "$EXPOSURE" | sed -e 's/}*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+  if ! has_entry "$EXPOSURE" leaderelection; then
+    echo "status: leaderelection is not exposed by this instance -- management.endpoints.web.exposure.include is '${EXPOSURE:-unset, so only health is exposed}' in $CONFIG_LIST. Add leaderelection to that list, or regenerate and redeploy the config with solmq-conn-util, which always includes it." >&2
+    exit 0
+  fi
+  if ! has_entry "$EXPOSURE" workflows; then
+    echo "status: workflows is not in management.endpoints.web.exposure.include in $CONFIG_LIST, so per-workflow state is missing from this report" >&2
+  fi
+else
+  echo "status: found no application config ($CONFIG_NAME.yml or $CONFIG_NAME.yaml) in SPRING_CONFIG_LOCATION, SPRING_CONFIG_ADDITIONAL_LOCATION, ` + ConfigDir + `/, ./ or ./config/, so actuator exposure and the management account could not be checked before querying" >&2
+fi
 
 LE=$(get "$BASE/leaderelection") || LE=""
 if [ -z "$LE" ]; then

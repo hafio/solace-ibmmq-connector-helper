@@ -6,6 +6,7 @@ import (
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 )
 
 const testImage = "solace/solace-pubsub-connector-ibmmq:2.13.0"
@@ -90,6 +91,11 @@ Volume=./solmq-connector-application.yml:/app/external/spring/config/application
 Volume=/abs/certs/truststore.jks:/app/external/classpath/truststores/truststore.jks:ro
 Volume=/abs/libs:/app/external/libs:ro
 Volume=./solmq-connector-status:/app/external/.status-script:ro
+HealthCmd=sh /app/external/.status-script --health
+HealthInterval=30s
+HealthTimeout=10s
+HealthRetries=3
+HealthStartPeriod=60s
 
 [Service]
 Restart=unless-stopped
@@ -118,6 +124,11 @@ Label=solace-connector/role=active
 PublishPort=8090:8090
 Volume=./solmq-connector-application.yml:/app/external/spring/config/application.yml:ro
 Volume=./solmq-connector-status:/app/external/.status-script:ro
+HealthCmd=sh /app/external/.status-script --health
+HealthInterval=30s
+HealthTimeout=10s
+HealthRetries=3
+HealthStartPeriod=60s
 
 [Install]
 WantedBy=default.target
@@ -176,6 +187,10 @@ func TestStatusScriptMountNestsAfterLibs(t *testing.T) {
 // TestStatusScriptMountOmittedWhenPathEmpty asserts a caller that has not
 // yet resolved the status script's host path (a preview/partial render)
 // gets no mount for it, rather than a mount with an empty source.
+//
+// It covers the healthcheck in the same breath: HealthCmd execs that same
+// path, so a unit that mounts no script must declare no check either, or
+// podman would report every such container unhealthy.
 func TestStatusScriptMountOmittedWhenPathEmpty(t *testing.T) {
 	in := fullInput()
 	in.Instance.StatusScriptPath = ""
@@ -183,6 +198,51 @@ func TestStatusScriptMountOmittedWhenPathEmpty(t *testing.T) {
 	unit := RenderQuadlet(in)
 	if strings.Contains(unit.Content, statusTarget) {
 		t.Errorf("RenderQuadlet with empty StatusScriptPath must omit the status mount, got:\n%s", unit.Content)
+	}
+	if strings.Contains(unit.Content, "Health") {
+		t.Errorf("RenderQuadlet with empty StatusScriptPath must omit the healthcheck, got:\n%s", unit.Content)
+	}
+}
+
+// TestHealthcheckRunsTheStatusScript covers the Health* keys. Without them
+// podman populates no .State.Health and `status container` can only report
+// n/a in the HEALTH column -- the defect these keys exist to fix.
+//
+// Every value is built from the statusscript constants, so the quadlet check,
+// the compose healthcheck and the kubernetes readiness probe cannot drift.
+func TestHealthcheckRunsTheStatusScript(t *testing.T) {
+	unit := RenderQuadlet(fullInput())
+
+	wantCmd := "HealthCmd=" + statusscript.HealthShell + " " + statusscript.ContainerPath + " " + statusscript.HealthArg + "\n"
+	if !strings.Contains(unit.Content, wantCmd) {
+		t.Errorf("HealthCmd missing:\nwant %q\ngot:\n%s", wantCmd, unit.Content)
+	}
+	for _, want := range []string{
+		"HealthInterval=30s\n",
+		"HealthTimeout=10s\n",
+		"HealthRetries=3\n",
+		"HealthStartPeriod=60s\n",
+	} {
+		if !strings.Contains(unit.Content, want) {
+			t.Errorf("quadlet health key %q missing:\n%s", want, unit.Content)
+		}
+	}
+	// HealthOnFailure is deliberately absent: podman defaults it to none, so
+	// the check reports a verdict and never restarts or kills anything. Naming
+	// it here means a future edit that adds one has to argue with this test.
+	if strings.Contains(unit.Content, "HealthOnFailure") {
+		t.Errorf("HealthOnFailure must stay unset -- the check reports, it does not act:\n%s", unit.Content)
+	}
+	// The keys belong to [Container], not [Service] or [Install]: quadlet only
+	// translates them there.
+	ctr := strings.Index(unit.Content, "[Container]")
+	cmd := strings.Index(unit.Content, "HealthCmd=")
+	next := strings.Index(unit.Content, "[Install]")
+	if svc := strings.Index(unit.Content, "[Service]"); svc != -1 && svc < next {
+		next = svc
+	}
+	if ctr == -1 || cmd < ctr || cmd > next {
+		t.Errorf("health keys must sit inside [Container]:\n%s", unit.Content)
 	}
 }
 

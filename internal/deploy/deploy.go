@@ -430,17 +430,35 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 	w.Line(14, "mountPath: "+statusscript.ContainerPath)
 	w.Line(14, "subPath: status")
 	w.Line(14, "readOnly: true")
-	// probes (tcpSocket — see prompt.md "Probes"; keep isolated for a later switch)
+	// Liveness stays a tcpSocket probe: it decides whether kubelet restarts the
+	// container, and a connector whose downstream is slow or flapping must not
+	// be restarted for it -- "the actuator port answers" is the right bar.
 	w.Line(10, "livenessProbe:")
 	w.Line(12, "tcpSocket:")
 	w.Line(14, "port: "+strconv.Itoa(mgmtPort))
 	w.Line(12, "initialDelaySeconds: 30")
 	w.Line(12, "periodSeconds: 15")
+	// Readiness runs the same --health check the compose and quadlet artifacts
+	// run, so READY means the connector reports itself UP rather than merely
+	// that its port is open, and the verdict means the same thing on all three
+	// platforms. The script is mounted just above, and is never executable, so
+	// it is passed to a shell rather than run directly.
+	//
+	// The cadence stays the probe's own rather than the engine healthcheck
+	// constants: readiness gates every rollout, and the engines' slower
+	// interval would drag one out. timeoutSeconds has to be spelled out
+	// because kubernetes defaults it to 1s, which an HTTP round trip plus a
+	// shell will lose.
 	w.Line(10, "readinessProbe:")
-	w.Line(12, "tcpSocket:")
-	w.Line(14, "port: "+strconv.Itoa(mgmtPort))
+	w.Line(12, "exec:")
+	w.Line(14, "command:")
+	w.Line(16, "- "+statusscript.HealthShell)
+	w.Line(16, "- "+statusscript.ContainerPath)
+	w.Line(16, "- "+statusscript.HealthArg)
 	w.Line(12, "initialDelaySeconds: 15")
 	w.Line(12, "periodSeconds: 10")
+	w.Line(12, "timeoutSeconds: 5")
+	w.Line(12, "failureThreshold: 3")
 	// resources
 	renderResources(w, dep.Resources)
 	// volumes
