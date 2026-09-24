@@ -867,6 +867,12 @@ func loadEnvFile(envPath string) (*spec.Env, error) {
 // no flags and always succeeds.
 func actVersion() int {
 	fmt.Println("solmq-conn-util", version, runtime.Version(), runtime.GOOS+"/"+runtime.GOARCH)
+	// The support statement goes under the version line, never into it: this
+	// is the output people paste into a problem report, and the first line is
+	// still the only thing a script needs to read.
+	for _, ln := range supportNoticeVersion {
+		fmt.Println(ln)
+	}
 	return 0
 }
 

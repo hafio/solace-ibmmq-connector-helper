@@ -51,6 +51,10 @@ type Instance struct {
 	AppYAML      string             // the rendered application.yml (trailing newline)
 	StatusScript string             // the rendered status script the operator execs inside the container
 	Model        *consolidate.Model // the consolidated model (drives MQTLS etc.)
+
+	// JavaOptions is the top-level java-options: block, nil when absent. It is
+	// merged with Model.MQTLS by spec.JavaEnv, as on every platform.
+	JavaOptions *spec.JavaOptions
 }
 
 // Input is everything needed to render the manifests.
@@ -96,6 +100,16 @@ func quoteRes(v string) string {
 		return `"` + v + `"`
 	}
 	return v
+}
+
+// envValueQuote renders an operator-supplied container env value as a
+// double-quoted YAML scalar. Backslashes and quotes are escaped for YAML, and
+// every '$' is doubled because kubernetes expands $(VAR) references to the
+// container's other variables inside env values and reads $$ back as a single
+// '$'. validate rejects all three characters in the values routed here, so
+// this is the render-side half of that pair, not the only defence.
+func envValueQuote(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", "$$").Replace(s) + `"`
 }
 
 // leaderMode returns the pod's leader-election mode label value, defaulting
@@ -374,16 +388,21 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 	// the timezone is a top-level key rather than a required per-platform one --
 	// an unguarded "env:" with nothing beneath it is a null, not an empty list.
 	sys := in.Syslog
-	if inst.Timezone != "" || inst.Model.MQTLS || sys != nil {
+	tool, jdk := spec.JavaEnv(inst.Model.MQTLS, inst.JavaOptions)
+	if inst.Timezone != "" || tool != "" || jdk != "" || sys != nil {
 		w.Line(10, "env:")
 	}
 	if inst.Timezone != "" {
 		w.Line(12, "- name: TZ")
 		w.Line(14, "value: "+inst.Timezone)
 	}
-	if inst.Model.MQTLS {
+	if tool != "" {
 		w.Line(12, "- name: JAVA_TOOL_OPTIONS")
-		w.Line(14, `value: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"`)
+		w.Line(14, "value: "+envValueQuote(tool))
+	}
+	if jdk != "" {
+		w.Line(12, "- name: JDK_JAVA_OPTIONS")
+		w.Line(14, "value: "+envValueQuote(jdk))
 	}
 	if sys != nil {
 		w.Line(12, "- name: LOGGING_SYSLOG_APPNAME")

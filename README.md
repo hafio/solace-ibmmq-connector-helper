@@ -1,5 +1,13 @@
 # solmq-conn-util -- Solace IBM MQ Connector config generator and deployer
 
+> [!WARNING]
+> **Not a supported Solace product.** `solmq-conn-util` was created by Solace
+> Professional Services and is supported only by Solace Professional Services --
+> not by Solace Support. For help with this tool, contact your Solace
+> Professional Services representative rather than opening a Solace Support
+> case. This notice covers this tool only, not the Solace PubSub+ Connector for
+> IBM MQ that it configures and deploys.
+
 `solmq-conn-util` turns a folder of small, per-workflow YAML files plus one `env.yaml`
 into a consolidated `application.yml` for the **Solace PubSub+ Connector for IBM
 MQ** (`solace/solace-pubsub-connector-ibmmq:2.13.0`), generates the Kubernetes,

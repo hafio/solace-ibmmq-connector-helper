@@ -75,6 +75,10 @@ func renderAbbreviationDoc() string {
 	add("Regenerate: go test ./cmd/solmq-conn-util -run TestAbbreviationDocInSync -update")
 	add("TestAbbreviationDocInSync fails the build if this file drifts from the model. -->")
 	add("")
+	for _, ln := range supportNoticeMarkdown {
+		add(ln)
+	}
+	add("")
 	add("Every short spelling " + bt + "solmq-conn-util" + bt + " accepts, keyed by the abbreviation.")
 	add("Each one is recognised wherever its canonical word is -- both when the command")
 	add("runs and in shell completion -- but only the canonical word is ever printed by")

@@ -410,7 +410,7 @@ var cliVerbs = []cliVerb{
 		Synopsis: "version",
 		Summary:  "Print the utility name, version, Go version and OS/arch",
 		Example:  "solmq-conn-util version",
-		Detail:   "Prints solmq-conn-util's own version (stamped in at build time), the Go version it was built with, and its OS/arch (" + bt + "GOOS" + bt + "/" + bt + "GOARCH" + bt + ") -- for bug reports and to confirm which build is installed. Takes no flags.",
+		Detail:   "Prints solmq-conn-util's own version (stamped in at build time), the Go version it was built with, and its OS/arch (" + bt + "GOOS" + bt + "/" + bt + "GOARCH" + bt + ") -- for bug reports and to confirm which build is installed -- on one line, followed by a short notice that this is not a supported Solace product: it was created by Solace Professional Services and is supported only by them. The first line is unchanged by the notice, so a script can still read the version off it. Takes no flags.",
 	},
 	{
 		Name: "validate", Args: "[-e env.yaml]", Flags: []string{"-e"}, PosArg: posNone, Aliases: []string{"vld"},
@@ -570,6 +570,10 @@ func renderCommandsDoc() string {
 	add("Source of truth: cmd/solmq-conn-util/commands.go (the cliSpec model).")
 	add("Regenerate: go test ./cmd/solmq-conn-util -run TestCommandsDocInSync -update")
 	add("TestCommandsDocInSync fails the build if this file drifts from the model. -->")
+	add("")
+	for _, ln := range supportNoticeMarkdown {
+		add(ln)
+	}
 	add("")
 	add("The full " + bt + "solmq-conn-util" + bt + " command tree. The first argument is a **verb**.")
 	add(bt + "generate" + bt + " takes an optional second argument, " + bt + "config" + bt + ", to render")

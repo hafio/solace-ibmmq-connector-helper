@@ -331,6 +331,58 @@ func TestLabelsPerMode(t *testing.T) {
 	}
 }
 
+// TestJavaOptionsEnvironment covers the java-options: block on compose: both
+// variables land in the service environment, the MQ TLS flag stays first in
+// JAVA_TOOL_OPTIONS with the operator's options after it, JDK_JAVA_OPTIONS
+// never carries the TLS flag, and a block with nothing in it adds nothing.
+func TestJavaOptionsEnvironment(t *testing.T) {
+	render := func(mqTLS bool, j *spec.JavaOptions) string {
+		return Render(Input{
+			Docker:   &spec.Docker{Name: "s"},
+			Instance: Instance{Name: "s", Image: "img", AppYAML: "k: v\n", MQTLS: mqTLS, StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone, JavaOptions: j},
+		})
+	}
+
+	both := render(true, &spec.JavaOptions{Tool: "-Xms512m\n-Xmx1g", JDK: "--add-opens=java.base/java.lang=ALL-UNNAMED"})
+	want := "    environment:\n" +
+		`      JAVA_TOOL_OPTIONS: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false -Xms512m -Xmx1g"` + "\n" +
+		`      JDK_JAVA_OPTIONS: "--add-opens=java.base/java.lang=ALL-UNNAMED"` + "\n"
+	if !strings.Contains(both, want) {
+		t.Errorf("environment block missing or wrong, want:\n%s\ngot:\n%s", want, both)
+	}
+
+	// No TLS and no timezone: the operator's options alone are enough to open
+	// the environment block, and the TLS flag does not appear.
+	jdkOnly := render(false, &spec.JavaOptions{JDK: "-Duser.language=en"})
+	if !strings.Contains(jdkOnly, "    environment:\n      JDK_JAVA_OPTIONS: \"-Duser.language=en\"\n") {
+		t.Errorf("jdk-only environment block missing:\n%s", jdkOnly)
+	}
+	if strings.Contains(jdkOnly, "JAVA_TOOL_OPTIONS") {
+		t.Errorf("JAVA_TOOL_OPTIONS must be absent with no TLS and no tool options:\n%s", jdkOnly)
+	}
+
+	if empty := render(false, &spec.JavaOptions{Tool: " ", JDK: "\n"}); strings.Contains(empty, "environment:") {
+		t.Errorf("a java-options block with nothing in it must not open an environment block:\n%s", empty)
+	}
+}
+
+// TestComposeQuoteEscapes pins the render-side half of the java-options gate:
+// validate refuses these characters, but a value that reached the renderer
+// anyway must still come out as the string the operator wrote -- '$' doubled
+// against compose interpolation, quotes and backslashes escaped for YAML.
+func TestComposeQuoteEscapes(t *testing.T) {
+	for in, want := range map[string]string{
+		"-Xmx1g":        `"-Xmx1g"`,
+		"-Dx=${Y}":      `"-Dx=$${Y}"`,
+		`-Dx="a"`:       `"-Dx=\"a\""`,
+		`-Dpath=C:\tmp`: `"-Dpath=C:\\tmp"`,
+	} {
+		if got := composeQuote(in); got != want {
+			t.Errorf("composeQuote(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
 // TestStatusScriptConfigSourceAndTarget covers the second configs entry: the
 // service references <name>-status and mounts it at
 // /app/external/.status-script.

@@ -258,6 +258,53 @@ func TestRenderNoSecretsNoServiceNoTLS(t *testing.T) {
 	}
 }
 
+// TestRenderJavaOptionsEnv covers the java-options: block on kubernetes: both
+// variables become container env entries, the MQ TLS flag stays first in
+// JAVA_TOOL_OPTIONS, and the operator's options alone are enough to open the
+// env: list when there is no timezone, TLS or syslog to put in it.
+func TestRenderJavaOptionsEnv(t *testing.T) {
+	k := baseKube()
+	inst := one(k.Deployment.Name, "x: 1\n", &consolidate.Model{MQTLS: true})
+	inst.JavaOptions = &spec.JavaOptions{Tool: "-Xms512m\n-Xmx1g", JDK: "-Duser.language=en"}
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
+	want := "            - name: JAVA_TOOL_OPTIONS\n" +
+		`              value: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false -Xms512m -Xmx1g"` + "\n" +
+		"            - name: JDK_JAVA_OPTIONS\n" +
+		`              value: "-Duser.language=en"` + "\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("env entries missing or wrong, want:\n%s\ngot:\n%s", want, out)
+	}
+
+	bare := one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})
+	bare.Timezone = ""
+	bare.JavaOptions = &spec.JavaOptions{JDK: "-Duser.language=en"}
+	out = Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: bare})
+	if !strings.Contains(out, "          env:\n            - name: JDK_JAVA_OPTIONS\n") {
+		t.Errorf("java-options alone must open the env: list:\n%s", out)
+	}
+	if strings.Contains(out, "JAVA_TOOL_OPTIONS") {
+		t.Errorf("JAVA_TOOL_OPTIONS must be absent with no TLS and no tool options:\n%s", out)
+	}
+}
+
+// TestEnvValueQuoteEscapes pins the render-side half of the java-options gate:
+// validate refuses these characters, but a value that reached the renderer
+// anyway must still reach the container as written -- '$' doubled, since
+// kubernetes expands $(VAR) inside env values and reads $$ as one '$', and
+// quotes and backslashes escaped for YAML.
+func TestEnvValueQuoteEscapes(t *testing.T) {
+	for in, want := range map[string]string{
+		"-Xmx1g":        `"-Xmx1g"`,
+		"-Dx=$(HOME)":   `"-Dx=$$(HOME)"`,
+		`-Dx="a"`:       `"-Dx=\"a\""`,
+		`-Dpath=C:\tmp`: `"-Dpath=C:\\tmp"`,
+	} {
+		if got := envValueQuote(in); got != want {
+			t.Errorf("envValueQuote(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
 func TestRenderSyslogUDP(t *testing.T) {
 	k := baseKube()
 	sys := &spec.Syslog{Host: "sys.host", Port: 514, Protocol: spec.SyslogUDP}

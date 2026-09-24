@@ -564,6 +564,97 @@ podman:
 	}
 }
 
+// TestGenerateJavaOptionsReachEveryPlatform is the end-to-end pin for the
+// top-level java-options: block. Written once, as a >- folded block with
+// ${VAR} references in it, it reaches the kubernetes manifest, the compose file
+// and the quadlet unit as the same single line; and an unsafe value stops every
+// platform's generation before anything renders.
+func TestGenerateJavaOptionsReachEveryPlatform(t *testing.T) {
+	const (
+		base   = "image:\n  name: img\n  tag: v1\n"
+		block  = "java-options:\n  tool: >-\n    -Xms512m\n    -Xmx${HEAP:768m}\n  jdk: -Dregion=${REGION}\n"
+		kube   = "kubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n"
+		docker = "docker:\n  command: docker\n  name: solmq\n"
+		podman = "podman:\n  command: podman\n  base-dir: /opt/solmq\n  name: solmq\n"
+	)
+	res := Resolver{Rand: fixedStatusRand, Env: func(name string) (string, bool) {
+		if name == "REGION" {
+			return "apac", true
+		}
+		return "", false
+	}}
+	req := func(env string) Request {
+		return Request{Env: &File{Name: "env.yaml", Data: []byte(env)}, Workflows: synthWorkflowFiles(1)}
+	}
+	// valueOf returns the rest of the line that follows marker, so a check does
+	// not depend on whether the MQ TLS flag leads JAVA_TOOL_OPTIONS.
+	valueOf := func(out, marker string) string {
+		i := strings.Index(out, marker)
+		if i < 0 {
+			return ""
+		}
+		rest := out[i+len(marker):]
+		if j := strings.Index(rest, "\n"); j >= 0 {
+			rest = rest[:j]
+		}
+		return rest
+	}
+
+	k8s, errs, _ := GenerateKubernetes(req(base+block+kube), res, KubeOpts{})
+	if len(errs) > 0 {
+		t.Fatalf("kubernetes: unexpected errors: %v", errs)
+	}
+	if v := valueOf(k8s, "- name: JAVA_TOOL_OPTIONS\n              value: "); !strings.HasSuffix(v, `-Xms512m -Xmx768m"`) {
+		t.Errorf("kubernetes JAVA_TOOL_OPTIONS = %s, want it to end with the folded, expanded options:\n%s", v, k8s)
+	}
+	if v := valueOf(k8s, "- name: JDK_JAVA_OPTIONS\n              value: "); v != `"-Dregion=apac"` {
+		t.Errorf("kubernetes JDK_JAVA_OPTIONS = %s, want \"-Dregion=apac\"", v)
+	}
+
+	compose, errs, _ := GenerateDocker(req(base+block+docker), res)
+	if len(errs) > 0 {
+		t.Fatalf("docker: unexpected errors: %v", errs)
+	}
+	if v := valueOf(compose.Compose, "JAVA_TOOL_OPTIONS: "); !strings.HasSuffix(v, `-Xms512m -Xmx768m"`) {
+		t.Errorf("compose JAVA_TOOL_OPTIONS = %s, want it to end with the folded, expanded options:\n%s", v, compose.Compose)
+	}
+	if v := valueOf(compose.Compose, "JDK_JAVA_OPTIONS: "); v != `"-Dregion=apac"` {
+		t.Errorf("compose JDK_JAVA_OPTIONS = %s, want \"-Dregion=apac\"", v)
+	}
+
+	quadlet, errs, _ := GeneratePodman(req(base+block+podman), res)
+	if len(errs) > 0 {
+		t.Fatalf("podman: unexpected errors: %v", errs)
+	}
+	if v := valueOf(quadlet.Unit.Content, "JAVA_TOOL_OPTIONS="); !strings.HasSuffix(v, `-Xms512m -Xmx768m"`) {
+		t.Errorf("quadlet JAVA_TOOL_OPTIONS = %s, want the quoted, folded, expanded options:\n%s", v, quadlet.Unit.Content)
+	}
+	if v := valueOf(quadlet.Unit.Content, "Environment=JDK_JAVA_OPTIONS="); v != "-Dregion=apac" {
+		t.Errorf("quadlet JDK_JAVA_OPTIONS = %s, want -Dregion=apac", v)
+	}
+
+	// The gate runs before any renderer, on every platform.
+	const bad = "java-options:\n  tool: '-Dx=\"y\"'\n"
+	gated := func(platform string, errs []Issue) {
+		t.Helper()
+		for _, e := range errs {
+			if strings.Contains(e.Msg, "java-options.tool (JAVA_TOOL_OPTIONS)") {
+				return
+			}
+		}
+		t.Errorf("%s: an unsafe java-options.tool must be an error, got %v", platform, errs)
+	}
+	if out, errs, _ := GenerateKubernetes(req(base+bad+kube), res, KubeOpts{}); out != "" || len(errs) == 0 {
+		t.Errorf("kubernetes rendered despite an unsafe java-options.tool")
+	} else {
+		gated("kubernetes", errs)
+	}
+	_, errs, _ = GenerateDocker(req(base+bad+docker), res)
+	gated("docker", errs)
+	_, errs, _ = GeneratePodman(req(base+bad+podman), res)
+	gated("podman", errs)
+}
+
 // TestGeneratePodmanRejectsModeKey pins the removed podman.mode key. Both former
 // values error: generate emits the quadlet unit either way, so a section asking
 // for the old run script is told rather than silently given something else.

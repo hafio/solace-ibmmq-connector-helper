@@ -1,5 +1,13 @@
 # solmq-conn-util user guide
 
+> [!WARNING]
+> **Not a supported Solace product.** `solmq-conn-util` was created by Solace
+> Professional Services and is supported only by Solace Professional Services --
+> not by Solace Support. For help with this tool, contact your Solace
+> Professional Services representative rather than opening a Solace Support
+> case. This notice covers this tool only, not the Solace PubSub+ Connector for
+> IBM MQ that it configures and deploys.
+
 `solmq-conn-util` turns a folder of small, per-workflow YAML files plus one `env.yaml`
 into one consolidated `application.yml` for the **Solace PubSub+ Connector for IBM
 MQ**, generates the Kubernetes, Docker Compose, or Podman artifacts that run it, and
@@ -39,7 +47,7 @@ documentation index; this guide is the complete reference.
 7. [Connector defaults (`env.yaml` top level)](#7-connector-defaults-envyaml-top-level)
    1. [The reserved status account (`solmq-status`)](#71-the-reserved-status-account-solmq-status)
 8. [Platform sections (`kubernetes:`, `docker:`, `podman:`)](#8-platform-sections-kubernetes-docker-podman)
-   0. [Image and timezone (shared by every platform)](#80-image-and-timezone-shared-by-every-platform)
+   0. [Image, timezone and JVM options (shared by every platform)](#80-image-timezone-and-jvm-options-shared-by-every-platform)
    1. [kubernetes](#81-kubernetes)
    2. [docker](#82-docker)
    3. [podman](#83-podman)
@@ -373,7 +381,10 @@ it -- see [section 12.9](#129-what-the-exit-code-means-and-what-each-view-costs)
   see [section 12](#12-status-the-container-the-connector-or-both).
 - **`version`** prints the build's own version (stamped in at build time), the Go
   version it was built with, and its `GOOS`/`GOARCH` -- for bug reports and to
-  confirm which build is installed. Takes no flags.
+  confirm which build is installed -- on one line, followed by a short notice
+  that this is not a supported Solace product (created by Solace Professional
+  Services and supported only by them). The first line is unchanged by the
+  notice, so a script can still read the version off it. Takes no flags.
 - **`validate`** runs **every** check across the whole `env.yaml` (including any
   present `kubernetes:`/`docker:`/`podman:` sections) and its workflows, and prints
   all findings (non-zero exit if any errors). Use it as a linter.
@@ -982,7 +993,7 @@ fields themselves. The stores are configured only under `kubernetes:`, which has
 build a Secret; docker and podman bind-mount them from the `tls.*.file` paths
 directly. See [section 9](#9-secrets-model).
 
-### 8.0 Image and timezone (shared by every platform)
+### 8.0 Image, timezone and JVM options (shared by every platform)
 
 The image is declared **once**, at the top level, and every platform deploys it.
 A per-platform `image:` key inside `kubernetes:`, `docker:`, or `podman:` is
@@ -1017,6 +1028,61 @@ Optional. Unset, no `TZ` is set at all and the image's own default applies; the
 per-platform `timezone:` keys are rejected with an error naming this one. On
 kubernetes the whole `env:` block is omitted when nothing goes in it, rather
 than emitted with nothing beneath it.
+
+Extra **JVM options** are declared the same way, once, in a top-level
+`java-options:` block with two optional sub-keys -- one per environment
+variable the JVM reads options from:
+
+```yaml
+java-options:
+  tool: >-                       # -> JAVA_TOOL_OPTIONS
+    -Xms512m
+    -Xmx${CONNECTOR_HEAP:1g}
+    -XX:+HeapDumpOnOutOfMemoryError
+  jdk: --add-opens=java.base/java.lang=ALL-UNNAMED   # -> JDK_JAVA_OPTIONS
+```
+
+| Sub-key | Variable | Read by | Takes |
+|---------|----------|---------|-------|
+| `tool` | `JAVA_TOOL_OPTIONS` | the JVM itself, so every JVM started in the container | JVM options only: `-X`, `-XX`, `-D`, `-javaagent`, ... |
+| `jdk` | `JDK_JAVA_OPTIONS` | the `java` launcher only (JDK 9+), applied after `JAVA_TOOL_OPTIONS` | anything `java` accepts on its command line, including `--add-opens` and `@argfiles` -- but not `-jar` or anything else that names a main class |
+
+Each value is one string of space-separated options. Write it plain
+(`tool: -Xms512m -Xmx1g`) or, when the list runs long, as a `>-` folded block
+as above; the two are identical, because every run of whitespace -- line breaks
+included -- is collapsed to a single space before anything is rendered. A list
+(`- -Xmx1g`) or a misspelled sub-key is a parse error rather than options
+silently dropped. `${VAR}` and `${VAR:default}` are expanded like every other
+non-credential value ([section 5.1](#51-variable-expansion-var)).
+
+When an MQ binder uses TLS the tool already sets
+`JAVA_TOOL_OPTIONS=-Dcom.ibm.mq.cfg.useIBMCipherMappings=false`; `tool` is
+appended **after** that flag rather than replacing it, so the connector keeps
+the cipher mapping it needs, and an option of yours that sets the same property
+deliberately wins -- the JVM applies these left to right. `jdk` never carries
+the flag. A variable with nothing in it is not set at all.
+
+The values are checked for what the three platforms would read differently: a
+quote, a backslash, a backtick, a `$` left over after expansion (that is, an
+unset variable with no default) or a control character is an error. None of
+them is needed -- options are split on spaces, so there is nothing to quote --
+and each would mean one thing in a compose file, another in a kubernetes
+manifest and a third in a systemd unit. Everything else JVM options use is
+fine, including the `*` and `:` of `-Xlog:gc*`, the `,` and `=` of an agent
+string, and the `%p` of `-XX:ErrorFile=hs_err_%p.log` (which the podman unit
+writes as `%%p`, so systemd does not expand it).
+
+Keep comments off the lines **inside** a `>-` block: there a `#` is part of the
+value, not a comment, and the JVM would refuse it as an option. A value
+carrying ` #` is therefore an error too, pointing the comment above the key --
+while a `#` within one option (`-Dmarker=a#b`) is left alone. A comment on the
+`tool: >-` line itself is fine.
+
+Both variables make the JVM print a `Picked up ...` notice to stderr at
+startup, so expect one in the container log. The status script's own
+`java -version` call clears both first, so its `java:` line
+([section 12](#12-status-the-container-the-connector-or-both)) still reports
+the version, and your heap options never start that throwaway JVM.
 
 ### 8.1 kubernetes
 
@@ -1520,7 +1586,7 @@ kubernetes:
 |--------|--------|
 | no `image-pull:` block | no pull secret, no `imagePullSecrets` -- nothing changes |
 | `name` only | the pod template gets `imagePullSecrets`, and **no Secret is rendered**. Make it yourself: `kubectl create secret docker-registry regcred ...` |
-| `name` + `create: true` | the tool also renders a `kubernetes.io/dockerconfigjson` Secret, built from `image.repo` and the registry account in the `image` block ([section 8.0](#80-image-and-timezone-shared-by-every-platform)) |
+| `name` + `create: true` | the tool also renders a `kubernetes.io/dockerconfigjson` Secret, built from `image.repo` and the registry account in the `image` block ([section 8.0](#80-image-timezone-and-jvm-options-shared-by-every-platform)) |
 
 `create` defaults to **false** deliberately: building a Secret is a mutation, and
 naming one you manage must not overwrite it. It also keeps the registry account
@@ -2184,7 +2250,7 @@ On the application side:
 |------|------|
 | `uptime` | `/actuator/metrics/process.uptime` |
 | `version` | `/actuator/info` -- the build version, when the image publishes one |
-| `java` | `java -version` inside the container; dropped when the image has no `java` on `PATH` |
+| `java` | `java -version` inside the container, run with `JAVA_TOOL_OPTIONS`/`JDK_JAVA_OPTIONS` cleared so the JVM's `Picked up ...` notice is not reported in place of the version ([section 8.0](#80-image-timezone-and-jvm-options-shared-by-every-platform)); dropped when the image has no `java` on `PATH` |
 | `config` | the configuration file the script read the account and exposure list from, resolved the way Spring itself resolves it (see "Instances this tool did not deploy" below) |
 | `heap` | `/actuator/metrics/jvm.memory.used` and `jvm.memory.max`, tagged `area:heap` so the number is comparable with `-Xmx` |
 | `health components` | the per-component statuses in the health document -- which dependency is up and which is not |
@@ -2761,6 +2827,10 @@ container is called something else, is not reachable with `cli` -- reach it with
   `" #"`, a leading YAML indicator, or something that reads back as a bool/number
   (`no`, `0123`) is double-quoted; everything else stays plain, so output is stable.
   Multi-line passthrough values keep their block form.
+- **`java-options` has its own, looser gate.** Spaces separate the options and
+  the shell metacharacters JVM options are full of are allowed, since none of
+  these values reaches a shell; quotes, backslash, backtick, `$`, control
+  characters and a comment left inside a `>-` block are rejected ([section 8.0](#80-image-timezone-and-jvm-options-shared-by-every-platform)).
 - **The safe-charset gate covers more than `command:`.** `image`, `restart` and
   the top-level `timezone`, the `tls.*.file` paths the docker/podman sections
   bind-mount, `libs.dir`, `podman.base-dir`, the kubernetes Secret names, and

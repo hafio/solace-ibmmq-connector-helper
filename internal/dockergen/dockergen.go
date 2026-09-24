@@ -25,6 +25,10 @@ type Instance struct {
 	MQTLS        bool   // when true, add JAVA_TOOL_OPTIONS for IBM cipher mappings
 	StatusScript string // the rendered status script, inlined as a second compose config
 	LeaderMode   string // effective leader-election mode; empty means standalone (normalized in the renderer)
+
+	// JavaOptions is the top-level java-options: block, nil when absent. It is
+	// merged with the MQTLS flag by spec.JavaEnv, as on every platform.
+	JavaOptions *spec.JavaOptions
 }
 
 // Mount is one read-only bind mount (host path -> container path).
@@ -129,15 +133,20 @@ func renderService(w *yw, in Input, inst Instance) {
 			w.Line(6, `- "`+p.String()+`"`)
 		}
 	}
-	// environment: TZ only when set, JAVA_TOOL_OPTIONS only when the connector
-	// uses MQ TLS. Omit the whole key when neither applies.
-	if inst.Timezone != "" || inst.MQTLS || in.Syslog != nil {
+	// environment: TZ only when set, each JVM options variable only when it has
+	// something in it -- the MQ TLS flag, the operator's java-options, or both.
+	// Omit the whole key when nothing applies.
+	tool, jdk := spec.JavaEnv(inst.MQTLS, inst.JavaOptions)
+	if inst.Timezone != "" || tool != "" || jdk != "" || in.Syslog != nil {
 		w.Line(4, "environment:")
 		if inst.Timezone != "" {
 			w.Line(6, "TZ: "+inst.Timezone)
 		}
-		if inst.MQTLS {
-			w.Line(6, `JAVA_TOOL_OPTIONS: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"`)
+		if tool != "" {
+			w.Line(6, "JAVA_TOOL_OPTIONS: "+composeQuote(tool))
+		}
+		if jdk != "" {
+			w.Line(6, "JDK_JAVA_OPTIONS: "+composeQuote(jdk))
 		}
 		// The logback config reads host/port/appname from these at runtime, the
 		// same three the kubernetes Deployment sets.
@@ -234,6 +243,15 @@ func renderContentConfig(w *yw, name, payload string) {
 			w.Line(6, composeEscape(ln))
 		}
 	}
+}
+
+// composeQuote renders an operator-supplied value as a double-quoted compose
+// scalar: backslashes and quotes escaped for YAML, and every '$' doubled so
+// compose's interpolation hands the container the value as written. validate
+// rejects all three characters in the values routed here, so this is the
+// render-side half of that pair, not the only defence.
+func composeQuote(s string) string {
+	return `"` + composeEscape(strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s)) + `"`
 }
 
 // composeEscape doubles every '$'. Docker Compose interpolates the whole

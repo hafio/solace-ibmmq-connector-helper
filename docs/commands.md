@@ -5,6 +5,14 @@ Source of truth: cmd/solmq-conn-util/commands.go (the cliSpec model).
 Regenerate: go test ./cmd/solmq-conn-util -run TestCommandsDocInSync -update
 TestCommandsDocInSync fails the build if this file drifts from the model. -->
 
+> [!WARNING]
+> **Not a supported Solace product.** `solmq-conn-util` was created by Solace
+> Professional Services and is supported only by Solace Professional Services --
+> not by Solace Support. For help with this tool, contact your Solace
+> Professional Services representative rather than opening a Solace Support
+> case. This notice covers this tool only, not the Solace PubSub+ Connector for
+> IBM MQ that it configures and deploys.
+
 The full `solmq-conn-util` command tree. The first argument is a **verb**.
 `generate` takes an optional second argument, `config`, to render
 `application.yml` instead of a platform's artifacts.
@@ -239,7 +247,7 @@ solmq-conn-util cli -e env.yaml
 
 Alias: `ver`.
 
-Prints solmq-conn-util's own version (stamped in at build time), the Go version it was built with, and its OS/arch (`GOOS`/`GOARCH`) -- for bug reports and to confirm which build is installed. Takes no flags.
+Prints solmq-conn-util's own version (stamped in at build time), the Go version it was built with, and its OS/arch (`GOOS`/`GOARCH`) -- for bug reports and to confirm which build is installed -- on one line, followed by a short notice that this is not a supported Solace product: it was created by Solace Professional Services and is supported only by them. The first line is unchanged by the notice, so a script can still read the version off it. Takes no flags.
 
 ```sh
 solmq-conn-util version

@@ -1,5 +1,13 @@
 # solmq-conn-util -- development guide
 
+> [!WARNING]
+> **Not a supported Solace product.** `solmq-conn-util` was created by Solace
+> Professional Services and is supported only by Solace Professional Services --
+> not by Solace Support. For help with this tool, contact your Solace
+> Professional Services representative rather than opening a Solace Support
+> case. This notice covers this tool only, not the Solace PubSub+ Connector for
+> IBM MQ that it configures and deploys.
+
 Building, testing, releasing, and design notes for `solmq-conn-util`. For using the
 tool, see [userguide.md](userguide.md); for a quick start, [README.md](../README.md).
 

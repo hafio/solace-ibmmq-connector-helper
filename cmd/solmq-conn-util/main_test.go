@@ -5903,15 +5903,21 @@ func TestNoPodsFoundExplainsTheBranchItCameFrom(t *testing.T) {
 
 // TestVersionOutputShape pins the exact printed shape in an un-injected test
 // build, where the package-level version var still holds its "dev" default.
+// The first line is the one a script reads the version from, so the support
+// notice must follow it rather than change it.
 func TestVersionOutputShape(t *testing.T) {
 	var code int
 	stdout := captureStdout(t, func() { code = run([]string{"version"}) })
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
-	want := fmt.Sprintf("solmq-conn-util dev %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	first := fmt.Sprintf("solmq-conn-util dev %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	want := first + strings.Join(supportNoticeVersion, "\n") + "\n"
 	if stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+	if !strings.HasPrefix(stdout, first) {
+		t.Errorf("the version line must come first and unchanged, got %q", stdout)
 	}
 }
 

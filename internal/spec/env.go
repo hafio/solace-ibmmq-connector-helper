@@ -17,6 +17,10 @@ type Env struct {
 	Kubernetes *Kubernetes
 	Docker     *Docker
 	Podman     *Podman
+
+	// JavaOptions is the top-level java-options: block, nil when absent: extra
+	// JVM options every platform sets through the environment.
+	JavaOptions *JavaOptions
 }
 
 // Workflows drives which files in a folder are treated as workflows.
@@ -32,6 +36,7 @@ type rawEnv struct {
 	Workflows   *rawWorkflows `yaml:"workflows"`
 	Image       *Image        `yaml:"image"`
 	Timezone    string        `yaml:"timezone"`
+	JavaOptions *JavaOptions  `yaml:"java-options"`
 	Kubernetes  *Kubernetes   `yaml:"kubernetes"`
 	Docker      *Docker       `yaml:"docker"`
 	Podman      *Podman       `yaml:"podman"`
@@ -50,10 +55,11 @@ func ParseEnv(data []byte) (*Env, error) {
 		return nil, fmt.Errorf("env.yaml: %v", err)
 	}
 	e := &Env{
-		Defaults:  *defaultsFromRaw(raw.rawDefaults),
-		Workflows: workflowsFromRaw(raw.Workflows),
-		Image:     raw.Image,
-		Timezone:  raw.Timezone,
+		Defaults:    *defaultsFromRaw(raw.rawDefaults),
+		Workflows:   workflowsFromRaw(raw.Workflows),
+		Image:       raw.Image,
+		Timezone:    raw.Timezone,
+		JavaOptions: raw.JavaOptions,
 	}
 	// The effective management port drives the kubernetes service default, so an
 	// unset service.port targets the port the connector actually listens on

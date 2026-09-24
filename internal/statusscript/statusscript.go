@@ -357,8 +357,15 @@ fi
 # it has that shape and passed through verbatim when it does not, so an
 # unfamiliar JVM still reports something. An image with no java on PATH reports
 # nothing at all rather than an error: this line is enrichment.
+#
+# The JVM options variables are cleared for this one call, in a subshell so the
+# rest of the script never sees the difference. Each makes the JVM print a
+# "Picked up ..." line to stderr ahead of the version, which head would then
+# report as the java line -- and the connector's own heap or agent options have
+# no business starting this throwaway JVM. The version is the same either way:
+# it is the same binary.
 if command -v java >/dev/null 2>&1; then
-  JAVA_RAW=$(java -version 2>&1 | head -n 1)
+  JAVA_RAW=$( (unset JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS; java -version 2>&1) | head -n 1)
   JAVA_LINE=$(printf %s "$JAVA_RAW" | sed -n 's/^\([^ ]*\)[[:space:]].*"\([^"]*\)".*/\1 \2/p')
   if [ -n "${JAVA_LINE:-}" ]; then
     echo "java: $JAVA_LINE"

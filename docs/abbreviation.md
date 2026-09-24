@@ -6,6 +6,14 @@ cmd/solmq-conn-util/main.go (platformAliasList).
 Regenerate: go test ./cmd/solmq-conn-util -run TestAbbreviationDocInSync -update
 TestAbbreviationDocInSync fails the build if this file drifts from the model. -->
 
+> [!WARNING]
+> **Not a supported Solace product.** `solmq-conn-util` was created by Solace
+> Professional Services and is supported only by Solace Professional Services --
+> not by Solace Support. For help with this tool, contact your Solace
+> Professional Services representative rather than opening a Solace Support
+> case. This notice covers this tool only, not the Solace PubSub+ Connector for
+> IBM MQ that it configures and deploys.
+
 Every short spelling `solmq-conn-util` accepts, keyed by the abbreviation.
 Each one is recognised wherever its canonical word is -- both when the command
 runs and in shell completion -- but only the canonical word is ever printed by

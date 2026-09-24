@@ -8,6 +8,7 @@ package podmangen
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -26,10 +27,6 @@ const appYAMLTarget = "/app/external/spring/config/application.yml"
 // instead of four.
 const statusTarget = statusscript.ContainerPath
 
-// javaToolOptions is the JAVA_TOOL_OPTIONS value set when the connector uses MQ TLS,
-// selecting the IBM cipher mappings the connector expects.
-const javaToolOptions = "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"
-
 // Instance is the connector: its container name and on-disk config path.
 type Instance struct {
 	Name             string // container name
@@ -43,6 +40,9 @@ type Instance struct {
 	// so unlike compose this has to exist on disk before the unit starts.
 	LogbackPath string
 	LeaderMode  string // leader-election mode; empty means standalone (see leaderLabels)
+	// JavaOptions is the top-level java-options: block, nil when absent. It is
+	// merged with the MQTLS flag by spec.JavaEnv, as on every platform.
+	JavaOptions *spec.JavaOptions
 }
 
 // Mount is one read-only bind mount (host path -> container path).
@@ -83,6 +83,22 @@ type Unit struct {
 // sw is the shared line writer; podman's lines are never nested, so every
 // call below passes indent 0 to Line.
 type sw = yamlwriter.Writer
+
+// systemdEnv renders one Environment= assignment for an operator-supplied value.
+// systemd expands % specifiers in unit files -- including in what quadlet
+// passes on to the generated service -- so a literal '%' (the %p in
+// -XX:ErrorFile=hs_err_%p.log) is doubled, or the container would get the
+// unit's name in its place. An assignment carrying a space has to be quoted
+// whole, or systemd splits it into several assignments. A value with neither
+// renders exactly as the unquoted form always has. Quotes and backslashes are
+// escaped too, though validate rejects both before anything renders.
+func systemdEnv(name, value string) string {
+	v := strings.ReplaceAll(value, "%", "%%")
+	if !strings.ContainsAny(v, " \t\"'\\") {
+		return "Environment=" + name + "=" + v
+	}
+	return `Environment="` + name + "=" + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(v) + `"`
+}
 
 // seconds spells a duration the way the quadlet Health* keys want it.
 func seconds(n int) string { return strconv.Itoa(n) + "s" }
@@ -131,8 +147,12 @@ func RenderQuadlet(in Input) Unit {
 	if inst.Timezone != "" {
 		w.Line(0, "Environment=TZ="+inst.Timezone)
 	}
-	if inst.MQTLS {
-		w.Line(0, "Environment=JAVA_TOOL_OPTIONS="+javaToolOptions)
+	tool, jdk := spec.JavaEnv(inst.MQTLS, inst.JavaOptions)
+	if tool != "" {
+		w.Line(0, systemdEnv("JAVA_TOOL_OPTIONS", tool))
+	}
+	if jdk != "" {
+		w.Line(0, systemdEnv("JDK_JAVA_OPTIONS", jdk))
 	}
 	if sl := in.Syslog; sl != nil {
 		w.Line(0, "Environment=LOGGING_SYSLOG_APPNAME="+inst.Name)

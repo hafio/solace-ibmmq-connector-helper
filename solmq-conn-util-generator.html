@@ -14,11 +14,12 @@
 <style>
 :root{--sg:#00C895;--sgl:#ABFF88;--sdb:#093B5F;--sddb:#03213B;--st:#009193;--so:#FCAB29;--sr:#e05252;--sky:#C2F7FF;--bg:#f8f9fa;--bgc:#fff;--bgi:#f1f5f9;--tp:#334155;--ts:#64748b;--tm:#94a3b8;--bc:#e2e8f0;--r:6px;--rl:8px;--ss:0 1px 3px 0 rgb(0 0 0/.1)}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Inter',system-ui,sans-serif;font-size:.88rem;color:var(--tp);background:var(--bg);line-height:1.5}
+body{font-family:'Inter',system-ui,sans-serif;font-size:.88rem;color:var(--tp);background:var(--bg);line-height:1.5;display:flex;flex-direction:column;height:100vh}
 .hero{background:linear-gradient(135deg,var(--sddb),var(--sdb));color:#fff;padding:.8rem 1.4rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
 .hero h1{font-size:1.15rem;font-weight:700}.hero .sub{font-size:.74rem;color:rgba(255,255,255,.6)}
 .hero-actions{margin-left:auto;display:flex;gap:.4rem;flex-wrap:wrap}
-.page{display:flex;height:calc(100vh - 60px)}
+.support-notice{background:#FFF4DE;border-bottom:1px solid var(--so);color:#6b4200;padding:.35rem 1.4rem;font-size:.74rem;line-height:1.45}
+.page{display:flex;flex:1;min-height:0}
 
 /* Sidebar */
 .sidebar{width:200px;flex-shrink:0;background:var(--sddb);overflow-y:auto;padding:.75rem 0}
@@ -97,7 +98,7 @@ details[open]>summary::before{content:"- "}
 .toast{position:fixed;bottom:1rem;right:1rem;background:var(--sddb);color:#fff;padding:.5rem 1rem;border-radius:var(--r);font-size:.78rem;opacity:0;transform:translateY(8px);transition:all .25s;pointer-events:none;z-index:100}
 .toast.show{opacity:1;transform:translateY(0)}
 
-@media(max-width:1000px){.sidebar{display:none}.page{height:auto}.main-area{flex-direction:column}.form-scroll,.yaml-scroll{overflow:visible;min-width:0}.ycode{max-height:none}}
+@media(max-width:1000px){.sidebar{display:none}body{height:auto}.main-area{flex-direction:column}.form-scroll,.yaml-scroll{overflow:visible;min-width:0}.ycode{max-height:none}}
 </style>
 </head>
 <body>
@@ -113,6 +114,7 @@ details[open]>summary::before{content:"- "}
     <button class="btn btn-d" onclick="downloadAll()">Download all (.zip)</button>
   </div>
 </div>
+<div class="support-notice" id="support-notice" role="note"><strong>Not a supported Solace product.</strong> solmq-conn-util was created by Solace Professional Services and is supported only by Solace Professional Services -- not by Solace Support. For help with this tool, contact your Solace Professional Services representative rather than opening a Solace Support case. This notice covers this tool only, not the Solace PubSub+ Connector for IBM MQ that it configures and deploys.</div>
 <div class="page">
 
 <nav class="sidebar" id="sidebar">
@@ -247,8 +249,8 @@ details[open]>summary::before{content:"- "}
     <div class="f"><label>solace-defaults</label><textarea id="i-soldef" rows="3" placeholder="connect-retries: -1"></textarea><div class="h">Merged into every Solace binder's solace.java.* block and into the leader-election session.</div></div>
   </div>
 
-  <!-- Image + timezone (shared by every platform) -->
-  <div class="sec"><h3>Image &amp; Timezone</h3>
+  <!-- Image, timezone and JVM options (shared by every platform) -->
+  <div class="sec"><h3>Image, Timezone &amp; JVM Options</h3>
     <div class="h">One declaration, used by every platform. Repo is the registry
     HOST only -- a Docker Hub namespace such as "solace/" is part of the
     repository path and belongs in Name.</div>
@@ -262,6 +264,10 @@ details[open]>summary::before{content:"- "}
       <div class="f"><label>Registry Pass</label><input id="i-img-pass" placeholder="REGISTRY_PASSWORD"><label class="h" style="display:flex;align-items:center;gap:.3rem;font-style:normal;cursor:pointer"><input type="checkbox" id="i-img-pass-env" checked> env var (uncheck for a literal value)</label></div>
     </div>
     <div class="f"><label>Timezone</label><input id="i-tz" placeholder="Asia/Singapore"><div class="h">Optional; sets the container TZ. Blank leaves the image default.</div></div>
+    <div class="fr">
+      <div class="f"><label>java-options.tool (JAVA_TOOL_OPTIONS)</label><textarea id="i-jto" rows="2" placeholder="-Xms512m -Xmx1g"></textarea><div class="h">Optional. Read by every JVM in the container; JVM options only. Line breaks become spaces. With MQ TLS, appended after the tool's own cipher-mapping flag.</div></div>
+      <div class="f"><label>java-options.jdk (JDK_JAVA_OPTIONS)</label><textarea id="i-jjo" rows="2" placeholder="--add-opens=java.base/java.lang=ALL-UNNAMED"></textarea><div class="h">Optional. Read by the java launcher only, so it also takes launcher options such as --add-opens.</div></div>
+    </div>
   </div>
 
   <!-- Kubernetes -->
@@ -1051,6 +1057,9 @@ function readModel(){
     pass: readCredById('i-img-pass', 'i-img-pass-env')
   };
   m.timezone = V('i-tz');
+  // Normalized exactly as spec.NormalizeJavaOptions does, so the preview shows
+  // the one line every platform will actually get.
+  m.javaOptions = { tool: normJavaOptions(V('i-jto')), jdk: normJavaOptions(V('i-jjo')) };
 
   m.kube = C('i-k8s-on') ? {
     command: V('i-k8s-cmd') || 'kubectl',
@@ -1204,6 +1213,11 @@ function emitEnv(m){
        + kcred('user', img.user, '  ') + kcred('pass', img.pass, '  ');
   }
   if(m.timezone) y += '\n' + kv('timezone', m.timezone, '');
+  const jo = m.javaOptions || {};
+  if(jo.tool || jo.jdk){
+    y += '\n# ---- JVM options (one declaration, every platform) ----\njava-options:\n'
+       + kv('tool', jo.tool, '  ') + kv('jdk', jo.jdk, '  ');
+  }
 
   if(m.kube) y += '\n' + emitKube(m.kube);
   if(m.docker) y += '\n' + emitCtr(m.docker);
@@ -1707,6 +1721,52 @@ function checkImageBlock(add, warn, m){
   checkCred(add, warn, ENV_FILE, 'image.pass', i.pass);
   if(m.timezone && !safeToken(m.timezone)) add(ENV_FILE, `timezone "${m.timezone}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
   checkExpansion(warn, ENV_FILE, 'timezone', m.timezone);
+  checkJavaOptions(add, warn, m);
+}
+
+// checkJavaOptions mirrors validate.checkJavaOptions: the JVM options every
+// platform sets. Spaces and shell metacharacters are ordinary JVM syntax here,
+// so this is not safeToken -- only what the three renderers would read
+// differently is refused (javaOptionsProblem). It runs wherever
+// checkImageBlock does, i.e. only once a platform is in play, as in Go.
+function checkJavaOptions(add, warn, m){
+  const jo = m.javaOptions || {};
+  [['java-options.tool', 'JAVA_TOOL_OPTIONS', jo.tool], ['java-options.jdk', 'JDK_JAVA_OPTIONS', jo.jdk]]
+    .forEach(([key, envVar, val]) => {
+      const p = javaOptionsProblem(val || '');
+      if(p) add(ENV_FILE, `${key} (${envVar}) ${p}`);
+      checkExpansion(warn, ENV_FILE, key, val);
+    });
+}
+// normJavaOptions mirrors spec.NormalizeJavaOptions: every run of whitespace,
+// line breaks included, becomes one space.
+function normJavaOptions(s){ return String(s || '').split(/\s+/).filter(Boolean).join(' '); }
+// javaOptionsProblem mirrors validate.javaOptionsProblem word for word. The
+// '$' message is built by concatenation, not a template literal, so its
+// ${VAR} stays literal text.
+function javaOptionsProblem(s){
+  if(s.startsWith('#') || s.indexOf(' #') >= 0){
+    return "contains ' #', which reads as a comment but is not one: inside a >- or | block a '#' is part of the value. " +
+      'Move the comment above the java-options: key';
+  }
+  for(const ch of s){
+    const c = ch.codePointAt(0);
+    if(ch === '$'){
+      return "contains '$': docker compose and kubernetes would each read it as a variable reference of their own. " +
+        "A ${VAR} or ${VAR:default} reference is expanded by solmq-conn-util before this check, so a '$' still here means " +
+        "an unset variable with no default -- set it, give it a :default, or remove the '$'";
+    }
+    if(ch === '"' || ch === '\\' || ch === "'" || ch === '`'){
+      const q = { '"': "'\"'", '\\': "'\\\\'", "'": "'\\''", '`': "'`'" }[ch];
+      return 'contains ' + q + ': quoting and escaping mean different things in a compose file, a kubernetes manifest and a systemd unit. ' +
+        'Remove it -- options are split on spaces, so no quoting is needed, and an option value cannot contain a space';
+    }
+    if(c < 0x20 || c === 0x7f){
+      const q = c === 7 ? "'\\a'" : c === 8 ? "'\\b'" : "'\\x" + c.toString(16).padStart(2, '0') + "'";
+      return 'contains the control character ' + q + '; remove it';
+    }
+  }
+  return '';
 }
 
 function checkKube(add, warn, m){
@@ -3087,7 +3147,7 @@ function clearForm(){
    'i-img-user-env', 'i-img-pass-env'].forEach(id => setC(id, true));
   ['i-log', 'i-soldef', 'i-le-queue', 'i-le-fo', 'i-le-props', 'i-k8s-name', 'i-k8s-ns',
    'i-k8s-cpu', 'i-k8s-mem', 'i-k8s-ipull-name',
-   'i-img-repo', 'i-img-name', 'i-img-tag', 'i-img-user', 'i-img-pass', 'i-tz',
+   'i-img-repo', 'i-img-name', 'i-img-tag', 'i-img-user', 'i-img-pass', 'i-tz', 'i-jto', 'i-jjo',
    'i-ts-file', 'i-ts-pass', 'i-ks-file', 'i-ks-pass'].forEach(id => setV(id, ''));
   setV('i-wf-dir', '.'); setV('i-wf-pat', '*');
   setV('i-le-mode', ''); setV('i-k8s-libs', ''); setV('i-k8s-cred', ''); setV('i-k8s-stores', '');

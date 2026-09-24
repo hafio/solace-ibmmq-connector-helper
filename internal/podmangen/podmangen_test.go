@@ -246,6 +246,53 @@ func TestHealthcheckRunsTheStatusScript(t *testing.T) {
 	}
 }
 
+// TestQuadletJavaOptionsEnvironment covers the java-options: block in the
+// unit: both variables are set, the MQ TLS flag stays first in
+// JAVA_TOOL_OPTIONS, and a value with spaces is quoted whole -- unquoted,
+// systemd would split it into one assignment per option and the container
+// would get only the first.
+func TestQuadletJavaOptionsEnvironment(t *testing.T) {
+	in := minimalInput()
+	in.Instance.MQTLS = true
+	in.Instance.JavaOptions = &spec.JavaOptions{Tool: "-Xms512m\n-Xmx1g", JDK: "-Duser.language=en"}
+	unit := RenderQuadlet(in).Content
+	for _, want := range []string{
+		`Environment="JAVA_TOOL_OPTIONS=-Dcom.ibm.mq.cfg.useIBMCipherMappings=false -Xms512m -Xmx1g"` + "\n",
+		// A single option has no space, so it keeps the unquoted form every
+		// other Environment= line in the unit uses.
+		"Environment=JDK_JAVA_OPTIONS=-Duser.language=en\n",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("unit missing %q:\n%s", want, unit)
+		}
+	}
+
+	// Nothing set: neither variable appears, not even empty.
+	plain := RenderQuadlet(minimalInput()).Content
+	if strings.Contains(plain, "JAVA_TOOL_OPTIONS") || strings.Contains(plain, "JDK_JAVA_OPTIONS") {
+		t.Errorf("no TLS and no java-options must set no JVM options variable:\n%s", plain)
+	}
+}
+
+// TestSystemdEnvEscapes pins the rules systemdEnv exists for: '%' doubled so
+// systemd does not expand it as a specifier (the %p of a JVM error-file path
+// would otherwise become the unit's name), a value with a space quoted whole,
+// and quotes and backslashes escaped inside those quotes.
+func TestSystemdEnvEscapes(t *testing.T) {
+	for _, c := range []struct{ value, want string }{
+		{"-Xmx1g", "Environment=V=-Xmx1g"},
+		{"-XX:ErrorFile=/tmp/hs_err_%p.log", "Environment=V=-XX:ErrorFile=/tmp/hs_err_%%p.log"},
+		{"-Xms512m -Xmx1g", `Environment="V=-Xms512m -Xmx1g"`},
+		{"-Dx=%t -Dy=z", `Environment="V=-Dx=%%t -Dy=z"`},
+		{`-Dx="a"`, `Environment="V=-Dx=\"a\""`},
+		{`-Dpath=C:\tmp`, `Environment="V=-Dpath=C:\\tmp"`},
+	} {
+		if got := systemdEnv("V", c.value); got != c.want {
+			t.Errorf("systemdEnv(%q) = %s, want %s", c.value, got, c.want)
+		}
+	}
+}
+
 // syslogInput is minimalInput plus a syslog block and the logback file path the
 // CLI would have written beside application.yml. podman cannot inline file
 // content, so unlike compose the config has to exist on disk and be mounted.

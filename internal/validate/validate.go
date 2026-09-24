@@ -72,6 +72,11 @@ type Context struct {
 	Docker    *spec.Docker     // nil when the docker section is absent/unused
 	Podman    *spec.Podman     // nil when the podman section is absent/unused
 
+	// JavaOptions is the top-level java-options: block, nil when absent. It is
+	// the JVM options every platform sets, so like Image it is checked only
+	// when a platform is in play.
+	JavaOptions *spec.JavaOptions
+
 	// Target gates: enable the deploy-grade checks for the selected target
 	// (secret/store wiring, image required, command safe). `validate` sets all
 	// three so it lints every section present in env.yaml.
@@ -146,6 +151,7 @@ func Run(ctx Context) (errs, warns []Issue) {
 
 	// The image every platform deploys, and then the per-target deploy-grade checks.
 	checkImage(add, warn, ctx)
+	checkJavaOptions(add, ctx)
 	// Unconditional: syslog is a top-level key now, so a docker-only run or a
 	// bare `generate config` has to validate it too. Under kubernetes only, it
 	// would go unchecked everywhere else it now applies.
@@ -956,6 +962,67 @@ func isDNS1123(s string) bool { return len(s) <= 63 && dns1123RE.MatchString(s) 
 // checkSecretName gates a Secret name that is emitted verbatim into the manifest
 // (metadata.name, secretRef.name, volumes[].secret.secretName). An empty name is
 // its own message: a create block without one renders a nameless object.
+// checkJavaOptions gates the top-level java-options: block. It cannot take
+// SafeToken like the other shared values: each variable is several options by
+// design, so spaces separate them, and shell metacharacters such as the '*' in
+// -Xlog:gc* or the ',' in -agentlib:jdwp=... are ordinary JVM syntax -- none of
+// these values is ever handed to a shell. What it rejects is what the three
+// renderers cannot all carry with one meaning (see javaOptionsProblem).
+//
+// The check runs on the normalized value, the one the renderers emit, so the
+// newlines a literal block keeps are not mistaken for control characters.
+func checkJavaOptions(add func(string, string, ...any), ctx Context) {
+	if !ctx.CheckKubernetes && !ctx.CheckDocker && !ctx.CheckPodman {
+		return
+	}
+	j := ctx.JavaOptions
+	if j == nil {
+		return
+	}
+	for _, o := range []struct{ key, envVar, value string }{
+		{"java-options.tool", "JAVA_TOOL_OPTIONS", j.Tool},
+		{"java-options.jdk", "JDK_JAVA_OPTIONS", j.JDK},
+	} {
+		if p := javaOptionsProblem(spec.NormalizeJavaOptions(o.value)); p != "" {
+			add(fileEnv, "%s (%s) %s", o.key, o.envVar, p)
+		}
+	}
+}
+
+// javaOptionsProblem returns why s cannot be set as a JVM options variable on
+// every platform, or "" when it can. The value lands double-quoted in a compose
+// file and a kubernetes manifest and in a systemd Environment= line, and each
+// of those has its own escape and quoting rules, so any character whose meaning
+// differs between them is refused rather than escaped three ways: an option
+// that means one thing under docker and another under podman is worse than an
+// error. '%' is not among them -- it is common in JVM options (the %p in
+// -XX:ErrorFile=hs_err_%p.log) and the podman renderer doubles it for systemd.
+func javaOptionsProblem(s string) string {
+	// A trailing comment on a line inside a >- or | block is not a comment:
+	// YAML keeps it as part of the value, and the JVM would refuse "#" as an
+	// unrecognized option. A plain scalar cannot carry " #" at all, so this is
+	// only ever that mistake -- while a '#' inside one option (-Dx=a#b) is left
+	// alone.
+	if strings.HasPrefix(s, "#") || strings.Contains(s, " #") {
+		return "contains ' #', which reads as a comment but is not one: inside a >- or | block a '#' is part of the value. " +
+			"Move the comment above the java-options: key"
+	}
+	for _, r := range s {
+		switch {
+		case r == '$':
+			return "contains '$': docker compose and kubernetes would each read it as a variable reference of their own. " +
+				"A ${VAR} or ${VAR:default} reference is expanded by solmq-conn-util before this check, so a '$' still here means " +
+				"an unset variable with no default -- set it, give it a :default, or remove the '$'"
+		case r == '"' || r == '\\' || r == '\'' || r == '`':
+			return fmt.Sprintf("contains %q: quoting and escaping mean different things in a compose file, a kubernetes manifest and a systemd unit. "+
+				"Remove it -- options are split on spaces, so no quoting is needed, and an option value cannot contain a space", r)
+		case r < 0x20 || r == 0x7f:
+			return fmt.Sprintf("contains the control character %q; remove it", r)
+		}
+	}
+	return ""
+}
+
 // checkImage validates the top-level image: block -- the one declaration every
 // platform deploys from. It runs only when a platform is in play: `generate
 // config` renders application.yml alone and never needs an image.

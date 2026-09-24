@@ -650,9 +650,14 @@ func TestRenderReportsHealthComponents(t *testing.T) {
 func TestRenderReportsJavaConfigAndHeap(t *testing.T) {
 	out := Render(8090, "solmq-status")
 	for _, want := range []string{
-		// java writes -version to stderr, so the redirect is load-bearing.
+		// java writes -version to stderr, so the redirect is load-bearing. The
+		// JVM options variables are cleared for that call, or the first line
+		// would be the JVM's "Picked up JAVA_TOOL_OPTIONS: ..." notice instead
+		// of the version -- which is what every MQ TLS instance, and every one
+		// with java-options set, reported before. The space after "$(" keeps
+		// the subshell from reading as arithmetic.
 		`if command -v java >/dev/null 2>&1; then`,
-		`JAVA_RAW=$(java -version 2>&1 | head -n 1)`,
+		`JAVA_RAW=$( (unset JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS; java -version 2>&1) | head -n 1)`,
 		`echo "java: $JAVA_LINE"`,
 		`echo "java: $JAVA_RAW"`,
 		`echo "config: $CONFIG_LIST"`,

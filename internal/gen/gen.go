@@ -100,6 +100,7 @@ func Validate(r Request, res Resolver) (errs, warns []Issue) {
 		Defaults:        &e.Defaults,
 		Image:           e.Image,
 		Timezone:        e.Timezone,
+		JavaOptions:     e.JavaOptions,
 		Kube:            e.Kubernetes,
 		Docker:          e.Docker,
 		Podman:          e.Podman,
@@ -158,6 +159,7 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		Defaults:        &e.Defaults,
 		Image:           e.Image,
 		Timezone:        e.Timezone,
+		JavaOptions:     e.JavaOptions,
 		Kube:            k,
 		CheckKubernetes: true,
 		Env:             res.Env,
@@ -208,6 +210,7 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		AppYAML:      b.appYAML,
 		StatusScript: statusscript.Render(deploy.ManagementPort(in), spec.StatusUserName),
 		Model:        b.model,
+		JavaOptions:  e.JavaOptions,
 	}
 	return deploy.Render(in), nil, warns
 }
@@ -234,7 +237,7 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 		pissues = append(pissues, Issue{File: fileEnv, Msg: "docker target requires a 'docker:' section in env.yaml"})
 	}
 	verrs, w := validate.Run(validate.Context{
-		Workflows: wfs, Defaults: &e.Defaults, Image: e.Image, Timezone: e.Timezone, Docker: d, CheckDocker: true, Env: res.Env,
+		Workflows: wfs, Defaults: &e.Defaults, Image: e.Image, Timezone: e.Timezone, JavaOptions: e.JavaOptions, Docker: d, CheckDocker: true, Env: res.Env,
 		AllowCommands: extraAllowed,
 	})
 	errs = append(pissues, verrs...)
@@ -268,6 +271,7 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 			MQTLS:        b.model.MQTLS,
 			StatusScript: statusscript.Render(e.Defaults.EffectiveManagementPort(), spec.StatusUserName),
 			LeaderMode:   e.Defaults.LeaderElection.EffectiveMode(),
+			JavaOptions:  e.JavaOptions,
 		},
 	}
 	return DockerPlan{Compose: dockergen.Render(in), Secrets: b.model.Secrets}, nil, warns
@@ -385,7 +389,7 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 		pissues = append(pissues, Issue{File: fileEnv, Msg: "podman target requires a 'podman:' section in env.yaml"})
 	}
 	verrs, w := validate.Run(validate.Context{
-		Workflows: wfs, Defaults: &e.Defaults, Image: e.Image, Timezone: e.Timezone, Podman: p, CheckPodman: true, Env: res.Env,
+		Workflows: wfs, Defaults: &e.Defaults, Image: e.Image, Timezone: e.Timezone, JavaOptions: e.JavaOptions, Podman: p, CheckPodman: true, Env: res.Env,
 		AllowCommands: extraAllowed,
 	})
 	errs = append(pissues, verrs...)
@@ -439,6 +443,7 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 			StatusScriptPath: pathIn(plan.BaseDir, statusName),
 			LogbackPath:      logbackPath,
 			LeaderMode:       e.Defaults.LeaderElection.EffectiveMode(),
+			JavaOptions:      e.JavaOptions,
 		},
 	}
 	plan.Unit = podmangen.RenderQuadlet(in)
