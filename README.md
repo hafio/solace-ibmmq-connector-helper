@@ -26,6 +26,10 @@ so splitting them across connectors stays your decision.
   `queue:`/`topic:`, and auto-names a
   **[durable subscription](docs/userguide.md#64-destinations-durable-names-passthrough)**
   for every MQ topic source.
+- Passes per-workflow
+  **[header transforms](docs/userguide.md#67-header-transforms-transform-headers)**
+  (`transform-headers`, SpEL) through to the connector, and rejects a transform
+  written anywhere it would otherwise be silently ignored.
 - Implements **[leader-election](docs/userguide.md#7-connector-defaults-envyaml-top-level)**
   (`standalone` / `active_active` / `active_standby`).
 - Wires **[TLS + mTLS](docs/userguide.md#7-connector-defaults-envyaml-top-level)**

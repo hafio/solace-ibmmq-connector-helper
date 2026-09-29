@@ -217,6 +217,13 @@ func renderConnector(w *yw, m *consolidate.Model) {
 	for _, wf := range m.Workflows {
 		w.Line(6, strconv.Itoa(wf.ID)+":")
 		w.Line(8, "enabled: "+strconv.FormatBool(wf.Enabled))
+		// Verbatim, like every other passthrough block: key order and each
+		// expression's quoting survive, so a SpEL string reaches the connector
+		// exactly as the workflow file wrote it.
+		if wf.TransformHeaders != nil {
+			w.Line(8, spec.TransformHeadersKey+":")
+			renderContainer(w, 10, wf.TransformHeaders)
+		}
 	}
 	// Management security is always on now (see spec.StatusUserName): the
 	// block is unconditional and enabled is always true, so there is no

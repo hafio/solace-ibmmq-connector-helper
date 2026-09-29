@@ -1345,20 +1345,30 @@ func TestNamespaceOccupantsRejectsUnreadableOutput(t *testing.T) {
 // deletionTimestamp yet must not be mistaken for someone else's workload and
 // keep the namespace alive forever.
 func TestOwnedNamesCoversEverythingThisReleaseCreates(t *testing.T) {
+	// The retired name keys are set on purpose: what the teardown created and
+	// deletes is the derived name, so that -- not the key -- is what is ours.
 	k := &spec.Kubernetes{
 		Secrets: spec.Secrets{
 			Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "solmq-creds"}},
 			Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{Name: "solmq-tls"}},
 			ImagePull:   &spec.ImagePullSecret{Name: "solmq-pull", Create: true},
 		},
-		Libs: &spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{Name: "solmq-libs"}}},
+		Libs: &spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{Name: "old-libs"}}},
 	}
 	k.Deployment.Name = "solmq-connector"
 
 	owned := ownedNames(k)
-	for _, want := range []string{"solmq-connector", "solmq-connector-config", "solmq-creds", "solmq-tls", "solmq-pull", "solmq-libs"} {
+	for _, want := range []string{
+		"solmq-connector", "solmq-connector-config", "solmq-connector-credentials",
+		"solmq-connector-stores", "solmq-connector-image-pull", "solmq-connector-libs",
+	} {
 		if !owned[want] {
 			t.Errorf("ownedNames should carry %q, got %v", want, owned)
+		}
+	}
+	for _, retired := range []string{"solmq-creds", "solmq-tls", "solmq-pull", "old-libs"} {
+		if owned[retired] {
+			t.Errorf("%q is a retired name key the tool never created, so it is not ours, got %v", retired, owned)
 		}
 	}
 	if owned[""] {

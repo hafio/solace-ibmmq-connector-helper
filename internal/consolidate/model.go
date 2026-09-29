@@ -85,6 +85,10 @@ type SolaceBinding struct {
 type WorkflowEnable struct {
 	ID      int
 	Enabled bool
+
+	// TransformHeaders is the workflow file's transform-headers: block, rendered
+	// verbatim beside enabled; nil when the file has none.
+	TransformHeaders *yaml.Node
 }
 
 // Management is the rendered management.* block. Port always reflects the

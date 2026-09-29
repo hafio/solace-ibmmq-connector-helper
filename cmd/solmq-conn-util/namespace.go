@@ -85,23 +85,8 @@ func ownedNames(k *spec.Kubernetes) map[string]bool {
 	if k == nil {
 		return owned
 	}
-	name := k.Deployment.Name
-	for _, n := range []string{name, name + "-config"} {
-		if n != "" {
-			owned[n] = true
-		}
-	}
-	if c := k.Secrets.Credentials; c != nil && c.Create != nil {
-		owned[c.Create.Name] = true
-	}
-	if s := k.Secrets.Stores; s != nil && s.Create != nil {
-		owned[s.Create.Name] = true
-	}
-	if ip := k.Secrets.ImagePull; ip != nil && ip.Create {
-		owned[ip.Name] = true
-	}
-	if lb := k.Libs; lb != nil && lb.PVC != nil && lb.PVC.Create != nil {
-		owned[lb.PVC.Create.Name] = true
+	for _, n := range k.CreatedNames() {
+		owned[n] = true
 	}
 	delete(owned, "")
 	return owned

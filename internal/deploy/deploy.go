@@ -129,23 +129,11 @@ func Render(in Input) string {
 	dep := in.Kube.Deployment
 	ns := dep.Namespace
 
-	// Secret references / emission flags.
-	credRef, emitCred := "", false
-	if c := in.Kube.Secrets.Credentials; c != nil {
-		if c.Create != nil {
-			credRef, emitCred = c.Create.Name, true
-		} else if c.Existing != "" {
-			credRef = c.Existing
-		}
-	}
-	storeRef, emitStores := "", false
-	if s := in.Kube.Secrets.Stores; s != nil {
-		if s.Create != nil {
-			storeRef, emitStores = s.Create.Name, true
-		} else if s.Existing != "" {
-			storeRef = s.Existing
-		}
-	}
+	// Secret references / emission flags. A created Secret is named after
+	// deployment.name, never after a key in env.yaml, so two instances in one
+	// namespace cannot render -- and later delete -- the same object.
+	credRef, emitCred := in.Kube.CredentialsSecretName()
+	storeRef, emitStores := in.Kube.StoresSecretName()
 	hasStores := storeRef != ""
 	mgmtPort := ManagementPort(in)
 
@@ -224,13 +212,16 @@ func Render(in Input) string {
 	}
 
 	// 3b. libs PV + PVC (only for libs.pvc.create; PV is cluster-scoped).
-	if lb := in.Kube.Libs; lb != nil && lb.PVC != nil && lb.PVC.Create != nil {
-		c := lb.PVC.Create
+	// Each instance gets its own claim, named after deployment.name: a claim two
+	// instances shared would hang remove of either one on
+	// kubernetes.io/pvc-protection while the other's pod still mounted it.
+	if claim := in.Kube.LibsPVCName(); claim != "" {
+		c := in.Kube.Libs.PVC.Create
 		sep()
 		w.Line(0, "apiVersion: v1")
 		w.Line(0, "kind: PersistentVolume")
 		w.Line(0, "metadata:")
-		w.Line(2, "name: "+spec.LibsPVName(ns, c.Name))
+		w.Line(2, "name: "+spec.LibsPVName(ns, claim))
 		w.Line(0, "spec:")
 		// Stated rather than left to the default, which is the same value: a
 		// Retain PV outlives its claim and comes back as Released, which never
@@ -249,11 +240,11 @@ func Render(in Input) string {
 		w.Line(0, "apiVersion: v1")
 		w.Line(0, "kind: PersistentVolumeClaim")
 		w.Line(0, "metadata:")
-		w.Line(2, "name: "+c.Name)
+		w.Line(2, "name: "+claim)
 		w.Line(2, "namespace: "+ns)
 		w.Line(0, "spec:")
 		w.Line(2, `storageClassName: ""`)
-		w.Line(2, "volumeName: "+spec.LibsPVName(ns, c.Name))
+		w.Line(2, "volumeName: "+spec.LibsPVName(ns, claim))
 		w.Line(2, "accessModes:")
 		w.Line(4, "- ReadWriteMany")
 		w.Line(2, "resources:")
@@ -504,7 +495,7 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 			w.Line(12, "claimName: "+lb.PVC.Existing)
 		case lb.PVC != nil && lb.PVC.Create != nil:
 			w.Line(10, "persistentVolumeClaim:")
-			w.Line(12, "claimName: "+lb.PVC.Create.Name)
+			w.Line(12, "claimName: "+in.Kube.LibsPVCName())
 		case lb.Download != nil && lb.Download.PVC != "":
 			w.Line(10, "persistentVolumeClaim:")
 			w.Line(12, "claimName: "+lb.Download.PVC)

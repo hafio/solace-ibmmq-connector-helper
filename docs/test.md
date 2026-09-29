@@ -48,7 +48,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 789 test functions, 1066 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 807 test functions, 1081 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -93,7 +93,7 @@ Tests: [scan_test.go](../internal/scan/scan_test.go)
 
 Parse env.yaml into the typed model -- workflows, defaults, named connections, the kubernetes/docker/podman platform sections, and ports -- and apply section defaults.
 
-Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/spec/env_test.go), [targets_test.go](../internal/spec/targets_test.go), [expand_test.go](../internal/spec/expand_test.go), [defaults_test.go](../internal/spec/defaults_test.go), [image_test.go](../internal/spec/image_test.go), [javaoptions_test.go](../internal/spec/javaoptions_test.go)
+Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/spec/env_test.go), [targets_test.go](../internal/spec/targets_test.go), [expand_test.go](../internal/spec/expand_test.go), [defaults_test.go](../internal/spec/defaults_test.go), [image_test.go](../internal/spec/image_test.go), [javaoptions_test.go](../internal/spec/javaoptions_test.go), [kubernetes_test.go](../internal/spec/kubernetes_test.go), [transform_test.go](../internal/spec/transform_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
@@ -181,6 +181,14 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestImageRegistry | hub fallback / private / nil / trailing slash | the auths key is the registry host, falling back to Docker Hub's v1 URL -- a Hub namespace lives in name and never reaches the lookup |
 | TestRetiredPerPlatformImageStillParses | - | kubernetes.deployment.image, docker.image and podman.image parse into their fields, which is what lets validate reject them instead of yaml dropping them silently |
 | TestImagePullSecretCreateDefaultsFalse | absent / explicit true | create defaults to false so naming a Secret only references it; an explicit true is honoured |
+| TestSecretsCreateSpellings | create: true / the retired mapping form / an empty mapping / create: false / create left empty / only existing | credentials and stores create: takes true, and the mapping an older env.yaml carries still means create (its name decoded only so validate can report it); false, empty and absent build nothing, and existing: survives the custom decoding |
+| TestSecretsCreateRejectsOtherShapes | a word / a list / stores, a word / a retired mapping with a list for its name (credentials, stores) / the block as a bare value (credentials, stores) | a create: value that is neither a boolean nor the retired mapping fails at parse naming the key, a wrongly-typed field inside the retired mapping is still a parse error, and a secrets block must itself be a mapping |
+| TestSecretsCreateFollowsAnAlias | - | a YAML alias (create: *on) is resolved before create: is read, so an aliased true creates the Secret |
+| TestDerivedObjectNames | - | every created Secret and the libs claim are named after deployment.name (-credentials, -stores, -image-pull, -libs) with any retired name key ignored, a referenced object keeps the operator's own name, and no block yields nothing |
+| TestCreatedNames | - | the Deployment and ConfigMap always, then exactly the Secrets and claim the config asks the tool to build -- a referenced object is not the tool's |
+| TestParseWorkflowTransformHeaders | - | a top-level transform-headers block is captured verbatim -- header order and each expression's quoting intact -- and is not reported as misplaced; an absent or empty block is none |
+| TestMisplacedWorkflowTransforms | - | the retired transform:, a transform-header: typo, and transform-headers under a side, its solace:/mq: block, or that block's consumer:/producer: are each reported as the dotted path they were found at, in file order, while the top-level block still parses |
+| TestMisplacedEnvTransforms | - | every transform key in env.yaml -- top level, a connection, or the connection's solace:/mq: block -- is reported, identically through ParseEnv and ParseDefaults, and a clean or empty env.yaml reports none |
 | TestParseEnvTopLevelSyslog | present / absent | logging.syslog parses beside logging.level at the top level, protocol defaults to udp, and an absent block stays nil (presence is what turns syslog on) |
 
 ## internal/consolidate
@@ -380,7 +388,8 @@ Tests: [deploy_test.go](../internal/deploy/deploy_test.go), [imagepull_test.go](
 | TestRenderSyslogUDP | - | UDP syslog config emits SyslogAppender, appname/host/port env vars, logback mount; no LogstashTcpSocketAppender |
 | TestRenderSyslogTCP | - | TCP syslog config emits LogstashTcpSocketAppender and destination tag; no SyslogAppender or AsyncAppender |
 | TestRenderLibsPVCExisting | - | existing libs PVC yields claimName and mount, no initContainers or PersistentVolume |
-| TestRenderLibsPVCCreate | - | created libs PVC emits PV/PVC docs with NFS server/path, storage size, claim name, PV/PVC precede Deployment |
+| TestRenderLibsPVCCreate | - | created libs PVC emits PV/PVC docs with NFS server/path and storage size, the claim named `<deployment>-libs` and its PV `<namespace>-<deployment>-libs-pv`, the retired create.name nowhere in the manifest, PV/PVC preceding the Deployment |
+| TestCreatedSecretsTakeDerivedNames | - | the credentials and stores Secrets are named and mounted as `<deployment>-credentials` / `<deployment>-stores`, and the retired create.name keys never reach the manifest -- so two instances in one namespace cannot overwrite or delete each other's |
 | TestRenderLibsDownload | emptyDir | init container wgets each jar url into /libs, mounted via emptyDir |
 | TestRenderLibsDownload | existing PVC download | download target uses claimName dl-pvc instead of emptyDir |
 | TestRenderNamespaceAlwaysFirst | - | Namespace doc is first in output and precedes ConfigMap |
@@ -579,7 +588,7 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 
 Validate the parsed model -- per-side rules, connection refs, leader election, the docker/podman/kubernetes platform sections, ports, container names, TLS/stores wiring, and the safe-token charset.
 
-Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extra_test.go](../internal/validate/validate_extra_test.go), [validate_deploycommand_test.go](../internal/validate/validate_deploycommand_test.go), [validate_image_test.go](../internal/validate/validate_image_test.go), [validate_javaoptions_test.go](../internal/validate/validate_javaoptions_test.go)
+Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extra_test.go](../internal/validate/validate_extra_test.go), [validate_deploycommand_test.go](../internal/validate/validate_deploycommand_test.go), [validate_image_test.go](../internal/validate/validate_image_test.go), [validate_javaoptions_test.go](../internal/validate/validate_javaoptions_test.go), [validate_derivednames_test.go](../internal/validate/validate_derivednames_test.go), [validate_transform_test.go](../internal/validate/validate_transform_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
@@ -587,7 +596,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestBinderIdentityUsesTheCredentialPair | same -env username | one binder with two key-aliases still conflicts |
 | TestWorkflowCap | 21 workflows | fatal error naming the count, the 20 cap, and the split-into-separate-folders remedy |
 | TestWorkflowCap | 20 workflows | exactly at the cap does not error |
-| TestDeployNameTooLong | 57-char name | deployment.name + "-config" exceeds the 63-char DNS-1123 limit |
+| TestDeployNameTooLong | 57-char name | deployment.name + "-config", the shortest name derived from it, exceeds the 63-char DNS-1123 limit |
 | TestDeployNameTooLong | short name | a short deployment name has no length error |
 | TestValidGoldenLikeInputPasses | - | valid solace->mq queue workflow produces no errors |
 | TestMissingSourceTarget | - | workflow with neither side set errors missing 'source' and missing 'target' |
@@ -621,7 +630,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckKubeServicePort | - | kubernetes.service.port is range-checked like docker/podman ports: a scalar or distinct host:container pair both pass, and an out-of-range host or container side each error independently naming the offending side |
 | TestCheckKubeCredentialCreateRemovedKeys | source/variables/values-file set | credentials.create carrying `source`, `variables`, and `values-file` errors naming all three and telling the operator to remove them |
 | TestCheckKubeCredentialCreateRemovedKeys | source alone | credentials.create carrying only `source` errors naming it alone |
-| TestCheckKubeCredentialCreateRemovedKeys | bare name | a bare create.name trips no removed-keys error |
+| TestCheckKubeCredentialCreateRemovedKeys | bare name | a bare (retired) create.name trips no removed-keys error |
 | TestCheckKubeStoresRequireTruststore | - | kube stores create without tls.truststore errors requires tls.truststore |
 | TestStoresNotWiredWarning | - | TLS workflow with kube deploy and no stores wiring warns secrets.stores is omitted |
 | TestStoresWiredExistingNoWarning | - | stores wired via existing secret produces no stores-omitted warning |
@@ -651,7 +660,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckLibs | pvc-neither | pvc with neither create nor existing errors exactly one of 'create' or 'existing' |
 | TestCheckLibs | pvc-both | pvc with both create and existing errors exactly one of 'create' or 'existing' |
 | TestCheckLibs | pvc-create-no-nfs | pvc create without nfs server/path errors requires nfs.server and nfs.path |
-| TestCheckLibs | pvc-create-bad-name | pvc create with Bad_Name errors DNS-1123 |
+| TestCheckLibs | pvc-create-bad-name | the claim is named after deployment.name, so a retired create.name -- even Bad_Name -- is ignored outside validate: no DNS-1123 or retired-key error |
 | TestCheckLibs | download-empty-urls | download with empty urls errors non-empty 'urls' list |
 | TestCheckLibs | download-ftp-url | non-http(s) download url errors must be http(s) |
 | TestCheckLibs | download-injection-quote | download url with quote/semicolon errors no spaces, quotes, or control characters |
@@ -740,12 +749,9 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckContainerHostPathsUnsafe | newline in tls.truststore.file | bind-mounted store path rejected |
 | TestCheckContainerHostPathsUnsafe | space in libs.dir | podman.libs.dir rejected |
 | TestCheckContainerHostPathsUnsafe | windows paths | `C:\certs\...` store paths and `C:\libs` accepted (backslash and colon permitted) |
-| TestCheckKubeSecretNames | cred create bad | non-DNS-1123 credentials create.name rejected |
-| TestCheckKubeSecretNames | cred create empty | missing credentials create.name reported as required |
 | TestCheckKubeSecretNames | cred existing bad | non-DNS-1123 credentials existing rejected |
-| TestCheckKubeSecretNames | stores create bad | non-DNS-1123 stores create.name rejected |
 | TestCheckKubeSecretNames | stores existing bad | non-DNS-1123 stores existing rejected |
-| TestCheckKubeSecretNames | valid names | solmq-credentials and solmq-tls produce no name error |
+| TestCheckKubeSecretNames | created Secrets | create with no name at all produces no name error -- the name is derived |
 | TestCheckKubeSecretsCreateXorExisting | credentials both set | rejected: Render would take the create branch and emit a Secret doc over the object existing names |
 | TestCheckKubeSecretsCreateXorExisting | credentials neither set | rejected: a present block must choose, or the SecretsDir mount silently disappears |
 | TestCheckKubeSecretsCreateXorExisting | stores both / neither set | same rule enforced for the stores Secret |
@@ -768,13 +774,20 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCredentialsWiredNoWarning | create / existing | either way of wiring kubernetes.secrets.credentials suppresses the warning |
 | TestNoCredentialsNoWarning | - | a config whose connections need no authentication is not warned about a Secret it does not need |
 | TestCredentialsFoundOutsideAWorkflowSide | a management account / a truststore password | a management account password and a store password are credentials too, and each trips the same warning as a missing binder credential |
-| TestLibsPVNameLengthIsCapped | - | a 40-char namespace and a 40-char `libs.pvc.create.name` derive a PV name that exceeds the 63-char DNS-1123 limit, which errors; shortening both to fit is not flagged, so the check cannot simply always fire |
+| TestLibsPVNameLengthIsCapped | - | a 30-char namespace and a 30-char deployment.name derive a PV name (`<namespace>-<name>-libs-pv`) that exceeds the 63-char DNS-1123 limit, which errors naming both fields; shortening both to fit is not flagged, so the check cannot simply always fire |
+| TestRetiredCreateNamesReportedOnlyByValidate | - | the four retired name keys (credentials/stores create.name, image-pull.name with create, libs.pvc.create.name) produce no error on a generate/deploy run and exactly one each under Lint, naming the derived object, the ignored value and how to remove the key |
+| TestRetiredCreateNamesNeedAKey | - | a created object with no name key, and an image-pull name without create (a reference), are not retired keys |
+| TestDerivedNamesMustFitALabel | - | the longest name derived from deployment.name that the config actually builds (here `<name>-credentials`) must fit a DNS-1123 label, naming it; a referenced Secret derives nothing |
+| TestTransformHeadersValidBlockPasses | - | a well-formed transform-headers block raises no error and no warning |
+| TestTransformHeadersShapeErrors | not a mapping / no expressions / expressions as a list / an expression that is not a string / a header set twice | each shape the connector would not apply is an error on every run |
+| TestTransformHeadersWarnings | - | a key beside expressions (a likely typo, passed through) and an empty expressions mapping are warnings, not errors |
+| TestMisplacedTransformsAreErrors | - | a misplaced transform-headers is told to move to the top level of its file, any other transform key that it is not a key, and a transform in env.yaml that it belongs in a workflow file -- each an error naming its file and path |
 | TestRetiredPerPlatformImageRejected | kubernetes / docker / podman | each per-platform image key errors, and the message names the top-level image: block to use instead |
 | TestImageBlockRequired | absent / no name / no tag / unsafe repo, name, tag | the top-level block is required once a platform is in play, tag included (an untagged image resolves to :latest and pins nothing), and the fields that reach an argv are charset-checked |
 | TestImageBlockRequired | bad pass-env name / either credential set both ways | the registry account (`user`/`pass`) goes through the shared checkCred, so it gets the same literal-xor-env rule and variable-name check as every other credential |
 | TestImageNotRequiredWithoutAPlatform | - | `generate config` renders application.yml alone and pulls nothing, so no image is demanded |
 | TestImagePullSecretChecks | name alone | referencing a Secret requires no registry credentials at all |
-| TestImagePullSecretChecks | name required / DNS-1123 | the Secret name is required and held to the label rule the cluster would apply |
+| TestImagePullSecretChecks | name required / DNS-1123 | a referenced Secret's name is required and held to the label rule the cluster would apply |
 | TestImagePullSecretChecks | create without credentials | create errors unless the registry account is set, in either the literal or the -env form |
 | TestImagePullSecretChecks | create, variable unset / set | an unset variable warns rather than errors, so a config can be linted without the deploy secrets |
 | TestRetiredPerPlatformTimezoneRejected | kubernetes / docker / podman | each per-platform timezone key errors and names the top-level timezone: key |
@@ -853,15 +866,17 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestGoldenKubernetesNoSecrets | - | generated manifests without secrets/syslog/libs (namespace, configmap incl. status script, deployment, service) match golden fixture byte-for-byte |
 | TestDockerConfigJSON | private registry / docker hub fallback | the payload is an auths map keyed by registry carrying the account plus the base64 user:password the engines send |
 | TestDockerConfigJSONEscapesAwkwardValues | - | a password carrying quotes, a backslash or JSON of its own round-trips as data rather than reshaping the document -- which is why it is marshalled, not concatenated |
-| TestResolvePullSecret | reference only | resolves to the name alone and never reads the registry password |
+| TestResolvePullSecret | reference only | resolves to the given name alone and never reads the registry password |
 | TestResolvePullSecret | create | builds the payload from the environment |
 | TestResolvePullSecret | both -env / both literal | all four halves resolve: the -env pair reads each variable, and a literal pair needs no environment access at all |
 | TestResolvePullSecret | unset user-env | an unset user variable fails naming that variable, not only the password one |
 | TestResolvePullSecret | variable unset / no environment access | both fail loudly, naming the variable |
 | TestResolvePullSecret | no image block / partial image block | the guard that exists so a caller who skipped validate gets an error rather than a nil dereference |
-| TestGenerateKubernetesImagePull | no block / reference / create | the wiring from config to rendered manifest: nothing, an imagePullSecrets entry alone, or the entry plus the dockerconfigjson Secret -- the integration point TestResolvePullSecret skips |
+| TestGenerateKubernetesImagePull | no block / reference / create / create with a retired name | the wiring from config to rendered manifest: nothing, an imagePullSecrets entry alone, or the entry plus a dockerconfigjson Secret named `<deployment>-image-pull` -- with a retired name alongside create ignored rather than rejected -- the integration point TestResolvePullSecret skips |
 | TestGenerateKubernetesImagePull | payload and leak check | the rendered payload decodes to the real account, and the registry password appears nowhere else in the manifest |
 | TestGenerateKubernetesImagePull | variable unset | create fails the generate with an issue naming the variable |
+| TestRetiredCreateNamesDeployButDoNotValidate | - | an env.yaml still naming its credentials/stores Secrets and libs claim generates cleanly under the derived names, the old names nowhere in the manifest, while Validate reports each old key |
+| TestConfigRendersTransformHeadersUnderItsWorkflow | - | the second workflow file's transform-headers renders verbatim under solace.connector.workflows.1 and nowhere under 0, and a misplaced transform: fails the render instead of being dropped |
 
 ## internal/libs
 
@@ -1285,7 +1300,7 @@ manifest-parity cases)
 | TestNamespaceOccupantsRejectsUnreadableOutput | - | a parse failure is an error, never an empty list: unreadable output must not read as "empty" and authorise the delete |
 | TestTeardownDropsTheNamespaceDocument | - | apply keeps the Namespace document, a teardown drops it, dropping the first document leaves no leading separator, and the ConfigMap and Deployment still render |
 | TestNamespaceManifestMatchesWhatRenderEmits | - | the standalone document the namespace delete pipes is exactly the one Render emits, so the two cannot drift |
-| TestOwnedNamesCoversEverythingThisReleaseCreates | created secrets/PVC / referenced ones / nil section | the safety net behind the occupancy check: everything this release creates counts as ours, an empty name never does, and objects merely referenced (existing:) are *not* ours -- the operator manages them and their presence is a real reason to keep the namespace |
+| TestOwnedNamesCoversEverythingThisReleaseCreates | created secrets/PVC / referenced ones / nil section | the safety net behind the occupancy check: everything this release creates counts as ours under the name it was actually created with (derived from deployment.name, never a retired name key), an empty name never does, and objects merely referenced (existing:) are *not* ours -- the operator manages them and their presence is a real reason to keep the namespace |
 | TestRemoveNamespaceWithoutANamespaceSaysSo | - | a kubernetes section with no namespace has nothing to remove, and says so rather than acting on an empty name |
 | TestRemoveNamespaceRejectsAnUnsafeCommand | - | the namespace delete goes through the same binary allowlist as everything else, rather than being a second path around it |
 | TestRemoveNamespaceUnreadableProbeLeavesItAlone | - | output that cannot be parsed must not read as "empty" and authorise the delete |

@@ -264,7 +264,7 @@ func configMapDoc(appYAML string, withLogback bool) string {
 const credDoc = `apiVersion: v1
 kind: Secret
 metadata:
-  name: solmq-credentials
+  name: solmq-connector-credentials
   namespace: solace-connectors
 type: Opaque
 stringData:
@@ -283,7 +283,7 @@ stringData:
 const storesDoc = `apiVersion: v1
 kind: Secret
 metadata:
-  name: solmq-tls
+  name: solmq-connector-stores
   namespace: solace-connectors
 type: Opaque
 data:
@@ -294,7 +294,7 @@ data:
 const pvDoc = `apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: solace-connectors-jar-libs-pvc-pv
+  name: solace-connectors-solmq-connector-libs-pv
 spec:
   persistentVolumeReclaimPolicy: Retain
   capacity:
@@ -310,11 +310,11 @@ spec:
 const pvcDoc = `apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: jar-libs-pvc
+  name: solmq-connector-libs
   namespace: solace-connectors
 spec:
   storageClassName: ""
-  volumeName: solace-connectors-jar-libs-pvc-pv
+  volumeName: solace-connectors-solmq-connector-libs-pv
   accessModes:
     - ReadWriteMany
   resources:
@@ -436,15 +436,15 @@ spec:
             name: solmq-connector-config
 `)
 	if hasCreds {
-		b.WriteString("        - name: secrets\n          secret:\n            secretName: solmq-credentials\n            defaultMode: 0400\n")
+		b.WriteString("        - name: secrets\n          secret:\n            secretName: solmq-connector-credentials\n            defaultMode: 0400\n")
 	}
 	if stores {
-		b.WriteString("        - name: stores\n          secret:\n            secretName: solmq-tls\n")
+		b.WriteString("        - name: stores\n          secret:\n            secretName: solmq-connector-stores\n")
 	}
 	if libs {
 		b.WriteString(`        - name: libs
           persistentVolumeClaim:
-            claimName: jar-libs-pvc
+            claimName: solmq-connector-libs
 `)
 	}
 	return b.String()

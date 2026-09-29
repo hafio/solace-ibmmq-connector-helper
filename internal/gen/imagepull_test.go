@@ -83,7 +83,7 @@ func TestResolvePullSecret(t *testing.T) {
 
 	t.Run("reference only: no payload, no environment read", func(t *testing.T) {
 		read := false
-		ps, err := resolvePullSecret(&spec.ImagePullSecret{Name: "regcred"}, img,
+		ps, err := resolvePullSecret("regcred", false, img,
 			Resolver{Env: func(string) (string, bool) { read = true; return "", true }})
 		if err != nil {
 			t.Fatal(err)
@@ -103,7 +103,7 @@ func TestResolvePullSecret(t *testing.T) {
 	t.Run("both credentials in their -env form", func(t *testing.T) {
 		envImg := &spec.Image{Repo: "registry.internal", Name: "c", Tag: "1",
 			UserEnv: "REGISTRY_USER", PassEnv: "REGISTRY_PASSWORD"}
-		ps, err := resolvePullSecret(&spec.ImagePullSecret{Name: "regcred", Create: true}, envImg,
+		ps, err := resolvePullSecret("solmq-image-pull", true, envImg,
 			Resolver{Env: func(k string) (string, bool) {
 				switch k {
 				case "REGISTRY_USER":
@@ -125,7 +125,7 @@ func TestResolvePullSecret(t *testing.T) {
 	t.Run("both credentials in their literal form", func(t *testing.T) {
 		litImg := &spec.Image{Repo: "registry.internal", Name: "c", Tag: "1", User: "svc", Pass: "hunter2"}
 		// No environment access at all: a literal pair must not need one.
-		ps, err := resolvePullSecret(&spec.ImagePullSecret{Name: "regcred", Create: true}, litImg, Resolver{})
+		ps, err := resolvePullSecret("solmq-image-pull", true, litImg, Resolver{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -138,7 +138,7 @@ func TestResolvePullSecret(t *testing.T) {
 	t.Run("an unset user-env fails, naming that variable", func(t *testing.T) {
 		envImg := &spec.Image{Repo: "registry.internal", Name: "c", Tag: "1",
 			UserEnv: "REGISTRY_USER", PassEnv: "REGISTRY_PASSWORD"}
-		_, err := resolvePullSecret(&spec.ImagePullSecret{Name: "regcred", Create: true}, envImg,
+		_, err := resolvePullSecret("solmq-image-pull", true, envImg,
 			Resolver{Env: func(k string) (string, bool) { return "pw", k == "REGISTRY_PASSWORD" }})
 		if err == nil {
 			t.Fatal("want an error when the user variable is unset")
@@ -149,7 +149,7 @@ func TestResolvePullSecret(t *testing.T) {
 	})
 
 	t.Run("create builds the payload", func(t *testing.T) {
-		ps, err := resolvePullSecret(&spec.ImagePullSecret{Name: "regcred", Create: true}, img,
+		ps, err := resolvePullSecret("solmq-image-pull", true, img,
 			Resolver{Env: func(k string) (string, bool) { return "hunter2", k == "REGISTRY_PASSWORD" }})
 		if err != nil {
 			t.Fatal(err)
@@ -160,7 +160,7 @@ func TestResolvePullSecret(t *testing.T) {
 	})
 
 	t.Run("create with the variable unset fails, naming it", func(t *testing.T) {
-		_, err := resolvePullSecret(&spec.ImagePullSecret{Name: "regcred", Create: true}, img,
+		_, err := resolvePullSecret("solmq-image-pull", true, img,
 			Resolver{Env: func(string) (string, bool) { return "", false }})
 		if err == nil {
 			t.Fatal("want an error when the variable is unset")
@@ -171,7 +171,7 @@ func TestResolvePullSecret(t *testing.T) {
 	})
 
 	t.Run("create with no environment access fails loudly", func(t *testing.T) {
-		if _, err := resolvePullSecret(&spec.ImagePullSecret{Name: "regcred", Create: true}, img, Resolver{}); err == nil {
+		if _, err := resolvePullSecret("solmq-image-pull", true, img, Resolver{}); err == nil {
 			t.Fatal("want an error when the resolver has no environment access")
 		}
 	})
@@ -180,7 +180,7 @@ func TestResolvePullSecret(t *testing.T) {
 	// means a caller skipped it. The guard exists so that is an error rather
 	// than a Secret built from an empty account.
 	t.Run("create with no image block at all", func(t *testing.T) {
-		if _, err := resolvePullSecret(&spec.ImagePullSecret{Name: "regcred", Create: true}, nil,
+		if _, err := resolvePullSecret("solmq-image-pull", true, nil,
 			Resolver{Env: func(string) (string, bool) { return "pw", true }}); err == nil {
 			t.Fatal("want an error when the image block is missing entirely")
 		}
@@ -190,7 +190,7 @@ func TestResolvePullSecret(t *testing.T) {
 			{Name: "c", Tag: "1", PassEnv: "REGISTRY_PASSWORD"}, // no user
 			{Name: "c", Tag: "1", User: "svc"},                  // no pass in either form
 		} {
-			if _, err := resolvePullSecret(&spec.ImagePullSecret{Name: "regcred", Create: true}, partial,
+			if _, err := resolvePullSecret("solmq-image-pull", true, partial,
 				Resolver{Env: func(string) (string, bool) { return "pw", true }}); err == nil {
 				t.Errorf("want an error for %+v", partial)
 			}
@@ -208,11 +208,15 @@ func kubeEnvWithPull(mode string, creds bool) []byte {
 		env += "  user: svc\n  pass-env: REGISTRY_PASSWORD\n"
 	}
 	env += "kubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n"
-	if mode != "" {
+	switch mode {
+	case "reference":
 		env += "  secrets:\n    image-pull:\n      name: regcred\n"
-		if mode == "create" {
-			env += "      create: true\n"
-		}
+	case "create":
+		env += "  secrets:\n    image-pull:\n      create: true\n"
+	case "create-with-retired-name":
+		// What an env.yaml written before the Secret name was derived still
+		// carries: name is ignored, and only validate reports it.
+		env += "  secrets:\n    image-pull:\n      name: regcred\n      create: true\n"
 	}
 	return []byte(env)
 }
@@ -258,8 +262,13 @@ func TestGenerateKubernetesImagePull(t *testing.T) {
 		if len(errs) > 0 {
 			t.Fatalf("unexpected errors: %v", errs)
 		}
-		if !strings.Contains(out, "imagePullSecrets:\n        - name: regcred\n") {
+		// Named after the deployment, so a second instance in the namespace
+		// can neither overwrite it nor delete it on remove.
+		if !strings.Contains(out, "imagePullSecrets:\n        - name: solmq-image-pull\n") {
 			t.Errorf("imagePullSecrets entry missing:\n%s", out)
+		}
+		if !strings.Contains(out, "kind: Secret\nmetadata:\n  name: solmq-image-pull\n") {
+			t.Errorf("the created Secret must carry the derived name:\n%s", out)
 		}
 		if !strings.Contains(out, "type: kubernetes.io/dockerconfigjson\n") {
 			t.Fatalf("dockerconfigjson Secret missing:\n%s", out)
@@ -275,6 +284,19 @@ func TestGenerateKubernetesImagePull(t *testing.T) {
 		}
 		if strings.Contains(strings.ReplaceAll(out, payload, ""), "hunter2") {
 			t.Errorf("the registry password leaked outside the Secret payload:\n%s", out)
+		}
+	})
+
+	t.Run("create with a retired name: the name is ignored, not rejected", func(t *testing.T) {
+		out, errs := run("create-with-retired-name", true, withPass)
+		if len(errs) > 0 {
+			t.Fatalf("generate must ignore the retired name quietly, got %v", errs)
+		}
+		if strings.Contains(out, "regcred") {
+			t.Errorf("the retired image-pull.name must not reach the manifest:\n%s", out)
+		}
+		if !strings.Contains(out, "- name: solmq-image-pull\n") {
+			t.Errorf("the derived name must be used instead:\n%s", out)
 		}
 	})
 

@@ -40,3 +40,10 @@ target:
   solace:
     conn-ref: prod-solace
     topic: orders/from-mq                 # publish to a Solace topic (EDA pub/sub)
+
+# Optional header transforms for this workflow, at the top level beside source:
+# and target: -- a transform-headers: under a side is an error. Each expression
+# is SpEL, evaluated by the connector; quote it whole:
+# transform-headers:
+#   expressions:
+#     solace_scst_targetDestination: "'orders/from-mq/' + headers.region"

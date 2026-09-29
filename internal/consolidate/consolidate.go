@@ -118,13 +118,14 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 	// Materialise conn-ref sides once, up front, so conn-ref and inline sides that
 	// resolve to the same connection tuple consolidate into a single binder.
 	type rwf struct {
-		file     string
-		enabled  bool
-		src, tgt spec.Side
+		file      string
+		enabled   bool
+		src, tgt  spec.Side
+		transform *yaml.Node
 	}
 	rwfs := make([]rwf, len(wfs))
 	for i, wf := range wfs {
-		rwfs[i] = rwf{file: wf.File, enabled: wf.Enabled, src: d.Resolve(wf.Source), tgt: d.Resolve(wf.Target)}
+		rwfs[i] = rwf{file: wf.File, enabled: wf.Enabled, src: d.Resolve(wf.Source), tgt: d.Resolve(wf.Target), transform: wf.TransformHeaders}
 	}
 
 	// ---- pass 1: register + accumulate binders --------------------------------
@@ -250,7 +251,7 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 		)
 		m.emitBindingOptions(in, w.src, true, w.file)
 		m.emitBindingOptions(out, w.tgt, false, w.file)
-		m.Workflows = append(m.Workflows, WorkflowEnable{ID: i, Enabled: w.enabled})
+		m.Workflows = append(m.Workflows, WorkflowEnable{ID: i, Enabled: w.enabled, TransformHeaders: w.transform})
 
 		if srcAcc.binder.Name == tgtAcc.binder.Name && w.src.Dest == w.tgt.Dest {
 			warn("workflow %q: source and target resolve to the same binder and destination %q (possible message loop)", w.file, w.src.Dest)

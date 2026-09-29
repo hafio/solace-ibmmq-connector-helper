@@ -305,8 +305,10 @@ func TestCheckLibs(t *testing.T) {
 	if e, _ := run(&spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{Name: "p"}}}); !hasErr(e, "requires nfs.server and nfs.path") {
 		t.Errorf("want missing nfs error, got %v", e)
 	}
-	if e, _ := run(&spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{Name: "Bad_Name", NFS: spec.NFS{Server: "s", Path: "/x"}}}}); !hasErr(e, "DNS-1123") {
-		t.Errorf("want DNS-1123 name error, got %v", e)
+	// The claim is named after deployment.name, so the retired create.name is
+	// ignored outside validate -- even one that would not be a valid label.
+	if e, _ := run(&spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{Name: "Bad_Name", NFS: spec.NFS{Server: "s", Path: "/x"}}}}); hasErr(e, "DNS-1123") || hasErr(e, "no longer accepted") {
+		t.Errorf("a retired claim name must be ignored outside validate, got %v", e)
 	}
 	if e, _ := run(&spec.Libs{Download: &spec.LibsDownload{}}); !hasErr(e, "non-empty 'urls' list") {
 		t.Errorf("want empty urls error, got %v", e)
@@ -840,18 +842,17 @@ func TestCheckContainerHostPathsUnsafe(t *testing.T) {
 }
 
 func TestCheckKubeSecretNames(t *testing.T) {
-	// Every Secret name is emitted verbatim as metadata.name / secretRef, so a
-	// non-DNS-1123 or missing name is rejected before the manifest is built.
+	// Every existing: Secret name is emitted verbatim as a secretRef, so a
+	// non-DNS-1123 one is rejected before the manifest is built. A created
+	// Secret's name is derived from deployment.name, so it has no case here:
+	// TestDerivedNamesMustFitALabel covers its length.
 	base := spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}
 	cases := []struct {
 		name string
 		sec  spec.Secrets
 		want string
 	}{
-		{"cred create bad", spec.Secrets{Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "Bad_Name"}}}, "kubernetes.secrets.credentials.create.name"},
-		{"cred create empty", spec.Secrets{Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{}}}, "kubernetes.secrets.credentials.create.name is required"},
 		{"cred existing bad", spec.Secrets{Credentials: &spec.CredentialsSecret{Existing: "my secret\nfoo: bar"}}, "kubernetes.secrets.credentials.existing"},
-		{"stores create bad", spec.Secrets{Stores: &spec.StoresSecret{Create: &spec.StoreCreate{Name: "../evil"}}}, "kubernetes.secrets.stores.create.name"},
 		{"stores existing bad", spec.Secrets{Stores: &spec.StoresSecret{Existing: "UPPER"}}, "kubernetes.secrets.stores.existing"},
 	}
 	for _, c := range cases {
@@ -861,10 +862,10 @@ func TestCheckKubeSecretNames(t *testing.T) {
 			t.Errorf("%s: want %q, got %v", c.name, c.want, e)
 		}
 	}
-	// Valid names produce no name error.
+	// Created Secrets need no name at all, and produce no name error.
 	k := &spec.Kubernetes{Deployment: base, Secrets: spec.Secrets{
-		Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "solmq-credentials"}},
-		Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{Name: "solmq-tls"}},
+		Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{}},
+		Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{}},
 	}}
 	e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true, Env: func(string) (string, bool) { return "v", true }})
 	if hasErr(e, "DNS-1123") || hasErr(e, "is required") {
@@ -938,8 +939,8 @@ func TestCheckKubeSecretsCreateXorExisting(t *testing.T) {
 		sec  spec.Secrets
 	}{
 		{"create only", spec.Secrets{
-			Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "solmq-credentials"}},
-			Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{Name: "solmq-tls"}},
+			Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{}},
+			Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{}},
 		}},
 		{"existing only", spec.Secrets{
 			Credentials: &spec.CredentialsSecret{Existing: "their-creds"},
@@ -962,7 +963,7 @@ func TestCheckLibsNFSFields(t *testing.T) {
 	base := spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}
 	kube := func(server, path string) *spec.Kubernetes {
 		return &spec.Kubernetes{Deployment: base, Libs: &spec.Libs{PVC: &spec.LibsPVC{
-			Create: &spec.PVCCreate{Name: "libs-pvc", Storage: "1Gi", NFS: spec.NFS{Server: server, Path: path}},
+			Create: &spec.PVCCreate{Storage: "1Gi", NFS: spec.NFS{Server: server, Path: path}},
 		}}}
 	}
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: kube("nfs1.corp\nreadOnly: false", "/libs"), CheckKubernetes: true}); !hasErr(e, "nfs.server") {
@@ -1339,25 +1340,24 @@ func TestCredentialsFoundOutsideAWorkflowSide(t *testing.T) {
 }
 
 // TestLibsPVNameLengthIsCapped covers what namespacing the PersistentVolume
-// name costs: the derived name is still a single DNS-1123 label, so a long
-// namespace plus a long claim name can exceed 63 characters. Caught at the gate
-// with both fields named, rather than by the API server part-way through an
-// apply that has already created other objects.
+// name costs: the name is still a single DNS-1123 label, so a long namespace
+// plus a long deployment name (which the claim is named after) can exceed 63
+// characters. Caught at the gate with both fields named, rather than by the
+// API server part-way through an apply that has already created other objects.
 func TestLibsPVNameLengthIsCapped(t *testing.T) {
-	long := strings.Repeat("a", 40)
 	k := &spec.Kubernetes{
-		Deployment: spec.Deployment{Name: "c", Namespace: strings.Repeat("n", 40), Replicas: 1},
+		Deployment: spec.Deployment{Name: strings.Repeat("a", 30), Namespace: strings.Repeat("n", 30), Replicas: 1},
 		Libs: &spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{
-			Name: long, Storage: "1Gi", NFS: spec.NFS{Server: "nfs1", Path: "/libs"},
+			Storage: "1Gi", NFS: spec.NFS{Server: "nfs1", Path: "/libs"},
 		}}},
 	}
 	errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
-	if !hasErr(errs, "exceeds the 63-char DNS-1123 limit") {
+	if !hasErr(errs, "derives the PersistentVolume name") || !hasErr(errs, "shorten deployment.name or deployment.namespace") {
 		t.Errorf("an over-long derived PV name must be refused, got %v", errs)
 	}
 
 	// A name that fits is not flagged, so the check cannot simply always fire.
-	k.Libs.PVC.Create.Name = "jar-libs"
+	k.Deployment.Name = "solmq"
 	k.Deployment.Namespace = "solconnector-tps-sit"
 	errs, _ = Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
 	if hasErr(errs, "exceeds the 63-char DNS-1123 limit") {

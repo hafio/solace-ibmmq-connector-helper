@@ -564,6 +564,115 @@ podman:
 	}
 }
 
+// TestConfigRendersTransformHeadersUnderItsWorkflow is the end-to-end pin for
+// header transforms. The block is written in the workflow file because only the
+// file knows which workflow number it becomes: here the second file by sorted
+// name, so its block must land under solace.connector.workflows.1 -- verbatim,
+// quoting and key order intact -- and nowhere under workflow 0.
+func TestConfigRendersTransformHeadersUnderItsWorkflow(t *testing.T) {
+	files := synthWorkflowFiles(2)
+	files[1].Data = append(files[1].Data, []byte(`transform-headers:
+  expressions:
+    solace_scst_targetDestination: "'orders/' + headers.region"
+    JMS_IBM_Format: 'MQSTR'
+`)...)
+	out, errs, _ := Config(Request{Workflows: files}, Resolver{Rand: fixedStatusRand})
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	want := `    workflows:
+      0:
+        enabled: true
+      1:
+        enabled: true
+        transform-headers:
+          expressions:
+            solace_scst_targetDestination: "'orders/' + headers.region"
+            JMS_IBM_Format: 'MQSTR'
+`
+	if !strings.Contains(out, want) {
+		t.Errorf("application.yml missing the transform under workflow 1, want:\n%s\ngot:\n%s", want, out)
+	}
+
+	// A misplaced transform stops the render rather than dropping it.
+	files[1].Data = append(synthWorkflowFiles(2)[1].Data, []byte("transform:\n  expressions:\n    h: x\n")...)
+	if out, errs, _ := Config(Request{Workflows: files}, Resolver{Rand: fixedStatusRand}); out != "" || !issuesContain(errs, "transform is not a key") {
+		t.Errorf("a misplaced transform must fail the render, got out=%q errs=%v", out, errs)
+	}
+}
+
+// TestRetiredCreateNamesDeployButDoNotValidate is the end-to-end pin for the
+// upgrade contract of the name keys the tool no longer honours. An env.yaml
+// written before names were derived must keep generating -- every object
+// under its derived name, the old keys ignored without a word -- while
+// validate reports each old key and asks for it to be removed.
+func TestRetiredCreateNamesDeployButDoNotValidate(t *testing.T) {
+	envData := `image:
+  name: img
+  tag: v1
+tls:
+  truststore:
+    file: ./certs/truststore.jks
+    password: ts
+    type: JKS
+kubernetes:
+  deployment:
+    name: solmq
+    namespace: ns
+  secrets:
+    credentials:
+      create:
+        name: shared-creds
+    stores:
+      create:
+        name: shared-tls
+  libs:
+    pvc:
+      create:
+        name: shared-libs
+        nfs:
+          server: nfs1
+          path: /libs
+`
+	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
+	res := Resolver{Rand: fixedStatusRand, ReadFile: func(string) ([]byte, error) { return []byte("JKS"), nil }}
+
+	out, errs, _ := GenerateKubernetes(req, res, KubeOpts{})
+	if len(errs) > 0 {
+		t.Fatalf("generate must ignore the retired names quietly, got %v", errs)
+	}
+	for _, want := range []string{
+		"  name: solmq-credentials\n", "  name: solmq-stores\n", "  name: solmq-libs\n",
+		"claimName: solmq-libs\n", "  name: ns-solmq-libs-pv\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("manifest missing the derived name %q:\n%s", want, out)
+		}
+	}
+	for _, retired := range []string{"shared-creds", "shared-tls", "shared-libs"} {
+		if strings.Contains(out, retired) {
+			t.Errorf("the retired name %q reached the manifest:\n%s", retired, out)
+		}
+	}
+
+	verrs, _ := Validate(req, res)
+	for _, field := range []string{
+		"kubernetes.secrets.credentials.create.name is no longer accepted",
+		"kubernetes.secrets.stores.create.name is no longer accepted",
+		"libs.pvc.create.name is no longer accepted",
+	} {
+		found := false
+		for _, e := range verrs {
+			if strings.Contains(e.Msg, field) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("validate must report %q, got %v", field, verrs)
+		}
+	}
+}
+
 // TestGenerateJavaOptionsReachEveryPlatform is the end-to-end pin for the
 // top-level java-options: block. Written once, as a >- folded block with
 // ${VAR} references in it, it reaches the kubernetes manifest, the compose file
@@ -933,8 +1042,7 @@ kubernetes:
     namespace: ns
   secrets:
     credentials:
-      create:
-        name: s
+      create: true
 `
 	req := Request{
 		Env:       &File{Name: "env.yaml", Data: []byte(envData)},

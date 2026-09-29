@@ -79,21 +79,29 @@ type Workflow struct {
 	Target    Side
 	SourceSet bool // a source: block was present in the file
 	TargetSet bool // a target: block was present in the file
+
+	// TransformHeaders is the file's top-level transform-headers: block,
+	// captured verbatim (nil when absent) and rendered under this workflow's
+	// solace.connector.workflows.<N>.transform-headers (see TransformHeadersKey).
+	TransformHeaders *yaml.Node
+	// MisplacedTransforms lists every other transform-looking key in the file,
+	// as dotted paths ("source.transform-headers"), so validate can refuse them
+	// rather than let the connector start without the transform they meant.
+	MisplacedTransforms []string
 }
 
 // ---- raw YAML shapes ---------------------------------------------------------
 
 type rawWorkflow struct {
-	Enabled   *bool      `yaml:"enabled"`
-	Source    *rawSide   `yaml:"source"`
-	Target    *rawSide   `yaml:"target"`
-	Transform *yaml.Node `yaml:"transform"` // absorbed and ignored (non-goal)
+	Enabled          *bool     `yaml:"enabled"`
+	Source           *rawSide  `yaml:"source"`
+	Target           *rawSide  `yaml:"target"`
+	TransformHeaders yaml.Node `yaml:"transform-headers"`
 }
 
 type rawSide struct {
-	Solace    *rawSolace `yaml:"solace"`
-	MQ        *rawMQ     `yaml:"mq"`
-	Transform *yaml.Node `yaml:"transform"` // absorbed and ignored
+	Solace *rawSolace `yaml:"solace"`
+	MQ     *rawMQ     `yaml:"mq"`
 }
 
 // NOTE: node-capturing fields MUST be `yaml.Node` (value), not `*yaml.Node`.
@@ -163,6 +171,17 @@ func ParseWorkflow(data []byte, path string) (*Workflow, error) {
 	if raw.Target != nil {
 		wf.Target = raw.Target.toSide()
 		wf.TargetSet = true
+	}
+	// An empty transform-headers: is the same as none at all.
+	if n := nodePtr(raw.TransformHeaders); n != nil && n.ShortTag() != "!!null" {
+		wf.TransformHeaders = n
+	}
+	// A second decode, into the generic tree, because a misplaced transform is
+	// by definition a key no struct above has a field for. It cannot fail: the
+	// same bytes decoded cleanly just above.
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err == nil {
+		wf.MisplacedTransforms = misplacedWorkflowTransforms(&doc)
 	}
 	return wf, nil
 }

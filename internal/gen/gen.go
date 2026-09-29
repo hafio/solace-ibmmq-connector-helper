@@ -108,6 +108,7 @@ func Validate(r Request, res Resolver) (errs, warns []Issue) {
 		CheckDocker:     e.Docker != nil,
 		CheckPodman:     e.Podman != nil,
 		Env:             res.Env,
+		Lint:            true,
 	})
 	errs, warns = append(pissues, verrs...), append(ewarns, w...)
 
@@ -196,8 +197,8 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		}
 		in.Stores = files
 	}
-	if ip := k.Secrets.ImagePull; ip != nil {
-		ps, err := resolvePullSecret(ip, e.Image, res)
+	if name, created := k.ImagePullSecretName(); name != "" {
+		ps, err := resolvePullSecret(name, created, e.Image, res)
 		if err != nil {
 			return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 		}
@@ -282,9 +283,9 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 // imagePullSecrets entry and no Secret, so the one the operator manages is left
 // untouched. create additionally reads the registry password here and builds
 // the payload, keeping deploy pure and the value inside this call.
-func resolvePullSecret(ip *spec.ImagePullSecret, img *spec.Image, res Resolver) (*deploy.PullSecret, error) {
-	out := &deploy.PullSecret{Name: ip.Name}
-	if !ip.Create {
+func resolvePullSecret(name string, create bool, img *spec.Image, res Resolver) (*deploy.PullSecret, error) {
+	out := &deploy.PullSecret{Name: name}
+	if !create {
 		return out, nil
 	}
 	user, pass := img.UserCred(), img.PassCred()

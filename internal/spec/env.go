@@ -61,6 +61,7 @@ func ParseEnv(data []byte) (*Env, error) {
 		Timezone:    raw.Timezone,
 		JavaOptions: raw.JavaOptions,
 	}
+	e.Defaults.MisplacedTransforms = envTransforms(data)
 	// The effective management port drives the kubernetes service default, so an
 	// unset service.port targets the port the connector actually listens on
 	// rather than a bare constant. docker/podman publish nothing unless the

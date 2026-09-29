@@ -44,6 +44,7 @@ documentation index; this guide is the complete reference.
    4. [Destinations, durable names, passthrough](#64-destinations-durable-names-passthrough)
    5. [Event-driven guidance (errors and warnings)](#65-event-driven-guidance-errors-and-warnings)
    6. [Reusable connections (`conn-ref`)](#66-reusable-connections-conn-ref)
+   7. [Header transforms (`transform-headers`)](#67-header-transforms-transform-headers)
 7. [Connector defaults (`env.yaml` top level)](#7-connector-defaults-envyaml-top-level)
    1. [The reserved status account (`solmq-status`)](#71-the-reserved-status-account-solmq-status)
 8. [Platform sections (`kubernetes:`, `docker:`, `podman:`)](#8-platform-sections-kubernetes-docker-podman)
@@ -580,6 +581,7 @@ Solace pattern is allowed but emits an advisory **warning** (see
 | `enabled` | no | `true` | `false` emits the workflow but marks it disabled |
 | `source` | yes | _(required)_ | the consuming side |
 | `target` | yes | _(required)_ | the producing side |
+| `transform-headers` | no | _(none)_ | header transforms for this workflow, copied verbatim to `solace.connector.workflows.<N>.transform-headers` -- see [section 6.7](#67-header-transforms-transform-headers) |
 
 ### 6.2 `solace:` options
 
@@ -629,8 +631,9 @@ Solace pattern is allowed but emits an advisory **warning** (see
   `6ba7f4e2-9c1d-5a3b-8e47-2f9a0c7d13e5`, key = `conn-name || queue-manager || topic
   || file-basename` joined by `0x1F`) -- so **renaming a workflow file changes its
   durable name** and orphans the old subscription. Rename deliberately.
-- `api-properties`, `additional-properties`, `consumer`, and `producer` are copied
-  through **verbatim**, preserving key order and scalar quoting.
+- `api-properties`, `additional-properties`, `consumer`, `producer`, and the
+  workflow's own `transform-headers` are copied through **verbatim**, preserving key
+  order and scalar quoting.
 
 ### 6.5 Event-driven guidance (errors and warnings)
 
@@ -700,6 +703,55 @@ target:
   is disambiguated with `-2`/`-3`.
 
 ---
+
+### 6.7 Header transforms (`transform-headers`)
+
+A workflow can rewrite message headers on the way through. Each entry under
+`transform-headers.expressions` names a header and gives the SpEL expression the
+connector evaluates to set it. The block goes at the **top level of the workflow
+file**, beside `source:` and `target:`:
+
+```yaml
+source:
+  mq:
+    # ...
+target:
+  solace:
+    # ...
+transform-headers:
+  expressions:
+    solace_scst_targetDestination: "'orders/' + headers.region"
+```
+
+It is copied through verbatim -- key order and each expression's quoting intact --
+to that workflow's `solace.connector.workflows.<N>.transform-headers` in
+`application.yml`. It has to live in the workflow file rather than `env.yaml`,
+because the tool numbers the workflows by sorted file name
+([section 5](#5-the-config-file-and-workflow-discovery)), so only the file knows
+which `<N>` it becomes. The expressions themselves are the connector's to evaluate:
+this tool checks where the block is and what shape it has, not the SpEL inside it.
+
+Quote each expression as a whole, as above. SpEL writes its string literals in single
+quotes, and an expression that starts with one would otherwise be read by YAML as a
+quoted string ending at the next `'`.
+
+**A transform in the wrong place is an error, on every command.** Both files are read
+leniently, so a transform anywhere else would otherwise be dropped without a word and
+the connector would start without it. Every key beginning `transform`, other than a
+workflow file's top-level `transform-headers:`, is rejected, naming the file and the
+path it was found at:
+
+| Found | Why it cannot work there | The error says |
+|-------|--------------------------|----------------|
+| `transform-headers:` under `source:`/`target:`, under their `solace:`/`mq:` block, or under that block's `consumer:`/`producer:` | a header transform applies to the whole workflow, not to one side | move it to the top level of the file |
+| `transform:`, `transform-header:`, or any other `transform...` key in a workflow file | not a key: the old `transform:` was never read, and the rest are typos | write it as `transform-headers:` at the top level |
+| any `transform...` key in `env.yaml` -- at the top level or in a `connections.<name>` entry | a header transform belongs to one workflow | write it in each workflow file it applies to |
+
+The block's shape is checked as well. It must be a mapping holding an `expressions:`
+mapping, each expression one string, with no header given twice -- anything else is
+an error. A key beside `expressions:` is passed through but warned about, since the
+connector reads transforms only from `expressions` and it is most likely a typo; an
+empty `expressions:` warns that the workflow transforms nothing.
 
 ## 7. Connector defaults (`env.yaml` top level)
 
@@ -1121,9 +1173,8 @@ kubernetes:
                                  # URLs below with "solmq-conn-util download jar mq" (section 10)
     pvc:
       existing: jar-libs-pvc     # ...a PVC that already holds the IBM MQ jars
-      # create:                  # ...or provision an NFS-backed PV + PVC
-      #   name: jar-libs-pvc
-      #   storage: 1Gi
+      # create:                  # ...or provision an NFS-backed PV + PVC, named after
+      #   storage: 1Gi           #    deployment.name: <name>-libs (PV <namespace>-<name>-libs-pv)
       #   nfs:
       #     server: nfs1.corp
       #     path: /solace-libs
@@ -1135,39 +1186,69 @@ kubernetes:
     #   pvc: jar-libs-pvc        # optional: download into this existing PVC instead of an emptyDir
   secrets:                       # entirely optional
     credentials:                 # mounted at /app/external/var/secrets, one file per key (no envFrom)
-      create:                    # create XOR existing -- exactly one, once the block is present
-        name: solmq-credentials  # the tool builds it: one key per credential the config
-                                 # references, each -env credential keyed by the variable
+      create: true               # create XOR existing -- exactly one, once the block is present.
+                                 # The tool builds <name>-credentials: one key per credential the
+                                 # config references, each -env credential keyed by the variable
                                  # it names (SOL_PASSWORD, ...)
       # existing: my-credentials # ...or mount a Secret that already exists, left
                                  # untouched -- it must already carry those same keys
     stores:                      # truststore/keystore Secret (volume-mounted)
-      create:
-        name: solmq-tls          # base64-embeds the .jks files from env.yaml tls.*.file
+      create: true               # <name>-stores: base64-embeds the .jks files from env.yaml tls.*.file
       # existing: my-tls         # ...its keys are the tls.*.file base names (truststore.jks)
 ```
 
 | Section | Option | Notes |
 |---------|--------|-------|
-| `deployment` | `name`, `namespace` | required; must be valid DNS-1123 labels; a `kind: Namespace` doc for `namespace` is always emitted first. Keep `name` short enough that the derived `<name>-config` stays within 63 chars |
+| `deployment` | `name`, `namespace` | required; must be valid DNS-1123 labels; a `kind: Namespace` doc for `namespace` is always emitted first. Every object the tool creates is named after `name` (see below), so keep it short enough that the longest of those -- `<name>-credentials` when the tool builds the credentials Secret -- stays within 63 chars; `validate` names the one that does not |
 | `deployment` | `replicas` | default `1`; `standalone` leader-election requires `1`, `active_*` allow more. Replicas are copies of the one connector, and leader-election picks the active one |
 | `deployment` | `resources.cpu`, `resources.memory` | one value each; emitted as identical requests **and** limits (guaranteed QoS); a bare integer like `cpu: 1` is auto-quoted |
-| `secrets.image-pull` | `name`, `create` | optional registry credential for pulling the image. `name` alone references a Secret you made (`kubectl create secret docker-registry`); adding `create: true` has the tool build it from the top-level `image` block instead. Omitted, nothing is created -- see [section 9](#9-secrets-model) |
+| `secrets.image-pull` | `name` \| `create` | optional registry credential for pulling the image. `name` alone references a Secret you made (`kubectl create secret docker-registry`); `create: true` instead has the tool build `<name>-image-pull` from the top-level `image` block, and takes no `name`. Omitted, nothing is created -- see [section 9](#9-secrets-model) |
 | `service` | `enabled`, `port` | emit a Service on this port; `port` accepts a bare port or `host:container`, the same syntax as docker/podman `ports` ([section 8.2](#82-docker)/[8.3](#83-podman)); unset defaults to the effective management port |
 | `libs` | `pvc` \| `download` | optional; exactly one mode; makes the IBM MQ java libraries available at `/app/external/libs` (read-only); `solmq-conn-util download jar mq` ([section 10](#10-download-jar)) fetches the jars themselves, into a PVC-mountable directory or ready to list under `libs.download.urls` |
-| `libs.pvc` | `create` / `existing` | `create` emits an NFS-backed PersistentVolume (named `<namespace>-<name>-pv`) + PersistentVolumeClaim; `existing` references a pre-provisioned PVC (`create` XOR `existing`) |
+| `libs.pvc` | `create` / `existing` | `create` (`storage`, default `1Gi`, and `nfs.server`/`nfs.path`) emits an NFS-backed PersistentVolumeClaim named `<name>-libs` and the PersistentVolume behind it, `<namespace>-<name>-libs-pv`; `existing` references a pre-provisioned PVC (`create` XOR `existing`) |
 | `libs.download` | `urls`, `image`, `pvc` | an initContainer `wget`s each URL into `/libs` at pod start; the shared volume is an `emptyDir` unless `pvc` names an existing PVC |
-| `secrets.credentials.create` | `name` | the tool builds the Secret: one key per credential the config references, each holding the resolved value -- read from the host variable for an `-env` credential, taken from the spec for a literal. It takes no other keys |
+| `secrets.credentials.create` | `true` | the tool builds `<name>-credentials`: one key per credential the config references, each holding the resolved value -- read from the host variable for an `-env` credential, taken from the spec for a literal |
 | `secrets.credentials.existing` | `<name>` | reference a pre-existing Secret instead of creating one; exactly one of `create` / `existing` is required once the block is present, and the Secret's keys must be the ones [section 9.2](#92-mount-names) derives -- your `-env` variable names, plus a derived name per literal |
-| `secrets.stores.create` | `name` | base64-embeds the `env.yaml` `tls.*.file` stores; requires a `tls.truststore` |
+| `secrets.stores.create` | `true` | the tool builds `<name>-stores`, base64-embedding the `env.yaml` `tls.*.file` stores; requires a `tls.truststore` |
 | `secrets.stores.existing` | `<name>` | reference a pre-existing stores Secret (`create` XOR `existing`, as above); its keys must be the base filenames of `tls.truststore.file` / `tls.keystore.file` |
 
-**The derived PV name carries the namespace.** A PersistentVolume is cluster-scoped
-while the claim naming it is not, so `libs.pvc.create.name` only has to be unique
-within its own namespace to make a valid PVC -- deriving the PV name from `name`
-alone would let two releases in different namespaces both name the same PV and fight
-over it. Keep `namespace` and `name` short enough that `<namespace>-<name>-pv` stays
-within the 63-char DNS-1123 limit; `validate` rejects a combination that would not.
+**Everything the tool creates is named after `deployment.name`.** The ConfigMap is
+`<name>-config`, the Secrets `<name>-credentials`, `<name>-stores` and
+`<name>-image-pull`, and the libs claim `<name>-libs`. A Deployment name is already
+unique within its namespace, so these are too: two instances deployed into one
+namespace can never render the same object. Before, each of these took a name you
+chose, and two instances given the same one shared it -- each deploy overwrote the
+other's credentials, `remove` of either deleted them for both, and a shared libs
+claim made `remove` hang outright, because `kubectl delete` waits on
+`kubernetes.io/pvc-protection` while the other instance's pod still mounts it.
+Several instances can still read the same jars: each gets its own PV and claim, all
+pointing at the one NFS export. To share one claim on purpose, create it yourself
+and reference it with `libs.pvc.existing` -- a referenced object is never deleted
+by `remove`.
+
+**The PV name also carries the namespace.** A PersistentVolume is cluster-scoped
+while the claim naming it is not, so a name built from the claim alone would let two
+releases in different namespaces both name the same PV and fight over it. Keep
+`namespace` and `name` short enough that `<namespace>-<name>-libs-pv` stays within
+the 63-char DNS-1123 limit; `validate` rejects a combination that would not.
+
+> [!NOTE]
+> **Upgrading an env.yaml that still names these objects.** The old
+> `secrets.credentials.create.name`, `secrets.stores.create.name`,
+> `secrets.image-pull.name` (together with `create: true`) and
+> `libs.pvc.create.name` keys are still read, and `generate`/`deploy` ignore them
+> without a word, so the file keeps deploying. `validate` reports each one as no
+> longer accepted: replace a `create: {name: ...}` block with `create: true`, and
+> drop the other two keys. The first deploy after the upgrade creates the objects
+> under their new names and moves the pods onto them, but it cannot know the old
+> names, so the old objects stay behind -- and `remove` will not delete them
+> either. Once the new pods are running, delete them by hand:
+>
+> ```sh
+> kubectl -n <namespace> delete secret <old-credentials-name> <old-stores-name> <old-image-pull-name>
+> kubectl -n <namespace> delete pvc <old-claim-name>
+> kubectl delete pv <namespace>-<old-claim-name>-pv
+> ```
 
 Capacity and `nfs.server`/`nfs.path` cannot be changed by re-applying an existing PV
 -- both are immutable once the object exists, so raising `storage` and redeploying
@@ -1501,7 +1582,7 @@ names until deploying to a platform does.
 
 ### 9.3 How each platform delivers them
 
-- **kubernetes**: `secrets.credentials.create.name` (or `existing:`) is mounted as
+- **kubernetes**: the credentials Secret (`<name>-credentials` with `create: true`, or your `existing:` one) is mounted as
   a volume at `/app/external/var/secrets`, read-only, `defaultMode: 0400`. There is
   no `envFrom` -- credentials are never environment variables. The pod also sets
   `automountServiceAccountToken: false`, since the connector never calls the API and
@@ -1579,14 +1660,14 @@ kubernetes:
   secrets:
     image-pull:
       name: regcred      # references a Secret you made
-      create: true       # ...or has the tool build it
+      # create: true     # ...or, instead of name, has the tool build <deployment.name>-image-pull
 ```
 
 | Config | Result |
 |--------|--------|
 | no `image-pull:` block | no pull secret, no `imagePullSecrets` -- nothing changes |
 | `name` only | the pod template gets `imagePullSecrets`, and **no Secret is rendered**. Make it yourself: `kubectl create secret docker-registry regcred ...` |
-| `name` + `create: true` | the tool also renders a `kubernetes.io/dockerconfigjson` Secret, built from `image.repo` and the registry account in the `image` block ([section 8.0](#80-image-timezone-and-jvm-options-shared-by-every-platform)) |
+| `create: true` | the tool renders a `kubernetes.io/dockerconfigjson` Secret named `<deployment.name>-image-pull`, built from `image.repo` and the registry account in the `image` block ([section 8.0](#80-image-timezone-and-jvm-options-shared-by-every-platform)), and the pod template references it. A `name` alongside is the retired form: ignored by `generate`/`deploy`, reported by `validate` ([section 8.1](#81-kubernetes)) |
 
 `create` defaults to **false** deliberately: building a Secret is a mutation, and
 naming one you manage must not overwrite it. It also keeps the registry account
@@ -2833,7 +2914,7 @@ container is called something else, is not reachable with `cli` -- reach it with
   characters and a comment left inside a `>-` block are rejected ([section 8.0](#80-image-timezone-and-jvm-options-shared-by-every-platform)).
 - **The safe-charset gate covers more than `command:`.** `image`, `restart` and
   the top-level `timezone`, the `tls.*.file` paths the docker/podman sections
-  bind-mount, `libs.dir`, `podman.base-dir`, the kubernetes Secret names, and
+  bind-mount, `libs.dir`, `podman.base-dir`, the referenced (`existing:`) kubernetes Secret names, and
   `libs.pvc.create.nfs.*` are all rejected when they carry whitespace, quotes,
   control characters, or shell metacharacters -- each one lands unquoted in a
   generated script, unit, or manifest.

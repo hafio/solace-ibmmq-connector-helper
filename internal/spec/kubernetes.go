@@ -39,8 +39,16 @@ type Service struct {
 // CredCreate builds the credentials Secret. Its contents are no longer declared
 // here: the keys are every credential the config references, derived from the
 // spec itself, and their values come from the literals and `-env` variables
-// those positions name.
+// those positions name. Nor is its name: the Secret is
+// <deployment.name>-credentials (Kubernetes.CredentialsSecretName).
+//
+// It is written create: true. The older mapping form, create: {name: ...},
+// still means "create" so an old env.yaml keeps deploying.
 type CredCreate struct {
+	// Name is retired: generate and deploy ignore it quietly, and only validate
+	// reports it, asking for it to be removed. A user-chosen name let two
+	// instances in one namespace render the same Secret, so each deploy
+	// overwrote the other's credentials and either remove deleted both.
 	Name string `yaml:"name"`
 
 	// Removed keys, kept only to fail loudly. yaml.v3 ignores unknown fields, so
@@ -79,8 +87,34 @@ type CredentialsSecret struct {
 	Existing string      `yaml:"existing"`
 }
 
-// StoreCreate embeds the .jks files from env.yaml tls.*.file.
+// UnmarshalYAML accepts create: in both spellings (see decodeCreate), so Create
+// is non-nil exactly when the tool is to build the Secret.
+func (c *CredentialsSecret) UnmarshalYAML(node *yaml.Node) error {
+	var raw struct {
+		Create   yaml.Node `yaml:"create"`
+		Existing string    `yaml:"existing"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	var cc CredCreate
+	create, err := decodeCreate(&raw.Create, "kubernetes.secrets.credentials.create", &cc)
+	if err != nil {
+		return err
+	}
+	if create {
+		c.Create = &cc
+	}
+	c.Existing = raw.Existing
+	return nil
+}
+
+// StoreCreate embeds the .jks files from env.yaml tls.*.file into a Secret
+// named <deployment.name>-stores (Kubernetes.StoresSecretName). It is written
+// create: true; the older create: {name: ...} still means "create".
 type StoreCreate struct {
+	// Name is retired, for the reason CredCreate.Name is: ignored by generate
+	// and deploy, reported by validate.
 	Name string `yaml:"name"`
 }
 
@@ -93,6 +127,58 @@ type StoresSecret struct {
 	Existing string       `yaml:"existing"`
 }
 
+// UnmarshalYAML accepts create: in both spellings (see decodeCreate), so Create
+// is non-nil exactly when the tool is to build the Secret.
+func (s *StoresSecret) UnmarshalYAML(node *yaml.Node) error {
+	var raw struct {
+		Create   yaml.Node `yaml:"create"`
+		Existing string    `yaml:"existing"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	var sc StoreCreate
+	create, err := decodeCreate(&raw.Create, "kubernetes.secrets.stores.create", &sc)
+	if err != nil {
+		return err
+	}
+	if create {
+		s.Create = &sc
+	}
+	s.Existing = raw.Existing
+	return nil
+}
+
+// decodeCreate reads a secrets create: value. true means the tool builds the
+// Secret and false, empty or absent means it does not. The older mapping form
+// (create: {name: ...}) still means "create", so an env.yaml written before the
+// names were derived keeps deploying; its keys are decoded into legacy so
+// validate can report the ones that are retired.
+func decodeCreate(n *yaml.Node, field string, legacy any) (bool, error) {
+	if n.Kind == yaml.AliasNode && n.Alias != nil {
+		n = n.Alias
+	}
+	switch n.Kind {
+	case 0:
+		return false, nil // the key is absent
+	case yaml.MappingNode:
+		if err := n.Decode(legacy); err != nil {
+			return false, err
+		}
+		return true, nil
+	case yaml.ScalarNode:
+		if n.ShortTag() == "!!null" {
+			return false, nil
+		}
+		var b bool
+		if err := n.Decode(&b); err != nil {
+			return false, fmt.Errorf("%s must be true or false, got %q", field, n.Value)
+		}
+		return b, nil
+	}
+	return false, fmt.Errorf("%s must be true or false, got a %s", field, YAMLKind(n))
+}
+
 // Secrets groups the optional secret wirings.
 type Secrets struct {
 	Credentials *CredentialsSecret `yaml:"credentials"`
@@ -101,8 +187,13 @@ type Secrets struct {
 }
 
 // ImagePullSecret wires the registry credential the kubelet pulls the image
-// with. Name always reaches the pod template as an imagePullSecrets entry;
-// Create additionally renders the Secret itself from the top-level image block.
+// with. Name alone references a Secret the operator manages; Create instead has
+// the tool render one from the top-level image block, named
+// <deployment.name>-image-pull (Kubernetes.ImagePullSecretName). Either way the
+// Secret reaches the pod template as an imagePullSecrets entry.
+//
+// With Create, Name is retired: generate and deploy ignore it quietly and only
+// validate reports it, for the reason CredCreate.Name is.
 //
 // Create defaults to false -- absent and false mean the same thing, which is
 // why a plain bool is enough. Building a Secret is a mutation, and naming one
@@ -119,8 +210,15 @@ type NFS struct {
 	Path   string `yaml:"path"`
 }
 
-// PVCCreate emits an NFS PersistentVolume + PersistentVolumeClaim pair.
+// PVCCreate emits an NFS PersistentVolume + PersistentVolumeClaim pair, named
+// after deployment.name (Kubernetes.LibsPVCName, LibsPVName). Several instances
+// may point at the same export: each gets its own PV and claim onto it.
 type PVCCreate struct {
+	// Name is retired: generate and deploy ignore it quietly, and only validate
+	// reports it. A user-chosen claim name let two instances in one namespace
+	// share one claim, so remove of either one hung -- kubectl delete waits on
+	// kubernetes.io/pvc-protection while the other instance's pod still
+	// mounts it -- and the other instance lost its libs at its next restart.
 	Name    string `yaml:"name"`
 	Storage string `yaml:"storage"` // default 1Gi
 	NFS     NFS    `yaml:"nfs"`
@@ -148,15 +246,99 @@ type Libs struct {
 // LibsPVName is the name of the PersistentVolume backing a created libs PVC.
 //
 // It carries the namespace because a PersistentVolume is cluster-scoped while
-// the claim naming it is not: libs.pvc.create.name only has to be unique within
-// a namespace to make a valid PVC, so deriving the PV name from it alone meant
-// two releases in different namespaces silently fought over one PV object --
-// the second apply rebound it, and the first release's pods were then left
-// unable to schedule on a claim that would never bind.
+// the claim naming it is not: the claim name is only unique within a namespace,
+// so deriving the PV name from it alone would let two releases in different
+// namespaces fight over one PV object -- the second apply rebinding it, and the
+// first release's pods then left unable to schedule on a claim that would
+// never bind.
 //
 // The result is a single DNS-1123 label, so validate caps the combined length
 // rather than letting the API server reject it mid-apply.
 func LibsPVName(namespace, claim string) string { return namespace + "-" + claim + "-pv" }
+
+// The suffixes of the objects the tool creates and names after
+// kubernetes.deployment.name. A Deployment name is already unique within its
+// namespace, so every derived name is too: two instances can never render,
+// and then tear down, the same Secret or claim.
+const (
+	ConfigMapSuffix         = "-config"
+	CredentialsSecretSuffix = "-credentials"
+	StoresSecretSuffix      = "-stores"
+	ImagePullSecretSuffix   = "-image-pull"
+	LibsPVCSuffix           = "-libs"
+)
+
+// CredentialsSecretName is the credentials Secret the pod mounts, and whether
+// the tool creates it: the derived name when it does, the existing: name when
+// it only references one, "" when there is none.
+func (k *Kubernetes) CredentialsSecretName() (name string, created bool) {
+	c := k.Secrets.Credentials
+	switch {
+	case c == nil:
+		return "", false
+	case c.Create != nil:
+		return k.Deployment.Name + CredentialsSecretSuffix, true
+	}
+	return c.Existing, false
+}
+
+// StoresSecretName is CredentialsSecretName for the truststore/keystore Secret.
+func (k *Kubernetes) StoresSecretName() (name string, created bool) {
+	s := k.Secrets.Stores
+	switch {
+	case s == nil:
+		return "", false
+	case s.Create != nil:
+		return k.Deployment.Name + StoresSecretSuffix, true
+	}
+	return s.Existing, false
+}
+
+// ImagePullSecretName is the registry Secret the pod pulls with, and whether
+// the tool creates it: the derived name with create, the operator's own name
+// without, "" when there is no image-pull block.
+func (k *Kubernetes) ImagePullSecretName() (name string, created bool) {
+	ip := k.Secrets.ImagePull
+	switch {
+	case ip == nil:
+		return "", false
+	case ip.Create:
+		return k.Deployment.Name + ImagePullSecretSuffix, true
+	}
+	return ip.Name, false
+}
+
+// LibsPVCName is the claim the tool creates for libs.pvc.create, or "" when it
+// creates none. Its PersistentVolume is LibsPVName(namespace, LibsPVCName()).
+func (k *Kubernetes) LibsPVCName() string {
+	if lb := k.Libs; lb != nil && lb.PVC != nil && lb.PVC.Create != nil {
+		return k.Deployment.Name + LibsPVCSuffix
+	}
+	return ""
+}
+
+// CreatedNames lists every namespaced object the tool creates for this
+// instance, in a fixed order: the Deployment (and its Service, which shares the
+// name), the ConfigMap, then each Secret and claim the config asks it to build.
+// validate holds each to the DNS-1123 label limit, and remove uses the list to
+// tell a straggler of its own from someone else's object.
+func (k *Kubernetes) CreatedNames() []string {
+	name := k.Deployment.Name
+	out := []string{name, name + ConfigMapSuffix}
+	if n, created := k.CredentialsSecretName(); created {
+		out = append(out, n)
+	}
+	if n, created := k.StoresSecretName(); created {
+		out = append(out, n)
+	}
+	if n, created := k.ImagePullSecretName(); created {
+		out = append(out, n)
+	}
+	if n := k.LibsPVCName(); n != "" {
+		out = append(out, n)
+	}
+	return out
+}
 
 // DefaultKubeCommand is the CLI used to apply/delete manifests when the
 // kubernetes.command key is unset.

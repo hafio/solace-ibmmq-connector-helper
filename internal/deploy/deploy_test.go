@@ -30,8 +30,8 @@ func one(name, appYAML string, m *consolidate.Model) Instance {
 func fullFixtureInput() Input {
 	k := baseKube()
 	k.Secrets = spec.Secrets{
-		Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "creds"}},
-		Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{Name: "tls"}},
+		Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{}},
+		Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{}},
 	}
 	return Input{
 		Kube: k, Defaults: &spec.Defaults{},
@@ -46,8 +46,8 @@ func TestRenderFull(t *testing.T) {
 	for _, w := range []string{
 		"kind: ConfigMap", "name: solmq-config", "application.yml: |", "    spring:",
 		"status: |", "    #!/bin/sh", "    echo status",
-		"kind: Secret", "name: creds", "stringData:", `A: "sec\"ret"`,
-		"name: tls", "truststore.jks: QUJD",
+		"kind: Secret", "name: solmq-credentials", "stringData:", `A: "sec\"ret"`,
+		"name: solmq-stores", "truststore.jks: QUJD",
 		"kind: Deployment", "automountServiceAccountToken: false", "name: JAVA_TOOL_OPTIONS", "useIBMCipherMappings=false",
 		"solace-connector/le-mode: standalone", "solace-connector/role: active",
 		"- name: secrets", "mountPath: " + SecretsMountPath, "defaultMode: 0400",
@@ -101,7 +101,7 @@ data:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: creds
+  name: solmq-credentials
   namespace: ns
 type: Opaque
 stringData:
@@ -110,7 +110,7 @@ stringData:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: tls
+  name: solmq-stores
   namespace: ns
 type: Opaque
 data:
@@ -188,11 +188,11 @@ spec:
             name: solmq-config
         - name: secrets
           secret:
-            secretName: creds
+            secretName: solmq-credentials
             defaultMode: 0400
         - name: stores
           secret:
-            secretName: tls
+            secretName: solmq-stores
 ---
 apiVersion: v1
 kind: Service
@@ -357,25 +357,66 @@ func TestRenderLibsPVCExisting(t *testing.T) {
 	}
 }
 
+// TestCreatedSecretsTakeDerivedNames pins the fix for two instances sharing
+// one namespace: every Secret the tool builds is named after deployment.name,
+// so neither instance's deploy can overwrite the other's credentials and
+// neither one's remove can delete them. The retired create.name keys an old
+// env.yaml still carries are ignored rather than rejected, so that file keeps
+// deploying; only validate reports them.
+func TestCreatedSecretsTakeDerivedNames(t *testing.T) {
+	k := baseKube()
+	k.Secrets = spec.Secrets{
+		Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "shared-creds"}},
+		Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{Name: "shared-tls"}},
+	}
+	out := Render(Input{
+		Kube: k, Defaults: &spec.Defaults{},
+		CredKVs:  []KV{{Key: "A", Val: "x"}},
+		Stores:   []StoreFile{{Name: "truststore.jks", Base64: "QUJD"}},
+		Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{}),
+	})
+	for _, want := range []string{
+		"  name: solmq" + spec.CredentialsSecretSuffix + "\n",
+		"  name: solmq" + spec.StoresSecretSuffix + "\n",
+		"secretName: solmq" + spec.CredentialsSecretSuffix + "\n",
+		"secretName: solmq" + spec.StoresSecretSuffix + "\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+	for _, retired := range []string{"shared-creds", "shared-tls"} {
+		if strings.Contains(out, retired) {
+			t.Errorf("the retired name %q must be ignored, but it reached the manifest:\n%s", retired, out)
+		}
+	}
+}
+
 func TestRenderLibsPVCCreate(t *testing.T) {
 	k := baseKube()
+	// Name is the retired key: it must not reach the manifest at all.
 	k.Libs = &spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{
 		Name: "jar-libs", Storage: "2Gi", NFS: spec.NFS{Server: "nfs1", Path: "/libs"},
 	}}}
 	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	claim := k.Deployment.Name + spec.LibsPVCSuffix
 	for _, want := range []string{
-		// The PV name carries the namespace; the claim's does not, because the
-		// claim is already namespaced. Both must agree on volumeName.
-		"kind: PersistentVolume", "name: " + spec.LibsPVName(k.Deployment.Namespace, "jar-libs"),
+		// The claim is named after the deployment, so no other instance in the
+		// namespace can share it; the PV name carries the namespace on top,
+		// because the PV is cluster-scoped. Both must agree on volumeName.
+		"kind: PersistentVolume", "name: " + spec.LibsPVName(k.Deployment.Namespace, claim),
 		"persistentVolumeReclaimPolicy: Retain",
 		"server: nfs1", "path: /libs", "readOnly: true",
-		"kind: PersistentVolumeClaim", `storageClassName: ""`,
-		"volumeName: " + spec.LibsPVName(k.Deployment.Namespace, "jar-libs"),
-		"storage: 2Gi", "claimName: jar-libs",
+		"kind: PersistentVolumeClaim", "name: " + claim + "\n", `storageClassName: ""`,
+		"volumeName: " + spec.LibsPVName(k.Deployment.Namespace, claim),
+		"storage: 2Gi", "claimName: " + claim,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "jar-libs") {
+		t.Errorf("the retired libs.pvc.create.name must be ignored, but it reached the manifest:\n%s", out)
 	}
 	if strings.Index(out, "kind: PersistentVolume") > strings.Index(out, "kind: Deployment") {
 		t.Error("PV/PVC must precede the Deployment")
@@ -675,7 +716,7 @@ func TestNamespaceManifestMatchesWhatRenderEmits(t *testing.T) {
 func TestTeardownReversesTheDocumentOrder(t *testing.T) {
 	k := baseKube()
 	k.Libs = &spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{
-		Name: "jar-libs", Storage: "2Gi", NFS: spec.NFS{Server: "nfs1", Path: "/libs"},
+		Storage: "2Gi", NFS: spec.NFS{Server: "nfs1", Path: "/libs"},
 	}}}
 	inst := one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})
 

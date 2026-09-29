@@ -296,8 +296,8 @@ details[open]>summary::before{content:"- "}
       </select></div>
       <div class="opt-fields" id="k8s-libs-pe"><div class="f"><label>Existing PVC</label><input id="i-k8s-libs-existing" placeholder="jar-libs-pvc"></div></div>
       <div class="opt-fields" id="k8s-libs-pc">
+        <div class="h">The claim is named after the deployment -- &lt;name&gt;-libs, its PV &lt;namespace&gt;-&lt;name&gt;-libs-pv -- so no other instance can share it and hang its remove. To share one claim on purpose, create it yourself and use pvc: existing.</div>
         <div class="fr">
-          <div class="f"><label>PVC Name</label><input id="i-k8s-libs-name" placeholder="jar-libs-pvc"></div>
           <div class="f"><label>Storage</label><input id="i-k8s-libs-storage" placeholder="1Gi"></div>
         </div>
         <div class="fr">
@@ -320,7 +320,7 @@ details[open]>summary::before{content:"- "}
         <option value="existing">existing</option>
       </select><div class="h">Keys come from the credential fields above -- each *-env name is its own key. <b>create</b> builds the Secret and fills those keys from your environment; <b>existing</b> leaves your Secret alone, so it must already carry them.</div></div>
       <div class="opt-fields" id="k8s-cred-c">
-        <div class="f"><label>Secret Name</label><input id="i-k8s-cred-name" placeholder="solmq-credentials"></div>
+        <div class="h">The Secret is named &lt;deployment name&gt;-credentials, so two instances in one namespace never share it.</div>
       </div>
       <div class="opt-fields" id="k8s-cred-e"><div class="f"><label>Existing Secret</label><input id="i-k8s-cred-existing" placeholder="my-credentials"></div></div>
       <div class="f"><label>Stores Secret</label><select id="i-k8s-stores" onchange="syncK8s()">
@@ -328,13 +328,13 @@ details[open]>summary::before{content:"- "}
         <option value="create">create</option>
         <option value="existing">existing</option>
       </select></div>
-      <div class="opt-fields" id="k8s-stores-c"><div class="f"><label>Secret Name</label><input id="i-k8s-stores-name" placeholder="solmq-tls"></div></div>
+      <div class="opt-fields" id="k8s-stores-c"><div class="h">The Secret is named &lt;deployment name&gt;-stores.</div></div>
       <div class="opt-fields" id="k8s-stores-e"><div class="f"><label>Existing Secret</label><input id="i-k8s-stores-existing" placeholder="my-tls"><div class="h">Its keys must be the base filenames of the truststore/keystore above (truststore.jks, keystore.jks) -- that is what the rendered config points at.</div></div></div>
       <div class="f"><label>Image Pull Secret</label><select id="i-k8s-ipull" onchange="syncK8s()">
         <option value="">(none)</option>
         <option value="reference">reference an existing Secret</option>
         <option value="create">create it from the image credentials</option>
-      </select><div class="h">Reference leaves your Secret untouched; create builds it from the registry username/password variable above.</div></div>
+      </select><div class="h">Reference leaves your Secret untouched; create builds &lt;deployment name&gt;-image-pull from the registry username/password variable above.</div></div>
       <div class="opt-fields" id="k8s-ipull-f"><div class="f"><label>Secret Name</label><input id="i-k8s-ipull-name" placeholder="regcred"></div></div>
     </div>
   </div>
@@ -798,7 +798,8 @@ function addWf(w){
     <div class="f" style="flex:0 0 7rem"><label>State</label><div class="tgl" style="margin:.3rem 0 0"><input type="checkbox" class="w-en" checked><label>enabled</label></div></div>
   </div>
   <div class="side-box sb-src"><div class="lbl">Source (consumes)</div>${sideHTML('src')}</div>
-  <div class="side-box sb-tgt"><div class="lbl">Target (produces)</div>${sideHTML('tgt')}</div>`;
+  <div class="side-box sb-tgt"><div class="lbl">Target (produces)</div>${sideHTML('tgt')}</div>
+  <div class="f"><label>Header transforms (transform-headers.expressions)</label><textarea class="w-th" rows="2" placeholder="solace_scst_targetDestination: &quot;'orders/' + headers.region&quot;"></textarea><div class="h">Optional. One <b>header: SpEL expression</b> per line, each expression quoted whole. Written at the top level of this workflow file and applied by the connector to this workflow only.</div></div>`;
   $('wfs-list').appendChild(d);
   d.querySelector('.sb-tgt .x-sys').value = 'solace'; // MQ -> Solace is the common default
   d.querySelectorAll('.side-box').forEach(sb => syncSide(sb.querySelector('.x-sys')));
@@ -883,8 +884,9 @@ function syncK8s(){
   const st = V('i-k8s-stores');
   show('k8s-stores-c', st === 'create');
   show('k8s-stores-e', st === 'existing');
-  // Both pull-secret modes need a name: one references it, the other creates it.
-  show('k8s-ipull-f', V('i-k8s-ipull') !== '');
+  // Only a reference needs a name: a created pull secret is named after the
+  // deployment.
+  show('k8s-ipull-f', V('i-k8s-ipull') === 'reference');
   gen();
 }
 function syncCtr(p){
@@ -1006,7 +1008,8 @@ function readModel(){
     file: card.querySelector('.w-file').value.trim(),
     enabled: card.querySelector('.w-en').checked,
     source: readSide(card.querySelector('.sb-src')),
-    target: readSide(card.querySelector('.sb-tgt'))
+    target: readSide(card.querySelector('.sb-tgt')),
+    transforms: parseProps(card.querySelector('.w-th').value)
   })).sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0);
 
   m.tls = {
@@ -1071,9 +1074,10 @@ function readModel(){
     service: { enabled: C('i-k8s-svc'), port: V('i-k8s-svcport') },
     libs: readLibs(),
     cred: readCred('k8s'),
-    stores: V('i-k8s-stores') === 'create' ? { create: V('i-k8s-stores-name') }
+    stores: V('i-k8s-stores') === 'create' ? { create: true }
           : V('i-k8s-stores') === 'existing' ? { existing: V('i-k8s-stores-existing') } : null,
-    imagePull: V('i-k8s-ipull') ? { name: V('i-k8s-ipull-name'), create: V('i-k8s-ipull') === 'create' } : null
+    imagePull: V('i-k8s-ipull') === 'create' ? { name: '', create: true }
+             : V('i-k8s-ipull') === 'reference' ? { name: V('i-k8s-ipull-name'), create: false } : null
   } : null;
 
   // project-name is docker-only, so it extends readCtr here rather than living
@@ -1090,7 +1094,7 @@ function readModel(){
 function readLibs(){
   switch(V('i-k8s-libs')){
     case 'pvc-existing': return { kind: 'pvc-existing', existing: V('i-k8s-libs-existing') };
-    case 'pvc-create': return { kind: 'pvc-create', name: V('i-k8s-libs-name'), storage: V('i-k8s-libs-storage') || '1Gi',
+    case 'pvc-create': return { kind: 'pvc-create', storage: V('i-k8s-libs-storage') || '1Gi',
       nfsServer: V('i-k8s-libs-nfssrv'), nfsPath: V('i-k8s-libs-nfspath') };
     case 'download': return { kind: 'download', urls: L('i-k8s-libs-urls'), image: V('i-k8s-libs-img') || 'busybox:1.37', pvc: V('i-k8s-libs-dlpvc') };
     default: return null;
@@ -1100,7 +1104,7 @@ function readCred(p){
   const mode = V('i-' + p + '-cred');
   if(mode === 'existing') return { existing: V('i-' + p + '-cred-existing') };
   if(mode !== 'create') return null;
-  return { create: { name: V('i-' + p + '-cred-name') } };
+  return { create: {} };
 }
 function readCtr(p, section){
   return {
@@ -1227,7 +1231,7 @@ function emitEnv(m){
 
 function emitCred(cred, ind){
   if(!cred) return '';
-  if(cred.create) return `${ind}credentials:\n${ind}  create:\n` + kv('name', cred.create.name, ind + '    ');
+  if(cred.create) return `${ind}credentials:\n${ind}  create: true\n`;
   return `${ind}credentials:\n` + kv('existing', cred.existing, ind + '  ');
 }
 
@@ -1243,7 +1247,7 @@ function emitKube(k){
     y += '  libs:\n';
     if(lb.kind === 'pvc-existing') y += '    pvc:\n' + kv('existing', lb.existing, '      ');
     if(lb.kind === 'pvc-create'){
-      y += '    pvc:\n      create:\n' + kv('name', lb.name, '        ') + kv('storage', lb.storage, '        ')
+      y += '    pvc:\n      create:\n' + kv('storage', lb.storage, '        ')
          + '        nfs:\n' + kv('server', lb.nfsServer, '          ') + kv('path', lb.nfsPath, '          ');
     }
     if(lb.kind === 'download'){
@@ -1253,14 +1257,15 @@ function emitKube(k){
   let sb = emitCred(k.cred, '    ');
   if(k.stores){
     sb += '    stores:\n' + (k.stores.create
-      ? '      create:\n' + kv('name', k.stores.create, '        ')
+      ? '      create: true\n'
       : kv('existing', k.stores.existing, '      '));
   }
   if(k.imagePull){
-    sb += '    image-pull:\n' + kv('name', k.imagePull.name, '      ');
-    // create is only emitted when true: absent means reference-only, the
-    // default, and the state that leaves an operator-managed Secret alone.
-    if(k.imagePull.create) sb += kbool('create', true, '      ');
+    // A reference names the operator's Secret; create takes no name, because
+    // the tool names what it builds after the deployment.
+    sb += '    image-pull:\n' + (k.imagePull.create
+      ? kbool('create', true, '      ')
+      : kv('name', k.imagePull.name, '      '));
   }
   if(sb) y += '  secrets:\n' + sb;
   return y;
@@ -1293,6 +1298,10 @@ function emitWorkflow(wf){
     y += `${label}:\n  ${s.system}:\n` + sideBody(s, '    ', true);
     if(s.tune.length) y += blk(label === 'source' ? 'consumer' : 'producer', emitProps(s.tune, '      '), '    ');
   });
+  // Top level, beside source: and target: -- the one place the CLI reads it.
+  if(wf.transforms && wf.transforms.length){
+    y += 'transform-headers:\n  expressions:\n' + emitProps(wf.transforms, '    ');
+  }
   return y;
 }
 
@@ -1373,6 +1382,30 @@ function checkWorkflowCount(add, n){
   add(ENV_FILE, `${n} workflows found, but one connector instance runs at most ${MAX_WF_PER_INSTANCE} (workflow ids 0..${MAX_WF_PER_INSTANCE - 1}). Split them across separate folders, each with its own env.yaml and its own deployment.name/docker.name/podman.name, and deploy each as its own connector`);
 }
 
+// checkTransformExpressions mirrors the part of validate.checkTransformHeaders
+// the form can actually get wrong: the textarea always yields a transform-headers
+// mapping with expressions:, but an indented or "- " line becomes a nested value
+// rather than one SpEL expression, and a header can be typed twice. Misplaced
+// transforms cannot arise here -- the page only ever writes the top-level key.
+function checkTransformExpressions(add, m){
+  m.wfs.forEach(wf => {
+    if(!wf.file) return;
+    const seen = {};
+    (wf.transforms || []).forEach(p => {
+      if(p.item !== undefined){
+        add(wf.file, 'transform-headers.expressions must be a mapping of <header>: <SpEL expression>, got a list');
+        return;
+      }
+      if(seen[p.key]) add(wf.file, `transform-headers.expressions sets "${p.key}" twice; give each header one expression`);
+      seen[p.key] = true;
+      if(p.children){
+        const kind = p.children.length && p.children[0].item !== undefined ? 'list' : 'mapping';
+        add(wf.file, `transform-headers.expressions.${p.key} must be one SpEL expression, got a ${kind}`);
+      }
+    });
+  });
+}
+
 function validateModel(m){
   const errs = [], warns = [];
   const add = (file, msg) => errs.push({ file: file, msg: msg });
@@ -1407,6 +1440,7 @@ function validateModel(m){
   });
 
   checkDefaultsCredentials(add, warn, m);
+  checkTransformExpressions(add, m);
 
   // Cross-workflow checks on resolved tuples.
   const resolved = m.wfs.map(wf => ({
@@ -1775,18 +1809,25 @@ function checkKube(add, warn, m){
   if(!d.name) add(ENV_FILE, 'deployment.name is required');
   else if(!isDNS1123(d.name)) add(ENV_FILE, `deployment.name "${d.name}" is not a valid DNS-1123 label`);
   else {
-    const longest = `${d.name}-config`;
-    if(longest.length > 63){
-      add(ENV_FILE, `deployment.name "${d.name}" is too long: it derives the ConfigMap name "${longest}", which exceeds the 63-char DNS-1123 limit`);
-    }
+    // Mirrors spec.Kubernetes.CreatedNames: every object the tool creates is
+    // named after deployment.name, so the longest one it builds must fit.
+    const derived = [d.name, d.name + '-config'];
+    if(k.cred && k.cred.create) derived.push(d.name + '-credentials');
+    if(k.stores && k.stores.create) derived.push(d.name + '-stores');
+    if(k.imagePull && k.imagePull.create) derived.push(d.name + '-image-pull');
+    if(k.libs && k.libs.kind === 'pvc-create') derived.push(d.name + '-libs');
+    const tooLong = derived.find(n => n.length > 63);
+    if(tooLong) add(ENV_FILE, `deployment.name "${d.name}" is too long: it derives the name "${tooLong}", which exceeds the 63-char DNS-1123 limit`);
   }
   checkExpansion(warn, ENV_FILE, 'deployment.name', d.name);
   if(!d.namespace) add(ENV_FILE, 'deployment.namespace is required');
   else if(!isDNS1123(d.namespace)) add(ENV_FILE, `deployment.namespace "${d.namespace}" is not a valid DNS-1123 label`);
   checkExpansion(warn, ENV_FILE, 'deployment.namespace', d.namespace);
-  if(k.imagePull){
+  if(k.imagePull && !k.imagePull.create){
     if(!k.imagePull.name) add(ENV_FILE, 'kubernetes.secrets.image-pull.name is required');
     else if(!isDNS1123(k.imagePull.name)) add(ENV_FILE, `kubernetes.secrets.image-pull.name "${k.imagePull.name}" is not a valid DNS-1123 label`);
+  }
+  if(k.imagePull){
     const set = c => !!(c && (c.literal || c.env));
     if(k.imagePull.create && (!set(m.image.user) || !set(m.image.pass))){
       add(ENV_FILE, 'kubernetes.secrets.image-pull.create requires image.user and image.pass (or their -env forms): the Secret is built from them. Reference an existing Secret instead to need neither');
@@ -1806,7 +1847,6 @@ function checkKube(add, warn, m){
       add(ENV_FILE, "kubernetes.secrets.credentials must set exactly one of 'create' or 'existing'");
     }
     if(k.cred.create){
-      checkSecretName(add, 'kubernetes.secrets.credentials.create.name', k.cred.create.name);
       const removed = [];
       if(k.cred.create.source) removed.push('source');
       if(k.cred.create.variables && k.cred.create.variables.length) removed.push('variables');
@@ -1825,7 +1865,6 @@ function checkKube(add, warn, m){
     }
     if(k.stores.create){
       if(!m.tls.truststore) add(ENV_FILE, 'kubernetes.secrets.stores.create requires tls.truststore');
-      checkSecretName(add, 'kubernetes.secrets.stores.create.name', k.stores.create);
     }
     if(k.stores.existing){
       checkSecretName(add, 'kubernetes.secrets.stores.existing', k.stores.existing);
@@ -1833,6 +1872,12 @@ function checkKube(add, warn, m){
   }
 
   checkLibs(add, warn, k.libs);
+  // Mirrors validate.checkLibs: the claim is named after the deployment, and
+  // its cluster-scoped PV carries the namespace on top -- still one label.
+  if(k.libs && k.libs.kind === 'pvc-create' && d.name && d.namespace){
+    const pv = `${d.namespace}-${d.name}-libs-pv`;
+    if(pv.length > 63) add(ENV_FILE, `libs.pvc.create derives the PersistentVolume name "${pv}", which exceeds the 63-char DNS-1123 limit: shorten deployment.name or deployment.namespace`);
+  }
 }
 
 // checkSyslog mirrors validate.checkSyslog. It is called unconditionally rather
@@ -1856,7 +1901,6 @@ function checkLibs(add, warn, lb){
     else if(!isDNS1123(lb.existing)) add(ENV_FILE, `libs.pvc.existing "${lb.existing}" is not a valid DNS-1123 label`);
   }
   if(lb.kind === 'pvc-create'){
-    if(!isDNS1123(lb.name)) add(ENV_FILE, `libs.pvc.create.name "${lb.name}" is not a valid DNS-1123 label`);
     if(!lb.nfsServer || !lb.nfsPath){
       add(ENV_FILE, 'libs.pvc.create requires nfs.server and nfs.path');
     } else {
@@ -2266,7 +2310,8 @@ function consolidateBuild(wfs, m, statusPassword){
 
   const rwfs = wfs.map(wf => ({
     file: wf.file, enabled: wf.enabled,
-    src: resolveSide(m, wf.source), tgt: resolveSide(m, wf.target)
+    src: resolveSide(m, wf.source), tgt: resolveSide(m, wf.target),
+    transforms: wf.transforms || []
   }));
 
   // pass 1: register + accumulate binders
@@ -2365,7 +2410,7 @@ function consolidateBuild(wfs, m, statusPassword){
     model.bindings.push({ name: outName, dest: w.tgt.dest, binder: tgtAcc.binder.name });
     emitBindingOptions(model, inName, w.src, true, w.file);
     emitBindingOptions(model, outName, w.tgt, false, w.file);
-    model.workflows.push({ id: i, enabled: w.enabled });
+    model.workflows.push({ id: i, enabled: w.enabled, transforms: w.transforms });
     if(srcAcc.binder.name === tgtAcc.binder.name && w.src.dest === w.tgt.dest){
       warns.push(`workflow "${w.file}": source and target resolve to the same binder and destination "${w.src.dest}" (possible message loop)`);
     }
@@ -2607,6 +2652,12 @@ function renderConnector(line, mm){
   mm.workflows.forEach(wf => {
     line(6, wf.id + ':');
     line(8, 'enabled: ' + (wf.enabled ? 'true' : 'false'));
+    // Mirrors render.go: the workflow file's transform-headers, verbatim.
+    if(wf.transforms && wf.transforms.length){
+      line(8, 'transform-headers:');
+      line(10, 'expressions:');
+      renderContainer(line, 12, wf.transforms);
+    }
   });
   // Management security is always on now (see STATUS_USER_NAME): the block is
   // unconditional and enabled is always true, so there is no operator toggle
@@ -3019,7 +3070,7 @@ function sampleModel(){
     channel: 'DSU.SVRCONN', user: litCred('appuser'), password: envCred('MQ_CORE_PASSWORD'),
     tls: true, cipher: 'TLS_RSA_WITH_AES_256_CBC_SHA256', keyAlias: 'mq-client'
   });
-  const cred = { create: { name: 'solmq-credentials' } };
+  const cred = { create: {} };
   return {
     workflows: { dir: '.', filePattern: '*' },
     // One image, one timezone, shared by every platform. repo stays blank for
@@ -3073,7 +3124,7 @@ function sampleModel(){
       deployment: { name: 'solmq-connector', namespace: 'solace-connectors',
                     replicas: 2, cpu: '1', memory: '1Gi' },
       service: { enabled: true, port: '8090' },
-      libs: null, cred: cred, stores: { create: 'solmq-tls' }, imagePull: null
+      libs: null, cred: cred, stores: { create: true }, imagePull: null
     },
     docker: {
       section: 'docker', command: 'docker', name: 'connector',
@@ -3137,6 +3188,7 @@ function fillWf(card, w){
   card.querySelector('.w-en').checked = w.enabled;
   fillSide(card.querySelector('.sb-src'), w.source);
   fillSide(card.querySelector('.sb-tgt'), w.target);
+  card.querySelector('.w-th').value = emitProps(w.transforms || [], '');
 }
 
 function clearForm(){
@@ -3214,8 +3266,8 @@ function loadSample(){
   setV('i-k8s-rep', k.deployment.replicas); setV('i-k8s-cpu', k.deployment.cpu);
   setV('i-k8s-mem', k.deployment.memory);
   setC('i-k8s-svc', k.service.enabled); setV('i-k8s-svcport', k.service.port);
-  setV('i-k8s-cred', 'create'); setV('i-k8s-cred-name', k.cred.create.name);
-  setV('i-k8s-stores', 'create'); setV('i-k8s-stores-name', k.stores.create);
+  setV('i-k8s-cred', 'create');
+  setV('i-k8s-stores', 'create');
   if(k.imagePull){
     setV('i-k8s-ipull', k.imagePull.create ? 'create' : 'reference');
     setV('i-k8s-ipull-name', k.imagePull.name);

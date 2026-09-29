@@ -38,7 +38,7 @@ type JavaOptions struct {
 // charset is validate's job; parse stays about shape.
 func (j *JavaOptions) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.MappingNode {
-		return fmt.Errorf("java-options must be a mapping with tool: (JAVA_TOOL_OPTIONS) and/or jdk: (JDK_JAVA_OPTIONS), got a %s", yamlKind(node))
+		return fmt.Errorf("java-options must be a mapping with tool: (JAVA_TOOL_OPTIONS) and/or jdk: (JDK_JAVA_OPTIONS), got a %s", YAMLKind(node))
 	}
 	seen := map[string]bool{}
 	for i := 0; i+1 < len(node.Content); i += 2 {
@@ -60,15 +60,16 @@ func (j *JavaOptions) UnmarshalYAML(node *yaml.Node) error {
 			v = v.Alias
 		}
 		if v.Kind != yaml.ScalarNode {
-			return fmt.Errorf("java-options.%s must be one string of space-separated options (plain, or a >- folded block to spread it over several lines), got a %s", k.Value, yamlKind(v))
+			return fmt.Errorf("java-options.%s must be one string of space-separated options (plain, or a >- folded block to spread it over several lines), got a %s", k.Value, YAMLKind(v))
 		}
 		*dst = v.Value
 	}
 	return nil
 }
 
-// yamlKind names a node's shape the way an env.yaml author would.
-func yamlKind(n *yaml.Node) string {
+// YAMLKind names a node's shape the way an env.yaml author would, for errors
+// that have to say what was found instead of what was expected.
+func YAMLKind(n *yaml.Node) string {
 	switch n.Kind {
 	case yaml.SequenceNode:
 		return "list"

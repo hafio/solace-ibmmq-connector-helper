@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
@@ -89,6 +91,12 @@ type Context struct {
 	// supplies os.LookupEnv; nil skips the check).
 	Env func(string) (string, bool)
 
+	// Lint is set by the validate verb alone. It adds the findings generate and
+	// deploy deliberately stay quiet about: keys that no longer mean anything
+	// but are harmless to ignore, so an old env.yaml keeps deploying while
+	// validate still asks for it to be cleaned up.
+	Lint bool
+
 	// AllowCommands extends the platform binary allowlist for CheckDeployCommand,
 	// threaded from deploy/remove's repeatable --allow-command flag. Plain
 	// `validate` leaves this nil: an exotic command (a chained binary like `sudo
@@ -135,6 +143,9 @@ func Run(ctx Context) (errs, warns []Issue) {
 	checkConnections(add, warn, ctx.Env, d, haveKeystore)
 	checkWorkflowSides(add, warn, ctx.Env, ctx.Workflows, haveKeystore, d.Connections)
 	checkDefaultsCredentials(add, warn, ctx, d)
+	// Every run, not just validate's: a transform in the wrong place is not
+	// harmless to ignore -- the connector would start without it.
+	checkTransforms(add, warn, ctx.Workflows, d)
 
 	// Cross-workflow (on resolved tuples): binder-level conflicts and duplicate sources.
 	checkKeyAliasConflicts(add, resolved)
@@ -190,6 +201,77 @@ func checkRemovedDefaultsKeys(add func(string, string, ...any), d *spec.Defaults
 	}
 	if d.LeaderElection.SolaceKey {
 		add(fileEnv, "leader-election.solace has been renamed to leader-election.session, which is what it renders to (solace.connector.management.session). Rename the key")
+	}
+}
+
+// checkTransforms validates header transforms: every workflow file's
+// transform-headers: block, and every transform-looking key found anywhere a
+// transform is not read (spec.Workflow.MisplacedTransforms,
+// spec.Defaults.MisplacedTransforms). Both files decode without KnownFields,
+// so a transform: key, a transform-header: typo, or transform-headers: nested
+// under a side would otherwise vanish, and the connector would start and run
+// without it.
+//
+// The block itself is passed through verbatim, so only its shape is checked --
+// the SpEL is the connector's to evaluate. A key beside expressions: is a
+// warning rather than an error: it is passed through as written, and nothing
+// here can know every key a later connector release reads.
+func checkTransforms(add, warn func(string, string, ...any), wfs []spec.Workflow, d *spec.Defaults) {
+	for _, p := range d.MisplacedTransforms {
+		add(fileEnv, "%s is not read here: a header transform belongs to one workflow, so write it as transform-headers: at the top level of each workflow file it applies to (expressions: <header>: <SpEL expression>)", p)
+	}
+	for _, wf := range wfs {
+		for _, p := range wf.MisplacedTransforms {
+			if strings.HasSuffix(p, "."+spec.TransformHeadersKey) {
+				add(wf.File, "%s is in the wrong place: header transforms apply to the whole workflow, so transform-headers: goes at the top level of this file, beside source: and target:", p)
+				continue
+			}
+			add(wf.File, "%s is not a key: header transforms are written transform-headers: (with expressions: <header>: <SpEL expression>) at the top level of this file", p)
+		}
+		if wf.TransformHeaders != nil {
+			checkTransformHeaders(add, warn, wf.File, wf.TransformHeaders)
+		}
+	}
+}
+
+// checkTransformHeaders checks the shape of one transform-headers: block: a
+// mapping whose expressions: maps each header name to one SpEL expression.
+func checkTransformHeaders(add, warn func(string, string, ...any), file string, n *yaml.Node) {
+	const key = spec.TransformHeadersKey
+	if n.Kind != yaml.MappingNode {
+		add(file, "%s must be a mapping with expressions: <header>: <SpEL expression>, got a %s", key, spec.YAMLKind(n))
+		return
+	}
+	var exprs *yaml.Node
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i].Value, n.Content[i+1]
+		if k == "expressions" {
+			exprs = v
+			continue
+		}
+		warn(file, "%s.%s is not a key this tool knows: it is passed through as written, but the connector reads header transforms from %s.expressions -- check the spelling", key, k, key)
+	}
+	switch {
+	case exprs == nil:
+		add(file, "%s has no expressions: -- the connector reads header transforms only from %s.expressions (<header>: <SpEL expression>)", key, key)
+		return
+	case exprs.Kind != yaml.MappingNode:
+		add(file, "%s.expressions must be a mapping of <header>: <SpEL expression>, got a %s", key, spec.YAMLKind(exprs))
+		return
+	case len(exprs.Content) == 0:
+		warn(file, "%s.expressions is empty, so this workflow transforms no headers", key)
+		return
+	}
+	seen := map[string]bool{}
+	for i := 0; i+1 < len(exprs.Content); i += 2 {
+		h, v := exprs.Content[i].Value, exprs.Content[i+1]
+		if seen[h] {
+			add(file, "%s.expressions sets %q twice; give each header one expression", key, h)
+		}
+		seen[h] = true
+		if v.Kind != yaml.ScalarNode {
+			add(file, "%s.expressions.%s must be one SpEL expression, got a %s", key, h, spec.YAMLKind(v))
+		}
 	}
 }
 
@@ -668,10 +750,18 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 		add(fileEnv, "deployment.name is required")
 	} else if !isDNS1123(dep.Name) {
 		add(fileEnv, "deployment.name %q is not a valid DNS-1123 label", dep.Name)
-	} else if longest := dep.Name + "-config"; len(longest) > 63 {
-		// The ConfigMap name is the longest object derived from deployment.name
-		// and must still be a valid DNS-1123 label.
-		add(fileEnv, "deployment.name %q is too long: it derives the ConfigMap name %q, which exceeds the 63-char DNS-1123 limit", dep.Name, longest)
+	} else {
+		// Every object the tool creates is named after deployment.name, and each
+		// of those names must still be a valid DNS-1123 label -- caught here
+		// rather than by the API server mid-apply. Which ones exist depends on
+		// what the config asks the tool to build, so the list is the instance's
+		// own rather than a fixed longest suffix.
+		for _, n := range ctx.Kube.CreatedNames() {
+			if len(n) > 63 {
+				add(fileEnv, "deployment.name %q is too long: it derives the name %q, which exceeds the 63-char DNS-1123 limit", dep.Name, n)
+				break
+			}
+		}
 	}
 	if dep.Namespace == "" {
 		add(fileEnv, "deployment.namespace is required")
@@ -697,11 +787,11 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 		add(fileEnv, "leader-election standalone requires replicas: 1 (got %d)", dep.Replicas)
 	}
 
-	// Secret wiring checks. Every name here is emitted verbatim as a manifest
-	// metadata.name / secretRef, so it is held to the same DNS-1123 rule the
-	// cluster would apply anyway -- caught at the gate with a readable message
-	// instead of by kubectl mid-apply (libs.pvc.create.name is checked the same
-	// way in checkLibs).
+	// Secret wiring checks. Every existing: name here is emitted verbatim as a
+	// secretRef, so it is held to the same DNS-1123 rule the cluster would apply
+	// anyway -- caught at the gate with a readable message instead of by kubectl
+	// mid-apply. A created Secret's name is derived from deployment.name and
+	// checked with it above.
 	if c := ctx.Kube.Secrets.Credentials; c != nil {
 		// create and existing are mutually exclusive: Render takes the create
 		// branch when both are set, which would emit a Secret doc over the very
@@ -711,7 +801,6 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 			add(fileEnv, "kubernetes.secrets.credentials must set exactly one of 'create' or 'existing'")
 		}
 		if c.Create != nil {
-			checkSecretName(add, "kubernetes.secrets.credentials.create.name", c.Create.Name)
 			if removed := c.Create.RemovedKeys(); len(removed) > 0 {
 				add(fileEnv, "kubernetes.secrets.credentials.create no longer takes %s: the Secret's keys are every credential the config references, and their values come from the literals and -env variables those fields name. Remove %s", strings.Join(removed, "/"), strings.Join(removed, ", "))
 			}
@@ -728,13 +817,15 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 			if ctx.Defaults.TLS.Truststore == nil {
 				add(fileEnv, "kubernetes.secrets.stores.create requires tls.truststore")
 			}
-			checkSecretName(add, "kubernetes.secrets.stores.create.name", s.Create.Name)
 		}
 		if s.Existing != "" {
 			checkSecretName(add, "kubernetes.secrets.stores.existing", s.Existing)
 		}
 	}
 	checkImagePull(add, warn, ctx)
+	if ctx.Lint {
+		checkRetiredCreateNames(add, ctx.Kube)
+	}
 
 	if ctx.Kube.Logging != nil {
 		add(fileEnv, "kubernetes.logging is no longer configured here: syslog moved to the top-level logging: block (beside logging.level) so one declaration serves every platform. Remove kubernetes.logging")
@@ -795,16 +886,13 @@ func checkLibs(add func(string, string, ...any), k *spec.Kubernetes) {
 			add(fileEnv, "libs.pvc.existing %q is not a valid DNS-1123 label", p.Existing)
 		}
 		if c := p.Create; c != nil {
-			if !isDNS1123(c.Name) {
-				add(fileEnv, "libs.pvc.create.name %q is not a valid DNS-1123 label", c.Name)
-			}
 			// The PersistentVolume is cluster-scoped, so its name carries the
 			// namespace to stop two releases fighting over one object -- and the
 			// result is still a single DNS-1123 label. Caught here rather than by
-			// the API server mid-apply, the same way the ConfigMap name is
-			// checked against deployment.name above.
-			if pv := spec.LibsPVName(k.Deployment.Namespace, c.Name); len(pv) > 63 {
-				add(fileEnv, "libs.pvc.create.name %q derives the PersistentVolume name %q, which exceeds the 63-char DNS-1123 limit: shorten it or deployment.namespace", c.Name, pv)
+			// the API server mid-apply, the same way the claim itself is checked
+			// with deployment.name.
+			if pv := spec.LibsPVName(k.Deployment.Namespace, k.LibsPVCName()); len(pv) > 63 {
+				add(fileEnv, "libs.pvc.create derives the PersistentVolume name %q, which exceeds the 63-char DNS-1123 limit: shorten deployment.name or deployment.namespace", pv)
 			}
 			if c.NFS.Server == "" || c.NFS.Path == "" {
 				add(fileEnv, "libs.pvc.create requires nfs.server and nfs.path")
@@ -1077,12 +1165,38 @@ func checkImagePull(add, warn func(string, string, ...any), ctx Context) {
 	if ip == nil {
 		return
 	}
-	checkSecretName(add, "kubernetes.secrets.image-pull.name", ip.Name)
 	if !ip.Create {
+		checkSecretName(add, "kubernetes.secrets.image-pull.name", ip.Name)
 		return
 	}
 	if ctx.Image.UserCred().Empty() || ctx.Image.PassCred().Empty() {
 		add(fileEnv, "kubernetes.secrets.image-pull.create requires image.user and image.pass (or their -env forms): the Secret is built from them. Omit create to reference a Secret you manage yourself instead")
+	}
+}
+
+// checkRetiredCreateNames reports the name keys an env.yaml written before the
+// tool derived its object names may still carry. Only validate runs it:
+// generate and deploy ignore these keys quietly and use the derived name, so an
+// old file keeps deploying while the lint asks for it to be cleaned up. The
+// message names the object the key no longer controls, because a redeploy of an
+// existing instance creates that one and leaves the old object behind.
+func checkRetiredCreateNames(add func(string, string, ...any), k *spec.Kubernetes) {
+	why := "the tool names it %q after kubernetes.deployment.name, so two instances in one namespace can never share it -- " +
+		"and tear it down under each other. generate and deploy ignore %q"
+	if c := k.Secrets.Credentials; c != nil && c.Create != nil && c.Create.Name != "" {
+		n, _ := k.CredentialsSecretName()
+		add(fileEnv, "kubernetes.secrets.credentials.create.name is no longer accepted: "+why+". Replace the create: block with create: true", n, c.Create.Name)
+	}
+	if s := k.Secrets.Stores; s != nil && s.Create != nil && s.Create.Name != "" {
+		n, _ := k.StoresSecretName()
+		add(fileEnv, "kubernetes.secrets.stores.create.name is no longer accepted: "+why+". Replace the create: block with create: true", n, s.Create.Name)
+	}
+	if ip := k.Secrets.ImagePull; ip != nil && ip.Create && ip.Name != "" {
+		n, _ := k.ImagePullSecretName()
+		add(fileEnv, "kubernetes.secrets.image-pull.name is no longer accepted with create: true: "+why+". Remove name -- or remove create instead, to reference a Secret you manage", n, ip.Name)
+	}
+	if lb := k.Libs; lb != nil && lb.PVC != nil && lb.PVC.Create != nil && lb.PVC.Create.Name != "" {
+		add(fileEnv, "libs.pvc.create.name is no longer accepted: "+why+". Remove the name key", k.LibsPVCName(), lb.PVC.Create.Name)
 	}
 }
 

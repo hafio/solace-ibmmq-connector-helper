@@ -155,6 +155,11 @@ type Defaults struct {
 	LeaderElection LeaderElection
 	SolaceDefaults *yaml.Node      // ordered mapping merged into each Solace binder's solace.java.*
 	Connections    map[string]Side // reusable connections referenced by conn-ref
+
+	// MisplacedTransforms lists every transform-looking key in env.yaml, as
+	// dotted paths. None belongs there -- a header transform is per workflow,
+	// written in the workflow file -- so validate refuses each one.
+	MisplacedTransforms []string
 }
 
 // Resolve materialises a side that uses conn-ref: it returns the referenced
@@ -231,7 +236,20 @@ func ParseDefaults(data []byte) (*Defaults, error) {
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("env.yaml: %v", err)
 	}
-	return defaultsFromRaw(raw), nil
+	d := defaultsFromRaw(raw)
+	d.MisplacedTransforms = envTransforms(data)
+	return d, nil
+}
+
+// envTransforms decodes env.yaml a second time, into the generic tree, to find
+// the transform keys no struct has a field for. It cannot fail where the typed
+// decode it follows succeeded.
+func envTransforms(data []byte) []string {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil
+	}
+	return misplacedEnvTransforms(&doc)
 }
 
 // defaultsFromRaw maps a decoded rawDefaults into the public Defaults.
