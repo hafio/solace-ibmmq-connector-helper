@@ -1,6 +1,8 @@
 package statusscript
 
 import (
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -241,6 +243,14 @@ func TestRenderHealthModeShortCircuits(t *testing.T) {
 			t.Errorf("%q must be resolved before the %s branch; it is not in:\n%s", want, HealthArg, before)
 		}
 	}
+	// The verdict is read by the same function the report's health line uses,
+	// so it has to be defined up here, where the branch can call it.
+	if !strings.Contains(before, "health_status() {") {
+		t.Errorf("health_status must be defined before the %s branch calls it:\n%s", HealthArg, before)
+	}
+	if !strings.Contains(block, `H=$(get "$BASE/health" | health_status)`) {
+		t.Errorf("the %s branch does not read its verdict with health_status:\n%s", HealthArg, block)
+	}
 	// Above the exposure check and the report's first query.
 	for _, notYet := range []string{`if [ -n "$CONFIGS" ]; then`, `$BASE/leaderelection`} {
 		if strings.Contains(before, notYet) {
@@ -436,10 +446,11 @@ func TestRenderReportsHealthUptimeAndVersion(t *testing.T) {
 			t.Errorf("enrichment line is not guarded (%q missing):\n%s", guard, out)
 		}
 	}
-	// The instance's own health is the first status in the document; matching the
-	// last would report a component's status as the whole instance's.
-	if !strings.Contains(out, `s/^[^{]*{`) {
-		t.Errorf("health status match is not anchored at the opening brace:\n%s", out)
+	// The health line reads the instance's own status through health_status,
+	// the function the healthcheck answers with too, so the two cannot
+	// disagree. TestHealthParseIsKeyOrderIndependent runs it.
+	if !strings.Contains(out, `H=$(printf %s "$HEALTH" | health_status)`) {
+		t.Errorf("the health line does not read its status with health_status:\n%s", out)
 	}
 }
 
@@ -614,33 +625,29 @@ func TestRenderWarnsOnEmptyWorkflowsOnlyWhenActive(t *testing.T) {
 	}
 }
 
-// TestRenderReportsHealthComponents covers the per-component breakdown, which
-// is the app-level fact closest to "is it actually moving messages". Spring
-// serialises each component as "<name>":{"status":"X"}, so the parse puts a
-// newline before every {"status" and carries the name forward from the line
-// above -- the assertions below pin that mechanism, since a regression would
-// silently report no components at all rather than fail.
+// TestRenderReportsHealthComponents covers where the per-component breakdown,
+// the app-level fact closest to "is it actually moving messages", is wired in:
+// health_components reads the document the health line already fetched, and
+// the block prints only when it found something.
+// TestHealthParseIsKeyOrderIndependent runs the parse itself.
 func TestRenderReportsHealthComponents(t *testing.T) {
 	out := Render(8090, "solmq-status")
 	for _, want := range []string{
-		`echo "health components:"`,
-		`sed -e 's/{[[:space:]]*"status"/`,
-		`if [ -n "$st" ] && [ -n "${pending:-}" ]; then`,
-		`pending=$(printf %s "$chunk" | sed -n 's/.*"`,
+		`HC_ROWS=$(printf %s "$HEALTH" | health_components)`,
 		`if [ -n "$HC_ROWS" ]; then`,
+		`echo "health components:"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
 	}
-	// The block only prints when something was parsed, and the whole thing sits
-	// inside the health guard -- no health document, no components.
-	if strings.Index(out, "HC_ROWS=") < strings.Index(out, `HEALTH=$(get "$BASE/health")`) {
-		t.Error("the component parse must come after the health document is fetched")
-	}
-	// $pending is read with set -u in force, so it needs the default-value form.
-	if strings.Contains(out, `[ -n "$pending" ]`) {
-		t.Errorf("an unguarded $pending would abort under set -u:\n%s", out)
+	// Defined before it is used, and used only once the health document is in
+	// hand -- no health document, no components.
+	def := strings.Index(out, "health_components() {")
+	fetch := strings.Index(out, `HEALTH=$(get "$BASE/health")`)
+	use := strings.Index(out, "HC_ROWS=")
+	if def < 0 || fetch < def || use < fetch {
+		t.Errorf("health_components must be defined, then the document fetched, then parsed:\n%s", out)
 	}
 }
 
@@ -709,5 +716,127 @@ func TestRenderHeaderNamesEveryReportedFact(t *testing.T) {
 		if !strings.Contains(header, want) {
 			t.Errorf("the header does not mention %q:\n%s", want, header)
 		}
+	}
+}
+
+// The same connector-shaped /actuator/health document as each Spring Boot
+// generation writes it. Spring Boot 3 (connector 2.x) keeps declaration order,
+// so every object opens with its status; Spring Boot 4 (connector 3.x) sorts
+// every key, so every object closes with it. binders is a composite, and the
+// ssl component's certificate chain carries a validity status that is not a
+// component.
+const healthBoot3 = `{"status":"UP","components":{"binders":{"status":"UP","components":{"jms":{"status":"UP","details":{"queueManager":"QM1"}},"solace":{"status":"UP"}}},"diskSpace":{"status":"UP","details":{"total":325426520064,"free":244218413056,"threshold":10485760,"path":"/app/.","exists":true}},"ping":{"status":"UP"},"ssl":{"status":"UP","details":{"validChains":[{"alias":"mq","certificates":[{"subject":"CN=mq","validity":{"status":"VALID"}}]}],"invalidChains":[],"expiringChains":[]}}},"groups":["liveness","readiness"]}`
+
+const healthBoot4 = `{"components":{"binders":{"components":{"jms":{"details":{"queueManager":"QM1"},"status":"UP"},"solace":{"status":"UP"}},"status":"UP"},"diskSpace":{"details":{"exists":true,"free":244218413056,"path":"/app/.","threshold":10485760,"total":325426520064},"status":"UP"},"ping":{"status":"UP"},"ssl":{"details":{"expiringChains":[],"invalidChains":[],"validChains":[{"alias":"mq","certificates":[{"subject":"CN=mq","validity":{"status":"VALID"}}]}]},"status":"UP"}},"groups":["liveness","readiness"],"status":"UP"}`
+
+// healthDownError is a failing component's error text carrying every
+// character the component parse treats as structure -- braces, brackets, <
+// and > -- and escaped quotes besides.
+const healthDownError = `"error":"com.ibm.msg.client.jakarta.jms.DetailedJMSSecurityException: JMSWMQ2013: {reason=2035} [\"MQRC_NOT_AUTHORIZED\"] <QM1>"`
+
+// A DOWN instance in each key order, with a healthy component on either side
+// of the failing one: reading the first status in the sorted document, or the
+// last in the declaration-ordered one, would report it UP.
+const healthDownBoot3 = `{"status":"DOWN","components":{"diskSpace":{"status":"UP"},"jms":{"status":"DOWN","details":{` + healthDownError + `}},"ping":{"status":"UP"}}}`
+
+const healthDownBoot4 = `{"components":{"diskSpace":{"status":"UP"},"jms":{"details":{` + healthDownError + `},"status":"DOWN"},"ping":{"status":"UP"}},"status":"DOWN"}`
+
+// healthPretty is a document with indent-output on, as the Spring Boot
+// reference prints one: every key on its own line, so nothing can be read a
+// line at a time.
+const healthPretty = `{
+  "status" : "DOWN",
+  "components" : {
+    "jms" : {
+      "status" : "DOWN"
+    },
+    "ping" : {
+      "status" : "UP"
+    }
+  }
+}`
+
+// testShell finds a POSIX sh to run the rendered script's functions under:
+// the one on PATH, else Git for Windows' own. Without one, the test that needs
+// it is skipped -- the only skip in this package, since every other test here
+// only reads the rendered text.
+func testShell(t *testing.T) string {
+	t.Helper()
+	if sh, err := exec.LookPath("sh"); err == nil {
+		return sh
+	}
+	for _, sh := range []string{`C:\Program Files\Git\bin\sh.exe`, `C:\Program Files\Git\usr\bin\sh.exe`} {
+		if _, err := os.Stat(sh); err == nil {
+			return sh
+		}
+	}
+	t.Skip("no POSIX sh on PATH or in Git for Windows, so the rendered health parse cannot be run here")
+	return ""
+}
+
+// scriptFunction cuts one shell function's definition out of the rendered
+// script: from its opening line through the closing brace on a line of its
+// own.
+func scriptFunction(t *testing.T, script, name string) string {
+	t.Helper()
+	start := strings.Index(script, "\n"+name+"() {\n")
+	if start < 0 {
+		t.Fatalf("no %s() in the rendered script", name)
+	}
+	end := strings.Index(script[start:], "\n}\n")
+	if end < 0 {
+		t.Fatalf("%s() is never closed in the rendered script", name)
+	}
+	return script[start+1 : start+end+len("\n}\n")]
+}
+
+// runScriptFunction runs the rendered script's own definition of fn under sh
+// with doc on its stdin, the way the container runs it, and returns what it
+// printed. The script reaches sh on its stdin and doc as a quoted
+// here-document, so neither goes through command-line quoting, which differs
+// by platform.
+func runScriptFunction(t *testing.T, sh, script, fn, doc string) string {
+	t.Helper()
+	cmd := exec.Command(sh)
+	cmd.Stdin = strings.NewReader(scriptFunction(t, script, fn) + fn + " <<'EOF'\n" + doc + "\nEOF\n")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("%s: %v\n%s", fn, err, stderr.String())
+	}
+	return strings.TrimRight(strings.ReplaceAll(string(out), "\r\n", "\n"), "\n")
+}
+
+// TestHealthParseIsKeyOrderIndependent runs the two health parses the script
+// ships -- health_status, which is also the engine healthcheck's verdict, and
+// health_components -- under a real sh against health documents in both key
+// orders. Spring Boot 4 (connector 3.x) writes every status last where
+// Spring Boot 3 wrote it first, and reading it from the wrong end left every
+// 3.x container unhealthy and every pod NotReady; both orders must now read
+// the same. The rest of this package only inspects the rendered text, which
+// is how that went unnoticed.
+func TestHealthParseIsKeyOrderIndependent(t *testing.T) {
+	sh := testShell(t)
+	script := Render(8090, "solmq-status")
+	healthRows := "  binders: UP\n  jms: UP\n  solace: UP\n  diskSpace: UP\n  ping: UP\n  ssl: UP"
+	downRows := "  diskSpace: UP\n  jms: DOWN\n  ping: UP"
+	for _, c := range []struct{ name, doc, status, rows string }{
+		{"spring boot 3", healthBoot3, "UP", healthRows},
+		{"spring boot 4", healthBoot4, "UP", healthRows},
+		{"down, spring boot 3", healthDownBoot3, "DOWN", downRows},
+		{"down, spring boot 4", healthDownBoot4, "DOWN", downRows},
+		{"pretty-printed", healthPretty, "DOWN", "  jms: DOWN\n  ping: UP"},
+		{"no components", `{"status":"UP"}`, "UP", ""},
+		{"no document", "", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := runScriptFunction(t, sh, script, "health_status", c.doc); got != c.status {
+				t.Errorf("health_status = %q, want %q", got, c.status)
+			}
+			if got := runScriptFunction(t, sh, script, "health_components", c.doc); got != c.rows {
+				t.Errorf("health_components =\n%s\nwant\n%s", got, c.rows)
+			}
+		})
 	}
 }

@@ -342,9 +342,9 @@
     "semantic_hash": ""
   },
   "docs/test.md": {
-    "mtime": 1790592125.0459065,
-    "seen": 1790592687.3577142,
-    "ast_hash": "1b99adb17f12a97e17c1cc4e23335eeb",
+    "mtime": 1790758571.8449235,
+    "seen": 1790776163.2691743,
+    "ast_hash": "51689fe1511ce18491809959bf28fe60",
     "semantic_hash": ""
   },
   "docs/commands.md": {
@@ -462,15 +462,15 @@
     "semantic_hash": ""
   },
   "internal/statusscript/statusscript.go": {
-    "mtime": 1790218281.1708176,
-    "seen": 1790227134.1120546,
-    "ast_hash": "d28ea6c1472ba9a6c8cdca0b15daadca",
+    "mtime": 1790758406.4073899,
+    "seen": 1790776163.2691488,
+    "ast_hash": "b55ce2988041943b042bef5813fadf2d",
     "semantic_hash": ""
   },
   "internal/statusscript/statusscript_test.go": {
-    "mtime": 1790218294.5386329,
-    "seen": 1790227134.1120555,
-    "ast_hash": "b89c00b58db261547f0dd9151917db92",
+    "mtime": 1790758510.1871207,
+    "seen": 1790776163.2691507,
+    "ast_hash": "bc0671b0d1d5d513e9c658bc159b28c2",
     "semantic_hash": ""
   },
   "internal/deploy/imagepull_test.go": {
@@ -654,9 +654,9 @@
     "semantic_hash": ""
   },
   "docs/userguide.md": {
-    "mtime": 1790591981.2538533,
-    "seen": 1790592687.3577151,
-    "ast_hash": "0ed88620fdf1f89d17236dcb2f0e259e",
+    "mtime": 1790758571.8435566,
+    "seen": 1790776163.2691753,
+    "ast_hash": "12aa8da19a28015d2c493c96b6500bde",
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/testcatalog_test.go": {

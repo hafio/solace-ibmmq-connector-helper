@@ -220,6 +220,65 @@ get() {
   fi
 }
 
+# The instance's own health status, from the /actuator/health document on
+# stdin. Where it sits depends on the connector's Spring Boot generation:
+# Spring Boot 3 (connector 2.x) writes it first, while Spring Boot 4 (connector
+# 3.x) sorts every key alphabetically, which puts it last -- after "components"
+# and "groups". So the first status is taken when it opens the document and the
+# last one otherwise. Nothing follows the document's own status in the sorted
+# order, and a string value cannot fake one, since JSON escapes every quote
+# inside a string. The document is joined onto one line first, so a
+# pretty-printed one reads the same.
+health_status() {
+  tr '\n' ' ' | sed -n -e 's/^[^{]*{[[:space:]]*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' -e t -e 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+# One "  <name>: <status>" row per health component, from the /actuator/health
+# document on stdin: every entry of every components map, a composite's
+# sub-components right after it, in document order. sed cannot match nesting,
+# and a status sits first or last in its object depending on the Spring Boot
+# generation (see health_status), so the document is reduced from the inside
+# out instead, which reads either order the same:
+#
+#   - escapes are dropped and every brace, bracket, < and > inside a string is
+#     blanked, so the punctuation left is the document's own structure -- a
+#     DOWN component's error text is exactly where stray braces turn up;
+#   - the document's own braces go, and every array with them: none holds a
+#     component, and the ssl component's certificate chains carry a validity
+#     "status" of their own that is not one;
+#   - then, innermost first until nothing changes: a details object is
+#     dropped, an object with a status becomes a <  name: status> marker, a
+#     components map gives up its braces and leaves its markers where they
+#     are -- so a composite's own marker, made on a later pass, lands just
+#     ahead of its sub-components' -- and any other object is dropped;
+#   - the markers are printed one per line.
+#
+# Nothing prints for a document without components, which is what the
+# actuator answers when show-details is off.
+health_components() {
+  tr '\n' ' ' | sed -n \
+    -e 's/\\.//g' \
+    -e ':a' \
+    -e 's/^\(\([^"]*"[^"]*"\)*[^"]*"[^]["{}<>]*\)[][{}<>]/\1_/' \
+    -e 'ta' \
+    -e 's/^[^{]*{//' \
+    -e 's/}[^}]*$//' \
+    -e ':b' \
+    -e 's/\[[^][]*]//g' \
+    -e 'tb' \
+    -e 's/"details"[[:space:]]*:[[:space:]]*{/~{/g' \
+    -e 's/"components"[[:space:]]*:[[:space:]]*{/|{/g' \
+    -e ':c' \
+    -e 's/~{[^{}]*}//g' \
+    -e 's/"\([^"]*\)"[[:space:]]*:[[:space:]]*{\([^{}]*\)"status"[[:space:]]*:[[:space:]]*"\([^"]*\)"\([^{}]*\)}/<  \1: \3>\2\4/g' \
+    -e 's/"[^"]*"[[:space:]]*:[[:space:]]*{[^{}]*}//g' \
+    -e 's/|{\([^{}]*\)}/\1/g' \
+    -e 'tc' \
+    -e '/</!d' \
+    -e 's/[^<]*<\([^>]*\)>[^<]*/\1\n/g' \
+    -e p
+}
+
 # --health is the container engine's healthcheck asking for a verdict rather
 # than the report: it answers with an exit status, so it clears the EXIT trap
 # the rest of this script relies on. It sits above the exposure check
@@ -229,7 +288,7 @@ get() {
 # cheap enough for the engine to run it on a timer.
 if [ "${1:-}" = "` + HealthArg + `" ]; then
   trap - EXIT
-  H=$(get "$BASE/health" | sed -n 's/^[^{]*{[[:space:]]*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+  H=$(get "$BASE/health" | health_status)
   # The engine keeps this line in the container's health log, so it is the
   # verdict a later inspect shows. That makes it the report, not a diagnostic,
   # which is why it goes to stdout with no "status:" prefix.
@@ -281,10 +340,7 @@ echo "leader-election state: ${STATE:-unknown}"
 # lines above and the workflow lines below are for.
 HEALTH=$(get "$BASE/health") || HEALTH=""
 if [ -n "$HEALTH" ]; then
-  # The instance's own status is the first one in the document, so the match is
-  # anchored at the opening brace -- [^{]* cannot cross a '{', which stops a
-  # component's status from being read as the whole instance's.
-  H=$(printf %s "$HEALTH" | sed -n 's/^[^{]*{[[:space:]]*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+  H=$(printf %s "$HEALTH" | health_status)
   if [ "$H" = "UP" ]; then
     echo "health: UP"
   else
@@ -294,25 +350,8 @@ if [ -n "$HEALTH" ]; then
     echo "health: ${H:-unknown}"
     echo "health-detail: $HEALTH"
   fi
-  # Per-component statuses: which dependency is up, which is not. Spring
-  # serialises each component as "<name>":{"status":"X",...}, so putting a
-  # newline before every {"status" leaves each component's status at the start
-  # of a line and its NAME at the end of the line before it -- which is why the
-  # name is carried forward in $pending rather than read from the same line.
-  # The document's own outer status lands on the first such line, where nothing
-  # is pending yet, and is skipped for free.
-  #
-  # Best-effort, like every other parse here: a composite component with nested
-  # sub-components yields an entry per level, which is still a real name and a
-  # real status. The while loop runs in a subshell, so $pending is scoped to the
-  # loop and cannot leak into the rest of the script.
-  HC_ROWS=$(printf '%s\n' "$HEALTH" | sed -e 's/{[[:space:]]*"status"/\n{"status"/g' | while IFS= read -r chunk; do
-    st=$(printf %s "$chunk" | sed -n 's/^{"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-    if [ -n "$st" ] && [ -n "${pending:-}" ]; then
-      echo "  $pending: $st"
-    fi
-    pending=$(printf %s "$chunk" | sed -n 's/.*"\([A-Za-z0-9_.:-]*\)"[[:space:]]*:[[:space:]]*$/\1/p')
-  done)
+  # Per-component statuses: which dependency is up, which is not.
+  HC_ROWS=$(printf %s "$HEALTH" | health_components)
   if [ -n "$HC_ROWS" ]; then
     echo "health components:"
     printf '%s\n' "$HC_ROWS"

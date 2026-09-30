@@ -48,7 +48,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 807 test functions, 1081 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 808 test functions, 1088 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -337,7 +337,7 @@ Tests: [logback_test.go](../internal/logback/logback_test.go)
 
 ## internal/statusscript
 
-Render the POSIX status script the generated deploy artifacts embed and `solmq-conn-util status` execs inside each running instance -- a pure renderer with no os/exec, filesystem, or network access.
+Render the POSIX status script the generated deploy artifacts embed and `solmq-conn-util status` execs inside each running instance -- a pure renderer with no os/exec, filesystem, or network access. Its tests read the rendered text, except TestHealthParseIsKeyOrderIndependent, which runs the script's own health parse under sh.
 
 Tests: [statusscript_test.go](../internal/statusscript/statusscript_test.go)
 
@@ -349,13 +349,13 @@ Tests: [statusscript_test.go](../internal/statusscript/statusscript_test.go)
 | TestRenderHeaderHasExecOneLiners | - | the header pins the kubectl/docker/podman exec one-liners and the `--health` invocation, each built from ContainerPath |
 | TestRenderPasswordResolution | - | the password-lookup chain references ContainerPath, SecretsDir and the from_configs account lookup, and no credential is embedded |
 | TestRenderAlwaysExitsZero | - | every exit in the report path is `exit 0` and the script's only `exit 1` is the healthcheck verdict, `set -e` is absent while `set -u` stays, the EXIT trap holds the contract, and active/standby are both quiet outcomes |
-| TestRenderHealthModeShortCircuits | - | `--health` sits below get() and the password it needs but above the exposure check that would exit 0, and makes exactly one actuator call -- no metrics, no /actuator/info, no JVM spawn, so it is cheap enough to run on a timer |
+| TestRenderHealthModeShortCircuits | - | `--health` sits below get(), the password it needs and the health_status it reads its verdict with, but above the exposure check that would exit 0, and makes exactly one actuator call -- no metrics, no /actuator/info, no JVM spawn, so it is cheap enough to run on a timer |
 | TestRenderHealthModeExitsOnVerdict | - | `--health` clears the EXIT trap before answering (or its non-zero status would be swallowed), exits 0 only on UP, and echoes the verdict to stdout without a `status:` prefix so the engine's health log carries it |
 | TestRenderSendsStatusToStdoutAndProblemsToStderr | - | the mode/state/health/workflow report lines go to stdout unredirected, and every `status:` diagnostic ends in `>&2` |
 | TestRenderAlignsWorkflowColumn | - | the workflows block is a bare header plus one indented row per workflow, with the ids right-aligned to the widest id present so every colon sits in the same column |
 | TestRenderReportsHealthUptimeAndVersion | endpoints | health, /actuator/metrics/process.uptime and /actuator/info are each read and rendered as their own report line |
 | TestRenderReportsHealthUptimeAndVersion | dropped when silent | each enrichment line sits behind a non-empty guard, so an endpoint that answers nothing drops its line instead of printing an empty value |
-| TestRenderReportsHealthUptimeAndVersion | first status wins | the health match is anchored at the opening brace, so a component's status is never reported as the whole instance's |
+| TestRenderReportsHealthUptimeAndVersion | own status | the health line reads the instance's status through health_status, the function the healthcheck answers with, so the two cannot disagree |
 | TestRenderReportsEveryWorkflowInNumericOrder | ordering | each workflow line carries the id as a leading tab-separated sort key, goes through `sort -n`, and has the key cut off, so the report reads 1..9..10..19 instead of the actuator's map order |
 | TestRenderReportsEveryWorkflowInNumericOrder | completeness | the workflows response is fed to the read loop with a terminating newline, and the bare `printf %s "$WF"` form is absent -- without it `read` skips the unterminated final line and the last workflow is dropped from every report |
 | TestRenderReportsOnlyConfiguredWorkflows | filter | a chunk is reported only when it carries an id and a state, so nested JSON fragments with an id of their own stay out, and the `${st:-unknown}` padding is gone |
@@ -368,9 +368,16 @@ Tests: [statusscript_test.go](../internal/statusscript/statusscript_test.go)
 | TestRenderSearchesSpringConfigLocations | - | the config search covers SPRING_CONFIG_LOCATION, SPRING_CONFIG_ADDITIONAL_LOCATION and SPRING_CONFIG_NAME, ConfigDir and its wildcard form, the ./ and ./config/ defaults, both YAML extensions, comma splitting with optional:/file: stripping, the classpath: skip, and runs before the exposure check and password lookup |
 | TestRenderEscapesUserForSedAddress | 7 names | USER_MATCH is regex-escaped for the sed address (dot, slash, brackets, star, backslash, anchors) while USER_NAME stays raw for the Authorization header |
 | TestFilenameAndPathConstants | - | the script's name and directory, that ContainerPath is not nested inside the libs, spring/config or classpath mounts -- the nesting that made the libs mount shadow it -- and the healthcheck contract the three renderers share (HealthArg, HealthShell, and a cadence whose timeout is below the interval and whose start period is above it) |
-| TestRenderReportsHealthComponents | - | the per-component health breakdown: a newline before every `{"status"` puts each component's status at the start of a line and its name at the end of the line above, so the name is carried forward in $pending (guarded with `${pending:-}` for set -u); the block prints only when something parsed |
+| TestRenderReportsHealthComponents | - | the per-component health breakdown is read by health_components from the document the health line already fetched -- defined first, parsed after the fetch -- and the block prints only when something parsed |
 | TestRenderReportsJavaConfigAndHeap | - | the three details-level lines from outside the report endpoints: `java -version` (stderr redirected, run with JAVA_TOOL_OPTIONS/JDK_JAVA_OPTIONS/_JAVA_OPTIONS unset so the JVM's "Picked up ..." notice is not reported as the version, folded to "openjdk 17.0.9" or passed through raw), the config the report was read from, and heap used/max tagged `area:heap`; each guarded so an absent source drops its line, a negative maximum is left out, and the byte arithmetic is deliberately *not done* here (busybox would read Jackson's 4.32013312E8 as 4) |
 | TestRenderHeaderNamesEveryReportedFact | - | the script's own header names what it reports, since it is the first thing someone running the script by hand reads |
+| TestHealthParseIsKeyOrderIndependent | spring boot 3 | runs the rendered health_status and health_components under a real sh (this package's only exec, skipped where no sh is found): a connector 2.x document, every status first, reads UP with one row per component -- a composite's sub-components right after it, the ssl certificate chain's validity status not among them |
+| TestHealthParseIsKeyOrderIndependent | spring boot 4 | the same document with every key sorted, as connector 3.x writes it (status last), reads the same verdict and the same rows -- reading it from the wrong end is what left 3.x containers unhealthy and pods NotReady |
+| TestHealthParseIsKeyOrderIndependent | down, spring boot 3 | a DOWN instance with a healthy component after the failing one reads DOWN, not the last status in the document; the error text's braces, brackets, < > and escaped quotes do not throw the component rows off |
+| TestHealthParseIsKeyOrderIndependent | down, spring boot 4 | the same in sorted order, with a healthy component ahead of the failing one: DOWN, not the first status in the document |
+| TestHealthParseIsKeyOrderIndependent | pretty-printed | a document with every key on its own line reads the same as a compact one |
+| TestHealthParseIsKeyOrderIndependent | no components | a document without components (show-details off) reads its status and prints no rows |
+| TestHealthParseIsKeyOrderIndependent | no document | an empty answer prints nothing, which the healthcheck reports as unreachable |
 
 ## internal/deploy
 

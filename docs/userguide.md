@@ -2193,7 +2193,7 @@ reports success.
 |------|------|-------|
 | `leader-election mode` | `leader-election.mode` ([section 7](#7-connector-defaults-envyaml-top-level)) | `standalone` / `active_active` / `active_standby` |
 | `leader-election state` | `/actuator/leaderelection` | `active` or `standby`, read live per instance |
-| `health` | `/actuator/health` | `UP`, or the status plus a `health-detail` line carrying the whole document (`show-details` is always on, so it names the failing component) |
+| `health` | `/actuator/health` | `UP`, or the status plus a `health-detail` line carrying the whole document (`show-details` is always on, so it names the failing component). Read the same whether the connector writes the document Spring Boot 3's way (connector 2.x: its own status first) or Spring Boot 4's (connector 3.x: every key sorted, so its status comes last) |
 | `workflows` | `/actuator/workflows` | one `<id>: <state>` row per workflow, ids **ordered numerically** (`1..9..10..19`, not the actuator's own map order, which lists 10 before 2) and **right-aligned so the colons line up** |
 
 `health` is dropped when the endpoint answers nothing, rather than reported as
@@ -2254,7 +2254,10 @@ sh /app/external/.status-script --health
 It queries `/actuator/health` once -- with the same account and password the
 report resolves, since the actuator is always behind the injected `solmq-status`
 account -- prints the status it saw, and **exits 0 only when that status is
-`UP`**. This is the one place the script departs from its always-exit-0
+`UP`**. It finds the instance's own status whichever order the connector writes
+the document in -- Spring Boot 3 (connector 2.x) puts it first, Spring Boot 4
+(connector 3.x) sorts it last -- so a 3.x container is judged by the same rule
+as a 2.x one, never by a component's status. This is the one place the script departs from its always-exit-0
 contract, which is why it has to be asked for by name; nothing else ever passes
 it an argument, and `status` never does.
 
@@ -2334,7 +2337,7 @@ On the application side:
 | `java` | `java -version` inside the container, run with `JAVA_TOOL_OPTIONS`/`JDK_JAVA_OPTIONS` cleared so the JVM's `Picked up ...` notice is not reported in place of the version ([section 8.0](#80-image-timezone-and-jvm-options-shared-by-every-platform)); dropped when the image has no `java` on `PATH` |
 | `config` | the configuration file the script read the account and exposure list from, resolved the way Spring itself resolves it (see "Instances this tool did not deploy" below) |
 | `heap` | `/actuator/metrics/jvm.memory.used` and `jvm.memory.max`, tagged `area:heap` so the number is comparable with `-Xmx` |
-| `health components` | the per-component statuses in the health document -- which dependency is up and which is not |
+| `health components` | the per-component statuses in the health document -- which dependency is up and which is not: one row per entry of every `components` map, a composite's sub-components right after it, in the order the document lists them, under either key order |
 
 Each line is dropped when its source answers nothing, rather than reported as
 missing. If a line you expect is absent, the installed script may be out of
