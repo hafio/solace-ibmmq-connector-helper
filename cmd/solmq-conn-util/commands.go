@@ -65,12 +65,13 @@ const urlFlagName = "--url"
 
 // versionFlagName pins the seed release (the IBM MQ client jar, or the
 // syslog encoder jar) instead of resolving latest stable. An empty value
-// means latest stable, exactly as omitting the flag does.
+// means latest stable, exactly as omitting the flag does -- for the syslog
+// encoder, the newest release on the line the connector's Jackson needs.
 const versionFlagName = "--version"
 
 // omitLibFileFlagName points at a jar list captured from a different
-// connector image, replacing the embedded default the omission rule compares
-// against. It REPLACES the embedded list completely rather than merging with
+// connector image, replacing the built-in list the omission rule compares
+// against. It REPLACES the built-in list completely rather than merging with
 // it, so a named file containing nothing omits nothing.
 const omitLibFileFlagName = "--omit-lib-file"
 
@@ -269,8 +270,8 @@ var cliFlags = []cliFlag{
 	// argName, not argFile: a URL is not a filesystem path, so offering file
 	// suggestions would suggest exactly the wrong kind of value.
 	{Short: urlFlagName, Long: urlFlagName, AppliesTo: bt + "download" + bt, Meaning: "exact URL to download instead of Maven resolution; repeatable; when given, no resolution happens at all", Arg: argName, Usage: "exact URL to download instead of Maven resolution (repeatable)"},
-	{Short: versionFlagName, Long: versionFlagName, AppliesTo: bt + "download" + bt, Meaning: "pin the seed release (the IBM MQ client jar, or the syslog encoder jar) instead of resolving latest stable; empty means latest stable", Arg: argName, Usage: "pin the seed release (default: latest stable)"},
-	{Short: omitLibFileFlagName, Long: omitLibFileFlagName, AppliesTo: bt + "download" + bt, Meaning: "a jar list that replaces (never merges with) the embedded default the omission rule compares against; an empty file omits nothing", Arg: argFile, Usage: "replace the built-in jar list the omission rule compares against"},
+	{Short: versionFlagName, Long: versionFlagName, AppliesTo: bt + "download" + bt, Meaning: "pin the seed release (the IBM MQ client jar, or the syslog encoder jar) instead of resolving it; empty means latest stable -- for the syslog encoder, the newest release that fits the Jackson generation the connector ships", Arg: argName, Usage: "pin the seed release (default: latest stable; syslog fits the connector)"},
+	{Short: omitLibFileFlagName, Long: omitLibFileFlagName, AppliesTo: bt + "download" + bt, Meaning: "a jar list that replaces (never merges with) the built-in list the omission rule compares against; an empty file omits nothing", Arg: argFile, Usage: "replace the built-in jar list the omission rule compares against"},
 	{Short: includeProvidedFlagName, Long: includeProvidedFlagName, AppliesTo: bt + "download" + bt, Meaning: "download the whole closure even where the connector image already provides a jar, instead of omitting it", Arg: argNone, Usage: "download the whole closure even where the image already ships a jar"},
 	{Short: installFlagName, Long: installFlagName, AppliesTo: bt + "status" + bt, Meaning: "install the status script on every instance without prompting", Arg: argNone, Usage: "install the status script on every instance without prompting"},
 	{Short: noPromptFlagName, Long: noPromptFlagName, AppliesTo: bt + "remove" + bt, Meaning: "tear down without asking anything -- what a script or CI job passes, since the prompts refuse to read a non-TTY rather than hang. It covers both questions: the teardown confirmation, and whether to remove a namespace that turned out to be empty. It cannot authorise more than that: a namespace holding anything this release does not own is never removed, with or without it", Arg: argNone, Usage: "tear down without asking for confirmation"},
@@ -433,14 +434,14 @@ var cliVerbs = []cliVerb{
 			bt + "download" + bt + ", then " + bt + "jar" + bt + ", then " + bt + libs.SetMQ + bt + " or " + bt + libs.SetSyslog + bt + " -- are required; a missing or unknown word is a loud error listing the valid words. " +
 			bt + libs.SetMQ + bt + " seeds from the IBM MQ client jar; " + bt + libs.SetSyslog + bt + " seeds from the logstash syslog encoder jar. " +
 			"The " + bt + libs.SetMQ + bt + " seed is the Jakarta build of the client, and there is no flag to change it: the connector image is a Jakarta stack, so the javax build could only ever produce a classpath that fails at run time.\n\n" +
-			bt + "-e" + bt + " is read for one thing only: the " + bt + "image" + bt + " block, so the command can say when the jar list it omits against does not describe the image being deployed. It reads no credentials, no platform and no workflows, and a missing env.yaml is not an error -- download is the verb you run before you have a deployment.\n\n" +
-			"The seed artifact resolves to its latest stable release, or to the exact release named by " + versionSpan + " when given; an empty value means latest stable, the same as leaving the flag off. Every dependency version instead comes from the Maven POM chain of the resolved seed release. " +
+			bt + "-e" + bt + " is read for one thing only: the " + bt + "image" + bt + " block, whose release picks the built-in jar list the command omits against and the syslog encoder line, and lets it say when no built-in list describes the image being deployed. It reads no credentials, no platform and no workflows, and a missing env.yaml is not an error -- download is the verb you run before you have a deployment.\n\n" +
+			"The seed artifact resolves to its latest stable release, or to the exact release named by " + versionSpan + " when given; an empty value means latest stable, the same as leaving the flag off. The " + bt + libs.SetSyslog + bt + " encoder is the exception: it has to match the connector's Jackson generation, so with no " + versionSpan + " a 2.x connector (Jackson 2) gets the newest 8.x and a 3.x connector, or none named in env.yaml, the newest release -- the report's " + bt + "seed:" + bt + " line says which and why. Every dependency version instead comes from the Maven POM chain of the resolved seed release. " +
 			urlSpan + " (repeatable) overrides all of that: when given, exactly those URLs are downloaded and no Maven resolution happens.\n\n" +
 			"By default, an artifact resolved through Maven is omitted when the connector image already ships that jar, matched by artifact base name, at a version equal to or newer than the one resolved here; every omission is reported, never silent. The seed artifact -- the jar the command was run to fetch in the first place -- is never a candidate for omission no matter what the omit file says about it, so the command stays useful against an older image that lacks it entirely, and a stale or hostile omit file can never cause the one jar that matters to be skipped. " +
-			omitLibFileSpan + " replaces the embedded jar list (captured from the shipped connector image) with one captured from a different image, so the comparison runs against that image instead; it replaces the embedded list completely rather than merging with it, so an omit file containing nothing omits nothing. " +
+			omitLibFileSpan + " replaces the built-in jar list (captured from the connector image, one per connector line) with one captured from a different image, so the comparison runs against that image instead; it replaces the built-in list completely rather than merging with it, so an omit file containing nothing omits nothing. " +
 			includeProvidedSpan + " disables omission entirely and downloads the whole closure regardless of what the image already has. " +
 			"Omission never applies to an explicit " + urlSpan + ": the operator named that URL directly, so it is always downloaded verbatim and never second-guessed.\n\n" +
-			"Matching is by jar artifact base name plus version, since a jar filename carries no groupId; this is why Jackson 3 (" + bt + "tools.jackson.core" + bt + ") still downloads for the " + bt + libs.SetSyslog + bt + " set even though the image already ships Jackson 2: its 3.x versions compare higher than the 2.x copies the image carries, so the version comparison still gets the right answer.\n\n" +
+			"Matching is by jar artifact base name plus version, since a jar filename carries no groupId. The version comparison still tells the Jackson generations apart: a 9.x encoder's Jackson 3 (" + bt + "tools.jackson.core" + bt + ") downloads even against a 2.x image's Jackson 2 under the same jar names, because its 3.x versions compare higher.\n\n" +
 			"The destination is the trailing " + bt + "[dir]" + bt + " positional (default " + bt + "./libs" + bt + "). " +
 			"Every jar is checked against the sha1 digest the repository publishes beside it before it is written, catching a truncated or corrupted transfer; that is integrity, not authenticity -- it is not proof against a compromised repository. https is still required on the initial URL and on every redirect hop. An existing file is skipped unless " + bt + "-f" + bt + " is given, exactly like " + bt + "examples" + bt + ".",
 		Targets: []cliTarget{

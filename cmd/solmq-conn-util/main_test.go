@@ -2001,13 +2001,13 @@ func TestDownloadReportNextHint(t *testing.T) {
 }
 
 // TestDownloadReportPrintsOmitListProvenance covers the "omit list:" line:
-// annotated "(built in; describes <floor> and later)" when --omit-lib-file
-// was left empty (Report.OmitListProvenance then names the embedded
-// default), printed bare when an explicit path was given, and any per-line
-// Report.OmitListWarnings (entries the omit list loader rejected as
-// unparseable) surfaced as their own lines.
+// annotated "(built in; describes <range>)" from Report.OmitListRange for a
+// built-in list (Report.OmitListProvenance then names it), printed bare when
+// an explicit path was given, and any per-line Report.OmitListWarnings
+// (entries the omit list loader rejected as unparseable) surfaced as their
+// own lines.
 //
-// The annotation carries the floor because the filename alone names one
+// The annotation carries the range because the filename alone names one
 // tag, and an operator reading "2.13.0" while deploying 2.14.1 would
 // reasonably conclude the omissions were judged against the wrong image.
 func TestDownloadReportPrintsOmitListProvenance(t *testing.T) {
@@ -2015,10 +2015,11 @@ func TestDownloadReportPrintsOmitListProvenance(t *testing.T) {
 		f := &fakeDownload{resp: libs.Report{
 			Written:            []string{"libs/a.jar"},
 			OmitListProvenance: "solace-pubsub-connector-ibmmq-2.13.0",
+			OmitListRange:      "2.10.0 and later, before 3.0.0",
 		}}
 		useFakeDownload(t, f)
 		stderr := captureStderr(t, func() { dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
-		want := "omit list: solace-pubsub-connector-ibmmq-2.13.0 (built in; describes " + libs.EmbeddedListMinVersion + " and later)"
+		want := "omit list: solace-pubsub-connector-ibmmq-2.13.0 (built in; describes 2.10.0 and later, before 3.0.0)"
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr missing %q, got:\n%s", want, stderr)
 		}
@@ -2043,6 +2044,25 @@ func TestDownloadReportPrintsOmitListProvenance(t *testing.T) {
 			t.Errorf("stderr missing the omit list warning line, got:\n%s", stderr)
 		}
 	})
+}
+
+// TestDownloadReportPrintsSeedChoice pins the "seed:" line: why the syslog
+// encoder resolved to the release it did, printed when the connector line
+// picked it and absent otherwise, so a pinned --version or the mq set reads
+// as it always has.
+func TestDownloadReportPrintsSeedChoice(t *testing.T) {
+	const why = "logstash-logback-encoder 8.1, the newest 8.x: connector 2.14.1 ships Jackson 2"
+	useFakeDownload(t, &fakeDownload{resp: libs.Report{Written: []string{"libs/a.jar"}, SeedChoice: why}})
+	stderr := captureStderr(t, func() { dispatch([]string{"download", "jar", "syslog"}, &fakeRunner{}) })
+	if !strings.Contains(stderr, "seed: "+why+"\n") {
+		t.Errorf("stderr missing the seed line, got:\n%s", stderr)
+	}
+
+	useFakeDownload(t, &fakeDownload{resp: libs.Report{Written: []string{"libs/a.jar"}}})
+	stderr = captureStderr(t, func() { dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
+	if strings.Contains(stderr, "seed:") {
+		t.Errorf("a report with no SeedChoice printed a seed line:\n%s", stderr)
+	}
 }
 
 // TestDownloadSetMapMatchesModel guards download/jar's third command level

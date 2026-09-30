@@ -56,20 +56,25 @@
 // The image's jar list comes from loadImageLibs (this package's image.go):
 // Input.OmitLibFile names a captured list from a different image and
 // REPLACES the built-in list completely -- there is no merging, so an empty
-// file omits nothing -- and an empty Input.OmitLibFile uses the list embedded
-// in the binary. Omission applies ONLY to a Maven-resolved closure -- an
-// explicit --url is always downloaded verbatim, because the operator named
-// it and the tool never second-guesses a named URL.
+// file omits nothing -- and an empty Input.OmitLibFile uses the built-in list
+// for the connector line Input.DeployedImage names (builtinList). Omission
+// applies ONLY to a Maven-resolved closure -- an explicit --url is always
+// downloaded verbatim, because the operator named it and the tool never
+// second-guesses a named URL.
+//
+// The syslog seed also depends on that line. logstash-logback-encoder 9.0
+// moved to Jackson 3, which only connector 3.x ships, so with no Version the
+// syslog set resolves the newest 8.x (Jackson 2) for a 2.x connector and the
+// newest release otherwise (syslogLine), and says which in Report.SeedChoice.
 //
 // Matching is by jar ARTIFACT BASE NAME plus version, never by groupId,
 // because a jar filename on a classpath carries no groupId. This is a real
 // limitation -- two different libraries that happen to share a base jar name
-// would be confused -- but it is also why the Jackson 3 artifacts
-// (tools.jackson.core) in the syslog closure still download even though the
-// image ships Jackson 2 (com.fasterxml.jackson.core) under the same
-// "jackson-core"/"jackson-databind" base names: Jackson 3's versions compare
-// higher than the image's 2.x copies, so the version comparison alone gets
-// the right answer without ever needing to know either side's groupId.
+// would be confused -- but the version comparison still gets the Jackson
+// generations right without knowing either side's groupId: a 9.x encoder's
+// Jackson 3 artifacts (tools.jackson.core) share the "jackson-core" and
+// "jackson-databind" base names with a 2.x image's Jackson 2 copies
+// (com.fasterxml.jackson.core), and download because 3.x compares higher.
 package libs
 
 import (
@@ -151,14 +156,14 @@ func SetNames() []string {
 // valid ones.
 //
 // The mq seed is the Jakarta build of the IBM client, and there is no choice to
-// make: the connector image is a Jakarta stack (it ships jakarta.jms-api,
-// Spring 6 and mq-jms-spring-boot-starter 3.x -- see the imagelibs list), and a
-// client implementing javax.jms cannot satisfy a jakarta.jms binder. The javax
-// build (com.ibm.mq:com.ibm.mq.allclient) was selectable until it became clear
-// it could only ever produce a classpath that fails at run time -- and that
-// having both on one classpath is worse still, since the two builds carry the
-// same com.ibm.mq.* and com.ibm.msg.client.* classes and load order decides
-// which wins.
+// make: the connector image is a Jakarta stack on every line (it ships
+// jakarta.jms-api, on Spring 6 for connector 2.x and Spring 7 for 3.x -- see
+// the imagelibs lists), and a client implementing javax.jms cannot satisfy a
+// jakarta.jms binder. The javax build (com.ibm.mq:com.ibm.mq.allclient) was
+// selectable until it became clear it could only ever produce a classpath that
+// fails at run time -- and that having both on one classpath is worse still,
+// since the two builds carry the same com.ibm.mq.* and com.ibm.msg.client.*
+// classes and load order decides which wins.
 func resolveSeed(set string) (Coord, error) {
 	switch set {
 	case SetMQ:
@@ -170,6 +175,33 @@ func resolveSeed(set string) (Coord, error) {
 	}
 }
 
+// connector3Major is the first connector major on Spring Boot 4, and so on
+// Jackson 3: connector 2.x (Spring Boot 3) ships Jackson 2.
+const connector3Major = 3
+
+// jackson2EncoderMajor is the newest logstash-logback-encoder major built on
+// Jackson 2; 9.0 moved to Jackson 3 (tools.jackson). An encoder expecting one
+// generation cannot run on a classpath that carries the other, so a connector
+// before connector3Major needs this line.
+const jackson2EncoderMajor = 8
+
+// syslogLine picks the encoder line a syslog download resolves when no Version
+// names one, from the connector release env.yaml deploys. major is 0 when the
+// newest release is right -- a 3.x connector, or no release to go by, where
+// the newest stays the default -- and why is the reason the report gives
+// either way, so the operator can see what was matched to what.
+func syslogLine(deployedImage string) (major int, why string) {
+	tag, connector, ok := connectorRelease(deployedImage)
+	switch {
+	case !ok:
+		return 0, fmt.Sprintf("the newest release: env.yaml names no connector release to match it to -- a connector before %d.0 ships Jackson 2 and needs an %d.x encoder, so pin one with --version", connector3Major, jackson2EncoderMajor)
+	case connector < connector3Major:
+		return jackson2EncoderMajor, fmt.Sprintf("the newest %d.x: connector %s ships Jackson 2, and every later encoder needs Jackson 3; --version picks another", jackson2EncoderMajor, tag)
+	default:
+		return 0, fmt.Sprintf("the newest release: connector %s ships Jackson 3; --version picks another", tag)
+	}
+}
+
 // Input is one Download request.
 type Input struct {
 	Dir             string   // destination directory, created if needed
@@ -177,7 +209,7 @@ type Input struct {
 	Version         string   // pin the seed release; empty means latest stable
 	URLs            []string // explicit overrides; when non-empty no Maven resolution and no omission happens
 	Force           bool     // overwrite existing files
-	OmitLibFile     string   // path to an omit list that REPLACES the embedded default completely; empty means the embedded default; an empty file omits nothing
+	OmitLibFile     string   // path to an omit list that REPLACES the built-in list completely; empty means the built-in list for DeployedImage; an empty file omits nothing
 	IncludeProvided bool     // download the whole closure even where the image already provides it
 	HTTP            Doer     // nil means a default client with a timeout
 
@@ -186,9 +218,11 @@ type Input struct {
 	// "solace/solace-pubsub-connector-ibmmq:2.14.1"). Empty when unknown --
 	// download runs perfectly well with no config at all.
 	//
-	// Purely advisory: it never changes what is downloaded, only whether
-	// Report.OmitListImageMismatch is set. Omission compares against the jar
-	// list, and this says whether that list describes the right image.
+	// Its release picks the built-in jar list omission compares against, and
+	// for the syslog set with no Version the encoder line (see syslogLine), so
+	// it does change what is downloaded. Unknown, it means the newest list and
+	// the newest encoder, the same as before there was more than one line.
+	// A reference no built-in list describes sets Report.OmitListImageMismatch.
 	DeployedImage string
 }
 
@@ -211,13 +245,17 @@ type Report struct {
 	Failed []Failure // per-artifact failures, in resolution order
 
 	// OmitListProvenance names which omit list was in effect for this run's
-	// omission step: the operator's --omit-lib-file path verbatim, or a name
-	// identifying the embedded default. Empty when omission never ran (an
-	// --url download, or IncludeProvided). Surfacing this lets an operator
-	// deploying against an image other than the one the built-in list came
-	// from see the mismatch in the report instead of discovering it at
-	// runtime.
+	// omission step: the operator's --omit-lib-file path verbatim, or the
+	// built-in list's name. Empty when omission never ran (an --url download,
+	// or IncludeProvided). Surfacing this lets an operator deploying against
+	// an image other than the one the built-in list came from see the
+	// mismatch in the report instead of discovering it at runtime.
 	OmitListProvenance string
+	// OmitListRange is the range of connector releases the built-in list in
+	// effect describes, e.g. "2.10.0 and later, before 3.0.0". Empty for an
+	// --omit-lib-file -- the operator's own statement about their image, with
+	// no range to state -- and when omission never ran.
+	OmitListRange string
 	// OmitListWarnings names the artifacts THIS closure had to download
 	// because the omit list's own entry for them carried a version
 	// loadImageLibs could not trust (see validateImageVersion) and so treated
@@ -230,16 +268,24 @@ type Report struct {
 	// nothing, so it is not worth an operator's attention.
 	OmitListWarnings []string
 	// OmitListImageMismatch is set when Input.DeployedImage names a connector
-	// image the embedded jar list is not known to describe, so every omission
+	// image no built-in jar list is known to describe, so every omission
 	// above may be a claim about a different classpath than the one being
-	// deployed to. The list covers a range of releases, not the single one it
-	// was captured from, so a newer image than that capture is silent.
+	// deployed to. Each list covers a range of releases, not just the one it
+	// was captured from, so only a release outside every range, a different
+	// image, or a reference naming no release warns.
 	//
 	// Its own field rather than an OmitListWarnings entry: that list means
 	// "entries this closure could not compare", which is a per-artifact
 	// finding. This is one statement about the whole run, and conflating them
 	// would blur a distinction the report just gained.
 	OmitListImageMismatch string
+	// SeedChoice says which release the seed resolved to and why, when no
+	// Version was given and the set's seed depends on the connector line --
+	// the syslog set, whose encoder has to match the connector's Jackson
+	// generation: "logstash-logback-encoder 8.1, the newest 8.x: connector
+	// 2.14.1 ships Jackson 2, ...". Empty for a pinned Version, an --url
+	// download, and the mq set.
+	SeedChoice string
 }
 
 // downloadItem is one artifact queued for the download loop: a URL to fetch
@@ -258,8 +304,9 @@ type downloadItem struct {
 //
 // error != nil is SYSTEMIC: a malformed or non-https --url, an unknown Set
 // or Version value, a destination dir that cannot be created, the seed
-// artifact's metadata being unreachable, or a named --omit-lib-file (or the
-// embedded default) failing to load. Nothing is written in that case. A
+// artifact's metadata being unreachable or naming no release on the line the
+// connector needs, or a named --omit-lib-file (or the built-in list) failing
+// to load. Nothing is written in that case. A
 // per-artifact problem -- one jar 404s, a redirect steps off https, an
 // artifact exceeds the byte cap, arrives short of its own Content-Length, or
 // fails sha1 verification -- never aborts the run; it is recorded in
@@ -328,16 +375,36 @@ func Download(in Input) (Report, error) {
 		// every run, even when nothing will end up written. That is a
 		// deliberate trade-off, not an oversight; see
 		// TestDownloadSetPathAlwaysResolvesEvenWhenFilesExist.
-		artifacts, err := resolveClosureAt(doer, seed, in.Version)
+		// With no Version, the syslog encoder is held to the line the
+		// connector's Jackson generation needs. That pick is handed on as the
+		// version to resolve at, so resolveClosureAt treats it like a pin and
+		// does not fetch the metadata a second time.
+		version, why := in.Version, ""
+		if in.Set == SetSyslog && version == "" {
+			major, reason := syslogLine(in.DeployedImage)
+			why = reason
+			if major > 0 {
+				v, err := latestStableMajor(doer, seed, major)
+				if err != nil {
+					return Report{}, fmt.Errorf("resolving the newest %d.x %s:%s, the line the connector env.yaml deploys needs (pass --version to choose one): %w", major, seed.Group, seed.Artifact, err)
+				}
+				version = v
+			}
+		}
+		artifacts, err := resolveClosureAt(doer, seed, version)
 		if err != nil {
 			return Report{}, fmt.Errorf("resolving %s:%s: %w", seed.Group, seed.Artifact, err)
+		}
+		if why != "" {
+			rep.SeedChoice = fmt.Sprintf("%s %s, %s", seed.Artifact, artifacts[0].Version, why)
 		}
 		if len(artifacts) > maxDownloadArtifacts {
 			return Report{}, fmt.Errorf("%d artifacts exceeds the maximum of %d in a single download", len(artifacts), maxDownloadArtifacts)
 		}
 
 		if !in.IncludeProvided {
-			loaded, err := loadImageLibs(in.OmitLibFile)
+			builtin, mismatch := builtinList(in.DeployedImage)
+			loaded, err := loadImageLibs(in.OmitLibFile, builtin)
 			if err != nil {
 				if in.OmitLibFile != "" {
 					// The operator named this file, so a bad one is a
@@ -346,20 +413,21 @@ func Download(in Input) (Report, error) {
 					// err already names the offending path.
 					return Report{}, fmt.Errorf("loading omit list: %w", err)
 				}
-				// An empty OmitLibFile means the embedded default, and that
-				// failing to load or parse is a bug baked into the binary --
-				// there is no operator-supplied file to blame -- but Download
-				// still cannot silently proceed, so it is surfaced the same
-				// way any other systemic failure is.
-				return Report{}, fmt.Errorf("loading embedded default omit list: %w", err)
+				// An empty OmitLibFile means a built-in list, and that failing
+				// to load or parse is a bug baked into the binary -- there is
+				// no operator-supplied file to blame -- but Download still
+				// cannot silently proceed, so it is surfaced the same way any
+				// other systemic failure is.
+				return Report{}, fmt.Errorf("loading the built-in omit list: %w", err)
 			}
 			rep.OmitListProvenance = loaded.Provenance
-			// Only when the embedded default is in play: a named --omit-lib-file
-			// is the operator's own statement about their image, and
+			// Only when a built-in list is in play: a named --omit-lib-file is
+			// the operator's own statement about their image, and
 			// second-guessing it would contradict the same rule that makes an
 			// explicit --url immune to omission.
 			if in.OmitLibFile == "" {
-				rep.OmitListImageMismatch = imageMismatchNote(in.DeployedImage)
+				rep.OmitListRange = builtin.describes()
+				rep.OmitListImageMismatch = mismatch
 			}
 
 			kept := artifacts[:0]

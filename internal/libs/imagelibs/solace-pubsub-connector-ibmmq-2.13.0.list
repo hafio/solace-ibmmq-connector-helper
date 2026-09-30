@@ -1,12 +1,13 @@
 # Jar classpath captured from the connector image
 # solace/solace-pubsub-connector-ibmmq:2.13.0
 #
-# This one capture describes every connector release from 2.10.0 onwards
-# (libs.EmbeddedListMinVersion): the classpath does not move between releases,
-# and 2.14.1's capture is byte-for-byte identical to this file. Recapture from
-# a newer image and diff before adding a second list -- an identical capture
-# means this file already covers that release and only the floor's evidence
-# changed.
+# This one capture describes every connector 2.x release from 2.10.0 on, up
+# to but not including 3.0.0 (its row in libs.embeddedLists): the classpath
+# does not move between releases of one line, and 2.14.1's capture is
+# byte-for-byte identical to this file. Connector 3.x moved to Spring Boot 4
+# and Jackson 3, so it needs a list of its own. Recapture from a newer image
+# and diff before adding one -- an identical capture means this file already
+# covers that release and only its range's evidence changed.
 #
 # Regenerate with:
 #   docker run --rm --entrypoint sh solace/solace-pubsub-connector-ibmmq:2.13.0 -c 'find / -name "*.jar" -not -path "/proc/*" 2>/dev/null | xargs -n1 basename | sort'

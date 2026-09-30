@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // call is one recorded Doer.Do invocation.
@@ -807,7 +808,7 @@ func TestDownloadOmitsDependencyImageProvidesAtNewerVersion(t *testing.T) {
 
 // TestDownloadEmptyOmitListFileOmitsNothing and
 // TestDownloadCommentsOnlyOmitListFileOmitsNothing pin the documented
-// semantics that --omit-lib-file REPLACES the embedded default rather than
+// semantics that --omit-lib-file REPLACES the built-in list rather than
 // merging with it: a supplied file that (after parsing) yields no entries at
 // all must omit NOTHING, so the whole resolved closure -- seed and every
 // dependency -- downloads, exactly as --include-provided would produce. Both
@@ -1034,7 +1035,7 @@ func TestDownloadBadOmitLibFilePathIsSystemic(t *testing.T) {
 }
 
 // TestDownloadEmbeddedDefaultListLoadFailureIsSystemic exercises Download's
-// "loading embedded default omit list" branch: a single line far longer than
+// "loading the built-in omit list" branch: a single line far longer than
 // loadImageLibs's own enlarged scanner buffer cannot be split into a token at
 // all, so loadImageLibs's own "skip one malformed line" contract cannot save
 // it -- that is bufio.Scanner's hard token-size ceiling, not a bug in
@@ -1042,22 +1043,24 @@ func TestDownloadBadOmitLibFilePathIsSystemic(t *testing.T) {
 // severe in DATA COMPILED INTO THE BINARY is a programming/build error, not
 // an operator error, and Download must still surface it as the systemic
 // error its own doc comment promises rather than silently falling through.
-// embeddedDefaultList is a package-level var (declared in image.go) for
-// exactly this kind of test injection.
+// embeddedListFS is a package-level var (declared in image.go) for exactly
+// this kind of test injection; with no image declared, the newest list is the
+// one read.
 func TestDownloadEmbeddedDefaultListLoadFailureIsSystemic(t *testing.T) {
-	orig := embeddedDefaultList
-	embeddedDefaultList = bytes.Repeat([]byte("x"), maxOmitListLineBytes*2)
-	defer func() { embeddedDefaultList = orig }()
+	orig := embeddedListFS
+	newest := embeddedLists[len(embeddedLists)-1]
+	embeddedListFS = fstest.MapFS{newest.file(): {Data: bytes.Repeat([]byte("x"), maxOmitListLineBytes*2)}}
+	defer func() { embeddedListFS = orig }()
 
 	dir := t.TempDir()
 	fd := &fakeDoer{byURL: syslogFixtures("9.0")}
 
 	rep, err := Download(Input{Dir: dir, Set: SetSyslog, Version: "9.0", HTTP: fd})
 	if err == nil {
-		t.Fatal("want systemic error when the embedded default list fails to parse")
+		t.Fatal("want systemic error when the built-in list fails to parse")
 	}
-	if !strings.Contains(err.Error(), "embedded default omit list") {
-		t.Errorf("err = %v, want it to name the embedded default", err)
+	if !strings.Contains(err.Error(), "built-in omit list") {
+		t.Errorf("err = %v, want it to name the built-in list", err)
 	}
 	if !reflect.DeepEqual(rep, Report{}) {
 		t.Errorf("Report = %+v, want zero value", rep)
@@ -1208,16 +1211,17 @@ func TestSetNames(t *testing.T) {
 // TestDownloadImageMismatchReported covers the end-to-end wiring of the
 // deployed-image check, including the cases that must stay quiet.
 //
-// The embedded list describes every release from EmbeddedListMinVersion
-// onwards, not just the tag it was captured from, so "deployed tag != captured
-// tag" is NOT what makes this warn -- only an image the list cannot speak for
-// does.
+// Each built-in list describes a range of releases, not just the tag it was
+// captured from, so "deployed tag != captured tag" is NOT what makes this
+// warn -- only an image no list can speak for does, below the oldest list's
+// floor or past a list's ceiling alike. The range of the list in effect is
+// reported either way.
 //
 // --omit-lib-file suppresses it entirely: the operator named a list, and
 // second-guessing that would contradict the same rule which makes an explicit
 // --url immune to omission.
 func TestDownloadImageMismatchReported(t *testing.T) {
-	// Deliberately below EmbeddedListMinVersion, so the check has something
+	// Deliberately below the oldest list's floor, so the check has something
 	// real to find. Every suppression case below uses this same reference --
 	// a covered image would make them pass whether suppression works or not.
 	const uncovered = "solace/solace-pubsub-connector-ibmmq:2.9.0"
@@ -1240,15 +1244,17 @@ func TestDownloadImageMismatchReported(t *testing.T) {
 		return rep
 	}
 
-	t.Run("an image the list cannot speak for warns", func(t *testing.T) {
-		rep := run(t, uncovered, "")
-		if rep.OmitListImageMismatch == "" {
-			t.Fatal("want a mismatch warning: 2.9.0 predates the embedded list's floor")
-		}
-		if !strings.Contains(rep.OmitListImageMismatch, "2.9.0") {
-			t.Errorf("warning %q should name the deployed image", rep.OmitListImageMismatch)
-		}
-	})
+	for _, ref := range []string{uncovered, "solace/solace-pubsub-connector-ibmmq:" + embeddedLists[0].before} {
+		t.Run("an image no list can speak for warns/"+ref, func(t *testing.T) {
+			rep := run(t, ref, "")
+			if rep.OmitListImageMismatch == "" {
+				t.Fatalf("want a mismatch warning: %s is outside every built-in list's range", ref)
+			}
+			if !strings.Contains(rep.OmitListImageMismatch, ref) {
+				t.Errorf("warning %q should name the deployed image", rep.OmitListImageMismatch)
+			}
+		})
+	}
 
 	// Both ends of the covered range, because the bug this replaced was a
 	// warning on every 2.14.1 run -- an image the list describes perfectly.
@@ -1256,7 +1262,10 @@ func TestDownloadImageMismatchReported(t *testing.T) {
 		t.Run("a covered release is silent/"+tag, func(t *testing.T) {
 			rep := run(t, "solace/solace-pubsub-connector-ibmmq:"+tag, "")
 			if rep.OmitListImageMismatch != "" {
-				t.Errorf("%s is described by the embedded list, want silence, got %q", tag, rep.OmitListImageMismatch)
+				t.Errorf("%s is described by the built-in list, want silence, got %q", tag, rep.OmitListImageMismatch)
+			}
+			if want := embeddedLists[0].describes(); rep.OmitListRange != want {
+				t.Errorf("OmitListRange = %q, want %q", rep.OmitListRange, want)
 			}
 		})
 	}
@@ -1273,5 +1282,84 @@ func TestDownloadImageMismatchReported(t *testing.T) {
 		if rep.OmitListImageMismatch != "" {
 			t.Errorf("a named list must not be second-guessed, got %q", rep.OmitListImageMismatch)
 		}
+		if rep.OmitListRange != "" {
+			t.Errorf("OmitListRange = %q, want none: a named list states no range", rep.OmitListRange)
+		}
 	})
+}
+
+// TestDownloadSyslogEncoderFollowsConnectorLine covers the encoder line pick.
+// logstash-logback-encoder 9.0 moved to Jackson 3, which only connector 3.x
+// ships, so with no --version a 2.x connector gets the newest 8.x -- never the
+// metadata's <release>, which names 9.0, nor a pre-release -- and anything
+// else the newest release. Every pick says which and why in
+// Report.SeedChoice, and --version still wins outright, with nothing to
+// explain.
+func TestDownloadSyslogEncoderFollowsConnectorLine(t *testing.T) {
+	seed := Coord{Group: "net.logstash.logback", Artifact: "logstash-logback-encoder"}
+	fixtures := map[string]response{
+		metadataURL(seed): {body: metaXML("9.0", "7.4", "8.0", "8.1", "8.2-rc1", "9.0")},
+	}
+	for _, v := range []string{"7.4", "8.1", "9.0"} {
+		body := "encoder-" + v
+		u := jarURL(artifact{Coord: seed, Version: v})
+		fixtures[pomURL(seed, v)] = response{body: pomXMLBody()}
+		fixtures[u] = response{body: body}
+		fixtures[u+".sha1"] = response{body: sha1Hex(body)}
+	}
+	for _, c := range []struct {
+		name, deployed, version, wantJar string
+		wantWhy                          []string
+	}{
+		{"a 2.x connector gets the newest 8.x", "solace/solace-pubsub-connector-ibmmq:2.14.1", "", "8.1", []string{"logstash-logback-encoder 8.1", "newest 8.x", "connector 2.14.1", "Jackson 2"}},
+		{"a 3.x connector gets the newest release", "solace/solace-pubsub-connector-ibmmq:3.1.0", "", "9.0", []string{"logstash-logback-encoder 9.0", "newest release", "connector 3.1.0", "Jackson 3"}},
+		{"no connector release keeps the newest and says how to pin", "", "", "9.0", []string{"logstash-logback-encoder 9.0", "no connector release", "--version"}},
+		{"a tag naming no release is no connector release", "solace/solace-pubsub-connector-ibmmq:latest", "", "9.0", []string{"no connector release"}},
+		{"--version wins", "solace/solace-pubsub-connector-ibmmq:2.14.1", "7.4", "7.4", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			rep, err := Download(Input{
+				Dir: dir, Set: SetSyslog, Version: c.version, IncludeProvided: true,
+				DeployedImage: c.deployed, HTTP: &fakeDoer{byURL: fixtures},
+			})
+			if err != nil {
+				t.Fatalf("Download: %v", err)
+			}
+			if want := []string{filepath.Join(dir, "logstash-logback-encoder-"+c.wantJar+".jar")}; !reflect.DeepEqual(rep.Written, want) {
+				t.Errorf("Written = %v, want %v", rep.Written, want)
+			}
+			if c.wantWhy == nil && rep.SeedChoice != "" {
+				t.Errorf("SeedChoice = %q, want none for a pinned --version", rep.SeedChoice)
+			}
+			for _, w := range c.wantWhy {
+				if !strings.Contains(rep.SeedChoice, w) {
+					t.Errorf("SeedChoice = %q, want it to say %q", rep.SeedChoice, w)
+				}
+			}
+		})
+	}
+}
+
+// TestDownloadSyslogWithNoReleaseOnTheLineIsSystemic pins the failure when
+// the metadata has no release on the line a 2.x connector needs: an error
+// naming the line and the way out, and nothing written -- never a quiet fall
+// back to a 9.x encoder the connector cannot load.
+func TestDownloadSyslogWithNoReleaseOnTheLineIsSystemic(t *testing.T) {
+	seed := Coord{Group: "net.logstash.logback", Artifact: "logstash-logback-encoder"}
+	fd := &fakeDoer{byURL: map[string]response{metadataURL(seed): {body: metaXML("9.0", "9.0")}}}
+	dir := t.TempDir()
+
+	_, err := Download(Input{Dir: dir, Set: SetSyslog, DeployedImage: "solace/solace-pubsub-connector-ibmmq:2.14.1", HTTP: fd})
+	if err == nil {
+		t.Fatal("want a systemic error when no 8.x release exists")
+	}
+	for _, want := range []string{"8.x", "--version"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to name %q", err, want)
+		}
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("dir has %v, want nothing written", entries)
+	}
 }

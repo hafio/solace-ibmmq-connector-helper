@@ -16,8 +16,9 @@ import (
 // injected Doer, comparing versions, walking a POM's <parent> chain to merge
 // properties and dependencyManagement, and applying the compile/runtime,
 // non-optional, jar-only, first-seen-wins closure rules. resolveClosure,
-// resolveClosureAt and jarURL are the only names the rest of the package
-// (Download, in libs.go) needs; everything below is a private helper.
+// resolveClosureAt, latestStableMajor and jarURL are the only names the rest
+// of the package (Download, in libs.go) needs; everything below is a private
+// helper.
 //
 // encoding/xml is a first for this codebase (nothing else here parses XML).
 // The <properties> element has caller-defined child element names rather
@@ -158,8 +159,9 @@ func resolveClosure(d Doer, seed Coord) ([]artifact, error) {
 // release's own POM and parent chain, exactly as when version is empty.
 // Fallback is never set for the seed: an unpinned seed's version came from
 // maven-metadata.xml (already a real, published release), and a pinned
-// seed's version was named by the operator, not guessed, so there is nothing
-// to report as a fallback either way.
+// seed's version was named by the operator or picked by Download from one
+// major line of that same metadata (latestStableMajor), not guessed, so there
+// is nothing to report as a fallback either way.
 //
 // error is returned only for a systemic failure: an invalid seed coordinate,
 // an invalid pinned version, the seed's own maven-metadata.xml being
@@ -167,7 +169,9 @@ func resolveClosure(d Doer, seed Coord) ([]artifact, error) {
 // a pinned version that does not name a real release (the seed's own POM
 // 404s at that exact version, which a typo'd --version deserves an
 // actionable error for rather than the bare 404 libs.Download would
-// otherwise surface as a single opaque Failure). Once the seed's version is
+// otherwise surface as a single opaque Failure). Those errors say "version",
+// not "pinned version", because the pin may be Download's own pick of a line
+// rather than the operator's --version. Once the seed's version is
 // known, an unreachable dependency (or parent) POM only stops that one
 // branch from expanding further; the artifact stays in the closure at the
 // version its declaring POM already gave it (or its own latest-stable
@@ -187,7 +191,7 @@ func resolveClosureAt(d Doer, seed Coord, version string) ([]artifact, error) {
 	seedVersion := version
 	if pinned {
 		if err := validateCoordPart(seedVersion); err != nil {
-			return nil, fmt.Errorf("pinned version %q for %s:%s: %w", seedVersion, seed.Group, seed.Artifact, err)
+			return nil, fmt.Errorf("version %q for %s:%s: %w", seedVersion, seed.Group, seed.Artifact, err)
 		}
 	} else {
 		v, err := latestStable(d, seed)
@@ -221,7 +225,7 @@ func resolveClosureAt(d Doer, seed Coord, version string) ([]artifact, error) {
 		pom, pomErr := fetchPOM(d, cur.Coord, cur.Version)
 		if pomErr != nil {
 			if pinned && item.idx == 0 {
-				return nil, fmt.Errorf("pinned version %q not found for %s:%s: %w", seedVersion, seed.Group, seed.Artifact, pomErr)
+				return nil, fmt.Errorf("version %q not found for %s:%s: %w", seedVersion, seed.Group, seed.Artifact, pomErr)
 			}
 			continue
 		}
@@ -420,19 +424,52 @@ func latestStable(d Doer, c Coord) (string, error) {
 		return release, nil
 	}
 
+	if best := highestStable(meta.Versioning.Versions.Version, anyMajor); best != "" {
+		return best, nil
+	}
+	return "", fmt.Errorf("no stable version found for %s:%s in maven-metadata.xml", c.Group, c.Artifact)
+}
+
+// latestStableMajor is latestStable held to one major line: the highest
+// stable version in maven-metadata.xml whose first segment is major. The
+// <release> element is not consulted -- it names the newest release of any
+// line -- so the pick always comes from <versions>, by the same comparison.
+func latestStableMajor(d Doer, c Coord, major int) (string, error) {
+	meta, err := fetchMetadataXML(d, c)
+	if err != nil {
+		return "", err
+	}
+	if best := highestStable(meta.Versioning.Versions.Version, major); best != "" {
+		return best, nil
+	}
+	return "", fmt.Errorf("no stable %d.x release of %s:%s in maven-metadata.xml", major, c.Group, c.Artifact)
+}
+
+// anyMajor tells highestStable not to hold its pick to one major line.
+const anyMajor = -1
+
+// highestStable returns the highest of versions that is not a pre-release --
+// on one major line unless major is anyMajor -- or "" when none qualifies.
+func highestStable(versions []string, major int) string {
 	best := ""
-	for _, v := range meta.Versioning.Versions.Version {
-		if isPreRelease(v) {
+	for _, v := range versions {
+		if isPreRelease(v) || (major != anyMajor && versionMajor(v) != major) {
 			continue
 		}
 		if best == "" || compareVersions(v, best) > 0 {
 			best = v
 		}
 	}
-	if best == "" {
-		return "", fmt.Errorf("no stable version found for %s:%s in maven-metadata.xml", c.Group, c.Artifact)
+	return best
+}
+
+// versionMajor is v's first segment as a number, or -1 when it is not one.
+func versionMajor(v string) int {
+	n, err := strconv.Atoi(versionSegmentSplitRe.Split(v, 2)[0])
+	if err != nil {
+		return -1
 	}
-	return best, nil
+	return n
 }
 
 func versionPublished(v string, list []string) bool {

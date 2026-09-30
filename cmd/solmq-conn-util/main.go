@@ -956,11 +956,12 @@ var downloadFn = libs.Download
 // internal/libs -- mirrors runAutoComplete's missing/unknown-word handling
 // (including its usage()-only-on-missing asymmetry) so the words accepted by
 // help, completion, and dispatch can never drift from what actually runs.
-// downloadDeployedImage reads the connector image reference out of env.yaml so
-// download can tell the operator when the jar list it omits against was
-// captured from a DIFFERENT image than the one being deployed. It is the only
-// thing download reads config for -- never credentials, a platform, or
-// workflows -- and the value only ever reaches Report.OmitListImageMismatch.
+// downloadDeployedImage reads the connector image reference out of env.yaml:
+// its release picks the built-in jar list download omits against and, for
+// syslog with no --version, the encoder line, and a reference no built-in list
+// describes is reported rather than silently judged. It is the only thing
+// download reads config for -- never credentials, a platform, or workflows --
+// and the value only ever reaches libs.Input.DeployedImage.
 //
 // The read is advisory because download is the command you run BEFORE you have
 // a deployment: it must work in an empty directory with no config at all. So
@@ -1004,8 +1005,8 @@ func runDownload(args []string) int {
 	var urls []string
 	urlVal := repeatableName{&urls}
 	fs.Var(urlVal, "url", "exact URL to download instead of Maven resolution (repeatable)")
-	version := fs.String("version", "", "pin the seed release instead of resolving latest stable (default: latest stable)")
-	omitLibFile := fs.String("omit-lib-file", "", "a jar list that replaces the embedded default the omission rule compares against (default: the embedded default; an empty file omits nothing)")
+	version := fs.String("version", "", "pin the seed release instead of resolving latest stable (default: latest stable; for syslog, the newest that fits the connector's Jackson)")
+	omitLibFile := fs.String("omit-lib-file", "", "a jar list that replaces the built-in list the omission rule compares against (default: the built-in list for the release env.yaml deploys; an empty file omits nothing)")
 	includeProvided := fs.Bool("include-provided", false, "download the whole closure even where the connector image already provides a jar")
 	envPath := envFlag(fs)
 	force := fs.Bool("f", false, "overwrite existing files")
@@ -1066,7 +1067,7 @@ func runDownload(args []string) int {
 	if derr != nil {
 		return errExit(derr)
 	}
-	return reportDownload(rep, dir, *omitLibFile)
+	return reportDownload(rep, dir)
 }
 
 // reportDownload prints libs.Download's Report mirroring runExamples' shape:
@@ -1077,10 +1078,13 @@ func runDownload(args []string) int {
 // whose POM chain never resolved a version and fell back to latest stable
 // (Report.Fallback), and "unverified:" for one written without a digest
 // match, e.g. an explicit --url whose ".sha1" sidecar 404s (Report.Unverified;
-// also not a failure, but worth an operator's attention) -- then which omit
-// list was in effect (Report.OmitListProvenance, annotated "(built in)" when
-// omitLibFile was left empty) and any per-line omit list warnings
-// (Report.OmitListWarnings), then a counts footer, then a "next:" hint pointing at
+// also not a failure, but worth an operator's attention) -- then why the seed
+// resolved to the release it did when the connector line picked it
+// (Report.SeedChoice, as "seed:"), which omit list was in effect
+// (Report.OmitListProvenance, annotated "(built in; describes <range>)" from
+// Report.OmitListRange for a built-in list) and any per-line omit list
+// warnings (Report.OmitListWarnings), then a counts footer, then a "next:"
+// hint pointing at
 // the docker/podman libs.dir and kubernetes libs: config keys. When every
 // resolved artifact was omitted, the hint instead names --include-provided,
 // since there is no dir to point deployment config at and -f cannot revive a
@@ -1093,7 +1097,7 @@ func runDownload(args []string) int {
 // failed counts in the footer, not the exit code. A run where every artifact
 // was omitted (the image already has all of it) has an empty Failed and so
 // exits 0: that is success, not failure.
-func reportDownload(rep libs.Report, dir string, omitLibFile string) int {
+func reportDownload(rep libs.Report, dir string) int {
 	for _, p := range rep.Written {
 		fmt.Fprintln(os.Stderr, "wrote:", p)
 	}
@@ -1112,10 +1116,13 @@ func reportDownload(rep libs.Report, dir string, omitLibFile string) int {
 	for _, note := range rep.Unverified {
 		fmt.Fprintln(os.Stderr, "unverified:", note)
 	}
+	if rep.SeedChoice != "" {
+		fmt.Fprintln(os.Stderr, "seed:", rep.SeedChoice)
+	}
 	if rep.OmitListProvenance != "" {
 		line := "omit list: " + rep.OmitListProvenance
-		if omitLibFile == "" {
-			line += " (built in; describes " + libs.EmbeddedListMinVersion + " and later)"
+		if rep.OmitListRange != "" {
+			line += " (built in; describes " + rep.OmitListRange + ")"
 		}
 		fmt.Fprintln(os.Stderr, line)
 	}

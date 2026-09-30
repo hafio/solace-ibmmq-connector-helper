@@ -1,8 +1,10 @@
 package libs
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -70,7 +72,7 @@ func writeLibsFile(t *testing.T, content string) string {
 
 func TestLoadImageLibsSkipsCommentsAndBlankLines(t *testing.T) {
 	path := writeLibsFile(t, "# a header comment\n\n  \nbcprov-jdk18on-1.84.jar\n")
-	loaded, err := loadImageLibs(path)
+	loaded, err := loadImageLibs(path, embeddedLists[0])
 	if err != nil {
 		t.Fatalf("loadImageLibs: %v", err)
 	}
@@ -82,7 +84,7 @@ func TestLoadImageLibsSkipsCommentsAndBlankLines(t *testing.T) {
 
 func TestLoadImageLibsSkipsUnsplittableLineWithoutFailing(t *testing.T) {
 	path := writeLibsFile(t, "jrt-fs.jar\nbcprov-jdk18on-1.84.jar\n")
-	loaded, err := loadImageLibs(path)
+	loaded, err := loadImageLibs(path, embeddedLists[0])
 	if err != nil {
 		t.Fatalf("loadImageLibs: %v", err)
 	}
@@ -97,7 +99,7 @@ func TestLoadImageLibsSkipsUnsplittableLineWithoutFailing(t *testing.T) {
 
 func TestLoadImageLibsToleratesSurroundingWhitespace(t *testing.T) {
 	path := writeLibsFile(t, "  bcprov-jdk18on-1.84.jar  \r\n")
-	loaded, err := loadImageLibs(path)
+	loaded, err := loadImageLibs(path, embeddedLists[0])
 	if err != nil {
 		t.Fatalf("loadImageLibs: %v", err)
 	}
@@ -108,14 +110,14 @@ func TestLoadImageLibsToleratesSurroundingWhitespace(t *testing.T) {
 }
 
 func TestLoadImageLibsBadPathIsError(t *testing.T) {
-	_, err := loadImageLibs(filepath.Join(t.TempDir(), "does-not-exist.list"))
+	_, err := loadImageLibs(filepath.Join(t.TempDir(), "does-not-exist.list"), embeddedLists[0])
 	if err == nil {
 		t.Fatal("want error for a nonexistent path")
 	}
 }
 
 func TestLoadImageLibsEmbeddedDefault(t *testing.T) {
-	loaded, err := loadImageLibs("")
+	loaded, err := loadImageLibs("", embeddedLists[0])
 	if err != nil {
 		t.Fatalf("loadImageLibs(\"\"): %v", err)
 	}
@@ -203,37 +205,138 @@ func TestValidateImageVersionQualifiers(t *testing.T) {
 	}
 }
 
-// TestEmbeddedOmitListFullyParses holds the shipped list to the standard the
-// code expects of it: every line either is not a jar reference at all, or
+// TestEmbeddedOmitListFullyParses holds every shipped list to the standard
+// the code expects of it: every line either is not a jar reference at all, or
 // splits and carries a version the comparator can order.
 //
 // This is what the 15 warnings on every `download jar mq` run were telling us,
 // unread. A future capture from a newer image that reintroduces an unorderable
 // shape now fails the build instead of printing noise no one acts on.
 func TestEmbeddedOmitListFullyParses(t *testing.T) {
-	loaded, err := loadImageLibs("")
+	for _, l := range embeddedLists {
+		t.Run(l.capturedAt, func(t *testing.T) {
+			loaded, err := loadImageLibs("", l)
+			if err != nil {
+				t.Fatalf("loadImageLibs: %v", err)
+			}
+			if len(loaded.Rejected) != 0 {
+				t.Errorf("the %s list has %d unparseable entries, want none: %v",
+					l.name(), len(loaded.Rejected), loaded.Rejected)
+			}
+			// Sanity: the list did actually load, so a future bug that empties
+			// it cannot make the assertion above pass vacuously.
+			if len(loaded.Libs) < 50 {
+				t.Errorf("the %s list parsed only %d entries, expected the full image classpath", l.name(), len(loaded.Libs))
+			}
+			for _, want := range []string{"netty-common", "hibernate-validator", "jakarta.jms-api"} {
+				if _, ok := loaded.Libs[want]; !ok {
+					t.Errorf("the %s list has no entry for %q", l.name(), want)
+				}
+			}
+			if loaded.Provenance != l.name() {
+				t.Errorf("Provenance = %q, want the list's own name %q", loaded.Provenance, l.name())
+			}
+		})
+	}
+}
+
+// TestEmbeddedListsTable keeps the table and the embedded files in step: the
+// rows run oldest first with ranges that never overlap, every row names a file
+// that is really embedded, and every embedded list has a row -- so a capture
+// dropped into imagelibs/ without one, or a row added before its capture,
+// fails the build rather than a download.
+func TestEmbeddedListsTable(t *testing.T) {
+	if len(embeddedLists) == 0 {
+		t.Fatal("no built-in jar list at all")
+	}
+	rows := map[string]bool{}
+	for i, l := range embeddedLists {
+		if !releaseTag(l.from) || (l.before != "" && compareVersions(l.from, l.before) >= 0) {
+			t.Errorf("%s: range %q..%q is not a release followed by a later one", l.capturedAt, l.from, l.before)
+		}
+		if !l.covers(l.capturedAt) {
+			t.Errorf("%s: the list does not cover the release it was captured from (%s)", l.capturedAt, l.describes())
+		}
+		if i > 0 {
+			if prev := embeddedLists[i-1]; prev.before == "" || compareVersions(l.from, prev.before) < 0 {
+				t.Errorf("%s: starts at %s, inside %s's range (%s)", l.capturedAt, l.from, prev.capturedAt, prev.describes())
+			}
+		}
+		if _, err := fs.Stat(embeddedListFiles, l.file()); err != nil {
+			t.Errorf("%s: %s is not embedded: %v", l.capturedAt, l.file(), err)
+		}
+		rows[l.file()] = true
+	}
+	entries, err := fs.ReadDir(embeddedListFiles, "imagelibs")
 	if err != nil {
-		t.Fatalf("loadImageLibs: %v", err)
+		t.Fatal(err)
 	}
-	if len(loaded.Rejected) != 0 {
-		t.Errorf("the embedded omit list has %d unparseable entries, want none: %v",
-			len(loaded.Rejected), loaded.Rejected)
-	}
-	// Sanity: the list did actually load, so a future bug that empties it
-	// cannot make the assertion above pass vacuously.
-	if len(loaded.Libs) < 50 {
-		t.Errorf("embedded list parsed only %d entries, expected the full image classpath", len(loaded.Libs))
-	}
-	for _, want := range []string{"netty-common", "hibernate-validator", "jakarta.jms-api"} {
-		if _, ok := loaded.Libs[want]; !ok {
-			t.Errorf("embedded list has no entry for %q", want)
+	for _, e := range entries {
+		if f := "imagelibs/" + e.Name(); !rows[f] {
+			t.Errorf("%s is embedded but has no row in embeddedLists", f)
 		}
 	}
 }
 
+// TestEmbeddedListRange pins both ends of a range -- from included, before
+// not -- and how the report words it, with and without a known end.
+func TestEmbeddedListRange(t *testing.T) {
+	closed := embeddedList{capturedAt: "2.13.0", from: "2.10.0", before: "3.0.0"}
+	for tag, want := range map[string]bool{"2.9.9": false, "2.10.0": true, "2.14.1": true, "2.99.0": true, "3.0.0": false, "3.1.0": false} {
+		if got := closed.covers(tag); got != want {
+			t.Errorf("covers(%q) = %v, want %v", tag, got, want)
+		}
+	}
+	open := embeddedList{capturedAt: "3.1.0", from: "3.1.0"}
+	for tag, want := range map[string]bool{"3.0.9": false, "3.1.0": true, "9.0.0": true} {
+		if got := open.covers(tag); got != want {
+			t.Errorf("open covers(%q) = %v, want %v", tag, got, want)
+		}
+	}
+	if got, want := closed.describes(), "2.10.0 and later, before 3.0.0"; got != want {
+		t.Errorf("describes() = %q, want %q", got, want)
+	}
+	if got, want := open.describes(), "3.1.0 and later"; got != want {
+		t.Errorf("open describes() = %q, want %q", got, want)
+	}
+	if got, want := closed.file(), "imagelibs/solace-pubsub-connector-ibmmq-2.13.0.list"; got != want {
+		t.Errorf("file() = %q, want %q", got, want)
+	}
+}
+
+// TestConnectorRelease covers reading the connector release off an image
+// reference: the tag and the major it leads with, for the connector image
+// only, and nothing for a reference that names no release.
+func TestConnectorRelease(t *testing.T) {
+	cases := []struct {
+		name, ref, wantTag string
+		wantMajor          int
+		wantOK             bool
+	}{
+		{"a 2.x release", "solace/solace-pubsub-connector-ibmmq:2.14.1", "2.14.1", 2, true},
+		{"a 3.x release", "solace/solace-pubsub-connector-ibmmq:3.1.0", "3.1.0", 3, true},
+		{"a two-digit major", "solace/solace-pubsub-connector-ibmmq:10.2", "10.2", 10, true},
+		{"a suffixed tag", "solace/solace-pubsub-connector-ibmmq:2.14.1-ubi", "2.14.1-ubi", 2, true},
+		{"a private registry mirror", "registry.internal:5000/team/solace-pubsub-connector-ibmmq:3.1.0", "3.1.0", 3, true},
+		{"latest names no release", "solace/solace-pubsub-connector-ibmmq:latest", "", 0, false},
+		{"a digest pin", "solace/solace-pubsub-connector-ibmmq@sha256:abc123", "", 0, false},
+		{"a different image", "solace/some-other-connector:2.14.1", "", 0, false},
+		{"a major too large to be one", "solace/solace-pubsub-connector-ibmmq:99999999999999999999.0", "", 0, false},
+		{"nothing declared", "", "", 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tag, major, ok := connectorRelease(c.ref)
+			if tag != c.wantTag || major != c.wantMajor || ok != c.wantOK {
+				t.Errorf("connectorRelease(%q) = (%q, %d, %v), want (%q, %d, %v)", c.ref, tag, major, ok, c.wantTag, c.wantMajor, c.wantOK)
+			}
+		})
+	}
+}
+
 // TestImageNameTag covers splitting a full image reference into the name and
-// tag imageMismatchNote compares separately: the name says whether this is the
-// connector at all, the tag says whether the embedded list reaches it.
+// tag builtinList compares separately: the name says whether this is the
+// connector at all, the tag says which built-in list reaches it.
 func TestImageNameTag(t *testing.T) {
 	cases := []struct {
 		name, ref, wantName, wantTag string
@@ -260,61 +363,108 @@ func TestImageNameTag(t *testing.T) {
 	}
 }
 
-// TestImageMismatchNote covers when the embedded jar list is reported as not
-// describing the deployed image. The list covers a RANGE of releases rather
-// than the single tag it was captured from, so matching that exact tag is not
-// what makes it silent -- being at or above EmbeddedListMinVersion is.
+// TestBuiltinList covers which built-in list judges the deployed image, and
+// when that is reported as not describing it. Each list covers a RANGE of
+// releases rather than the single tag it was captured from, so matching that
+// exact tag is not what makes it silent -- being inside the range is.
 //
-// Both directions matter. Silence on an image the list does not describe is
-// what let a 2.13.0 list judge a 2.14.1 deployment unnoticed; a warning on one
-// it does describe is noise on every correct run, and noise is what operators
+// Both directions matter. Silence on an image no list describes is what let a
+// 2.13.0 list judge a 2.14.1 deployment unnoticed; a warning on one a list
+// does describe is noise on every correct run, and noise is what operators
 // learn to skip past.
-func TestImageMismatchNote(t *testing.T) {
-	silent := []struct{ name, ref string }{
-		{"nothing declared", ""},
-		{"the captured release itself", "solace/solace-pubsub-connector-ibmmq:2.13.0"},
-		{"a newer release the same list covers", "solace/solace-pubsub-connector-ibmmq:2.14.1"},
-		{"the floor itself is covered", "solace/solace-pubsub-connector-ibmmq:" + EmbeddedListMinVersion},
-		// No ceiling: the floor is the only bound, so a release beyond every
-		// capture stays silent. Raising the floor is how a release that
-		// diverges gets caught -- see the list header.
-		{"a release past every capture", "solace/solace-pubsub-connector-ibmmq:3.0.0"},
-		{"a private registry mirror of a covered release", "registry.internal:5000/team/solace-pubsub-connector-ibmmq:2.14.1"},
+func TestBuiltinList(t *testing.T) {
+	first, newest := embeddedLists[0], embeddedLists[len(embeddedLists)-1]
+	silent := []struct {
+		name, ref string
+		want      embeddedList
+	}{
+		{"nothing declared", "", newest},
+		{"the captured release itself", "solace/solace-pubsub-connector-ibmmq:2.13.0", first},
+		{"a newer release the same list covers", "solace/solace-pubsub-connector-ibmmq:2.14.1", first},
+		{"the floor itself is covered", "solace/solace-pubsub-connector-ibmmq:" + first.from, first},
+		{"a private registry mirror of a covered release", "registry.internal:5000/team/solace-pubsub-connector-ibmmq:2.14.1", first},
 	}
 	for _, c := range silent {
 		t.Run("silent/"+c.name, func(t *testing.T) {
-			if got := imageMismatchNote(c.ref); got != "" {
-				t.Errorf("imageMismatchNote(%q) = %q, want silence", c.ref, got)
+			got, note := builtinList(c.ref)
+			if note != "" {
+				t.Errorf("builtinList(%q) note = %q, want silence", c.ref, note)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("builtinList(%q) = %s, want %s", c.ref, got.name(), c.want.name())
 			}
 		})
 	}
 
-	warns := []struct{ name, ref, mustName string }{
+	warns := []struct {
+		name, ref, mustName string
+		want                embeddedList
+	}{
 		// Below the floor the classpath is unverified, so the omissions may
 		// name jars that image does not ship.
-		{"a release below the floor", "solace/solace-pubsub-connector-ibmmq:2.9.9", EmbeddedListMinVersion},
-		{"a different image entirely", "solace/some-other-connector:2.14.1", embeddedListImage},
-		// A digest pin names no release any list could have been captured
-		// under, so it cannot be confirmed to be covered either.
-		{"a digest pin", "solace/solace-pubsub-connector-ibmmq@sha256:abc123", EmbeddedListMinVersion},
-		{"no tag at all", "solace/solace-pubsub-connector-ibmmq", EmbeddedListMinVersion},
+		{"a release below the floor", "solace/solace-pubsub-connector-ibmmq:2.9.9", first.from, first},
+		// The ceiling is what catches a line whose classpath moved: connector
+		// 3.x is Spring Boot 4 and Jackson 3, which a 2.x capture cannot speak
+		// for.
+		{"the first release past a list's range", "solace/solace-pubsub-connector-ibmmq:" + first.before, first.name(), first},
+		{"a different image entirely", "solace/some-other-connector:2.14.1", embeddedListImage, newest},
+		// A digest pin or a tag like latest names no release any list could
+		// have been captured under, so it cannot be confirmed to be covered
+		// either -- latest used to sort past every number and pass silently.
+		{"a digest pin", "solace/solace-pubsub-connector-ibmmq@sha256:abc123", first.from, newest},
+		{"no tag at all", "solace/solace-pubsub-connector-ibmmq", first.from, newest},
+		{"latest", "solace/solace-pubsub-connector-ibmmq:latest", first.from, newest},
 	}
 	for _, c := range warns {
 		t.Run("warns/"+c.name, func(t *testing.T) {
-			got := imageMismatchNote(c.ref)
-			if got == "" {
-				t.Fatalf("imageMismatchNote(%q) was silent, want a warning", c.ref)
+			got, note := builtinList(c.ref)
+			if note == "" {
+				t.Fatalf("builtinList(%q) was silent, want a warning", c.ref)
 			}
 			// The deployed reference and what it was judged against both have
 			// to appear, or the operator cannot see what to fix.
-			for _, want := range []string{c.ref, c.mustName} {
-				if !strings.Contains(got, want) {
-					t.Errorf("warning %q should name %q", got, want)
+			for _, want := range []string{c.ref, c.mustName, "--omit-lib-file"} {
+				if !strings.Contains(note, want) {
+					t.Errorf("warning %q should name %q", note, want)
 				}
 			}
-			if !strings.Contains(got, "--omit-lib-file") {
-				t.Errorf("warning %q should name the remedy", got)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("builtinList(%q) = %s, want %s", c.ref, got.name(), c.want.name())
 			}
 		})
+	}
+}
+
+// TestBuiltinListPicksTheNearestLine runs the pick against a two-line table --
+// the shape the table takes once a 3.x capture is added -- so the choice
+// between lines is pinned before there is a second list to ship: a release
+// gets its own line, one in the gap between lines or past the last gets the
+// nearest line captured at or before it, and one older than every capture
+// gets the oldest.
+func TestBuiltinListPicksTheNearestLine(t *testing.T) {
+	orig := embeddedLists
+	t.Cleanup(func() { embeddedLists = orig })
+	twoX := embeddedList{capturedAt: "2.13.0", from: "2.10.0", before: "3.0.0"}
+	threeX := embeddedList{capturedAt: "3.1.0", from: "3.1.0"}
+	embeddedLists = []embeddedList{twoX, threeX}
+
+	for _, c := range []struct {
+		tag    string
+		want   embeddedList
+		silent bool
+	}{
+		{"2.14.1", twoX, true},
+		{"3.1.0", threeX, true},
+		{"4.0.0", threeX, true},
+		{"3.0.5", twoX, false},
+		{"2.9.0", twoX, false},
+	} {
+		got, note := builtinList("solace/solace-pubsub-connector-ibmmq:" + c.tag)
+		if !reflect.DeepEqual(got, c.want) || (note == "") != c.silent {
+			t.Errorf("builtinList(%s) = %s with note %q, want %s (silent %v)", c.tag, got.name(), note, c.want.name(), c.silent)
+		}
+	}
+	if got, _ := builtinList(""); !reflect.DeepEqual(got, threeX) {
+		t.Errorf("nothing declared picked %s, want the newest line", got.name())
 	}
 }

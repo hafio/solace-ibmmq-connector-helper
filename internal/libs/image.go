@@ -3,10 +3,10 @@ package libs
 import (
 	"bufio"
 	"bytes"
-	_ "embed"
+	"embed"
 	"fmt"
+	"io/fs"
 	"os"
-	"path"
 	"strconv"
 	"strings"
 )
@@ -59,39 +59,68 @@ import (
 // exemption above and the unparseable-version rejection below narrow that
 // trust. A wrong list yields wrong omissions for dependencies by design.
 
-// The embedded jar list is named for the single image it was captured from,
-// but it describes a RANGE of them: the connector's classpath has not moved
-// across releases (2.13.0's capture and 2.14.1's are byte-for-byte identical),
-// so one list judges omission correctly for every release from
-// EmbeddedListMinVersion onwards. Splitting the name from the captured tag
-// keeps that distinction in the type system rather than in a comment: the
-// filename stays an honest record of where the bytes came from, and the floor
-// is what the mismatch check actually compares against.
-const (
-	embeddedListImage      = "solace-pubsub-connector-ibmmq"
-	embeddedListCapturedAt = "2.13.0"
+// embeddedListImage is the connector image every built-in jar list was
+// captured from.
+const embeddedListImage = "solace-pubsub-connector-ibmmq"
 
-	// EmbeddedListMinVersion is the earliest connector release the embedded
-	// list is known to describe. It is a verified floor, not a guess: lower it
-	// only once a capture from an older release proves that release matches
-	// too, and raise it the moment one proves a release does NOT.
-	EmbeddedListMinVersion = "2.10.0"
-)
+// embeddedList is one jar list captured from a connector image and built into
+// the binary, with the connector releases it is known to describe. A list is
+// named for the single tag its bytes came from, but it describes a RANGE: the
+// classpath does not move between releases of one line (2.13.0's capture and
+// 2.14.1's are byte-for-byte identical), while connector 3.x moved to Spring
+// Boot 4 and Jackson 3, which no 2.x list can speak for. Keeping the captured
+// tag apart from the range keeps that distinction in the type rather than in
+// a comment: the file name stays an honest record of where the bytes came
+// from, and the range is what a deployed tag is checked against.
+type embeddedList struct {
+	capturedAt string // the tag the list was captured from; names its file
+	from       string // the earliest release it describes
+	before     string // the first release it does not describe; "" while none is known
+}
 
-// embeddedDefaultListPath names the embedded jar list loadImageLibs falls
-// back to when the operator passes no --omit-lib-file. Recapturing from a
-// newer image is a small change: add a new imagelibs/<image>-<tag>.list file
-// (regenerated with the docker command in its own header comment) and repoint
-// embeddedListCapturedAt and the go:embed directive at it -- and only if the
-// contents actually differ, since an identical capture means the list already
-// covers that release and just the floor's comment needs the new evidence.
-// omitListProvenance derives the embedded list's display name from this same
-// path, so the two can never drift apart into two independent copies of the
-// image name.
-const embeddedDefaultListPath = "imagelibs/" + embeddedListImage + "-" + embeddedListCapturedAt + ".list"
+// embeddedLists are the built-in jar lists, oldest first, with ranges that
+// never overlap. A range is verified evidence, not a guess: lower a from only
+// once a capture from an older release proves that release matches, and set a
+// before the moment one proves a release does NOT. Adding a list is a small
+// change -- capture it with the command in an existing list's header, save it
+// as imagelibs/<image>-<tag>.list, and add its row here -- and only needed
+// when the contents actually differ from the newest list's, since an identical
+// capture means that list already covers the release and only its range moves.
+var embeddedLists = []embeddedList{
+	{capturedAt: "2.13.0", from: "2.10.0", before: "3.0.0"},
+}
 
-//go:embed imagelibs/solace-pubsub-connector-ibmmq-2.13.0.list
-var embeddedDefaultList []byte
+//go:embed imagelibs/*.list
+var embeddedListFiles embed.FS
+
+// embeddedListFS is where loadImageLibs reads a built-in list from: the
+// embedded files, behind fs.FS so a test can substitute a broken one.
+var embeddedListFS fs.FS = embeddedListFiles
+
+// name is the list's display name: its file name without the extension, the
+// image and the tag it was captured from.
+func (l embeddedList) name() string {
+	return embeddedListImage + "-" + l.capturedAt
+}
+
+// file is the list's path inside embeddedListFS.
+func (l embeddedList) file() string {
+	return "imagelibs/" + l.name() + ".list"
+}
+
+// covers reports whether the release tag names falls inside the list's range.
+func (l embeddedList) covers(tag string) bool {
+	return compareVersions(tag, l.from) >= 0 && (l.before == "" || compareVersions(tag, l.before) < 0)
+}
+
+// describes renders the list's range for the report: "2.10.0 and later,
+// before 3.0.0", or "3.1.0 and later" for a line with no known end.
+func (l embeddedList) describes() string {
+	if l.before == "" {
+		return l.from + " and later"
+	}
+	return l.from + " and later, before " + l.before
+}
 
 // maxOmitListLineBytes bounds one line of an omit list. bufio.Scanner's
 // default token limit is 64KB; a well-formed line is a few dozen bytes, so
@@ -131,16 +160,14 @@ type loadedImageLibs struct {
 }
 
 // omitListProvenance names which omit list is in effect: the operator's
-// --omit-lib-file path verbatim when one was supplied, or a name identifying
-// the embedded default -- derived from embeddedDefaultListPath's own
-// filename (image name and tag) rather than a second hard-coded copy of that
-// string.
-func omitListProvenance(omitLibFile string) string {
+// --omit-lib-file path verbatim when one was supplied, or the built-in list's
+// own name -- derived from the same capturedAt its file path is, so the two
+// can never drift apart into independent copies of the image name.
+func omitListProvenance(omitLibFile string, builtin embeddedList) string {
 	if omitLibFile != "" {
 		return omitLibFile
 	}
-	base := path.Base(embeddedDefaultListPath)
-	return strings.TrimSuffix(base, path.Ext(base))
+	return builtin.name()
 }
 
 // imageNameTag splits a full image reference into its bare image name and
@@ -168,38 +195,86 @@ func imageNameTag(ref string) (string, string, bool) {
 	return name, tag, true
 }
 
-// imageMismatchNote reports that the embedded jar list is not known to
-// describe the connector image deployedImage names, which would make every
-// omission in this run a claim about the wrong classpath. It returns "" when
-// the list does cover that image, or when there is nothing to compare.
+// releaseTag reports whether tag names a release a list's range can be
+// compared with: one that starts with a digit. A tag such as "latest" names
+// none -- compared as a version it would sort after every number, and be
+// judged covered by accident.
+func releaseTag(tag string) bool {
+	return tag != "" && tag[0] >= '0' && tag[0] <= '9'
+}
+
+// connectorRelease reads the connector release off the image reference
+// env.yaml deploys: its tag, and the major number the tag leads with. ok is
+// false when there is no release to read -- no reference, a digest pin, a
+// different image, or a tag such as "latest".
+func connectorRelease(ref string) (string, int, bool) {
+	name, tag, ok := imageNameTag(ref)
+	if !ok || name != embeddedListImage || !releaseTag(tag) {
+		return "", 0, false
+	}
+	end := strings.IndexFunc(tag, func(r rune) bool { return r < '0' || r > '9' })
+	if end < 0 {
+		end = len(tag)
+	}
+	major, err := strconv.Atoi(tag[:end])
+	if err != nil {
+		return "", 0, false
+	}
+	return tag, major, true
+}
+
+// listRanges names what the built-in lists describe, for a mismatch note:
+// "2.10.0 and later, before 3.0.0; 3.1.0 and later".
+func listRanges() string {
+	ranges := make([]string, 0, len(embeddedLists))
+	for _, l := range embeddedLists {
+		ranges = append(ranges, l.describes())
+	}
+	return strings.Join(ranges, "; ")
+}
+
+// builtinList picks the built-in jar list for the connector image env.yaml
+// deploys, with a note when no list is known to describe that image, which
+// makes every omission in this run a claim about the wrong classpath. A
+// connector release inside a list's range gets that list and no note.
+// Anything else gets the nearest list -- the newest captured at or before its
+// release, the oldest for a release older than every capture, or the newest
+// when there is no release to go by -- and a note naming the reference, what
+// it was judged against and the remedy. A differing tag is not itself a
+// mismatch: the ranges are what decide.
 //
-// The list is not tied to the one tag it was captured from -- see
-// EmbeddedListMinVersion -- so a deployment at or above that floor is judged
-// correctly and stays silent. Only a different image, or one older than the
-// floor, is worth an operator's attention.
-//
-// A reference with no comparable tag warns rather than staying quiet: "we
-// cannot tell whether these omissions apply" is the same operator problem as
-// "they do not", and silence is what let a 2.13.0 list judge a 2.14.1
-// deployment unnoticed in the first place.
-func imageMismatchNote(deployedImage string) string {
+// Nothing declared at all is silent, since download runs fine with no config
+// and the report still names the list it used. A reference with no comparable
+// release -- no tag, a digest pin, "latest" -- warns rather than staying
+// quiet: "we cannot tell whether these omissions apply" is the same operator
+// problem as "they do not", and silence is what let a 2.13.0 list judge a
+// 2.14.1 deployment unnoticed in the first place.
+func builtinList(deployedImage string) (embeddedList, string) {
+	newest := embeddedLists[len(embeddedLists)-1]
 	if deployedImage == "" {
-		return ""
+		return newest, ""
 	}
 	const remedy = "Pass --omit-lib-file with a list captured from that image, or --include-provided to skip omission entirely"
 	name, tag, ok := imageNameTag(deployedImage)
 	switch {
-	case !ok:
-		return fmt.Sprintf("env.yaml deploys %s, which names no tag to check against the built-in %s jar list (%s and later) -- omissions are approximate. %s",
-			deployedImage, embeddedListImage, EmbeddedListMinVersion, remedy)
+	case !ok || !releaseTag(tag):
+		return newest, fmt.Sprintf("env.yaml deploys %s, which names no release to check against the built-in %s jar lists (%s) -- omissions are approximate. %s",
+			deployedImage, embeddedListImage, listRanges(), remedy)
 	case name != embeddedListImage:
-		return fmt.Sprintf("env.yaml deploys %s but the built-in jar list describes %s -- every omission above is a claim about that image, not the one being deployed. %s",
+		return newest, fmt.Sprintf("env.yaml deploys %s but the built-in jar lists describe %s -- every omission above is a claim about that image, not the one being deployed. %s",
 			deployedImage, embeddedListImage, remedy)
-	case compareVersions(tag, EmbeddedListMinVersion) < 0:
-		return fmt.Sprintf("env.yaml deploys %s, which predates %s -- the built-in jar list is only known to describe %s and later, so every omission above may name a jar that image does not ship. %s",
-			deployedImage, EmbeddedListMinVersion, EmbeddedListMinVersion, remedy)
 	}
-	return ""
+	nearest := embeddedLists[0]
+	for _, l := range embeddedLists {
+		if l.covers(tag) {
+			return l, ""
+		}
+		if compareVersions(tag, l.from) >= 0 {
+			nearest = l
+		}
+	}
+	return nearest, fmt.Sprintf("env.yaml deploys %s, which no built-in jar list describes (they cover %s) -- every omission above is judged against %s, so it may name a jar that image does not ship. %s",
+		deployedImage, listRanges(), nearest.name(), remedy)
 }
 
 // loadImageLibs reads an omit list, one jar basename per line. A blank line
@@ -218,26 +293,33 @@ func imageMismatchNote(deployedImage string) string {
 // nothing and is never reported.
 //
 // omitLibFile REPLACES the built-in list completely when non-empty -- there
-// is no merging with the embedded default, so an omit list containing
-// nothing (an empty file) omits nothing. An empty omitLibFile loads the
-// embedded default list, captured from the connector image named in that
-// file's own header comment. A non-empty omitLibFile that cannot be read IS
-// a systemic error: the caller named a specific file with --omit-lib-file and
-// it does not exist, which is worth failing loud on rather than silently
-// falling back to the embedded default.
-func loadImageLibs(omitLibFile string) (loadedImageLibs, error) {
-	content := embeddedDefaultList
+// is no merging with it, so an omit list containing nothing (an empty file)
+// omits nothing. An empty omitLibFile loads builtin, the built-in list
+// builtinList picked for the image being deployed; its header comment names
+// the image it was captured from. A non-empty omitLibFile that cannot be read
+// IS a systemic error: the caller named a specific file with --omit-lib-file
+// and it does not exist, which is worth failing loud on rather than silently
+// falling back to a built-in list.
+func loadImageLibs(omitLibFile string, builtin embeddedList) (loadedImageLibs, error) {
+	provenance := omitListProvenance(omitLibFile, builtin)
+	var content []byte
 	if omitLibFile != "" {
 		b, err := os.ReadFile(omitLibFile)
 		if err != nil {
 			return loadedImageLibs{}, fmt.Errorf("reading omit list %q: %w", omitLibFile, err)
 		}
 		content = b
+	} else {
+		b, err := fs.ReadFile(embeddedListFS, builtin.file())
+		if err != nil {
+			return loadedImageLibs{}, fmt.Errorf("reading %q: %w", builtin.file(), err)
+		}
+		content = b
 	}
 
 	result := loadedImageLibs{
 		Libs:       imageLibs{},
-		Provenance: omitListProvenance(omitLibFile),
+		Provenance: provenance,
 		Rejected:   map[string]string{},
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(content))
@@ -260,7 +342,7 @@ func loadImageLibs(omitLibFile string) (loadedImageLibs, error) {
 		result.Libs[art] = version
 	}
 	if err := scanner.Err(); err != nil {
-		return loadedImageLibs{}, fmt.Errorf("reading omit list %q: %w", omitLibFile, err)
+		return loadedImageLibs{}, fmt.Errorf("reading omit list %q: %w", provenance, err)
 	}
 	return result, nil
 }

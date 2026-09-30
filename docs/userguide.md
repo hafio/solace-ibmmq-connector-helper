@@ -62,7 +62,7 @@ documentation index; this guide is the complete reference.
     2. [Version resolution](#102-version-resolution)
     3. [Image-aware omission](#103-image-aware-omission)
     4. [The image jar list: built-in, `--omit-lib-file`, and `--include-provided`](#104-the-image-jar-list-built-in---omit-lib-file-and---include-provided)
-    5. [`logstash-logback-encoder` and Jackson: verify before relying on tcp syslog](#105-logstash-logback-encoder-and-jackson-verify-before-relying-on-tcp-syslog)
+    5. [`logstash-logback-encoder` and Jackson: the encoder follows the connector line](#105-logstash-logback-encoder-and-jackson-the-encoder-follows-the-connector-line)
     6. [`--url` overrides all resolution](#106---url-overrides-all-resolution)
     7. [Flags and defaults](#107-flags-and-defaults)
     8. [Integrity verification (sha1)](#108-integrity-verification-sha1)
@@ -325,11 +325,11 @@ reference at [commands.md](commands.md).
 
 | Flag | Applies to | Meaning |
 |------|-----------|---------|
-| `-e`, `--env` | all except `examples`; `download jar` accepts it too, but reads only the `image` block from it | config file, relative or absolute path (default: `env.yaml`). `download jar` uses it to check the jar list it omits against the image you deploy ([section 10.3](#103-image-aware-omission)) |
+| `-e`, `--env` | all except `examples`; `download jar` accepts it too, but reads only the `image` block from it | config file, relative or absolute path (default: `env.yaml`). `download jar` uses the release it deploys to pick the jar list it omits against ([section 10.3](#103-image-aware-omission)) and the `syslog` encoder line |
 | `-o`, `--out` | `generate` | write output to a file (default: stdout) |
 | `-f`, `--force` | `examples`/`download jar` | overwrite existing files; on `download jar` this never reaches an artifact the image-aware omission check already dropped -- use `--include-provided` for that (see [section 10.3](#103-image-aware-omission)) |
-| `--version` | `download jar mq\|syslog` | pin the seed artifact to this release instead of resolving latest stable; empty (the default) means latest stable. Dependency versions still come from the pinned release's own POM (and parent chain) -- see [section 10.2](#102-version-resolution) |
-| `--omit-lib-file` | `download jar mq\|syslog` | path to a jar list that REPLACES the embedded default entirely (an empty file omits nothing); captured from a different connector image -- see [section 10.4](#104-the-image-jar-list-built-in---omit-lib-file-and---include-provided) |
+| `--version` | `download jar mq\|syslog` | pin the seed artifact to this release instead of resolving latest stable; empty (the default) means latest stable -- for `syslog`, the newest release on the line the connector needs ([section 10.5](#105-logstash-logback-encoder-and-jackson-the-encoder-follows-the-connector-line)). Dependency versions still come from the pinned release's own POM (and parent chain) -- see [section 10.2](#102-version-resolution) |
+| `--omit-lib-file` | `download jar mq\|syslog` | path to a jar list that REPLACES the built-in list entirely (an empty file omits nothing); captured from a different connector image -- see [section 10.4](#104-the-image-jar-list-built-in---omit-lib-file-and---include-provided) |
 | `--include-provided` | `download jar mq\|syslog` | download the whole resolved closure regardless of what the image already provides; skips the omission check entirely -- see [section 10.4](#104-the-image-jar-list-built-in---omit-lib-file-and---include-provided) |
 | `--url` | `download jar` | repeatable; when given, exactly those URLs are downloaded and no Maven resolution (and no omission check) happens at all -- see [section 10.6](#106---url-overrides-all-resolution) |
 | `--platform` | `generate`/`deploy`/`remove`/`status`/`logs`/`cli` | the platform: `kubernetes`, `docker`, or `podman` (short: `kube`, `dk`, `pm`; default: resolved from `env.yaml`, or an interactive menu -- see [section 3](#3-commands)) |
@@ -1700,9 +1700,10 @@ Fetches the jars a platform's `libs` section expects on disk
 ([section 8.1](#81-kubernetes)'s `libs.pvc`/`libs.download`, [section 8.2](#82-docker)/
 [8.3](#83-podman)'s `libs.dir`) into `<dir>` (default `./libs`), so you have
 something to point those keys at. It reads `-e env.yaml` for exactly one thing --
-the `image` block, to check the jar list it omits against the image you
-deploy ([section 10.3](#103-image-aware-omission)) -- and makes no other change to
-your config.
+the `image` block, whose connector release picks the jar list it omits against
+([section 10.3](#103-image-aware-omission)) and the `syslog` encoder line
+([section 10.5](#105-logstash-logback-encoder-and-jackson-the-encoder-follows-the-connector-line))
+-- and makes no other change to your config.
 
 ### 10.1 The two sets
 
@@ -1714,9 +1715,9 @@ your config.
 The `mq` seed is **always** `com.ibm.mq:com.ibm.mq.jakarta.client` (JMS 3.0,
 `jakarta.jms`), and there is no flag to change it. IBM publishes a second build,
 `com.ibm.mq.allclient` (JMS 2.0, `javax.jms`), but it cannot be used here: the
-connector image is a Jakarta stack -- it ships `jakarta.jms-api`, Spring 6 and
-`mq-jms-spring-boot-starter` 3.x -- and a client implementing `javax.jms` cannot
-satisfy a `jakarta.jms` binder.
+connector image is a Jakarta stack on every line -- it ships `jakarta.jms-api`,
+on Spring 6 for connector 2.x and Spring 7 for 3.x -- and a client implementing
+`javax.jms` cannot satisfy a `jakarta.jms` binder.
 
 Nor can you have both. The two builds are the same client compiled against
 different JMS APIs, so both carry `com.ibm.mq.*` and `com.ibm.msg.client.*`;
@@ -1741,6 +1742,12 @@ one. When a dependency's version cannot be resolved even after walking its
 full parent POM chain, the command falls back to that one artifact's latest
 stable release and reports it under "fallback" so you can see what was
 guessed rather than have it happen silently.
+
+**The `syslog` encoder is the one exception to "latest stable".** With no
+`--version` it resolves the newest release on the line your connector's Jackson
+generation needs -- the newest 8.x for a 2.x connector -- and the report's
+`seed:` line says which release it took and why; see
+[section 10.5](#105-logstash-logback-encoder-and-jackson-the-encoder-follows-the-connector-line).
 
 ### 10.3 Image-aware omission
 
@@ -1796,35 +1803,45 @@ ships produces wrong omissions for dependencies, by design. This is the
 sharpest edge in the feature: using a list while deploying an image it does
 not describe can omit a jar that image does not really have.
 
-**The built-in default describes a range of releases, not one tag.** It was
-captured from `solace/solace-pubsub-connector-ibmmq:2.13.0`, but the
-connector's classpath does not move between releases -- a capture from 2.14.1
-is byte-for-byte identical -- so the same list judges omission correctly for
-**2.10.0 and later**. The filename records where the bytes came from; the
-range is what the tool checks against, and it is printed on every run:
+**The built-in lists are one per connector line, and each describes a range
+of releases, not one tag.** The 2.x list was captured from
+`solace/solace-pubsub-connector-ibmmq:2.13.0`, but the classpath does not move
+between releases of one line -- a capture from 2.14.1 is byte-for-byte
+identical -- so it judges omission correctly for **2.10.0 and later, before
+3.0.0**. Connector 3.x moved to Spring Boot 4 and Jackson 3, so the 2.x list
+cannot speak for it: a 3.x release needs a list of its own, and until one is
+built in, a 3.x deployment is warned about (below) rather than silently judged
+against the wrong classpath. The filename records where the bytes came from;
+the range is what the tool checks against, and it is printed on every run:
 
 ```text
-omit list: solace-pubsub-connector-ibmmq-2.13.0 (built in; describes 2.10.0 and later)
+omit list: solace-pubsub-connector-ibmmq-2.13.0 (built in; describes 2.10.0 and later, before 3.0.0)
 ```
 
-**The command tells you when your image falls outside that range.**
+**The command picks the list, and tells you when none covers your image.**
 `download jar` reads `-e env.yaml` (default `env.yaml`) for exactly one thing
--- the `image` block -- and warns when the jar list cannot speak for the image
-you deploy: a release older than the floor, a different image entirely, or a
-digest pin naming no release at all.
+-- the `image` block -- and uses the list whose range holds the release you
+deploy. When no list's does -- a release older than the oldest list, one past a
+list's ceiling (connector 3.x today), a different image entirely, or a
+reference naming no release at all (a digest pin, or a tag such as `latest`)
+-- it warns, naming what the omissions were judged against instead: the nearest
+list at or before your release, or the newest when there is no release to go
+by.
 
 ```text
-omit list warning: env.yaml deploys solace/solace-pubsub-connector-ibmmq:2.9.0,
-  which predates 2.10.0 -- the built-in jar list is only known to describe
-  2.10.0 and later, so every omission above may name a jar that image does not
-  ship.
+omit list warning: env.yaml deploys solace/solace-pubsub-connector-ibmmq:3.1.0,
+  which no built-in jar list describes (they cover 2.10.0 and later, before
+  3.0.0) -- every omission above is judged against
+  solace-pubsub-connector-ibmmq-2.13.0, so it may name a jar that image does
+  not ship.
 ```
 
-Deploying anything from 2.10.0 up is silent: the list does describe it, and a
-warning on every correct run is noise you would learn to skip past. Note there
-is no upper bound -- a future release that *did* change its classpath would go
-unnoticed until someone recaptures and raises the floor, so recapture when you
-adopt a major version bump (the probe command is in the next section).
+Deploying a release a list covers is silent: the list does describe it, and a
+warning on every correct run is noise you would learn to skip past. With no
+`env.yaml` at all the newest list is used, silently -- the `omit list:` line
+still names it. `latest` is worth pinning in any case: it moves to a new
+connector line without the config changing, and since it names no release the
+command cannot tell which line it is.
 
 It reads nothing else from the file -- no credentials, no platform, no
 workflows -- and a missing `env.yaml` is not an error, because `download` is the
@@ -1842,14 +1859,15 @@ an omission line names the jar and the version the image has, so a skipped
 jar is never silent. This is why `download jar mq` typically fetches only one
 or two jars instead of the whole six-or-so-jar closure: the image already
 covers the rest. For example, against the jar list captured from
-`solace/solace-pubsub-connector-ibmmq:2.13.0` (the embedded default, see
+`solace/solace-pubsub-connector-ibmmq:2.13.0` (the built-in 2.x list, see
 below):
 
 | Command | Seed | Result |
 |---------|------|--------|
 | `download jar mq` | latest stable (e.g. `9.4.3.0`) | `com.ibm.mq.jakarta.client` downloads (absent from the image); `org.json:json` downloads (the image's `20250517` is older than the `20251224` this release's POM needs); the BouncyCastle trio and `jakarta.jms-api` are omitted (the image already has each at an equal-or-newer version) |
 | `download jar mq --version 9.4.2.0` | pinned `9.4.2.0` | only `com.ibm.mq.jakarta.client-9.4.2.0.jar` downloads -- that release's POM needs BouncyCastle `1.80`, `jakarta.jms-api` `3.0.0` and `org.json:json` `20250107`, and the image satisfies every one of those at an equal-or-newer version |
-| `download jar syslog` | latest stable (e.g. `9.0`) | `logstash-logback-encoder` downloads anyway (the image's `8.0` is older -- see the caveat below); `jackson-databind`/`jackson-core` (groupId `tools.jackson.core`, Jackson 3) download because the image has no such jars at all; `jackson-annotations` is omitted (the image's `2.22` satisfies the `2.20` required) |
+| `download jar syslog`, `env.yaml` deploying 2.x | the newest 8.x (e.g. `8.1`) -- see [section 10.5](#105-logstash-logback-encoder-and-jackson-the-encoder-follows-the-connector-line) | `logstash-logback-encoder` downloads anyway (the seed is never omitted, and the image's `8.0` is older); its Jackson 2 dependencies are omitted -- the image's `2.22` copies already satisfy them |
+| `download jar syslog`, no `env.yaml` | latest stable (e.g. `9.0`) | the encoder downloads; `jackson-databind`/`jackson-core` (groupId `tools.jackson.core`, Jackson 3) download because the 2.x list has those jar names only at Jackson 2's lower versions; `jackson-annotations` is omitted (the image's `2.22` satisfies the `2.20` required). Right for a 3.x image, wrong for a 2.x one -- which is why the command asks `env.yaml` |
 
 Exact version numbers above are illustrative -- "latest stable" moves, so
 re-run the command to see what your seed actually resolves today.
@@ -1859,16 +1877,18 @@ re-run the command to see what your seed actually resolves today.
 The list this command compares against is a flat file of jar filenames, one
 per line -- the format
 [`internal/libs/imagelibs/solace-pubsub-connector-ibmmq-2.13.0.list`](../internal/libs/imagelibs/solace-pubsub-connector-ibmmq-2.13.0.list)
-(the tracked source of the **embedded default**, captured from
-`solace/solace-pubsub-connector-ibmmq:2.13.0` and describing every release from
-2.10.0 on) shows firsthand. Its header records both the probe command and the
-evidence for that range.
+(the tracked source of the **built-in 2.x list**, captured from
+`solace/solace-pubsub-connector-ibmmq:2.13.0` and describing 2.10.0 and later,
+before 3.0.0) shows firsthand. Its header records both the probe command and the
+evidence for that range. Each connector line gets a file like it, picked by the
+release `env.yaml` deploys ([section 10.3](#103-image-aware-omission)).
 
-`--omit-lib-file <file>` **replaces the embedded default completely** -- it
+`--omit-lib-file <file>` **replaces the built-in list completely** -- it
 never merges with it. An empty file omits nothing at all, which is itself a
 valid way to get the whole closure without reaching for `--include-provided`.
 
-Running a different (custom or slimmed) image, or one older than 2.10.0?
+Running a different (custom or slimmed) image, or a release no built-in list
+covers -- one older than 2.10.0, or a 3.x release until its list is built in?
 Point `--omit-lib-file` at a list captured from *that* image instead, or the
 omission check will be comparing against a classpath you do not actually
 have. Probe a running image directly for its jar list:
@@ -1892,29 +1912,46 @@ classpath you do not trust to already have the right versions).
 **Matching is by jar filename, not groupId.** A downloaded jar's filename
 carries no groupId, so the omission check can only compare artifact base
 name plus version -- it has no way to tell `com.fasterxml.jackson.core` from
-`tools.jackson.core`. This is harmless in practice and is exactly why Jackson
-3 still downloads for the `syslog` set even though the image already ships
-Jackson 2: `tools.jackson.core:jackson-databind` and
-`com.fasterxml.jackson.core:jackson-databind` share the same base name
-(`jackson-databind`), but the syslog closure's Jackson 3 version (e.g.
-`3.0.1`) compares higher than the image's Jackson 2 copy (`2.22.0`), so the
-version comparison still gets the right answer -- the jar downloads because
-it looks newer, not because the tool knows it is a different library.
+`tools.jackson.core`. The version comparison still tells the two Jackson
+generations apart. A 9.x encoder's `tools.jackson.core:jackson-databind` and
+a 2.x image's `com.fasterxml.jackson.core:jackson-databind` share the base name
+`jackson-databind`, but the Jackson 3 version (e.g. `3.0.1`) compares higher
+than the image's Jackson 2 copy (`2.22.0`), so the jar downloads -- because it
+looks newer, not because the tool knows it is a different library. An 8.x
+encoder asks for Jackson 2 itself, which a 2.x image's copies satisfy.
 
-### 10.5 `logstash-logback-encoder` and Jackson: verify before relying on tcp syslog
+### 10.5 `logstash-logback-encoder` and Jackson: the encoder follows the connector line
 
-The `syslog` set's dependency versions come from its own POM chain the same
-way `mq`'s do -- but unlike `mq`, a major bump in
-`logstash-logback-encoder`'s latest release can change which Jackson
-**generation** it needs. The image ships `logstash-logback-encoder 8.0`
-against Jackson 2, while the latest encoder (`9.0`) needs Jackson 3 at a
-different groupId (`tools.jackson.core`) -- `download jar syslog` fetches the
-newer encoder anyway rather than pinning it to match, which is why the
-closure downloads it even though the image's copy is only older, not
-missing. The practical effect: **two `logstash-logback-encoder`
-versions now exist across the image classpath and the `libs` mount** (the
-image's bundled `8.0`, plus whatever `download jar syslog` just fetched).
-Nothing in this tool confirms the resulting classpath actually loads with
+The encoder has to match the Jackson **generation** the connector ships.
+`logstash-logback-encoder` 8.x is built on Jackson 2, which connector 2.x ships
+(Spring Boot 3); 9.0 moved to Jackson 3 at a different groupId
+(`tools.jackson.core`), which only connector 3.x ships (Spring Boot 4). An
+encoder built for one generation cannot run on a classpath that carries the
+other. So with no `--version`, `download jar syslog` reads the connector
+release off `env.yaml`'s `image` block and resolves:
+
+| `env.yaml` deploys | Encoder resolved |
+|--------------------|------------------|
+| connector 2.x (e.g. `2.14.1`) | the newest 8.x |
+| connector 3.x (e.g. `3.1.0`) | the newest release |
+| no connector release -- no `env.yaml`, a digest pin, `latest`, another image | the newest release |
+
+The report says which, and why:
+
+```text
+seed: logstash-logback-encoder 8.1, the newest 8.x: connector 2.14.1 ships Jackson 2, and every later encoder needs Jackson 3; --version picks another
+```
+
+With no connector release to go by, the newest release stays the default --
+right for a 3.x connector, wrong for a 2.x one -- and the `seed:` line says so
+and how to pin. `--version` always wins, with no `seed:` line, and `mq` has no
+such choice to make.
+
+The seed is never omitted ([section 10.3](#103-image-aware-omission)), and the
+image already ships an encoder of its own (2.x ships `8.0`), so **two
+`logstash-logback-encoder` versions end up across the image classpath and the
+`libs` mount** -- of the same Jackson generation now, but nothing in this tool
+confirms the resulting classpath actually loads with
 `logging.syslog.protocol: tcp` at runtime. If you rely on tcp syslog in
 production, verify the deployed classpath yourself, or pin a known-good
 combination with `--version` (a specific `logstash-logback-encoder` release)
@@ -1943,9 +1980,11 @@ with nothing missing still needs network access; `--url` does not.
 
 - `[dir]` -- destination directory, created if missing; default `./libs`.
 - `--version <v>` -- pin the seed artifact to this release; empty (the
-  default) resolves latest stable.
+  default) resolves latest stable, or for `syslog` the newest release on the
+  line the connector needs
+  ([section 10.5](#105-logstash-logback-encoder-and-jackson-the-encoder-follows-the-connector-line)).
 - `--omit-lib-file <file>` -- compare against a jar list that replaces the
-  embedded default entirely instead of merging with it; see
+  built-in list entirely instead of merging with it; see
   [section 10.4](#104-the-image-jar-list-built-in---omit-lib-file-and---include-provided).
 - `--include-provided` -- skip the omission check and download the whole
   resolved closure regardless of what the image already has; also covered in

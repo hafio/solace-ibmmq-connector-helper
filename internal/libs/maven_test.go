@@ -240,6 +240,31 @@ func TestLatestStableUnreachableMetadataIsError(t *testing.T) {
 	}
 }
 
+// TestLatestStableMajor covers the one-line pick the syslog encoder uses: the
+// highest stable version on the line by numeric comparison, skipping
+// pre-releases and anything that names no number, never the <release>
+// element (which names another line's newest), and an error when the line has
+// no stable release or the metadata is unreachable.
+func TestLatestStableMajor(t *testing.T) {
+	c := Coord{Group: "net.logstash.logback", Artifact: "logstash-logback-encoder"}
+	d := &mavenFakeDoer{responses: map[string]mavenFakeResp{
+		metadataURL(c): {body: metaXML("9.0", "7.4", "8.0", "8.1", "8.10", "8.11-rc1", "vNext", "9.0")},
+	}}
+	got, err := latestStableMajor(d, c, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "8.10" {
+		t.Errorf("latestStableMajor(8) = %q, want 8.10 -- the line's numeric newest, not the <release> 9.0 or the 8.11 pre-release", got)
+	}
+	if _, err := latestStableMajor(d, c, 6); err == nil || !strings.Contains(err.Error(), "6.x") {
+		t.Errorf("latestStableMajor(6) err = %v, want one naming the missing 6.x line", err)
+	}
+	if _, err := latestStableMajor(&mavenFakeDoer{responses: map[string]mavenFakeResp{}}, c, 8); err == nil {
+		t.Error("latestStableMajor with unreachable metadata = nil error, want one")
+	}
+}
+
 // --- resolveClosure: the two verified mq closures ---
 
 func mqFixtures(seed Coord, seedVersion string, jmsDep, jsonVersion string) map[string]mavenFakeResp {
