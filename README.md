@@ -10,7 +10,8 @@
 
 `solmq-conn-util` turns a folder of small, per-workflow YAML files plus one `env.yaml`
 into a consolidated `application.yml` for the **Solace PubSub+ Connector for IBM
-MQ** (`solace/solace-pubsub-connector-ibmmq:2.13.0`), generates the Kubernetes,
+MQ** (`solace/solace-pubsub-connector-ibmmq`, the 2.x and the Spring Boot 4 based
+3.x lines -- [pin the tag](docs/userguide.md#connector-2x-and-3x)), generates the Kubernetes,
 Docker Compose, or Podman artifacts that run it, and can apply or tear those down
 by shelling out to `kubectl`/`oc`, `docker`, or `podman`/`systemctl`. One folder is
 one connector instance, holding up to 20 workflows; a folder with more is rejected,

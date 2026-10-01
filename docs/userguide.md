@@ -1173,6 +1173,39 @@ image:
 | `user` / `user-env` | registry account, needed only when the tool builds a pull secret ([section 9](#9-secrets-model)) |
 | `pass` / `pass-env` | its password. A literal/`-env` pair like every other credential here ([section 9.1](#91-declaring-a-credential)): give one form or the other, never both. Prefer `-env` -- this file is meant to be safe to commit |
 
+#### Connector 2.x and 3.x
+
+The connector ships in two lines, and Docker Hub's `latest` now points at the newer
+one. **Pin `tag`**: `latest` moves to a new line without your config changing, and,
+naming no release, it leaves the tool unable to tell which line it is deploying.
+
+| | 2.x (e.g. `2.14.1`) | 3.x (e.g. `3.1.0`) |
+|---|---|---|
+| Spring Boot | 3 | 4 |
+| Java | 17 | 25 |
+| Jackson | 2 (`com.fasterxml.jackson`) | 3 (`tools.jackson`) |
+| Solace Spring Cloud | 5 | 6 |
+
+What the tool does differently per line, all driven by `tag`:
+
+- **`download jar`** judges omissions against the built-in jar list for that line,
+  and picks the syslog encoder its Jackson needs -- the newest 8.x for 2.x, the
+  newest release for 3.x ([section 10](#10-download-jar)). There is no built-in 3.x
+  list yet, so a 3.x deployment is warned that its omissions are approximate; pass
+  `--omit-lib-file` with a list captured from the image
+  ([section 10.4](#104-the-image-jar-list-built-in---omit-lib-file-and---include-provided)).
+- **The status script** reads the instance's health under either line: Spring Boot 4
+  sorts the keys of `/actuator/health` alphabetically, which puts its status last
+  ([section 12.3](#123-first-run-installing-the-script)).
+- The generated `application.yml` is the same for both.
+
+Solace Spring Cloud 6, in 3.x, changes some message headers: `contentType` is no
+longer mapped to `httpContentType`, `headerTypeCompatibility` and
+`payloadTypeCompatibility` are deprecated (default `NATIVE_ONLY`), and
+`solace_scst_messageVersion` and `SOURCE_DATA` are no longer set. None of these is a
+key this tool writes; check them if your `solace-defaults` or `api-properties` set
+them, or a downstream consumer reads those headers.
+
 The container timezone is declared the same way, at the top level, for the
 same reason:
 
