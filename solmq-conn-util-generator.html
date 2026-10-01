@@ -1004,6 +1004,9 @@ function readModel(){
     return { name: q('c-name').value.trim(), side: s };
   });
 
+  // Sorted the way the CLI numbers them (spec.WorkflowFileLess): plain code-unit
+  // order, what LC_ALL=C ls lists -- workflow-10.yaml before workflow-2.yaml --
+  // so each file previews under the same workflows.<N> the CLI generates.
   m.wfs = Array.from(document.querySelectorAll('#wfs-list .card')).map(card => ({
     file: card.querySelector('.w-file').value.trim(),
     enabled: card.querySelector('.w-en').checked,

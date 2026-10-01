@@ -668,8 +668,9 @@ func pathIn(base, name string) string {
 
 func parse(r Request, res Resolver) (wfs []spec.Workflow, e *spec.Env, issues, warns []Issue) {
 	files := append([]File(nil), r.Workflows...)
-	// Natural, not lexical: a workflow's id is its position here, so 10.yaml
-	// must not land ahead of 2.yaml (spec.WorkflowFileLess).
+	// A workflow's id is its position here, in the order a directory listing
+	// shows the names (spec.WorkflowFileLess), so the scan and an explicit
+	// file list number the same files the same way.
 	sort.Slice(files, func(i, j int) bool { return spec.WorkflowFileLess(files[i].Name, files[j].Name) })
 	for _, f := range files {
 		wf, err := spec.ParseWorkflow(f.Data, f.Name)

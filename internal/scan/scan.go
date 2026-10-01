@@ -1,8 +1,8 @@
 // Package scan walks the workflows folder (workflows.dir from env.yaml) and
 // returns the *.yaml/*.yml files whose base name matches file_pattern, sorted
-// in natural numeric order by base name (spec.WorkflowFileLess: 2.yaml before
-// 10.yaml) so workflow IDs are assigned deterministically and in the order an
-// operator numbered the files. The env.yaml file itself is always excluded,
+// by base name in the order LC_ALL=C ls lists them (spec.WorkflowFileLess:
+// 10.yaml before 2.yaml) so workflow IDs are assigned deterministically and in
+// the order the folder shows. The env.yaml file itself is always excluded,
 // regardless of dir/pattern.
 package scan
 
@@ -19,7 +19,7 @@ import (
 // Result is the outcome of scanning the workflows folder.
 type Result struct {
 	Dir           string
-	WorkflowFiles []string // full paths, sorted in natural order by base name
+	WorkflowFiles []string // full paths, sorted by base name in ls order
 }
 
 // Scan reads dir (non-recursive) and returns its *.yaml/*.yml files whose base

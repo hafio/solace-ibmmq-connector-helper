@@ -48,7 +48,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 816 test functions, 1096 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 817 test functions, 1097 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -59,8 +59,8 @@ Tests: [scan_test.go](../internal/scan/scan_test.go)
 | Test | Case | Verifies |
 |------|------|----------|
 | TestScanSortsYAMLOnly | - | result sorted to [10.yml, 20.yaml], non-yaml and dirs ignored, Dir set to input dir |
-| TestScanSortsNumericallyNotLexically | - | 19/2/10/9.yaml come back as [2, 9, 10, 19], the numbering order, not the lexical [10, 19, 2, 9] |
-| TestScanSortsPrefixedNamesNumerically | - | the same ordering when the digits follow a shared prefix, as in the workflow-N.yaml names the examples verb writes |
+| TestScanSortsLikeLs | - | 19/2/10/9.yaml come back as [10, 19, 2, 9] -- the order LC_ALL=C ls lists them, which is the numbering the connector and the generator page both use |
+| TestScanSortsPrefixedNamesLikeLs | - | the same ordering when the digits follow a shared prefix, as in the workflow-N.yaml names the examples verb writes: workflow-1, workflow-10, workflow-2 |
 | TestScanExcludesEnvFile | - | env.yaml excluded even with pattern '*', only workflow-0.yaml returned |
 | TestScanEnvFileExcludedRegardlessOfPattern | - | pattern 'env*' still excludes env.yaml, only envoy.yaml remains |
 | TestScanEmptyPatternDefaultsToStar | - | empty pattern behaves as '*', matches a.yaml |
@@ -100,9 +100,9 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestParseWorkflowSolaceAndMQ | - | parses full solace source and mq target with dest kind, tls, key alias, props |
 | TestParseWorkflowConnRef | - | mq source with conn-ref resolves ConnRef, DestKind queue, Dest A.IN; SetsConnFields false |
 | TestBaseName | url / posix / windows / bare / empty | one shared BaseName splits on both separators, so a Windows-authored path resolves identically on Linux |
-| TestWorkflowFileLess | 2 vs 10 / 9 vs 10 / workflow-2 vs workflow-10 | digit runs compare as numbers, so workflow ids follow the order the files were numbered in rather than lexical order |
-| TestWorkflowFileLess | 10.yaml vs 10.yml / a vs b | equal digit runs fall through to byte order, and names without digits compare byte-wise throughout |
-| TestWorkflowFileLess | 7 vs 007 / x vs x | equal value with different zero padding is ordered by the raw text, and no name is less than itself -- the strict order sort.Slice requires |
+| TestWorkflowFileLess | 10 vs 2 / workflow-10 vs workflow-2 / 1 vs 10 | names compare byte by byte, the order a directory listing shows, so 10.yaml takes an earlier id than 2.yaml and a name that is a prefix of another sorts first |
+| TestWorkflowFileLess | workflow-02 vs workflow-10 / 10.yaml vs 10.yml / B vs a | zero-padded names keep their numbers in step with their ids, equal stems fall through to the suffix, and the order is bytes, not a locale's collation (upper case first) |
+| TestWorkflowFileLess | reversed pairs / x vs x | the reverse of every pair is false and no name is less than itself -- the strict order sort.Slice requires |
 | TestConnRefSideMayTuneBinding | - | consumer block parses on a conn-ref side, SetsConnFields ignores it, and Resolve keeps it alongside the referenced tuple and destination |
 | TestParseDefaultsConnectionsAndLeaderElection | - | parses 2 named connections and leader-election active_standby with fail-over |
 | TestParseDefaultsLeaderSession | - | an inline `session:` block parses the full solace tuple, api-properties included, and leaves the SolaceKey marker unset |
@@ -843,6 +843,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestConfigRejectsSecretNameConflict | security.users "ops.1" and "ops-1" | Config renders nothing and errors naming the contested key *and both claiming positions*, rather than emit a config where one credential silently takes the other's password |
 | TestConfigRejectsSecretNameConflict | same spec through Validate | the collision is caught while linting too, not only at generate/deploy -- names are assigned in consolidate, so Validate builds to see them |
 | TestValidateCleanSpecStillPasses | no collision | the build call Validate now makes adds no errors of its own, and consolidate's warnings do not leak into validate output |
+| TestConfigNumbersWorkflowsInLsOrder | - | gen.parse numbers an explicit file list in the same listing order the folder scan uses: 10.yaml takes workflow 0 ahead of 2.yaml, whatever order the files arrived in |
 | TestConfigWorkflowCap | 21 workflows | Config produces no output and one error naming the count, the 20 cap, and the split-into-folders remedy |
 | TestConfigWorkflowCap | 20 workflows | exactly at the cap does not error |
 | TestGenerateKubernetesWorkflowCap | 21 workflows | GenerateKubernetes produces no manifest and the same workflow-cap error |

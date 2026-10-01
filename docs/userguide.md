@@ -474,11 +474,23 @@ workflow's id in the output (`input-<N>` / `output-<N>` and
 order matters. Filtering with `file_pattern` happens **before** numbering, so the
 surviving files are numbered `0..N` among themselves.
 
-The sort is **numeric, not lexical**: runs of digits in a name compare as
-numbers, so `2.yaml` comes before `10.yaml` and `workflow-9.yaml` before
-`workflow-10.yaml` -- the order you numbered them in, not the order a plain
-string sort would give (`10, 19, 2, 9`). Names without digits fall back to
-ordinary character order.
+The sort is the **order a directory listing shows**: byte by byte, exactly as
+`LC_ALL=C ls` prints the folder, so `10.yaml` comes before `2.yaml` and
+`workflow-10.yaml` before `workflow-2.yaml` (`10, 19, 2, 9`). The generator page
+([section 2.1](#21-the-spec-generator-no-editor-required)) numbers the same files the
+same way. To keep the number in a file's name equal to its id, **zero-pad it**:
+`workflow-00.yaml` ... `workflow-19.yaml`. Plain `ls` in a UTF-8 locale can order
+punctuation differently; byte order is used so the ids are the same on every
+machine.
+
+> [!WARNING]
+> **Renaming or adding files renumbers the ones after them.** A folder with
+> unpadded names past 9 (`workflow-2.yaml` ... `workflow-10.yaml`) is numbered in
+> listing order, so `workflow-10.yaml` is workflow 2, not 10. Releases before this
+> one numbered such names numerically: regenerating an existing folder like that
+> moves those workflows to new ids, and their `input-<N>`/`output-<N>` bindings and
+> `solace.connector.workflows.<N>` settings move with them. Durable subscription
+> names come from the file's base name and do not change.
 
 The connector runtime holds **up to 20 workflows** (ids `0..19`) per
 `application.yml`, so **one folder is one connector instance**. A folder holding more

@@ -314,6 +314,27 @@ target:
 	return fs
 }
 
+// TestConfigNumbersWorkflowsInLsOrder pins the second place workflow ids are
+// assigned -- gen.parse over an explicit file list -- to the same order the
+// folder scan uses: the one LC_ALL=C ls lists, so 10.yaml becomes workflow 0
+// ahead of 2.yaml, whatever order the caller handed the files over in.
+func TestConfigNumbersWorkflowsInLsOrder(t *testing.T) {
+	files := synthWorkflowFiles(2)
+	files[0].Name, files[1].Name = "2.yaml", "10.yaml"
+	out, errs, _ := Config(Request{Workflows: files}, Resolver{Rand: fixedStatusRand})
+	if len(errs) != 0 {
+		t.Fatalf("Config: %v", errs)
+	}
+	for _, want := range []string{
+		"        input-0:\n          destination: IN-1\n",
+		"        input-1:\n          destination: IN-0\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q -- 10.yaml (IN-1) must be workflow 0:\n%s", want, out)
+		}
+	}
+}
+
 // TestConfigWorkflowCap pins the new hard cap: a folder holding more than
 // validate.MaxWorkflows workflows is a fatal error through the real
 // gen.Config path (no sharding, no output).

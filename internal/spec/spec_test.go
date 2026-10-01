@@ -655,8 +655,8 @@ func TestBaseName(t *testing.T) {
 	}
 }
 
-// TestWorkflowFileLess covers the ordering workflow ids are assigned from:
-// digit runs compare as numbers, everything else byte by byte. The sort/reverse
+// TestWorkflowFileLess covers the ordering workflow ids are assigned from: the
+// order a directory listing shows (LC_ALL=C ls), byte by byte. The sort/reverse
 // pairs also pin that the comparator is a strict order (never true both ways),
 // which sort.Slice relies on.
 func TestWorkflowFileLess(t *testing.T) {
@@ -664,14 +664,12 @@ func TestWorkflowFileLess(t *testing.T) {
 		a, b string
 		want bool // want WorkflowFileLess(a, b); the reverse must be false
 	}{
-		{"2.yaml", "10.yaml", true},                   // the case plain lexical order gets wrong
-		{"9.yaml", "10.yaml", true},                   // ...and its 9/10 boundary
-		{"workflow-2.yaml", "workflow-10.yaml", true}, // digits after a shared prefix
-		{"1.yaml", "2.yaml", true},                    // same width, still numeric
-		{"10.yaml", "10.yml", true},                   // equal numbers fall through to the suffix
-		{"a.yaml", "b.yaml", true},                    // no digits at all: byte order
-		{"7.yaml", "007.yaml", false},                 // same value, padding breaks the tie
-		{"2.yaml", "2b.yaml", true},                   // equal digits, then '.' before 'b'
+		{"10.yaml", "2.yaml", true},                    // a listing puts 10 first, so its id comes first
+		{"workflow-10.yaml", "workflow-2.yaml", true},  // the same after a shared prefix
+		{"1.yaml", "10.yaml", true},                    // a prefix of the other name sorts first
+		{"workflow-02.yaml", "workflow-10.yaml", true}, // zero-padding keeps the numbers in step
+		{"10.yaml", "10.yml", true},                    // equal stems fall through to the suffix
+		{"B.yaml", "a.yaml", true},                     // bytes, not a locale: upper case first
 	}
 	for _, c := range cases {
 		if got := WorkflowFileLess(c.a, c.b); got != c.want {
