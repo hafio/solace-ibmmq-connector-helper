@@ -347,6 +347,31 @@ func TestKubernetesServicePortRejectsInvalidForms(t *testing.T) {
 	}
 }
 
+// TestEffectiveHealthShowDetails pins the show-details default: always, for a
+// nil Defaults and an unset key, so /actuator/health names its components;
+// an operator's own value is kept as written.
+func TestEffectiveHealthShowDetails(t *testing.T) {
+	tests := []struct {
+		name string
+		d    *Defaults
+		want string
+	}{
+		{"nil receiver", nil, DefaultHealthShowDetails},
+		{"unset", &Defaults{}, DefaultHealthShowDetails},
+		{"set", &Defaults{Management: Management{HealthShowDetails: "when-authorized"}}, "when-authorized"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.d.EffectiveHealthShowDetails(); got != tt.want {
+				t.Errorf("EffectiveHealthShowDetails() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	if DefaultHealthShowDetails != "always" {
+		t.Errorf("DefaultHealthShowDetails = %q, want always", DefaultHealthShowDetails)
+	}
+}
+
 func TestEffectiveManagementPort(t *testing.T) {
 	tests := []struct {
 		name string

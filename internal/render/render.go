@@ -294,8 +294,9 @@ func renderLeaderElection(w *yw, le *consolidate.LeaderElectionModel) {
 
 // renderManagement always emits the management block: server.port and the
 // fixed actuator exposure list are unconditional (consolidate.applyStatusAccess
-// guarantees both are always set), endpoint.health.show-details only when the
-// operator configured one.
+// guarantees both are always set), and so is endpoint.health.show-details in
+// practice -- consolidate.Build sets the operator's value or
+// spec.DefaultHealthShowDetails -- so only a hand-built model can leave it out.
 func renderManagement(w *yw, mg consolidate.Management) {
 	w.Line(0, "management:")
 	w.Line(2, "server:")

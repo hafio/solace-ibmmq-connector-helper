@@ -2246,6 +2246,8 @@ const CONFIG_IMPORT = 'optional:configtree:' + SECRETS_MOUNT + '/';
 const STATUS_USER_NAME = 'solmq-status';
 // DEFAULT_MGMT_PORT mirrors spec.DefaultMgmtPort.
 const DEFAULT_MGMT_PORT = 8090;
+// DEFAULT_HEALTH_SHOW_DETAILS mirrors spec.DefaultHealthShowDetails.
+const DEFAULT_HEALTH_SHOW_DETAILS = 'always';
 // MANAGEMENT_EXPOSURE is the actuator exposure list every render carries. It
 // is fixed rather than derived from the operator's configuration: the
 // generated status script depends on leaderelection and workflows being
@@ -2363,11 +2365,12 @@ function consolidateBuild(wfs, m, statusPassword){
     // Mirrors consolidate.Build's "Security: d.Security".
     security: { users: [] },
     // Port always reflects the effective management port (operator value or
-    // DEFAULT_MGMT_PORT); exposure is fixed by applyStatusAccess rather than
-    // carried through from the operator's config. Mirrors consolidate.Build's
-    // Management seed.
+    // DEFAULT_MGMT_PORT) and show-details the effective value (operator value
+    // or DEFAULT_HEALTH_SHOW_DETAILS); exposure is fixed by applyStatusAccess
+    // rather than carried through from the operator's config. Mirrors
+    // consolidate.Build's Management seed.
     management: { port: effectiveManagementPort(m),
-                  healthShowDetails: m.management.present ? m.management.healthShowDetails : '' },
+                  healthShowDetails: (m.management.present && m.management.healthShowDetails) || DEFAULT_HEALTH_SHOW_DETAILS },
     loggingLevel: m.loggingLevel,
     leader: null, mqTLS: false, secrets: [], secretConflicts: [], configImport: CONFIG_IMPORT
   };
@@ -2807,8 +2810,9 @@ function renderLeaderElection(line, le){
 }
 // renderManagement always emits the management block: server.port and the
 // fixed actuator exposure list are unconditional (applyStatusAccess guarantees
-// both are always set), endpoint.health.show-details only when the operator
-// configured one. Mirrors render.go's renderManagement.
+// both are always set), and so is endpoint.health.show-details, which
+// consolidateBuild defaults to DEFAULT_HEALTH_SHOW_DETAILS. Mirrors render.go's
+// renderManagement.
 function renderManagement(line, mg){
   line(0, 'management:');
   line(2, 'server:'); line(4, 'port: ' + mg.port);

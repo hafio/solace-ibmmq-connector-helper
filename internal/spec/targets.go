@@ -47,6 +47,24 @@ func (d *Defaults) EffectiveManagementPort() int {
 	return d.Management.Port
 }
 
+// DefaultHealthShowDetails is management.endpoint.health.show-details when
+// env.yaml sets no management.health-show-details: always, so /actuator/health
+// names each component and its status. The status script's health components
+// block, and the failing component in a DOWN report, depend on it. The details
+// only ever reach an authenticated caller, since the actuator is always behind
+// the injected read-only account (see StatusUserName).
+const DefaultHealthShowDetails = "always"
+
+// EffectiveHealthShowDetails returns d.Management.HealthShowDetails, falling
+// back to DefaultHealthShowDetails when unset. Nil-receiver safe, like
+// EffectiveManagementPort.
+func (d *Defaults) EffectiveHealthShowDetails() string {
+	if d == nil || d.Management.HealthShowDetails == "" {
+		return DefaultHealthShowDetails
+	}
+	return d.Management.HealthShowDetails
+}
+
 // Container mount points inside the connector image (mirror the k8s layout so
 // application.yml keystore/truststore/libs paths are identical everywhere).
 const (

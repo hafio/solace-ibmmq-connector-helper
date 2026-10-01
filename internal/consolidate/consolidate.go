@@ -64,7 +64,7 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 	mountStores := opts.MountStores
 	m := &Model{
 		Security:     d.Security,
-		Management:   Management{Port: d.EffectiveManagementPort(), HealthShowDetails: d.Management.HealthShowDetails},
+		Management:   Management{Port: d.EffectiveManagementPort(), HealthShowDetails: d.EffectiveHealthShowDetails()},
 		LoggingLevel: d.LoggingLevel,
 		ConfigImport: opts.ConfigImport,
 	}

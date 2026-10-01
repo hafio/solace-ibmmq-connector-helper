@@ -95,7 +95,9 @@ type WorkflowEnable struct {
 }
 
 // Management is the rendered management.* block. Port always reflects the
-// effective management port (operator value or spec.DefaultMgmtPort);
+// effective management port (operator value or spec.DefaultMgmtPort), and
+// HealthShowDetails the effective show-details (operator value or
+// spec.DefaultHealthShowDetails);
 // Exposure is fixed by applyStatusAccess rather than carried through from
 // spec.Management.Exposure, which by this point is only a removed-key marker
 // for validate.

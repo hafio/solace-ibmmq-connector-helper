@@ -401,14 +401,16 @@ target:
 	// TLS and logging stay absent with nothing configured. management and
 	// security are no longer part of this check: consolidate's
 	// applyStatusAccess forces both on unconditionally so the generated status
-	// script always has actuator access, regardless of what the operator set.
+	// script always has actuator access, regardless of what the operator set,
+	// and show-details defaults to always so its health components block has
+	// something to read.
 	for _, no := range []string{"ssl:", "logging:"} {
 		if strings.Contains(out, no) {
 			t.Errorf("unexpected %q with empty defaults:\n%s", no, out)
 		}
 	}
 	for _, want := range []string{
-		"management:", "include: health,info,metrics,leaderelection,workflows",
+		"management:", "include: health,info,metrics,leaderelection,workflows", "show-details: always",
 		"security:", "enabled: true", "- name: solmq-status", "password: status-literal-pw",
 	} {
 		if !strings.Contains(out, want) {

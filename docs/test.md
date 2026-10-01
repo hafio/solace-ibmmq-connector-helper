@@ -48,7 +48,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 828 test functions, 1111 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 829 test functions, 1112 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -171,6 +171,7 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestExpandNilLookupDisablesEverything | - | nil Lookup makes Expand a no-op, leaving `${HOST}` untouched |
 | TestLeaderElectionEffectiveMode | empty | an empty Mode defaults EffectiveMode to standalone |
 | TestLeaderElectionEffectiveMode | standalone / active_active / active_standby | an explicit Mode passes through EffectiveMode unchanged |
+| TestEffectiveHealthShowDetails | nil receiver / unset / set | EffectiveHealthShowDetails falls back to DefaultHealthShowDetails (always) for a nil Defaults and an unset key, and returns a configured value unchanged |
 | TestEffectiveManagementPort | nil receiver / unset port / set port | EffectiveManagementPort falls back to DefaultMgmtPort (8090) for a nil Defaults and an unset port, and returns a configured port unchanged |
 | TestCredEmptyBothKeyDescribe | unset / literal only / env only / both set | Cred.Empty/Both/Key/Describe resolve deterministically for every shape; both-set resolves to the env side (validate rejects it separately) rather than panicking |
 | TestSideUsernameSecretBothSystems | - | Side.Username/Secret dispatch by System, not by whichever credential pair is non-empty: solace returns client-user/-pass, mq returns user/password |
@@ -305,7 +306,7 @@ Tests: [render_test.go](../internal/render/render_test.go)
 | TestApplicationRichExact | - | generated application.yml matches richApplicationWant golden fixture byte-for-byte |
 | TestApplicationRendersWorkflowTransforms | - | each workflow's transform renders verbatim right after enabled -- quoting as written, each list item a bare dash over its indented mapping, a folded expression on one quoted line so its " #" survives -- transform-headers under its own workflow, an empty transform renders nothing, and the document reads back as the connector's expressions list |
 | TestApplicationMinimalNoOptionalBlocks | ssl: / logging: | ssl: and logging: blocks stay absent when defaults are empty |
-| TestApplicationMinimalNoOptionalBlocks | management: / security: | management: and security: are unconditional now: the fixed exposure list and the reserved solmq-status account render even with empty defaults |
+| TestApplicationMinimalNoOptionalBlocks | management: / security: | management: and security: are unconditional now: the fixed exposure list, show-details: always and the reserved solmq-status account render even with empty defaults |
 | TestApplicationMinimalNoOptionalBlocks | type: undefined | undefined binder is always emitted even with minimal config |
 | TestApplicationLeaderElection | - | leader-election, fail-over, queue and management render for active_standby, and the whole session block matches exactly: binder-shared credential names, solace-defaults between the credentials and api-properties, verbatim passthrough last |
 | TestApplicationLeaderElectionSessionMatchesBinderKeySet | - | rendered from one connection, the session key sequence equals the binder solace.java key sequence -- the guard against the two renderers drifting apart again |
