@@ -79,9 +79,13 @@ type Workflow struct {
 	SourceSet bool // a source: block was present in the file
 	TargetSet bool // a target: block was present in the file
 
-	// TransformHeaders is the file's top-level transform-headers: block,
-	// captured verbatim (nil when absent) and rendered under this workflow's
-	// solace.connector.workflows.<N>.transform-headers (see TransformHeadersKey).
+	// Transform is the file's top-level transform: block, captured verbatim
+	// (nil when absent) and rendered under this workflow's
+	// solace.connector.workflows.<N>.transform (see TransformKey).
+	Transform *yaml.Node
+	// TransformHeaders is the file's top-level transform-headers: block -- the
+	// deprecated section (see TransformHeadersKey) -- captured and rendered the
+	// same way, under solace.connector.workflows.<N>.transform-headers.
 	TransformHeaders *yaml.Node
 	// MisplacedTransforms lists every other transform-looking key in the file,
 	// as dotted paths ("source.transform-headers"), so validate can refuse them
@@ -95,6 +99,7 @@ type rawWorkflow struct {
 	Enabled          *bool     `yaml:"enabled"`
 	Source           *rawSide  `yaml:"source"`
 	Target           *rawSide  `yaml:"target"`
+	Transform        yaml.Node `yaml:"transform"`
 	TransformHeaders yaml.Node `yaml:"transform-headers"`
 }
 
@@ -149,6 +154,16 @@ func nodePtr(n yaml.Node) *yaml.Node {
 	return &n
 }
 
+// presentBlock is nodePtr for a block that is also absent when its key is
+// written with no value: an empty transform: is the same as none at all. An
+// empty mapping ({}) is still a block, which validate reports on.
+func presentBlock(n yaml.Node) *yaml.Node {
+	if p := nodePtr(n); p != nil && p.ShortTag() != "!!null" {
+		return p
+	}
+	return nil
+}
+
 // ParseWorkflow decodes one workflow file. A YAML syntax error is returned as
 // the error result. Structural conformance (exactly one system/destination per
 // side, both sides present, required tuple fields) is left to the validate
@@ -171,10 +186,8 @@ func ParseWorkflow(data []byte, path string) (*Workflow, error) {
 		wf.Target = raw.Target.toSide()
 		wf.TargetSet = true
 	}
-	// An empty transform-headers: is the same as none at all.
-	if n := nodePtr(raw.TransformHeaders); n != nil && n.ShortTag() != "!!null" {
-		wf.TransformHeaders = n
-	}
+	wf.Transform = presentBlock(raw.Transform)
+	wf.TransformHeaders = presentBlock(raw.TransformHeaders)
 	// A second decode, into the generic tree, because a misplaced transform is
 	// by definition a key no struct above has a field for. It cannot fail: the
 	// same bytes decoded cleanly just above.

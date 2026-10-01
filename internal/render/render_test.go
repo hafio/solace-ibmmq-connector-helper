@@ -2,9 +2,12 @@ package render
 
 import (
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -274,6 +277,106 @@ func lineDiff(want, got string) string {
 		}
 	}
 	return "(strings differ only in length/trailing content)"
+}
+
+// renderedTransform is the part of a rendered transform block the connector
+// binds, as it reads back from application.yml.
+type renderedTransform struct {
+	SourcePayload map[string]string   `yaml:"source-payload"`
+	Expressions   []map[string]string `yaml:"expressions"`
+}
+
+// TestApplicationRendersWorkflowTransforms pins where each transform block
+// lands in application.yml: under its own workflow's id, right after enabled,
+// verbatim -- quoting as written. A list of - transform: items is written as a
+// bare dash over its indented mapping, renderContainer's form for a list of
+// mappings, and reads back as the connector's expressions list. A folded
+// expression lands on one line quoted, so its " #" is not read as a comment,
+// and an empty transform renders nothing rather than a bare key.
+func TestApplicationRendersWorkflowTransforms(t *testing.T) {
+	const sides = `
+source:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: v
+    client-username: u
+    client-password: x
+    queue: IN-%d
+target:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: v
+    client-username: u
+    client-password: x
+    queue: OUT-%d
+`
+	wfs := []spec.Workflow{
+		wf(t, "0.yaml", fmt.Sprintf(sides, 0, 0)+`transform:
+  source-payload:
+    content-type: application/json
+  expressions:
+    - transform: "target['headers']['region'] = source['headers']['region']"
+    - transform: 'target[''payload''] = source[''payload'']'
+    - transform: >-
+        target['headers']['d'] = #joinString('/',
+        'a', 'b')
+`),
+		wf(t, "1.yaml", fmt.Sprintf(sides, 1, 1)+`transform-headers:
+  expressions:
+    h: "'x'"
+`),
+		wf(t, "2.yaml", fmt.Sprintf(sides, 2, 2)+"transform: {}\n"),
+	}
+	m, _ := consolidate.Build(wfs, &spec.Defaults{}, consolidate.Opts{MountStores: true, StatusPassword: "status-literal-pw"})
+	out := Application(m)
+
+	want := `    workflows:
+      0:
+        enabled: true
+        transform:
+          source-payload:
+            content-type: application/json
+          expressions:
+            -
+              transform: "target['headers']['region'] = source['headers']['region']"
+            -
+              transform: 'target[''payload''] = source[''payload'']'
+            -
+              transform: "target['headers']['d'] = #joinString('/', 'a', 'b')"
+      1:
+        enabled: true
+        transform-headers:
+          expressions:
+            h: "'x'"
+      2:
+        enabled: true
+    security:
+`
+	if !strings.Contains(out, want) {
+		t.Errorf("workflows block:\n%s\nwant it to contain:\n%s", out, want)
+	}
+
+	var doc struct {
+		Solace struct {
+			Connector struct {
+				Workflows map[int]struct {
+					Transform renderedTransform `yaml:"transform"`
+				} `yaml:"workflows"`
+			} `yaml:"connector"`
+		} `yaml:"solace"`
+	}
+	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("application.yml does not read back: %v", err)
+	}
+	got := doc.Solace.Connector.Workflows[0].Transform
+	wantExprs := []map[string]string{
+		{"transform": "target['headers']['region'] = source['headers']['region']"},
+		{"transform": "target['payload'] = source['payload']"},
+		{"transform": "target['headers']['d'] = #joinString('/', 'a', 'b')"},
+	}
+	if got.SourcePayload["content-type"] != "application/json" || !reflect.DeepEqual(got.Expressions, wantExprs) {
+		t.Errorf("transform reads back as %+v, want content-type application/json and %v", got, wantExprs)
+	}
 }
 
 func TestApplicationMinimalNoOptionalBlocks(t *testing.T) {

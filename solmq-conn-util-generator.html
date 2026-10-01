@@ -613,6 +613,9 @@ const $ = id => document.getElementById(id);
 const V = id => ($(id) ? $(id).value.trim() : '');
 const C = id => ($(id) ? $(id).checked : false);
 const L = id => V(id).split('\n').map(s => s.trim()).filter(s => s);
+// LT is L for a textarea's own text: one trimmed entry per non-blank line, with
+// no comment or key: value handling, since a SpEL expression may hold either.
+const LT = t => String(t || '').split('\n').map(s => s.trim()).filter(s => s);
 function togOpt(chkId, fieldsId){ $(fieldsId).classList.toggle('vis', C(chkId)); gen(); }
 function show(id, on){ const e = $(id); if(e) e.classList.toggle('vis', !!on); }
 
@@ -631,6 +634,31 @@ function yq(s){
   if(/^\s|\s$/.test(s)) return dq(s);
   if(/:\s/.test(s) || /\s#/.test(s) || /\t/.test(s)) return dq(s);
   return s;
+}
+// goQuote is Go's strconv.Quote: the quoting render.go re-renders a
+// double-quoted passthrough scalar with (consolidate.FormatScalar). A transform
+// expression is written with it in both the workflow file and the
+// application.yml preview, so the two agree with what the CLI generates.
+const GO_PRINT = /^[\p{L}\p{M}\p{N}\p{P}\p{S}]$/u; // Go's unicode.IsPrint, less the ASCII space
+const GO_ESC = { 7: '\\a', 8: '\\b', 9: '\\t', 10: '\\n', 11: '\\v', 12: '\\f', 13: '\\r' };
+function goQuote(s){
+  let o = '"';
+  for(const ch of String(s)){
+    const c = ch.codePointAt(0);
+    if(ch === '"' || ch === '\\') o += '\\' + ch;
+    else if(c === 0x20 || GO_PRINT.test(ch)) o += ch;
+    else if(GO_ESC[c]) o += GO_ESC[c];
+    else if(c < 0x20 || c === 0x7f) o += '\\x' + c.toString(16).padStart(2, '0');
+    else if(c < 0x10000) o += '\\u' + c.toString(16).padStart(4, '0');
+    else o += '\\U' + c.toString(16).padStart(8, '0');
+  }
+  return o + '"';
+}
+// The payload content types Solace documents for the IBM MQ connector's
+// transform; mirrors validate's contentTypeJSON and contentTypeUnspecified.
+const TRANSFORM_CONTENT_TYPES = ['application/json', 'application/vnd.solace.micro-integration.unspecified'];
+function ctOptions(){
+  return '<option value="">(not set -- the default)</option>' + TRANSFORM_CONTENT_TYPES.map(t => `<option value="${t}">${t}</option>`).join('');
 }
 // kv/knum/kbool/klist/blk skip empty values so the Go defaults apply instead.
 function kv(k, v, ind){ return v ? `${ind}${k}: ${yq(v)}\n` : ''; }
@@ -799,10 +827,21 @@ function addWf(w){
   </div>
   <div class="side-box sb-src"><div class="lbl">Source (consumes)</div>${sideHTML('src')}</div>
   <div class="side-box sb-tgt"><div class="lbl">Target (produces)</div>${sideHTML('tgt')}</div>
-  <div class="f"><label>Header transforms (transform-headers.expressions)</label><textarea class="w-th" rows="2" placeholder="solace_scst_targetDestination: &quot;'orders/' + headers.region&quot;"></textarea><div class="h">Optional. One <b>header: SpEL expression</b> per line, each expression quoted whole. Written at the top level of this workflow file and applied by the connector to this workflow only.</div></div>`;
+  <div class="fr">
+    <div class="f" style="flex:0 0 16rem"><label>Transforms</label><select class="w-tmode" onchange="syncWfTransform(this)"><option value="">none</option><option value="transform">transform</option><option value="headers">transform-headers (deprecated)</option></select></div>
+  </div>
+  <div class="opt-fields w-tx-f">
+    <div class="fr">
+      <div class="f"><label>Source payload content-type</label><select class="w-tsrc">${ctOptions()}</select></div>
+      <div class="f"><label>Target payload content-type</label><select class="w-ttgt">${ctOptions()}</select></div>
+    </div>
+    <div class="f"><label>Expressions (transform.expressions)</label><textarea class="w-tx" rows="3" placeholder="target['headers']['scst_targetDestination'] = #joinString('/', 'orders', source['headers']['region'])"></textarea><div class="h">Optional. One <b>SpEL expression</b> per line, applied in order; type it as is -- the page adds the YAML quoting. No source header reaches the target unless an expression sets it. Written at the top level of this workflow file and applied by the connector to this workflow only.</div></div>
+  </div>
+  <div class="f opt-fields w-th-f"><label>Header transforms (transform-headers.expressions) -- deprecated</label><textarea class="w-th" rows="2" placeholder="solace_scst_targetDestination: &quot;'orders/' + headers.region&quot;"></textarea><div class="h">Optional. One <b>header: SpEL expression</b> per line, each expression quoted whole. Deprecated by Solace and cannot be combined with transform; prefer transform for new workflows.</div></div>`;
   $('wfs-list').appendChild(d);
   d.querySelector('.sb-tgt .x-sys').value = 'solace'; // MQ -> Solace is the common default
   d.querySelectorAll('.side-box').forEach(sb => syncSide(sb.querySelector('.x-sys')));
+  syncWfTransform(d.querySelector('.w-tmode'));
   refreshRefs();
   renumberWfs();
   if(w) fillWf(d, w);
@@ -862,6 +901,16 @@ function syncSide(el){
   box.querySelector('.x-ref-f').classList.toggle('vis', ref);
   box.querySelector('.x-sol').classList.toggle('vis', !ref && !mq);
   box.querySelector('.x-mq').classList.toggle('vis', !ref && mq);
+  gen();
+}
+// syncWfTransform shows the fields of the transform mode a workflow card has
+// selected: the transform: block, the deprecated transform-headers:, or none.
+// Each keeps its text while hidden, so switching back loses nothing.
+function syncWfTransform(el){
+  const card = el.closest('.card');
+  const mode = card.querySelector('.w-tmode').value;
+  card.querySelector('.w-tx-f').classList.toggle('vis', mode === 'transform');
+  card.querySelector('.w-th-f').classList.toggle('vis', mode === 'headers');
   gen();
 }
 function syncLE(){
@@ -1007,13 +1056,24 @@ function readModel(){
   // Sorted the way the CLI numbers them (spec.WorkflowFileLess): plain code-unit
   // order, what LC_ALL=C ls lists -- workflow-10.yaml before workflow-2.yaml --
   // so each file previews under the same workflows.<N> the CLI generates.
-  m.wfs = Array.from(document.querySelectorAll('#wfs-list .card')).map(card => ({
-    file: card.querySelector('.w-file').value.trim(),
-    enabled: card.querySelector('.w-en').checked,
-    source: readSide(card.querySelector('.sb-src')),
-    target: readSide(card.querySelector('.sb-tgt')),
-    transforms: parseProps(card.querySelector('.w-th').value)
-  })).sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0);
+  m.wfs = Array.from(document.querySelectorAll('#wfs-list .card')).map(card => {
+    const mode = card.querySelector('.w-tmode').value;
+    const tf = {
+      source: card.querySelector('.w-tsrc').value,
+      target: card.querySelector('.w-ttgt').value,
+      exprs: LT(card.querySelector('.w-tx').value)
+    };
+    return {
+      file: card.querySelector('.w-file').value.trim(),
+      enabled: card.querySelector('.w-en').checked,
+      source: readSide(card.querySelector('.sb-src')),
+      target: readSide(card.querySelector('.sb-tgt')),
+      // A transform with nothing set is no transform at all, as an empty
+      // transform: key is to the CLI.
+      transform: mode === 'transform' && (tf.source || tf.target || tf.exprs.length) ? tf : null,
+      transforms: mode === 'headers' ? parseProps(card.querySelector('.w-th').value) : []
+    };
+  }).sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0);
 
   m.tls = {
     truststore: C('i-ts-on') ? { file: V('i-ts-file'), password: readCredById('i-ts-pass', 'i-ts-pass-env'), type: V('i-ts-type') } : null,
@@ -1301,9 +1361,24 @@ function emitWorkflow(wf){
     y += `${label}:\n  ${s.system}:\n` + sideBody(s, '    ', true);
     if(s.tune.length) y += blk(label === 'source' ? 'consumer' : 'producer', emitProps(s.tune, '      '), '    ');
   });
-  // Top level, beside source: and target: -- the one place the CLI reads it.
-  if(wf.transforms && wf.transforms.length){
+  // Top level, beside source: and target: -- the one place the CLI reads either.
+  if(wf.transform){
+    y += emitTransformFile(wf.transform);
+  } else if(wf.transforms && wf.transforms.length){
     y += 'transform-headers:\n  expressions:\n' + emitProps(wf.transforms, '    ');
+  }
+  return y;
+}
+
+// emitTransformFile writes a workflow file's transform: block, each expression
+// quoted the way Go re-renders it (goQuote). Keep in step with renderTransform.
+function emitTransformFile(tf){
+  let y = 'transform:\n';
+  if(tf.source) y += `  source-payload:\n    content-type: ${tf.source}\n`;
+  if(tf.target) y += `  target-payload:\n    content-type: ${tf.target}\n`;
+  if(tf.exprs.length){
+    y += '  expressions:\n';
+    tf.exprs.forEach(e => { y += `    - transform: ${goQuote(e)}\n`; });
   }
   return y;
 }
@@ -1385,16 +1460,25 @@ function checkWorkflowCount(add, n){
   add(ENV_FILE, `${n} workflows found, but one connector instance runs at most ${MAX_WF_PER_INSTANCE} (workflow ids 0..${MAX_WF_PER_INSTANCE - 1}). Split them across separate folders, each with its own env.yaml and its own deployment.name/docker.name/podman.name, and deploy each as its own connector`);
 }
 
-// checkTransformExpressions mirrors the part of validate.checkTransformHeaders
-// the form can actually get wrong: the textarea always yields a transform-headers
-// mapping with expressions:, but an indented or "- " line becomes a nested value
-// rather than one SpEL expression, and a header can be typed twice. Misplaced
-// transforms cannot arise here -- the page only ever writes the top-level key.
-function checkTransformExpressions(add, m){
+// TRANSFORM_HEADERS_DEPRECATED mirrors validate.checkTransforms' notice,
+// character for character.
+const TRANSFORM_HEADERS_DEPRECATED = 'transform-headers is deprecated by Solace (since connector 2.9.0; connector 3.1.0 still reads it, a future release removes it): move to transform:, which carries no source header over to the target unless an expression sets it (user guide section 6.7)';
+
+// checkTransforms mirrors the parts of validate.checkTransforms the form can
+// get wrong. None of the transform: checks can fire here: the mode select makes
+// transform and transform-headers exclusive, the content-type selects offer only
+// the two documented values, every expression line is written as one quoted
+// string, and an empty transform is not written at all. What remains is the
+// transform-headers textarea -- an indented or "- " line becomes a nested value
+// rather than one SpEL expression, and a header can be typed twice -- and the
+// deprecation notice the CLI's validate (Lint) prints, which is the run these
+// findings mirror. Misplaced transforms cannot arise either: the page only ever
+// writes the top-level keys.
+function checkTransforms(add, warn, m){
   m.wfs.forEach(wf => {
-    if(!wf.file) return;
+    if(!wf.file || !wf.transforms || !wf.transforms.length) return;
     const seen = {};
-    (wf.transforms || []).forEach(p => {
+    wf.transforms.forEach(p => {
       if(p.item !== undefined){
         add(wf.file, 'transform-headers.expressions must be a mapping of <header>: <SpEL expression>, got a list');
         return;
@@ -1406,6 +1490,7 @@ function checkTransformExpressions(add, m){
         add(wf.file, `transform-headers.expressions.${p.key} must be one SpEL expression, got a ${kind}`);
       }
     });
+    warn(wf.file, TRANSFORM_HEADERS_DEPRECATED);
   });
 }
 
@@ -1443,7 +1528,7 @@ function validateModel(m){
   });
 
   checkDefaultsCredentials(add, warn, m);
-  checkTransformExpressions(add, m);
+  checkTransforms(add, warn, m);
 
   // Cross-workflow checks on resolved tuples.
   const resolved = m.wfs.map(wf => ({
@@ -2314,6 +2399,7 @@ function consolidateBuild(wfs, m, statusPassword){
   const rwfs = wfs.map(wf => ({
     file: wf.file, enabled: wf.enabled,
     src: resolveSide(m, wf.source), tgt: resolveSide(m, wf.target),
+    transform: wf.transform || null,
     transforms: wf.transforms || []
   }));
 
@@ -2413,7 +2499,7 @@ function consolidateBuild(wfs, m, statusPassword){
     model.bindings.push({ name: outName, dest: w.tgt.dest, binder: tgtAcc.binder.name });
     emitBindingOptions(model, inName, w.src, true, w.file);
     emitBindingOptions(model, outName, w.tgt, false, w.file);
-    model.workflows.push({ id: i, enabled: w.enabled, transforms: w.transforms });
+    model.workflows.push({ id: i, enabled: w.enabled, transform: w.transform, transforms: w.transforms });
     if(srcAcc.binder.name === tgtAcc.binder.name && w.src.dest === w.tgt.dest){
       warns.push(`workflow "${w.file}": source and target resolve to the same binder and destination "${w.src.dest}" (possible message loop)`);
     }
@@ -2648,6 +2734,18 @@ function renderCloudStream(line, mm){
     });
   }
 }
+// renderTransform writes a workflow's transform block into application.yml the
+// way render.go's renderContainer does, each list item a bare dash over its
+// indented mapping. Keep in step with emitTransformFile.
+function renderTransform(line, ind, tf){
+  line(ind, 'transform:');
+  if(tf.source){ line(ind + 2, 'source-payload:'); line(ind + 4, 'content-type: ' + tf.source); }
+  if(tf.target){ line(ind + 2, 'target-payload:'); line(ind + 4, 'content-type: ' + tf.target); }
+  if(tf.exprs.length){
+    line(ind + 2, 'expressions:');
+    tf.exprs.forEach(e => { line(ind + 4, '-'); line(ind + 6, 'transform: ' + goQuote(e)); });
+  }
+}
 function renderConnector(line, mm){
   line(0, 'solace:');
   line(2, 'connector:');
@@ -2655,7 +2753,9 @@ function renderConnector(line, mm){
   mm.workflows.forEach(wf => {
     line(6, wf.id + ':');
     line(8, 'enabled: ' + (wf.enabled ? 'true' : 'false'));
-    // Mirrors render.go: the workflow file's transform-headers, verbatim.
+    // Mirrors render.go: the workflow file's transform, then its deprecated
+    // transform-headers, each verbatim.
+    if(wf.transform) renderTransform(line, 8, wf.transform);
     if(wf.transforms && wf.transforms.length){
       line(8, 'transform-headers:');
       line(10, 'expressions:');
@@ -3191,7 +3291,15 @@ function fillWf(card, w){
   card.querySelector('.w-en').checked = w.enabled;
   fillSide(card.querySelector('.sb-src'), w.source);
   fillSide(card.querySelector('.sb-tgt'), w.target);
+  const tf = w.transform;
+  card.querySelector('.w-tmode').value = tf ? 'transform' : (w.transforms && w.transforms.length ? 'headers' : '');
+  if(tf){
+    card.querySelector('.w-tsrc').value = tf.source || '';
+    card.querySelector('.w-ttgt').value = tf.target || '';
+    card.querySelector('.w-tx').value = (tf.exprs || []).join('\n');
+  }
   card.querySelector('.w-th').value = emitProps(w.transforms || [], '');
+  syncWfTransform(card.querySelector('.w-tmode'));
 }
 
 function clearForm(){

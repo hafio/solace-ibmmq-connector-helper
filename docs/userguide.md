@@ -44,7 +44,7 @@ documentation index; this guide is the complete reference.
    4. [Destinations, durable names, passthrough](#64-destinations-durable-names-passthrough)
    5. [Event-driven guidance (errors and warnings)](#65-event-driven-guidance-errors-and-warnings)
    6. [Reusable connections (`conn-ref`)](#66-reusable-connections-conn-ref)
-   7. [Header transforms (`transform-headers`)](#67-header-transforms-transform-headers)
+   7. [Transforms (`transform`)](#67-transforms-transform)
 7. [Connector defaults (`env.yaml` top level)](#7-connector-defaults-envyaml-top-level)
    1. [The reserved status account (`solmq-status`)](#71-the-reserved-status-account-solmq-status)
 8. [Platform sections (`kubernetes:`, `docker:`, `podman:`)](#8-platform-sections-kubernetes-docker-podman)
@@ -532,8 +532,9 @@ msg-vpn: ${VPN:prod}          # ${VAR:default} -- default used when VAR is unset
   literal credential already triggers its own warning telling you to switch to
   `-env`.
 - **Verbatim passthrough never expands** either -- `api-properties`,
-  `additional-properties`, `consumer`, `producer`, `solace-defaults`,
-  `logging.level` and the leader-election `fail-over` block are copied through
+  `additional-properties`, `consumer`, `producer`, a workflow's `transform` and
+  `transform-headers`, `solace-defaults`, `logging.level` and the leader-election
+  `fail-over` block are copied through
   untouched ([section 6.4](#64-destinations-durable-names-passthrough)), so a
   `${...}` inside one reaches the connector as typed and is resolved by Spring at
   runtime, not by `solmq-conn-util` at generate time.
@@ -593,7 +594,8 @@ Solace pattern is allowed but emits an advisory **warning** (see
 | `enabled` | no | `true` | `false` emits the workflow but marks it disabled |
 | `source` | yes | _(required)_ | the consuming side |
 | `target` | yes | _(required)_ | the producing side |
-| `transform-headers` | no | _(none)_ | header transforms for this workflow, copied verbatim to `solace.connector.workflows.<N>.transform-headers` -- see [section 6.7](#67-header-transforms-transform-headers) |
+| `transform` | no | _(none)_ | header and payload transforms for this workflow, copied verbatim to `solace.connector.workflows.<N>.transform` -- see [section 6.7](#67-transforms-transform) |
+| `transform-headers` | no | _(none)_ | **deprecated by Solace**: the earlier, header-only transforms, copied verbatim to `solace.connector.workflows.<N>.transform-headers`; cannot be combined with `transform` -- see [section 6.7](#67-transforms-transform) |
 
 ### 6.2 `solace:` options
 
@@ -644,8 +646,8 @@ Solace pattern is allowed but emits an advisory **warning** (see
   || file-basename` joined by `0x1F`) -- so **renaming a workflow file changes its
   durable name** and orphans the old subscription. Rename deliberately.
 - `api-properties`, `additional-properties`, `consumer`, `producer`, and the
-  workflow's own `transform-headers` are copied through **verbatim**, preserving key
-  order and scalar quoting.
+  workflow's own `transform` (or deprecated `transform-headers`) are copied through
+  **verbatim**, preserving key order and scalar quoting.
 
 ### 6.5 Event-driven guidance (errors and warnings)
 
@@ -716,12 +718,12 @@ target:
 
 ---
 
-### 6.7 Header transforms (`transform-headers`)
+### 6.7 Transforms (`transform`)
 
-A workflow can rewrite message headers on the way through. Each entry under
-`transform-headers.expressions` names a header and gives the SpEL expression the
-connector evaluates to set it. The block goes at the **top level of the workflow
-file**, beside `source:` and `target:`:
+A workflow can map headers and payload on the way through with the connector's
+**`transform:`** section. The block goes at the **top level of the workflow file**,
+beside `source:` and `target:`, and the tool writes it to that workflow's
+`solace.connector.workflows.<N>.transform` in `application.yml`:
 
 ```yaml
 source:
@@ -730,40 +732,130 @@ source:
 target:
   solace:
     # ...
-transform-headers:
+transform:
   expressions:
-    solace_scst_targetDestination: "'orders/' + headers.region"
+    - transform: "target['headers']['scst_targetDestination'] = #joinString('/', 'orders', source['headers']['region'])"
 ```
 
-It is copied through verbatim -- key order and each expression's quoting intact --
-to that workflow's `solace.connector.workflows.<N>.transform-headers` in
-`application.yml`. It has to live in the workflow file rather than `env.yaml`,
-because the tool numbers the workflows by sorted file name
+| Key | Notes |
+|-----|-------|
+| `source-payload.content-type` | how the connector reads the source payload: `application/json`, or `application/vnd.solace.micro-integration.unspecified` -- the default, under which the payload can be neither read nor written |
+| `target-payload.content-type` | the same for the target payload |
+| `expressions` | an ordered list, applied in order; each item is `- transform: "<SpEL expression>"` |
+
+An expression reads `source['headers']['<name>']` and `source['payload'][...]`,
+writes `target['headers']['<name>'] = ...` and `target['payload'][...] = ...`, can
+keep an intermediate value in `var['<name>']`, and calls Solace's functions with `#`,
+such as `#joinString('/', a, b)`. Three behaviours are worth knowing before you write
+one:
+
+- **No source header reaches the target unless an expression sets it.** Copy each
+  one you need: `- transform: "target['headers']['region'] = source['headers']['region']"`.
+- **Setting `scst_targetDestination` routes the message** to that destination
+  instead of the configured one, as the example above does.
+- When no expression writes `target['payload']`, the payload is copied through
+  unchanged; once one does, the target payload is built from scratch.
+
+A payload mapping, from Solace's documentation, in workflow-file shape:
+
+```yaml
+transform:
+  source-payload:
+    content-type: application/json
+  target-payload:
+    content-type: application/json
+  expressions:
+    - transform: "target['payload'] = source['payload']"
+    - transform: "var['split'] = #splitString(source['payload']['passengers'], ',', 3)"
+    - transform: "target['payload']['passengers'] = {:}"
+    - transform: "target['payload']['passengers']['capacity'] = #convertStringToNumber(var['split'][0])"
+```
+
+The block is copied through verbatim -- key order and each expression's quoting
+intact. It has to live in the workflow file rather than `env.yaml`, because the tool
+numbers the workflows by sorted file name
 ([section 5](#5-the-config-file-and-workflow-discovery)), so only the file knows
 which `<N>` it becomes. The expressions themselves are the connector's to evaluate:
-this tool checks where the block is and what shape it has, not the SpEL inside it.
+this tool checks where the block is and what shape it has, not the SpEL inside it,
+and a `${...}` inside one reaches Spring as typed. Solace's "Mapping Message Headers
+and Payloads" page for the self-managed Micro-Integrations
+(<https://docs.solace.com/Micro-Integrations/Self-Managed/Message-transforms.htm>) is
+the full reference; its functions are listed in Solace's Transformation Function
+Reference
+(<https://docs.solace.com/Micro-Integrations/Self-Managed/Transformation-functions.htm>).
 
-Quote each expression as a whole, as above. SpEL writes its string literals in single
-quotes, and an expression that starts with one would otherwise be read by YAML as a
-quoted string ending at the next `'`.
+Quote each expression as a whole, as above. Unquoted, YAML ends the expression at its
+first ` #` -- which every `#function(...)` call has -- reading the rest as a comment,
+so `target['headers']['x'] = #joinString(...)` would reach the connector as
+`target['headers']['x'] =`; that cut is reported as an error. A `>-` folded block is
+fine too: the tool writes it to `application.yml` on one quoted line.
+
+The block's shape is checked on every command:
+
+| Found | Reported as |
+|-------|-------------|
+| `transform:` that is not a mapping; `expressions:` that is not a list (a mapping is the `transform-headers` shape, and the error shows how to rewrite it); an item that is not `- transform: <expression>`, or an empty one; an unquoted expression YAML cut off at its ` #` (it then ends in `=`); a payload block that is not a mapping, or a `content-type` that is not one value; a key given twice | **error**, saying what was found and how to write it |
+| a key this tool does not know, at any level | **warning**: it is passed through as written, so check the spelling |
+| a `content-type` other than the two above -- `application/xml` included, since the IBM MQ connector's release notes support JSON payloads only | **warning**: passed through as written (a `${...}` placeholder is left for Spring to resolve and not warned about) |
+| an empty `expressions:`, or a block with neither expressions nor a content type | **warning**: the block does nothing |
 
 **A transform in the wrong place is an error, on every command.** Both files are read
 leniently, so a transform anywhere else would otherwise be dropped without a word and
 the connector would start without it. Every key beginning `transform`, other than a
-workflow file's top-level `transform-headers:`, is rejected, naming the file and the
-path it was found at:
+workflow file's top-level `transform:` and `transform-headers:`, is rejected, naming
+the file and the path it was found at:
 
 | Found | Why it cannot work there | The error says |
 |-------|--------------------------|----------------|
-| `transform-headers:` under `source:`/`target:`, under their `solace:`/`mq:` block, or under that block's `consumer:`/`producer:` | a header transform applies to the whole workflow, not to one side | move it to the top level of the file |
-| `transform:`, `transform-header:`, or any other `transform...` key in a workflow file | not a key: the old `transform:` was never read, and the rest are typos | write it as `transform-headers:` at the top level |
-| any `transform...` key in `env.yaml` -- at the top level or in a `connections.<name>` entry | a header transform belongs to one workflow | write it in each workflow file it applies to |
+| `transform:` or `transform-headers:` under `source:`/`target:`, under their `solace:`/`mq:` block, or under that block's `consumer:`/`producer:` | a transform applies to the whole workflow, not to one side | move it to the top level of the file |
+| `transform-payload:` or `transform-payloads:` anywhere in a workflow file | the connector's legacy payload section, which this tool never carried | write payload transforms as `target['payload']` expressions in `transform:` |
+| `transform-header:`, `transforms:`, or any other `transform...` key in a workflow file | not a key -- a typo | write `transform:` (or the deprecated `transform-headers:`) at the top level |
+| any `transform...` key in `env.yaml` -- at the top level or in a `connections.<name>` entry | a transform belongs to one workflow | write it in each workflow file it applies to |
 
-The block's shape is checked as well. It must be a mapping holding an `expressions:`
-mapping, each expression one string, with no header given twice -- anything else is
-an error. A key beside `expressions:` is passed through but warned about, since the
-connector reads transforms only from `expressions` and it is most likely a typo; an
-empty `expressions:` warns that the workflow transforms nothing.
+> [!NOTE]
+> **`transform-headers` is deprecated.** Solace deprecated the connector's earlier,
+> header-only section in connector 2.9.0; connector 3.1.0 still reads it, and Solace
+> says it "will be removed in a future release". The tool still passes it through to
+> `solace.connector.workflows.<N>.transform-headers`, and `validate` -- alone;
+> `generate` and `deploy` stay quiet -- warns on every workflow file that uses it.
+> **The two sections cannot be used together** ("The previous and current
+> configuration sections cannot be used together."), so a file carrying both is an
+> error on every command.
+
+#### Moving from `transform-headers` to `transform`
+
+```yaml
+# before
+transform-headers:
+  expressions:
+    route: "T(String).format('%s/%s', headers.region, headers.status)"
+    count: "headers.count.toString()"
+```
+
+```yaml
+# after
+transform:
+  expressions:
+    - transform: "target['headers']['route'] = #joinString('/', source['headers']['region'], source['headers']['status'])"
+    - transform: "target['headers']['count'] = #convertNumberToString(source['headers']['count'])"
+```
+
+1. Rename the block to `transform:` and make `expressions:` a list: each
+   `<header>: <expression>` becomes
+   `- transform: "target['headers']['<header>'] = <expression>"`.
+2. Rewrite each expression: `headers.<name>` becomes `source['headers']['<name>']`,
+   and Java methods become Solace's functions -- `T(String).join()` ->
+   `#joinString()`, `.split()` -> `#splitString()`, `.toUpperCase()` ->
+   `#upperCaseString()`, `.toLowerCase()` -> `#lowerCaseString()`, `.toString()`
+   -> `#convertNumberToString()`.
+3. Add an expression for every header the target still needs: `transform-headers`
+   carried headers over by default, `transform:` carries none.
+
+Until you move, the `transform-headers` block is checked as before: it must be a
+mapping holding an `expressions:` mapping of `<header>: <SpEL expression>`, each
+expression one string, with no header given twice -- anything else is an error. A key
+beside `expressions:` is passed through but warned about, since it is most likely a
+typo, and an empty `expressions:` warns that the workflow transforms nothing.
 
 ## 7. Connector defaults (`env.yaml` top level)
 
@@ -2940,8 +3032,10 @@ container is called something else, is not reachable with `cli` -- reach it with
   produces identical bytes (an ordered emitter, not generic YAML marshaling), so
   files diff cleanly in review.
 - **Workflow numbering is filename-driven**; sort order decides the ids and gaps in
-  your naming are fine. The sort reads digit runs as numbers (`2` before `10`), so
-  `1..9..10..19` numbers the way you would expect. A folder is capped at 20
+  your naming are fine. The sort is byte order, as `LC_ALL=C ls` lists the folder
+  (`workflow-10.yaml` before `workflow-2.yaml`), so zero-pad numbers past 9
+  (`workflow-00.yaml` ... `workflow-19.yaml`) to keep a name's number equal to its
+  id ([section 5](#5-the-config-file-and-workflow-discovery)). A folder is capped at 20
   workflows (ids `0..19`) -- past that the run fails and you split the folder
   yourself.
 - **Renaming a workflow file changes its MQ durable subscription name** (it is part

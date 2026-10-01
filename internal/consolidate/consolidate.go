@@ -118,14 +118,15 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 	// Materialise conn-ref sides once, up front, so conn-ref and inline sides that
 	// resolve to the same connection tuple consolidate into a single binder.
 	type rwf struct {
-		file      string
-		enabled   bool
-		src, tgt  spec.Side
-		transform *yaml.Node
+		file             string
+		enabled          bool
+		src, tgt         spec.Side
+		transform        *yaml.Node
+		transformHeaders *yaml.Node
 	}
 	rwfs := make([]rwf, len(wfs))
 	for i, wf := range wfs {
-		rwfs[i] = rwf{file: wf.File, enabled: wf.Enabled, src: d.Resolve(wf.Source), tgt: d.Resolve(wf.Target), transform: wf.TransformHeaders}
+		rwfs[i] = rwf{file: wf.File, enabled: wf.Enabled, src: d.Resolve(wf.Source), tgt: d.Resolve(wf.Target), transform: wf.Transform, transformHeaders: wf.TransformHeaders}
 	}
 
 	// ---- pass 1: register + accumulate binders --------------------------------
@@ -251,7 +252,7 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 		)
 		m.emitBindingOptions(in, w.src, true, w.file)
 		m.emitBindingOptions(out, w.tgt, false, w.file)
-		m.Workflows = append(m.Workflows, WorkflowEnable{ID: i, Enabled: w.enabled, TransformHeaders: w.transform})
+		m.Workflows = append(m.Workflows, WorkflowEnable{ID: i, Enabled: w.enabled, Transform: w.transform, TransformHeaders: w.transformHeaders})
 
 		if srcAcc.binder.Name == tgtAcc.binder.Name && w.src.Dest == w.tgt.Dest {
 			warn("workflow %q: source and target resolve to the same binder and destination %q (possible message loop)", w.file, w.src.Dest)
@@ -504,13 +505,22 @@ func nodeToProps(node *yaml.Node) []Prop {
 //
 // A literal (|) or folded (>) source scalar keeps its embedded newlines here;
 // the render layer re-emits those as a block scalar, since only it knows the
-// indent (see render.writeScalar).
+// indent (see render.writeScalar). One whose value is a single line -- a |- or
+// >- block, or a folded paragraph -- is written on the key's line instead, so
+// it is quoted when a plain scalar would not read back as the same text: a
+// folded SpEL expression such as "x = #joinString(...)" would otherwise lose
+// everything from its " #" on.
 func FormatScalar(n *yaml.Node) string {
 	switch n.Style {
 	case yaml.DoubleQuotedStyle:
 		return strconv.Quote(n.Value)
 	case yaml.SingleQuotedStyle:
 		return "'" + strings.ReplaceAll(n.Value, "'", "''") + "'"
+	case yaml.LiteralStyle, yaml.FoldedStyle:
+		if !strings.Contains(n.Value, "\n") {
+			return QuoteScalar(n.Value)
+		}
+		return n.Value
 	default:
 		return n.Value
 	}

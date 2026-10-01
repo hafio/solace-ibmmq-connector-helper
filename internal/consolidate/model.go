@@ -86,8 +86,11 @@ type WorkflowEnable struct {
 	ID      int
 	Enabled bool
 
-	// TransformHeaders is the workflow file's transform-headers: block, rendered
-	// verbatim beside enabled; nil when the file has none.
+	// Transform is the workflow file's transform: block, rendered verbatim
+	// beside enabled; nil when the file has none.
+	Transform *yaml.Node
+	// TransformHeaders is the workflow file's deprecated transform-headers:
+	// block, rendered verbatim after Transform; nil when the file has none.
 	TransformHeaders *yaml.Node
 }
 

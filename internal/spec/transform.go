@@ -1,47 +1,64 @@
 package spec
 
 import (
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// TransformHeadersKey is the one place a header transform is read: the top
-// level of a workflow file. The block is passed through verbatim to that
-// workflow's solace.connector.workflows.<N>.transform-headers, where the
-// connector evaluates each transform-headers.expressions.<header> as a SpEL
-// expression. It has to live in the workflow file rather than env.yaml because
-// the tool numbers the workflows (by sorted file name), so only the file knows
-// which <N> it becomes.
+// TransformKey is where a workflow's transforms are read: the top level of a
+// workflow file. The block -- source-payload:/target-payload: content types and
+// an expressions: list of SpEL expressions -- is passed through verbatim to that
+// workflow's solace.connector.workflows.<N>.transform, the connector's current
+// transform section. It has to live in the workflow file rather than env.yaml
+// because the tool numbers the workflows (by sorted file name), so only the
+// file knows which <N> it becomes.
+const TransformKey = "transform"
+
+// TransformHeadersKey is the connector's earlier, header-only transform
+// section, deprecated by Solace since connector 2.9.0 but still read. It is
+// read in the same place as TransformKey and passed through the same way, to
+// solace.connector.workflows.<N>.transform-headers, where the connector
+// evaluates each transform-headers.expressions.<header> as a SpEL expression.
+// The connector cannot use the two sections together.
 const TransformHeadersKey = "transform-headers"
 
+// The connector's legacy payload transform section, spelled both ways in
+// Solace's documentation. The tool has never carried it -- payload transforms
+// are written in a transform: block -- so either spelling is always misplaced.
+const (
+	TransformPayloadKey  = "transform-payload"
+	TransformPayloadsKey = "transform-payloads"
+)
+
 // transformPrefix is what every spelling of a transform key starts with. A key
-// beginning with it anywhere other than the one right place is almost certainly
-// a transform the author meant to apply -- transform:, transform-header:, or
-// transform-headers: nested under a side -- and both files decode without
-// KnownFields, so without this scan it would be dropped in silence and the
-// connector would start without it.
+// beginning with it anywhere other than the two right places is almost
+// certainly a transform the author meant to apply -- transform-header:,
+// transform-payload:, or a transform block nested under a side -- and both
+// files decode without KnownFields, so without this scan it would be dropped in
+// silence and the connector would start without it.
 const transformPrefix = "transform"
 
 // misplacedWorkflowTransforms lists every transform-looking key in a workflow
-// file except a top-level transform-headers:, as dotted paths, at each level a
-// misplaced one plausibly lands: the top level, each side, the side's
-// solace:/mq: block, and that block's consumer:/producer: tuning.
+// file except a top-level transform: or transform-headers:, as dotted paths, at
+// each level a misplaced one plausibly lands: the top level, each side, the
+// side's solace:/mq: block, and that block's consumer:/producer: tuning.
 func misplacedWorkflowTransforms(doc *yaml.Node) []string {
 	top := documentMapping(doc)
 	if top == nil {
 		return nil
 	}
 	var out []string
-	out = appendTransformKeys(out, top, "", TransformHeadersKey)
+	out = appendTransformKeys(out, top, "", TransformKey, TransformHeadersKey)
 	for _, side := range []string{"source", "target"} {
 		s := mappingChild(top, side)
-		out = appendTransformKeys(out, s, side+".", "")
+		out = appendTransformKeys(out, s, side+".")
 		for _, system := range []string{SystemSolace, SystemMQ} {
 			b := mappingChild(s, system)
-			out = appendTransformKeys(out, b, side+"."+system+".", "")
+			out = appendTransformKeys(out, b, side+"."+system+".")
 			for _, tuning := range []string{"consumer", "producer"} {
-				out = appendTransformKeys(out, mappingChild(b, tuning), side+"."+system+"."+tuning+".", "")
+				out = appendTransformKeys(out, mappingChild(b, tuning), side+"."+system+"."+tuning+".")
 			}
 		}
 	}
@@ -56,7 +73,7 @@ func misplacedEnvTransforms(doc *yaml.Node) []string {
 	if top == nil {
 		return nil
 	}
-	out := appendTransformKeys(nil, top, "", "")
+	out := appendTransformKeys(nil, top, "")
 	conns := mappingChild(top, "connections")
 	if conns == nil {
 		return out
@@ -67,23 +84,23 @@ func misplacedEnvTransforms(doc *yaml.Node) []string {
 			continue
 		}
 		prefix := "connections." + name + "."
-		out = appendTransformKeys(out, c, prefix, "")
+		out = appendTransformKeys(out, c, prefix)
 		for _, system := range []string{SystemSolace, SystemMQ} {
-			out = appendTransformKeys(out, mappingChild(c, system), prefix+system+".", "")
+			out = appendTransformKeys(out, mappingChild(c, system), prefix+system+".")
 		}
 	}
 	return out
 }
 
 // appendTransformKeys appends prefix+key for every key of mapping m that
-// starts with transformPrefix, other than allowed. A nil or non-mapping m has
-// none.
-func appendTransformKeys(out []string, m *yaml.Node, prefix, allowed string) []string {
+// starts with transformPrefix, other than the allowed ones. A nil or
+// non-mapping m has none.
+func appendTransformKeys(out []string, m *yaml.Node, prefix string, allowed ...string) []string {
 	if m == nil || m.Kind != yaml.MappingNode {
 		return out
 	}
 	for i := 0; i+1 < len(m.Content); i += 2 {
-		if k := m.Content[i].Value; strings.HasPrefix(k, transformPrefix) && k != allowed {
+		if k := m.Content[i].Value; strings.HasPrefix(k, transformPrefix) && !slices.Contains(allowed, k) {
 			out = append(out, prefix+k)
 		}
 	}

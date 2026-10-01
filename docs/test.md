@@ -48,7 +48,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 817 test functions, 1097 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 828 test functions, 1111 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -187,8 +187,9 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestDerivedObjectNames | - | every created Secret and the libs claim are named after deployment.name (-credentials, -stores, -image-pull, -libs) with any retired name key ignored, a referenced object keeps the operator's own name, and no block yields nothing |
 | TestCreatedNames | - | the Deployment and ConfigMap always, then exactly the Secrets and claim the config asks the tool to build -- a referenced object is not the tool's |
 | TestParseWorkflowTransformHeaders | - | a top-level transform-headers block is captured verbatim -- header order and each expression's quoting intact -- and is not reported as misplaced; an absent or empty block is none |
-| TestMisplacedWorkflowTransforms | - | the retired transform:, a transform-header: typo, and transform-headers under a side, its solace:/mq: block, or that block's consumer:/producer: are each reported as the dotted path they were found at, in file order, while the top-level block still parses |
-| TestMisplacedEnvTransforms | - | every transform key in env.yaml -- top level, a connection, or the connection's solace:/mq: block -- is reported, identically through ParseEnv and ParseDefaults, and a clean or empty env.yaml reports none |
+| TestParseWorkflowTransform | - | a top-level transform block is captured verbatim -- key order, the list of one-key mappings and each expression's quoting intact -- beside a top-level transform-headers block, and neither is reported as misplaced; an absent or empty block is none |
+| TestMisplacedWorkflowTransforms | - | a transform-header: typo, the legacy transform-payload section (either spelling), and transform or transform-headers under a side, its solace:/mq: block, or that block's consumer:/producer: are each reported as the dotted path they were found at, in file order, while both top-level blocks still parse |
+| TestMisplacedEnvTransforms | - | every transform key in env.yaml (transform included) -- top level, a connection, or the connection's solace:/mq: block -- is reported, identically through ParseEnv and ParseDefaults, and a clean or empty env.yaml reports none |
 | TestParseEnvTopLevelSyslog | present / absent | logging.syslog parses beside logging.level at the top level, protocol defaults to udp, and an absent block stays nil (presence is what turns syslog on) |
 
 ## internal/consolidate
@@ -207,10 +208,14 @@ Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [cons
 | TestDerivedDestinationTypes | mq topic consumer durable -> solace topic producer | input-0 jms is consumer/topic with non-empty Durable |
 | TestDerivedDestinationTypes | solace producer to topic | output-0 emits no solace binding |
 | TestDerivedDestinationTypes | solace queue -> mq queue producer | output-1 jms is producer/queue |
+| TestBuildCarriesEachWorkflowsTransformBlocks | - | a workflow's transform and transform-headers blocks reach its own WorkflowEnable entry untouched and never a neighbour's, and a workflow with neither carries neither |
 | TestFormatScalarQuoting | plain passthrough | FormatScalar returns plain |
 | TestFormatScalarQuoting | double-quoted requoting | FormatScalar returns "dq" |
 | TestFormatScalarQuoting | single-quote-doubling escape | FormatScalar returns 'a''b' |
 | TestFormatScalarQuoting | depth>=2 nested quoted passthrough from parsed YAML | FormatScalar preserves quoting, returns "R1" |
+| TestFormatScalarQuoting | one-line folded block, safe plain | a one-line block scalar that reads back the same as plain text stays plain |
+| TestFormatScalarQuoting | one-line folded block holding a comment marker | a one-line block scalar is written on the key's line, so one holding " #" is double-quoted rather than cut off there |
+| TestFormatScalarQuoting | multi-line literal block left to the render layer | a value spanning lines is returned unchanged for render.writeScalar to re-emit as a block |
 | TestSanitizeAndIsTCPS | sanitize A_b.2-x/y | returns A-b-2-x-y |
 | TestSanitizeAndIsTCPS | isTCPS tcps:// and tcp:// | tcps:// true, tcp:// false |
 | TestDisplayName | acc with name set | returns the name |
@@ -298,6 +303,7 @@ Tests: [render_test.go](../internal/render/render_test.go)
 |------|------|----------|
 | TestApplicationRich | - | rendered output contains all expected substrings for rich MQ->Solace workflow (ssl bundle, binders, jms/solace bindings, defaults blocks) |
 | TestApplicationRichExact | - | generated application.yml matches richApplicationWant golden fixture byte-for-byte |
+| TestApplicationRendersWorkflowTransforms | - | each workflow's transform renders verbatim right after enabled -- quoting as written, each list item a bare dash over its indented mapping, a folded expression on one quoted line so its " #" survives -- transform-headers under its own workflow, an empty transform renders nothing, and the document reads back as the connector's expressions list |
 | TestApplicationMinimalNoOptionalBlocks | ssl: / logging: | ssl: and logging: blocks stay absent when defaults are empty |
 | TestApplicationMinimalNoOptionalBlocks | management: / security: | management: and security: are unconditional now: the fixed exposure list and the reserved solmq-status account render even with empty defaults |
 | TestApplicationMinimalNoOptionalBlocks | type: undefined | undefined binder is always emitted even with minimal config |
@@ -788,7 +794,12 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestTransformHeadersValidBlockPasses | - | a well-formed transform-headers block raises no error and no warning |
 | TestTransformHeadersShapeErrors | not a mapping / no expressions / expressions as a list / an expression that is not a string / a header set twice | each shape the connector would not apply is an error on every run |
 | TestTransformHeadersWarnings | - | a key beside expressions (a likely typo, passed through) and an empty expressions mapping are warnings, not errors |
-| TestMisplacedTransformsAreErrors | - | a misplaced transform-headers is told to move to the top level of its file, any other transform key that it is not a key, and a transform in env.yaml that it belongs in a workflow file -- each an error naming its file and path |
+| TestMisplacedTransformsAreErrors | - | a misplaced transform or transform-headers is told to move to the top level of its file, the legacy transform-payload section (either spelling) how payload transforms are written now, any other transform key that it is not a key (naming both valid spellings), and a transform in env.yaml that it belongs in a workflow file -- each an error naming its file and path |
+| TestTransformLegitimateBlocksStayQuiet | header copy / payload mapping / IBM MQ migration example / content types alone / placeholders / empty payload values | the transform blocks Solace documents -- variables, functions, the dynamic destination header, Solace's own enabled: true (passed through unchecked for now) -- and ${...} placeholders raise nothing, even under Lint, and a top-level transform is not misplaced |
+| TestTransformShapeErrors | not a mapping / a list / expressions as a mapping / as a scalar / a scalar item / an item without transform / a later item / a non-scalar expression / an empty expression / an unquoted expression cut at its # / a payload block that is not a mapping / a content-type that is not one value / a key set twice / a content-type set twice | each shape the connector would not apply is an error on every run, saying what was found and how to write it; the transform-headers shape carried over under transform gets the migration hint, and an unquoted expression YAML cut off at " #" is caught by the "=" it is left ending in |
+| TestTransformWarnings | an unknown key / in a payload block / in an item / an undocumented content type / xml / empty expressions / an empty block / enabled alone | what is passed through but probably not meant is a warning, never an error, and enabled draws no warning of its own |
+| TestTransformAndTransformHeadersCannotBeCombined | - | both blocks in one file is an error on every run quoting Solace's rule, each block's own shape is still checked beside it, and either alone is fine |
+| TestTransformHeadersDeprecatedOnlyUnderLint | - | transform-headers draws no deprecation notice on a generate or deploy run and exactly one under Lint, naming the timeline and section 6.7; a transform-only file draws none, and both blocks still draw it |
 | TestRetiredPerPlatformImageRejected | kubernetes / docker / podman | each per-platform image key errors, and the message names the top-level image: block to use instead |
 | TestImageBlockRequired | absent / no name / no tag / unsafe repo, name, tag | the top-level block is required once a platform is in play, tag included (an untagged image resolves to :latest and pins nothing), and the fields that reach an argv are charset-checked |
 | TestImageBlockRequired | bad pass-env name / either credential set both ways | the registry account (`user`/`pass`) goes through the shared checkCred, so it gets the same literal-xor-env rule and variable-name check as every other credential |
@@ -816,6 +827,7 @@ Tests: [examples_test.go](../internal/examples/examples_test.go)
 | TestWriteCreatesSkipsForces | force-rewrite | force write rewrites all files, restoring workflow-0.yaml to embedded original content over junk |
 | TestWriteMkdirError | - | Write returns error when target dir path is under a regular file |
 | TestShippedExamplesGenerateConfig | - | embedded example set written to disk generates config via gen.Config with no errors and at least one non-empty rendered application.yml |
+| TestWorkflow0TransformExampleValidWhenUncommented | - | uncommenting the transform example shipped in workflow-0.yaml still generates, with no transform finding and the block rendered under workflow 0, so the example a new user copies cannot rot |
 | TestWorkflowExamplesMatchGoldenSpecs | workflow-0..3 | the four workflow files are byte-identical to testdata/golden/specs (go:embed cannot share one copy); env.yaml is excluded, it diverges on purpose |
 
 ## internal/gen
@@ -884,7 +896,9 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestGenerateKubernetesImagePull | payload and leak check | the rendered payload decodes to the real account, and the registry password appears nowhere else in the manifest |
 | TestGenerateKubernetesImagePull | variable unset | create fails the generate with an issue naming the variable |
 | TestRetiredCreateNamesDeployButDoNotValidate | - | an env.yaml still naming its credentials/stores Secrets and libs claim generates cleanly under the derived names, the old names nowhere in the manifest, while Validate reports each old key |
-| TestConfigRendersTransformHeadersUnderItsWorkflow | - | the second workflow file's transform-headers renders verbatim under solace.connector.workflows.1 and nowhere under 0, and a misplaced transform: fails the render instead of being dropped |
+| TestConfigRendersTransformHeadersUnderItsWorkflow | - | the second workflow file's transform-headers renders verbatim under solace.connector.workflows.1 and nowhere under 0, and a misspelt transform-header: fails the render instead of being dropped |
+| TestConfigRendersTransformUnderItsWorkflow | - | the second workflow file's transform renders verbatim under solace.connector.workflows.1 and nowhere under 0, a ${...} inside an expression is left as written with no warning, and the transform-headers shape under transform, a transform under a side, and both sections in one file each fail the render |
+| TestTransformHeadersDeprecationIsLintOnly | - | Validate warns that transform-headers is deprecated while Config renders the same file with no such warning |
 
 ## internal/libs
 

@@ -82,6 +82,60 @@ func TestWriteMkdirError(t *testing.T) {
 // diverged from this one in comments/sections.
 func TestShippedExamplesGenerateConfig(t *testing.T) {
 	dir := t.TempDir()
+	out, errs, _ := gen.Config(shippedExamplesRequest(t, dir), testResolver(dir))
+	if len(errs) != 0 {
+		t.Fatalf("shipped examples must generate config with no errors, got: %v", errs)
+	}
+	if strings.TrimSpace(out) == "" {
+		t.Fatal("rendered application.yml is empty")
+	}
+}
+
+// TestWorkflow0TransformExampleValidWhenUncommented keeps the transform
+// example shipped in workflow-0.yaml honest: uncommented -- every line from
+// "# transform:" to the end of the file loses its "# " -- the set still
+// generates, with no finding about a transform and the block rendered under
+// workflow 0. The marker line and the block's place at the end of the file
+// are what this relies on.
+func TestWorkflow0TransformExampleValidWhenUncommented(t *testing.T) {
+	dir := t.TempDir()
+	req := shippedExamplesRequest(t, dir)
+	uncommented := false
+	for i, f := range req.Workflows {
+		text := string(f.Data)
+		at := strings.Index(text, "\n# transform:\n")
+		if f.Name != "workflow-0.yaml" || at < 0 {
+			continue
+		}
+		lines := strings.Split(strings.TrimRight(text[at+1:], "\n"), "\n")
+		for j, l := range lines {
+			lines[j] = strings.TrimPrefix(l, "# ")
+		}
+		req.Workflows[i].Data = []byte(text[:at+1] + strings.Join(lines, "\n") + "\n")
+		uncommented = true
+	}
+	if !uncommented {
+		t.Fatal("workflow-0.yaml no longer carries a commented-out # transform: example")
+	}
+	out, errs, warns := gen.Config(req, testResolver(dir))
+	if len(errs) != 0 {
+		t.Fatalf("the uncommented example must generate, got: %v", errs)
+	}
+	for _, w := range warns {
+		if strings.Contains(w.Msg, "transform") {
+			t.Errorf("the uncommented example raised a transform finding: %v", w)
+		}
+	}
+	if !strings.Contains(out, "      0:\n        enabled: true\n        transform:\n          expressions:\n") {
+		t.Errorf("the example's transform is not rendered under workflow 0:\n%s", out)
+	}
+}
+
+// shippedExamplesRequest writes the embedded example set into dir and loads it
+// the way `generate config` does -- env.yaml, then the workflows its
+// workflows.dir and file_pattern select -- into a gen.Request.
+func shippedExamplesRequest(t *testing.T, dir string) gen.Request {
+	t.Helper()
 	if _, _, err := Write(dir, false); err != nil {
 		t.Fatal(err)
 	}
@@ -116,14 +170,7 @@ func TestShippedExamplesGenerateConfig(t *testing.T) {
 		}
 		req.Workflows = append(req.Workflows, gen.File{Name: filepath.Base(p), Data: wd})
 	}
-
-	out, errs, _ := gen.Config(req, testResolver(dir))
-	if len(errs) != 0 {
-		t.Fatalf("shipped examples must generate config with no errors, got: %v", errs)
-	}
-	if strings.TrimSpace(out) == "" {
-		t.Fatal("rendered application.yml is empty")
-	}
+	return req
 }
 
 // goldenSpecsDir is internal/gen's golden fixture set, relative to this package.

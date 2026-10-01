@@ -62,6 +62,37 @@ func propsNode(t *testing.T, y string) *yaml.Node {
 	return n.Content[0]
 }
 
+// TestBuildCarriesEachWorkflowsTransformBlocks pins that a workflow's
+// transform and transform-headers blocks reach its own WorkflowEnable entry,
+// untouched, and never a neighbour's: the render places each under that
+// workflow's id. A workflow with neither carries neither.
+func TestBuildCarriesEachWorkflowsTransformBlocks(t *testing.T) {
+	tr := propsNode(t, "expressions:\n  - transform: \"target['headers']['h'] = 'x'\"\n")
+	th := propsNode(t, "expressions:\n  h: \"'x'\"\n")
+	wfs := []spec.Workflow{
+		{File: "a.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: solaceSide("v", "IN-A", spec.DestQueue, ""), Target: mqSide("QM", "OUT-A", spec.DestQueue, false), Transform: tr},
+		{File: "b.yaml", Enabled: false, SourceSet: true, TargetSet: true, Source: solaceSide("v", "IN-B", spec.DestQueue, ""), Target: mqSide("QM", "OUT-B", spec.DestQueue, false), TransformHeaders: th},
+		{File: "c.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: solaceSide("v", "IN-C", spec.DestQueue, ""), Target: mqSide("QM", "OUT-C", spec.DestQueue, false)},
+	}
+	m, _ := Build(wfs, &spec.Defaults{}, Opts{MountStores: true})
+	if len(m.Workflows) != 3 {
+		t.Fatalf("workflows = %+v, want 3", m.Workflows)
+	}
+	for i, c := range []struct {
+		enabled bool
+		tr, th  *yaml.Node
+	}{
+		{true, tr, nil},
+		{false, nil, th},
+		{true, nil, nil},
+	} {
+		got := m.Workflows[i]
+		if got.ID != i || got.Enabled != c.enabled || got.Transform != c.tr || got.TransformHeaders != c.th {
+			t.Errorf("workflow %d = %+v, want id %d, enabled %v, transform %p, transform-headers %p", i, got, i, c.enabled, c.tr, c.th)
+		}
+	}
+}
+
 func TestFormatScalarQuoting(t *testing.T) {
 	cases := []struct {
 		name string
@@ -71,6 +102,12 @@ func TestFormatScalarQuoting(t *testing.T) {
 		{"plain passthrough", &yaml.Node{Kind: yaml.ScalarNode, Value: "plain"}, "plain"},
 		{"double-quoted requoting", &yaml.Node{Kind: yaml.ScalarNode, Value: "dq", Style: yaml.DoubleQuotedStyle}, `"dq"`},
 		{"single-quote-doubling escape", &yaml.Node{Kind: yaml.ScalarNode, Value: "a'b", Style: yaml.SingleQuotedStyle}, `'a''b'`},
+		// A one-line block scalar lands on the key's line, so it is quoted only
+		// when plain text would not read back the same -- a folded SpEL call
+		// would lose everything from " #" on.
+		{"one-line folded block, safe plain", &yaml.Node{Kind: yaml.ScalarNode, Value: "plain words", Style: yaml.FoldedStyle}, "plain words"},
+		{"one-line folded block holding a comment marker", &yaml.Node{Kind: yaml.ScalarNode, Value: "x = #f('a')", Style: yaml.FoldedStyle}, `"x = #f('a')"`},
+		{"multi-line literal block left to the render layer", &yaml.Node{Kind: yaml.ScalarNode, Value: "a\nb\n", Style: yaml.LiteralStyle}, "a\nb\n"},
 	}
 	for _, c := range cases {
 		if got := FormatScalar(c.node); got != c.want {

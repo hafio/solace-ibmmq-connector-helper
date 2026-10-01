@@ -157,8 +157,8 @@ type Defaults struct {
 	Connections    map[string]Side // reusable connections referenced by conn-ref
 
 	// MisplacedTransforms lists every transform-looking key in env.yaml, as
-	// dotted paths. None belongs there -- a header transform is per workflow,
-	// written in the workflow file -- so validate refuses each one.
+	// dotted paths. None belongs there -- a transform is per workflow, written
+	// in the workflow file -- so validate refuses each one.
 	MisplacedTransforms []string
 }
 

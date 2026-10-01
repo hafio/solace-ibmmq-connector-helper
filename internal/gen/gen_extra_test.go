@@ -615,10 +615,91 @@ func TestConfigRendersTransformHeadersUnderItsWorkflow(t *testing.T) {
 		t.Errorf("application.yml missing the transform under workflow 1, want:\n%s\ngot:\n%s", want, out)
 	}
 
-	// A misplaced transform stops the render rather than dropping it.
-	files[1].Data = append(synthWorkflowFiles(2)[1].Data, []byte("transform:\n  expressions:\n    h: x\n")...)
-	if out, errs, _ := Config(Request{Workflows: files}, Resolver{Rand: fixedStatusRand}); out != "" || !issuesContain(errs, "transform is not a key") {
-		t.Errorf("a misplaced transform must fail the render, got out=%q errs=%v", out, errs)
+	// A misspelt transform stops the render rather than dropping it.
+	files[1].Data = append(synthWorkflowFiles(2)[1].Data, []byte("transform-header:\n  expressions:\n    h: x\n")...)
+	if out, errs, _ := Config(Request{Workflows: files}, Resolver{Rand: fixedStatusRand}); out != "" || !issuesContain(errs, "transform-header is not a key") {
+		t.Errorf("a misspelt transform must fail the render, got out=%q errs=%v", out, errs)
+	}
+}
+
+// TestConfigRendersTransformUnderItsWorkflow is the end-to-end pin for the
+// connector's current transform section: the second workflow file's
+// transform: renders verbatim under solace.connector.workflows.1 and nowhere
+// under 0, with a ${...} inside an expression left exactly as written --
+// passthrough blocks are never expanded -- and no warning about it. The ways
+// a transform goes wrong each fail the render instead of being dropped: the
+// transform-headers shape carried over, a transform under a side, and both
+// sections in one file.
+func TestConfigRendersTransformUnderItsWorkflow(t *testing.T) {
+	base := synthWorkflowFiles(2)[1].Data
+	withExtra := func(extra string) []File {
+		files := synthWorkflowFiles(2)
+		files[1].Data = append(append([]byte(nil), base...), extra...)
+		return files
+	}
+
+	out, errs, warns := Config(Request{Workflows: withExtra(`transform:
+  target-payload:
+    content-type: application/json
+  expressions:
+    - transform: "target['headers']['scst_targetDestination'] = #joinString('/', 'orders', '${DEPLOY_ENV}')"
+`)}, Resolver{Env: func(string) (string, bool) { return "", false }, Rand: fixedStatusRand})
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	want := `    workflows:
+      0:
+        enabled: true
+      1:
+        enabled: true
+        transform:
+          target-payload:
+            content-type: application/json
+          expressions:
+            -
+              transform: "target['headers']['scst_targetDestination'] = #joinString('/', 'orders', '${DEPLOY_ENV}')"
+`
+	if !strings.Contains(out, want) {
+		t.Errorf("application.yml missing the transform under workflow 1, want:\n%s\ngot:\n%s", want, out)
+	}
+	if issuesContain(warns, "DEPLOY_ENV") {
+		t.Errorf("a ${...} inside a transform is the connector's, not expanded or warned about, got %v", warns)
+	}
+
+	sideTransform := strings.Replace(string(base), "    queue: IN-1\n", "    queue: IN-1\n    transform:\n      expressions:\n        - transform: x\n", 1)
+	for _, c := range []struct {
+		name  string
+		files []File
+		want  string
+	}{
+		{"the transform-headers shape", withExtra("transform:\n  expressions:\n    h: x\n"), "transform.expressions must be a list of - transform: <SpEL expression> items, got a mapping"},
+		{"a transform under a side", []File{synthWorkflowFiles(2)[0], {Name: "wf-01.yaml", Data: []byte(sideTransform)}}, "source.solace.transform is in the wrong place"},
+		{"both sections", withExtra("transform:\n  expressions:\n    - transform: x\ntransform-headers:\n  expressions:\n    h: x\n"), "cannot use the two together"},
+	} {
+		if out, errs, _ := Config(Request{Workflows: c.files}, Resolver{Rand: fixedStatusRand}); out != "" || !issuesContain(errs, c.want) {
+			t.Errorf("%s must fail the render with %q, got out=%q errs=%v", c.name, c.want, out, errs)
+		}
+	}
+}
+
+// TestTransformHeadersDeprecationIsLintOnly pins where Solace's deprecation of
+// transform-headers is reported end to end: validate asks for the migration,
+// while generate -- and so deploy -- renders the same file without a word,
+// since the connector still reads it.
+func TestTransformHeadersDeprecationIsLintOnly(t *testing.T) {
+	const deprecated = "transform-headers is deprecated by Solace"
+	files := synthWorkflowFiles(2)
+	files[1].Data = append(files[1].Data, []byte("transform-headers:\n  expressions:\n    h: \"'x'\"\n")...)
+
+	if _, warns := Validate(Request{Workflows: files}, Resolver{Rand: fixedStatusRand}); !issuesContain(warns, deprecated) {
+		t.Errorf("validate must warn that transform-headers is deprecated, got %v", warns)
+	}
+	out, errs, warns := Config(Request{Workflows: files}, Resolver{Rand: fixedStatusRand})
+	if out == "" || len(errs) > 0 {
+		t.Fatalf("a transform-headers file must still generate, got errs=%v", errs)
+	}
+	if issuesContain(warns, deprecated) {
+		t.Errorf("generate must stay quiet about the deprecation, got %v", warns)
 	}
 }
 

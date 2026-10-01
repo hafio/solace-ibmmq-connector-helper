@@ -10,8 +10,6 @@ import (
 	"sort"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
@@ -93,7 +91,8 @@ type Context struct {
 
 	// Lint is set by the validate verb alone. It adds the findings generate and
 	// deploy deliberately stay quiet about: keys that no longer mean anything
-	// but are harmless to ignore, so an old env.yaml keeps deploying while
+	// but are harmless to ignore, and keys the connector still honours but has
+	// deprecated, so an old env.yaml or workflow file keeps deploying while
 	// validate still asks for it to be cleaned up.
 	Lint bool
 
@@ -144,8 +143,9 @@ func Run(ctx Context) (errs, warns []Issue) {
 	checkWorkflowSides(add, warn, ctx.Env, ctx.Workflows, haveKeystore, d.Connections)
 	checkDefaultsCredentials(add, warn, ctx, d)
 	// Every run, not just validate's: a transform in the wrong place is not
-	// harmless to ignore -- the connector would start without it.
-	checkTransforms(add, warn, ctx.Workflows, d)
+	// harmless to ignore -- the connector would start without it. Only the
+	// transform-headers deprecation notice waits for Lint.
+	checkTransforms(add, warn, ctx.Workflows, d, ctx.Lint)
 
 	// Cross-workflow (on resolved tuples): binder-level conflicts and duplicate sources.
 	checkKeyAliasConflicts(add, resolved)
@@ -201,77 +201,6 @@ func checkRemovedDefaultsKeys(add func(string, string, ...any), d *spec.Defaults
 	}
 	if d.LeaderElection.SolaceKey {
 		add(fileEnv, "leader-election.solace has been renamed to leader-election.session, which is what it renders to (solace.connector.management.session). Rename the key")
-	}
-}
-
-// checkTransforms validates header transforms: every workflow file's
-// transform-headers: block, and every transform-looking key found anywhere a
-// transform is not read (spec.Workflow.MisplacedTransforms,
-// spec.Defaults.MisplacedTransforms). Both files decode without KnownFields,
-// so a transform: key, a transform-header: typo, or transform-headers: nested
-// under a side would otherwise vanish, and the connector would start and run
-// without it.
-//
-// The block itself is passed through verbatim, so only its shape is checked --
-// the SpEL is the connector's to evaluate. A key beside expressions: is a
-// warning rather than an error: it is passed through as written, and nothing
-// here can know every key a later connector release reads.
-func checkTransforms(add, warn func(string, string, ...any), wfs []spec.Workflow, d *spec.Defaults) {
-	for _, p := range d.MisplacedTransforms {
-		add(fileEnv, "%s is not read here: a header transform belongs to one workflow, so write it as transform-headers: at the top level of each workflow file it applies to (expressions: <header>: <SpEL expression>)", p)
-	}
-	for _, wf := range wfs {
-		for _, p := range wf.MisplacedTransforms {
-			if strings.HasSuffix(p, "."+spec.TransformHeadersKey) {
-				add(wf.File, "%s is in the wrong place: header transforms apply to the whole workflow, so transform-headers: goes at the top level of this file, beside source: and target:", p)
-				continue
-			}
-			add(wf.File, "%s is not a key: header transforms are written transform-headers: (with expressions: <header>: <SpEL expression>) at the top level of this file", p)
-		}
-		if wf.TransformHeaders != nil {
-			checkTransformHeaders(add, warn, wf.File, wf.TransformHeaders)
-		}
-	}
-}
-
-// checkTransformHeaders checks the shape of one transform-headers: block: a
-// mapping whose expressions: maps each header name to one SpEL expression.
-func checkTransformHeaders(add, warn func(string, string, ...any), file string, n *yaml.Node) {
-	const key = spec.TransformHeadersKey
-	if n.Kind != yaml.MappingNode {
-		add(file, "%s must be a mapping with expressions: <header>: <SpEL expression>, got a %s", key, spec.YAMLKind(n))
-		return
-	}
-	var exprs *yaml.Node
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		k, v := n.Content[i].Value, n.Content[i+1]
-		if k == "expressions" {
-			exprs = v
-			continue
-		}
-		warn(file, "%s.%s is not a key this tool knows: it is passed through as written, but the connector reads header transforms from %s.expressions -- check the spelling", key, k, key)
-	}
-	switch {
-	case exprs == nil:
-		add(file, "%s has no expressions: -- the connector reads header transforms only from %s.expressions (<header>: <SpEL expression>)", key, key)
-		return
-	case exprs.Kind != yaml.MappingNode:
-		add(file, "%s.expressions must be a mapping of <header>: <SpEL expression>, got a %s", key, spec.YAMLKind(exprs))
-		return
-	case len(exprs.Content) == 0:
-		warn(file, "%s.expressions is empty, so this workflow transforms no headers", key)
-		return
-	}
-	seen := map[string]bool{}
-	for i := 0; i+1 < len(exprs.Content); i += 2 {
-		h, v := exprs.Content[i].Value, exprs.Content[i+1]
-		if seen[h] {
-			add(file, "%s.expressions sets %q twice; give each header one expression", key, h)
-		}
-		seen[h] = true
-		if v.Kind != yaml.ScalarNode {
-			add(file, "%s.expressions.%s must be one SpEL expression, got a %s", key, h, spec.YAMLKind(v))
-		}
 	}
 }
 

@@ -219,7 +219,12 @@ func renderConnector(w *yw, m *consolidate.Model) {
 		w.Line(8, "enabled: "+strconv.FormatBool(wf.Enabled))
 		// Verbatim, like every other passthrough block: key order and each
 		// expression's quoting survive, so a SpEL string reaches the connector
-		// exactly as the workflow file wrote it.
+		// exactly as the workflow file wrote it. An empty transform: {} renders
+		// nothing rather than a bare key; validate reports it.
+		if t := wf.Transform; t != nil && len(t.Content) > 0 {
+			w.Line(8, spec.TransformKey+":")
+			renderContainer(w, 10, t)
+		}
 		if wf.TransformHeaders != nil {
 			w.Line(8, spec.TransformHeadersKey+":")
 			renderContainer(w, 10, wf.TransformHeaders)

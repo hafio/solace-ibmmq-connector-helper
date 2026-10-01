@@ -1,6 +1,7 @@
 # ---------------------------------------------------------------------------
 # Starter set — 4 workflows that together show every connection style.
-# Files named workflow-<N>.yaml map to workflow N (numbered by sorted filename).
+# Files named workflow-<N>.yaml map to workflow N: workflows are numbered in
+# sorted filename order (as ls lists them), so zero-pad past 9 (workflow-00).
 #
 # A side declares its connection one of two ways:
 #   * conn-ref: <name>  — REFERENCE a connection defined in env.yaml; the
@@ -41,9 +42,11 @@ target:
     conn-ref: prod-solace
     topic: orders/from-mq                 # publish to a Solace topic (EDA pub/sub)
 
-# Optional header transforms for this workflow, at the top level beside source:
-# and target: -- a transform-headers: under a side is an error. Each expression
-# is SpEL, evaluated by the connector; quote it whole:
-# transform-headers:
+# Optional transform for this workflow, at the top level beside source: and
+# target: -- a transform: under a side is an error. Each expression is SpEL,
+# evaluated by the connector; quote it whole. A transform carries no source
+# header over to the target unless an expression sets it. (transform-headers:
+# still works but is deprecated by Solace; see user guide section 6.7.)
+# transform:
 #   expressions:
-#     solace_scst_targetDestination: "'orders/from-mq/' + headers.region"
+#     - transform: "target['headers']['scst_targetDestination'] = #joinString('/', 'orders/from-mq', source['headers']['region'])"
