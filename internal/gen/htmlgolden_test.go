@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
 // The spec generator page embeds a copy of the golden application.yml, and a
@@ -169,5 +170,45 @@ func TestGeneratorPageSelfTestNormalizesEmptyFindings(t *testing.T) {
 		t.Errorf("%s selfTest()'s gotF = %s must trim trailing newlines then add exactly one, "+
 			"mirroring wantF's normalization -- otherwise Self-test fails on the empty-findings case",
 			generatorPagePath, got)
+	}
+}
+
+// pageKeyList extracts the JS key list `const NAME = ['a', 'b'];` from the page.
+func pageKeyList(t *testing.T, page []byte, name string) []string {
+	t.Helper()
+	m := regexp.MustCompile(`const ` + name + ` = \[([^\]]*)\];`).FindSubmatch(page)
+	if m == nil {
+		t.Fatalf("%s has no `const %s = [...];`", generatorPagePath, name)
+	}
+	var keys []string
+	for _, q := range regexp.MustCompile(`'([^']*)'`).FindAllSubmatch(m[1], -1) {
+		keys = append(keys, string(q[1]))
+	}
+	return keys
+}
+
+// TestGeneratorPageKnownKeysInSync pins the page's hand-copied key lists --
+// what it treats as the tool's own keys, the tool-managed ones and the
+// credentials, per system -- against the Go source of truth in spec, so the
+// validate port cannot drift from the CLI when a key is added to one side.
+func TestGeneratorPageKnownKeysInSync(t *testing.T) {
+	page, err := os.ReadFile(generatorPagePath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", generatorPagePath, err)
+	}
+	for _, c := range []struct {
+		name string
+		want []string
+	}{
+		{"SOLACE_KEYS", spec.KnownKeys(spec.SystemSolace)},
+		{"MQ_KEYS", spec.KnownKeys(spec.SystemMQ)},
+		{"SOLACE_MANAGED", spec.ToolManagedKeys(spec.SystemSolace)},
+		{"MQ_MANAGED", spec.ToolManagedKeys(spec.SystemMQ)},
+		{"SOLACE_CREDS", spec.CredentialKeys(spec.SystemSolace)},
+		{"MQ_CREDS", spec.CredentialKeys(spec.SystemMQ)},
+	} {
+		if got := pageKeyList(t, page, c.name); strings.Join(got, ",") != strings.Join(c.want, ",") {
+			t.Errorf("%s = %v, want %v (spec)", c.name, got, c.want)
+		}
 	}
 }

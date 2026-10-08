@@ -117,7 +117,14 @@ transform-headers:
 // block's consumer:/producer: tuning. Each is reported as the dotted path it
 // was found at, in file order; the two top-level blocks are not.
 func TestMisplacedWorkflowTransforms(t *testing.T) {
-	wf, err := ParseWorkflow([]byte(`transform:
+	wf, err := ParseWorkflow([]byte(`x-side: &side
+  transform-header: x
+x-mq: &mq
+  <<: *side
+  queue: OUT
+  producer:
+    transforms: x
+transform:
   expressions:
     - transform: "target['headers']['h'] = 'x'"
 transform-header:
@@ -135,10 +142,7 @@ source:
       transform: x
       transform-payloads: x
 target:
-  mq:
-    queue: OUT
-    producer:
-      transforms: x
+  mq: *mq
 transform-headers:
   expressions: {a: b}
 `), "wf.yaml")
@@ -153,6 +157,7 @@ transform-headers:
 		"source.solace.transform-headers",
 		"source.solace.consumer.transform",
 		"source.solace.consumer.transform-payloads",
+		"target.mq.transform-header",
 		"target.mq.producer.transforms",
 	}
 	if !reflect.DeepEqual(wf.MisplacedTransforms, want) {

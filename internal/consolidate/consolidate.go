@@ -39,6 +39,7 @@ type acc struct {
 	connName string // contributing connection name (first by appearance); "" = purely inline
 
 	pass2 []Prop // merged verbatim passthrough (api-properties / additional-properties)
+	extra []Prop // merged other keys of the block (spec.Side.Extra), the same way
 
 	binder *Binder
 }
@@ -167,7 +168,8 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 				a.cipher = s.Cipher
 			}
 		}
-		// Merge verbatim passthrough in workflow order.
+		// Merge verbatim passthrough in workflow order: the api-properties /
+		// additional-properties block, and the block's other keys (Side.Extra).
 		var node *yaml.Node
 		if s.System == spec.SystemSolace {
 			node = s.APIProps
@@ -176,6 +178,9 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 		}
 		for _, p := range nodeToProps(node) {
 			a.pass2 = mergeProp(a.pass2, p, &warns, displayName(a))
+		}
+		for _, p := range nodeToProps(s.Extra) {
+			a.extra = mergeProp(a.extra, p, &warns, displayName(a))
 		}
 		return a
 	}
@@ -188,6 +193,9 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 	assignBinderNames(accs)
 
 	// ---- finalize binder + bundle objects -------------------------------------
+	// The defaults blocks are read once: a managed key in mq-defaults is reported
+	// once, not per binder (solace-defaults is left as written, as it always was).
+	mqDefaults := dropManaged(nodeToProps(d.MQDefaults), spec.SystemMQ, &warns, "mq-defaults")
 	for _, a := range accs {
 		switch a.kind {
 		case spec.SystemSolace:
@@ -197,7 +205,7 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 				ClientUser: secretRef(stableName(a.name, "CLIENT_USERNAME"), binderOwner(a.name)+" client-username", a.user),
 				ClientPass: secretRef(stableName(a.name, "CLIENT_PASSWORD"), binderOwner(a.name)+" client-password", a.pass),
 			}
-			sb.Extras = nodeToProps(d.SolaceDefaults)
+			sb.Extras = overlayExtras(nodeToProps(d.SolaceDefaults), dropManaged(a.extra, spec.SystemSolace, &warns, binderOwner(a.name)))
 			var props []Prop
 			if a.tls {
 				for _, kv := range tls.SolaceProps(d, a.keyAlias, mountStores, storeSecret(secretRef)) {
@@ -227,6 +235,7 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 					warn("binder %q: tls is enabled but tls.truststore is not configured; no SSL bundle is emitted and the connection falls back to the JVM default truststore", a.name)
 				}
 			}
+			mb.Extras = overlayExtras(mqDefaults, dropManaged(a.extra, spec.SystemMQ, &warns, binderOwner(a.name)))
 			var props []Prop
 			if a.cipher != "" {
 				props = append(props, Prop{Key: "WMQ_SSL_CIPHER_SUITE", Val: a.cipher})
@@ -390,9 +399,9 @@ func buildBundle(a *acc, d *spec.Defaults, mount bool, secretRef secretFn) *Bund
 // buildLeaderElection assembles the leader-election model for active_active /
 // active_standby (nil for standalone/absent). The management session carries the
 // same key set as a Solace binder -- the connector documents session.* as the
-// same interface as solace.java.* -- so solace-defaults and the connection's own
-// verbatim api-properties land here too, on top of the shared
-// truststore/keystore wiring (config vs deploy path via mount).
+// same interface as solace.java.* -- so solace-defaults, the connection's own
+// other keys and its verbatim api-properties land here too, on top of the
+// shared truststore/keystore wiring (config vs deploy path via mount).
 func buildLeaderElection(d *spec.Defaults, mount bool, secretRef secretFn, names leaderNameFn, warns *[]string) *LeaderElectionModel {
 	le := d.LeaderElection
 	if !le.Present || le.Mode == "" || le.Mode == spec.LeaderStandalone {
@@ -414,7 +423,7 @@ func buildLeaderElection(d *spec.Defaults, mount bool, secretRef secretFn, names
 			MsgVPN:     sess.MsgVPN,
 			ClientUser: secretRef(userName, leaderSessionOwner+" client-username", sess.Username()),
 			ClientPass: secretRef(passName, leaderSessionOwner+" client-password", sess.Secret()),
-			Extras:     nodeToProps(d.SolaceDefaults),
+			Extras:     overlayExtras(nodeToProps(d.SolaceDefaults), dropManaged(nodeToProps(sess.Extra), spec.SystemSolace, warns, leaderSessionOwner)),
 		}
 		var props []Prop
 		if isTCPS(sess.Host) {
@@ -572,11 +581,13 @@ func needsQuote(s string) bool {
 }
 
 // mergeProp appends p unless its key already exists, in which case the value is
-// updated (last writer wins) with a warning on a real change.
+// updated (last writer wins) with a warning on a real change. A nested value is
+// compared structurally: a connection shared by several workflows is merged
+// once per side, and the same pool: block arriving again is not a change.
 func mergeProp(list []Prop, p Prop, warns *[]string, binder string) []Prop {
 	for i := range list {
 		if list[i].Key == p.Key {
-			if list[i].Val != p.Val || (p.Sub != nil) {
+			if list[i].Val != p.Val || !sameNode(list[i].Sub, p.Sub) {
 				*warns = append(*warns, fmt.Sprintf("binder %q: passthrough key %q set more than once; last (by filename) wins", binder, p.Key))
 				list[i] = p
 			}
@@ -584,6 +595,74 @@ func mergeProp(list []Prop, p Prop, warns *[]string, binder string) []Prop {
 		}
 	}
 	return append(list, p)
+}
+
+// sameNode reports whether two passthrough subtrees render the same: nil only
+// equals nil, a scalar by its formatted value (so quoting counts), a container
+// element by element.
+func sameNode(a, b *yaml.Node) bool {
+	switch {
+	case a == b:
+		return true
+	case a == nil || b == nil:
+		return false
+	case a.Kind != b.Kind || len(a.Content) != len(b.Content):
+		return false
+	case a.Kind == yaml.ScalarNode:
+		return FormatScalar(a) == FormatScalar(b)
+	}
+	for i := range a.Content {
+		if !sameNode(a.Content[i], b.Content[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// overlayExtras lays a connection's own other keys (over) on the defaults
+// block (base): a key the connection also sets -- by Spring's reading of the
+// name, so connect-retries and connectRetries are one -- is replaced where the
+// default stood, anything else is appended. No warning: a default is there to
+// be overridden. base comes back untouched when there is nothing to lay on it.
+func overlayExtras(base, over []Prop) []Prop {
+	if len(over) == 0 {
+		return base
+	}
+	out := append([]Prop(nil), base...)
+	for _, p := range over {
+		ck := spec.CanonicalKey(p.Key)
+		i := 0
+		for ; i < len(out); i++ {
+			if spec.CanonicalKey(out[i].Key) == ck {
+				out[i] = p
+				break
+			}
+		}
+		if i == len(out) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// dropManaged drops, with a warning, any other key that names -- in any
+// spelling -- a property the tool writes itself under this system's block
+// (spec.ToolManagedKeys): the connector would otherwise receive it twice.
+// validate refuses these first; this is the backstop for a model built by hand.
+func dropManaged(props []Prop, system string, warns *[]string, owner string) []Prop {
+	managed := map[string]bool{}
+	for _, k := range spec.ToolManagedKeys(system) {
+		managed[spec.CanonicalKey(k)] = true
+	}
+	var out []Prop
+	for _, p := range props {
+		if managed[spec.CanonicalKey(p.Key)] {
+			*warns = append(*warns, fmt.Sprintf("%s: passthrough overrides tool-managed key %q; tool value kept", owner, p.Key))
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // appendPassthrough appends verbatim props after the tool-managed props, dropping

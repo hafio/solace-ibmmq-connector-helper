@@ -154,6 +154,7 @@ type Defaults struct {
 	Security       Security
 	LeaderElection LeaderElection
 	SolaceDefaults *yaml.Node      // ordered mapping merged into each Solace binder's solace.java.*
+	MQDefaults     *yaml.Node      // ordered mapping merged into each MQ binder's ibm.mq.*
 	Connections    map[string]Side // reusable connections referenced by conn-ref
 
 	// MisplacedTransforms lists every transform-looking key in env.yaml, as
@@ -192,6 +193,7 @@ type rawDefaults struct {
 	Connections    map[string]rawSide `yaml:"connections"`
 	// yaml.Node value (not *yaml.Node) so the subtree is actually captured.
 	SolaceDefaults yaml.Node `yaml:"solace-defaults"`
+	MQDefaults     yaml.Node `yaml:"mq-defaults"`
 }
 
 type rawTLS struct {
@@ -302,5 +304,6 @@ func defaultsFromRaw(raw rawDefaults) *Defaults {
 		}
 	}
 	d.SolaceDefaults = nodePtr(raw.SolaceDefaults)
+	d.MQDefaults = nodePtr(raw.MQDefaults)
 	return d
 }

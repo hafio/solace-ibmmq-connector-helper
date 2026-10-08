@@ -48,7 +48,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 829 test functions, 1112 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 868 test functions, 1151 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -93,7 +93,7 @@ Tests: [scan_test.go](../internal/scan/scan_test.go)
 
 Parse env.yaml into the typed model -- workflows, defaults, named connections, the kubernetes/docker/podman platform sections, and ports -- and apply section defaults.
 
-Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/spec/env_test.go), [targets_test.go](../internal/spec/targets_test.go), [expand_test.go](../internal/spec/expand_test.go), [defaults_test.go](../internal/spec/defaults_test.go), [image_test.go](../internal/spec/image_test.go), [javaoptions_test.go](../internal/spec/javaoptions_test.go), [kubernetes_test.go](../internal/spec/kubernetes_test.go), [transform_test.go](../internal/spec/transform_test.go)
+Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/spec/env_test.go), [targets_test.go](../internal/spec/targets_test.go), [expand_test.go](../internal/spec/expand_test.go), [defaults_test.go](../internal/spec/defaults_test.go), [image_test.go](../internal/spec/image_test.go), [javaoptions_test.go](../internal/spec/javaoptions_test.go), [kubernetes_test.go](../internal/spec/kubernetes_test.go), [transform_test.go](../internal/spec/transform_test.go), [extra_test.go](../internal/spec/extra_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
@@ -106,6 +106,17 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestConnRefSideMayTuneBinding | - | consumer block parses on a conn-ref side, SetsConnFields ignores it, and Resolve keeps it alongside the referenced tuple and destination |
 | TestParseDefaultsConnectionsAndLeaderElection | - | parses 2 named connections and leader-election active_standby with fail-over |
 | TestParseDefaultsLeaderSession | - | an inline `session:` block parses the full solace tuple, api-properties included, and leaves the SolaceKey marker unset |
+| TestKnownKeysReadsYAMLTags | - | the schema is read off a raw struct's yaml tags the way yaml.v3 names them: the tag's first element, options dropped, an untagged field lower-cased, a "-" tag or an unexported field skipped |
+| TestToolManagedKeysAreSchemaKeys | solace / mq / unknown system | every credential key is tool-managed and every tool-managed key is a sorted schema key -- except mq's ssl-bundle, which is derived rather than read; an unknown system has no keys |
+| TestCanonicalKey | kebab / camelCase with an acronym / upper snake / mixed / dots and brackets | CanonicalKey folds case and the - and _ separators the way Spring's relaxed binding does, and nothing else |
+| TestParseWorkflowCapturesExtraKeys | block style / flow style / known keys only | every key a side's block carries that the schema does not name is captured in file order with its value as written -- a bool, a camelCase name, a double-quoted string, a nested mapping and a list whole -- known keys and a transform key (the scan's) left out, and a block of known keys alone captures nothing |
+| TestParseWorkflowExtraKeysFollowAliasesAndMergeKeys | - | a << merge is expanded in place with the block's own key winning over a merged one and a merge source's own key over what it merges in turn, a block written as an alias reads as the block it names, and an aliased value is the value it names |
+| TestParseDefaultsCapturesExtraKeys | connection mq / connection solace / both systems / session / mq-defaults / empty | each env.yaml site read through the side structs captures its other keys, a connection naming both systems carries nothing, mq-defaults parses as a block of its own, and an empty env.yaml has none |
+| TestSideSetsConnFieldsCountsExtraKeys | - | an extra key beside conn-ref is a connection field, a bare conn-ref side sets none |
+| TestResolveCarriesTheConnectionsExtraKeys | - | a conn-ref side resolves to the connection's other keys along with its tuple, keeping its own destination |
+| TestMisplacedEnvTransformsCoversLeaderSession | - | a transform under the inline leader-election session is reported as misplaced through ParseEnv, and is not captured as an extra key |
+| TestParseWorkflowTypeErrorInsideASideStillNamesTheLine | - | a wrong scalar type on a known key still fails with yaml's own error naming the line, so the capture never hides it |
+| TestExpandLeavesExtraKeysAlone | - | a ${...} inside another key is never expanded (rule 6), reaching Spring as typed |
 | TestParseDefaultsLeaderSolaceKeyRetired | mapping / scalar / list | a `solace:` key under leader-election parses whatever shape it holds, sets SolaceKey and never populates Session, so validate can error naming `session:` |
 | TestSideBindingFields | bare tuple | no destination and no tuning means no binding fields |
 | TestSideBindingFields | queue / topic | the destination kind is reported |
@@ -189,7 +200,7 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestCreatedNames | - | the Deployment and ConfigMap always, then exactly the Secrets and claim the config asks the tool to build -- a referenced object is not the tool's |
 | TestParseWorkflowTransformHeaders | - | a top-level transform-headers block is captured verbatim -- header order and each expression's quoting intact -- and is not reported as misplaced; an absent or empty block is none |
 | TestParseWorkflowTransform | - | a top-level transform block is captured verbatim -- key order, the list of one-key mappings and each expression's quoting intact -- beside a top-level transform-headers block, and neither is reported as misplaced; an absent or empty block is none |
-| TestMisplacedWorkflowTransforms | - | a transform-header: typo, the legacy transform-payload section (either spelling), and transform or transform-headers under a side, its solace:/mq: block, or that block's consumer:/producer: are each reported as the dotted path they were found at, in file order, while both top-level blocks still parse |
+| TestMisplacedWorkflowTransforms | - | a transform-header: typo, the legacy transform-payload section (either spelling), and transform or transform-headers under a side, its solace:/mq: block (also when that block is an alias and the key reaches it through a << merge), or that block's consumer:/producer: are each reported as the dotted path they were found at, in file order, while both top-level blocks still parse |
 | TestMisplacedEnvTransforms | - | every transform key in env.yaml (transform included) -- top level, a connection, or the connection's solace:/mq: block -- is reported, identically through ParseEnv and ParseDefaults, and a clean or empty env.yaml reports none |
 | TestParseEnvTopLevelSyslog | present / absent | logging.syslog parses beside logging.level at the top level, protocol defaults to udp, and an absent block stays nil (presence is what turns syslog on) |
 
@@ -197,7 +208,7 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 
 Build the consolidated binder model from the workflows -- dedup connections, TLS bundles, destination roles, store-path rewriting, leader election, and durable-name UUIDs.
 
-Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [consolidate_extra_test.go](../internal/consolidate/consolidate_extra_test.go), [names_test.go](../internal/consolidate/names_test.go), [uuid_test.go](../internal/consolidate/uuid_test.go)
+Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [consolidate_extra_test.go](../internal/consolidate/consolidate_extra_test.go), [consolidate_extrakeys_test.go](../internal/consolidate/consolidate_extrakeys_test.go), [names_test.go](../internal/consolidate/names_test.go), [uuid_test.go](../internal/consolidate/uuid_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
@@ -226,6 +237,15 @@ Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [cons
 | TestMergeProp | append new key b | list grows to 2 entries, no warnings |
 | TestMergeProp | overwrite existing key a with new value | value updated to 9, one warning emitted |
 | TestMergeProp | overwrite key a with same value again | no additional warning |
+| TestMergePropNestedValues | - | the same nested mapping arriving again is not a change and neither is the same node, a different one warns once and the last writer wins |
+| TestSameNode | nil and nil / nil and a node / same value / quoting differs / same mapping / different length / different kind | the structural compare behind mergeProp: nil only equals nil, a scalar by its formatted value so quoting counts, a container element by element |
+| TestOverlayExtras | replaces in place / another spelling replaces too / a new key is appended / no extras / nil over nil / extras over no defaults | a connection's other keys lay over a defaults block by Spring's reading of the name, replacing in place or appending, and nothing to lay on returns the defaults untouched |
+| TestBuildCarriesExtraKeysOntoBothBinders | - | an inline side's other keys reach its own binder -- an MQ one as Extras beside additional-properties, a Solace one laid over solace-defaults with the connection winning in place -- with no warning |
+| TestBuildMergesExtraKeysAcrossSidesOfOneBinder | a union / a disagreement | two sides on one tuple merge their other keys into the one binder: a union without a warning, last (by filename) wins a disagreement with the passthrough warning |
+| TestBuildNestedExtraKeyThroughSharedConnRefIsQuiet | - | a connection carrying a nested block, reused by three workflows through conn-ref, merges it once per side without a set-more-than-once warning |
+| TestBuildDropsExtraKeysTheToolManages | - | the consolidate backstop: ssl-bundle and another spelling of queue-manager or msg-vpn are dropped with the passthrough warning and the tool's value stays |
+| TestBuildLeaderElectionSessionCarriesExtraKeys | - | the session's connection's other keys lay over solace-defaults as a binder's do, and a managed-key spelling is dropped under the session's own label |
+| TestBuildMQDefaultsOverriddenByConnection | - | mq-defaults reach every MQ binder, a connection's own key replaces a default in place, and a managed key in the block is dropped once rather than once per binder |
 | TestAppendPassthroughCollision | passthrough T collides with existing T | output has 2 props and 1 collision warning reading `binder "bndr": passthrough overrides tool-managed key "T"; tool value kept` byte for byte, since the owner label is caller-supplied now |
 | TestNodeToProps | mapping with scalar and nested keys | 2 props, first key k1/val v1, second has Sub set |
 | TestNodeToProps | nil node | nodeToProps returns nil |
@@ -311,6 +331,9 @@ Tests: [render_test.go](../internal/render/render_test.go)
 | TestApplicationLeaderElection | - | leader-election, fail-over, queue and management render for active_standby, and the whole session block matches exactly: binder-shared credential names, solace-defaults between the credentials and api-properties, verbatim passthrough last |
 | TestApplicationLeaderElectionSessionMatchesBinderKeySet | - | rendered from one connection, the session key sequence equals the binder solace.java key sequence -- the guard against the two renderers drifting apart again |
 | TestApplicationLeaderElectionSessionPlaintext | - | a non-tcps session emits no SSL_ keys but still carries solace-defaults and its own api-properties, and falls back to the LEADER_ELECTION_* names |
+| TestApplicationRendersExtraKeys | mq block / solace block / read-back | an MQ binder's other keys render after ssl-bundle and before additional-properties, mq-defaults first and the connection's own after, a nested block whole; a Solace binder's where solace-defaults render, the connection's value in place of the default it overrides; the document reads back with the key as a sibling of queue-manager, never inside additional-properties |
+| TestApplicationSessionCarriesExtraKeysLikeTheBinder | - | the anti-drift guard extended to other keys: a session built from the same connection as a binder renders the same key set, client-name included |
+| TestApplicationEmitsExactlyTheToolManagedKeys | mq / solace | the keys render writes at the top of a binder's block are exactly spec.ToolManagedKeys, so a key added to one but not the other fails |
 | TestApplicationOmitsEmptyCredentials | conn-name: h(1414) | binder identity fields still rendered when credentials absent |
 | TestApplicationOmitsEmptyCredentials | queue-manager: QM1 | binder identity fields still rendered when credentials absent |
 | TestApplicationOmitsEmptyCredentials | host: tcp://b:55555 | binder identity fields still rendered when credentials absent |
@@ -602,7 +625,7 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 
 Validate the parsed model -- per-side rules, connection refs, leader election, the docker/podman/kubernetes platform sections, ports, container names, TLS/stores wiring, and the safe-token charset.
 
-Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extra_test.go](../internal/validate/validate_extra_test.go), [validate_deploycommand_test.go](../internal/validate/validate_deploycommand_test.go), [validate_image_test.go](../internal/validate/validate_image_test.go), [validate_javaoptions_test.go](../internal/validate/validate_javaoptions_test.go), [validate_derivednames_test.go](../internal/validate/validate_derivednames_test.go), [validate_transform_test.go](../internal/validate/validate_transform_test.go)
+Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extra_test.go](../internal/validate/validate_extra_test.go), [validate_deploycommand_test.go](../internal/validate/validate_deploycommand_test.go), [validate_image_test.go](../internal/validate/validate_image_test.go), [validate_javaoptions_test.go](../internal/validate/validate_javaoptions_test.go), [validate_derivednames_test.go](../internal/validate/validate_derivednames_test.go), [validate_transform_test.go](../internal/validate/validate_transform_test.go), [validate_extrakeys_test.go](../internal/validate/validate_extrakeys_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
@@ -659,6 +682,17 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestIdiomaticSolaceCombosNoEDAWarn | - | idiomatic solace topic-target/queue-source combos emit no errors and no EDA warnings |
 | TestConnRefSolaceTopicSourceIsError | - | conn-ref solace source with a topic errors cannot be consumed from, so the rejection is not inline-only |
 | TestConnRefStrictOnlyDestination | - | conn-ref side also setting host errors may set only queue/topic |
+| TestExtraKeysQuietForLegitimateProperties | IBM starter keys / Solace direct keys / a list value / a mounted credential reference | the properties the connector reads pass through without a word: starter keys in either spelling, a nested block, a list, Solace's direct keys, and a secret-looking key referencing a mounted credential |
+| TestExtraKeysManagedByTheToolIsAnError | ssl-bundle / sslBundle / queueManager / additionalProperties / msgVpn / apiProperties | ssl-bundle, derived from tls: and the truststore, and any other spelling of a key the tool reads are errors naming the key to write |
+| TestExtraKeysCredentialSpellingIsAnError | Password / USER / clientPassword / clientUsername | another spelling of a credential key is an error: it would land in application.yml as a literal instead of a mounted secret |
+| TestExtraKeysCipherSuiteClashesWithCipher | ssl-cipher-suite beside cipher / sslCipherSuite beside cipher / ssl-cipher-suite alone | the starter's cipher-suite key beside cipher: sets the same thing twice and is an error; alone it is fine |
+| TestExtraKeysUnsafeKeyIsAnError | a space / a colon / a hash / empty | a key that is not a plain property name is refused rather than written unquoted into application.yml |
+| TestExtraKeysEnvSuffixWarns | -env / _env / environment (contains env, no suffix) | an -env name outside the credential pairs is a plain property, passed through with a warning naming the pairs the tool resolves |
+| TestExtraKeysSecretLookingLiteralWarns | a token literal / a nested secret / a mounted reference / an empty value / an ordinary key | a secret-looking key, at the top or inside a nested block, carrying a literal value warns with its dotted path; a ${...} reference, an empty value and an ordinary key do not |
+| TestExtraKeysNearMissWarns | queue-managr / chanel / an unrelated key / a very short key / keyAlias | a key within an edit or two of one the tool reads warns "did you mean", an unrelated or very short key does not, and another spelling is the error rather than the question |
+| TestExtraKeysTLSInterplayWarns | use-ibm-cipher-mappings true and false / jks / client-name fixed, per-instance, standalone | the JVM cipher-mapping flag the tool sets, the starter's jks stores that ssl-bundle supersedes, and a fixed client-name every replica of an active_* deployment would share each warn, and their safe forms do not |
+| TestConnRefSideRejectsExtraKeys | - | another key beside conn-ref is a connection field: the strict conn-ref error |
+| TestExtraKeysCheckedOnConnectionsSessionAndDefaults | - | a connection in env.yaml, the inline management session and the mq-defaults block are each checked under their own label on every run, the defaults block with its own wording for a per-connection key |
 | TestConnRefUnknownAndSystemMismatch | unknown-ref | conn-ref to undefined connection errors is not defined under connections |
 | TestConnRefUnknownAndSystemMismatch | system-mismatch | mq side referencing solace connection errors is a solace connection but referenced under mq |
 | TestConnRefValidResolvesNoError | - | valid conn-ref resolution for both sides passes with no errors |
@@ -828,6 +862,7 @@ Tests: [examples_test.go](../internal/examples/examples_test.go)
 | TestWriteCreatesSkipsForces | force-rewrite | force write rewrites all files, restoring workflow-0.yaml to embedded original content over junk |
 | TestWriteMkdirError | - | Write returns error when target dir path is under a regular file |
 | TestShippedExamplesGenerateConfig | - | embedded example set written to disk generates config via gen.Config with no errors and at least one non-empty rendered application.yml |
+| TestEnvExtraKeysExampleValidWhenUncommented | - | uncommenting the other-key examples shipped in env.yaml (two connection lines and the mq-defaults block) still generates with no finding about them, and each key lands under its binder |
 | TestWorkflow0TransformExampleValidWhenUncommented | - | uncommenting the transform example shipped in workflow-0.yaml still generates, with no transform finding and the block rendered under workflow 0, so the example a new user copies cannot rot |
 | TestWorkflowExamplesMatchGoldenSpecs | workflow-0..3 | the four workflow files are byte-identical to testdata/golden/specs (go:embed cannot share one copy); env.yaml is excluded, it diverges on purpose |
 
@@ -857,6 +892,9 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestConfigRejectsSecretNameConflict | same spec through Validate | the collision is caught while linting too, not only at generate/deploy -- names are assigned in consolidate, so Validate builds to see them |
 | TestValidateCleanSpecStillPasses | no collision | the build call Validate now makes adds no errors of its own, and consolidate's warnings do not leak into validate output |
 | TestConfigNumbersWorkflowsInLsOrder | - | gen.parse numbers an explicit file list in the same listing order the folder scan uses: 10.yaml takes workflow 0 ahead of 2.yaml, whatever order the files arrived in |
+| TestConfigCarriesExtraKeysEndToEnd | - | an inline side's other keys land under its own binder after the mq-defaults entry as siblings of the tool's keys, a connection's other key reaches the binder a conn-ref side builds from it and the management session, and a ${...} inside one reaches application.yml as typed |
+| TestConfigRejectsExtraKeysBesideConnRef | - | another key beside conn-ref fails the render with the strict conn-ref error |
+| TestConfigWarnsOnANearMissKeyButStillRenders | - | a probable typo warns "did you mean" and still passes through to a rendered config |
 | TestConfigWorkflowCap | 21 workflows | Config produces no output and one error naming the count, the 20 cap, and the split-into-folders remedy |
 | TestConfigWorkflowCap | 20 workflows | exactly at the cap does not error |
 | TestGenerateKubernetesWorkflowCap | 21 workflows | GenerateKubernetes produces no manifest and the same workflow-cap error |
@@ -881,6 +919,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestGenValidateStoresWarning | - | kubernetes credentials.create (name-only) plus a TLS-without-stores config yields no errors and exactly one stores-omitted advisory warning |
 | TestGeneratorPageGoldenInSync | - | the golden embedded in solmq-conn-util-generator.html matches testdata/golden/application.yml (regenerate with -update-html-golden) |
 | TestGeneratorPageFindingsGoldenInSync | - | the findings embedded in solmq-conn-util-generator.html (id="golden-findings") match what gen.Validate reports for testdata/golden/specs, CRLF and trailing newlines normalized (regenerate with -update-html-golden) |
+| TestGeneratorPageKnownKeysInSync | SOLACE_KEYS / MQ_KEYS / SOLACE_MANAGED / MQ_MANAGED / SOLACE_CREDS / MQ_CREDS | the page's hand-copied key lists equal spec.KnownKeys, ToolManagedKeys and CredentialKeys per system, so the validate port cannot drift from the CLI when a key is added |
 | TestGeneratorPageSelfTestNormalizesEmptyFindings | - | the page's Self-test normalizes its own findings output the way it normalizes the golden block (trailing newlines trimmed, exactly one added), pinned by matching the normalization pattern in the page source, so the check needs no JS engine -- without the normalization the zero-findings case diffs a bare newline against an empty string and Self-test fails on the page's own fixture |
 | TestGoldenConfig | - | generated config output matches testdata/golden/application.yml byte-for-byte, one instance |
 | TestGoldenKubernetesCreate | - | generated kubernetes manifests (namespace, configmap incl. status script, secret, stores, pv, pvc, deployment with secrets-volume/stores/syslog/libs mounts and le-mode/role labels, service) match golden fixture byte-for-byte |

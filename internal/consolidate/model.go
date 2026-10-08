@@ -21,7 +21,7 @@ type SolaceBinder struct {
 	MsgVPN     string
 	ClientUser string
 	ClientPass string
-	Extras     []Prop // from solace-defaults (connect-retries, reconnect-retries, ...)
+	Extras     []Prop // solace-defaults, overridden by the connection's own other keys (Side.Extra)
 	APIProps   []Prop // ordered api-properties (tool TLS keys first, then verbatim passthrough)
 }
 
@@ -33,6 +33,7 @@ type MQBinder struct {
 	User         string
 	Password     string
 	SSLBundle    string // "" when the binder has no TLS bundle
+	Extras       []Prop // mq-defaults, overridden by the connection's own other keys (Side.Extra); after ssl-bundle
 	AddlProps    []Prop // ordered additional-properties (tool cipher first, then passthrough)
 }
 
@@ -120,7 +121,7 @@ type Session struct {
 	MsgVPN     string
 	ClientUser string
 	ClientPass string
-	Extras     []Prop // from solace-defaults (connect-retries, reconnect-retries, ...)
+	Extras     []Prop // solace-defaults, overridden by the session's own other keys (Side.Extra)
 	APIProps   []Prop // ordered api-properties (tool TLS keys first, then verbatim passthrough)
 }
 

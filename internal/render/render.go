@@ -155,6 +155,9 @@ func renderCloudStream(w *yw, m *consolidate.Model) {
 			if b.MQ.SSLBundle != "" {
 				w.Line(16, "ssl-bundle: "+b.MQ.SSLBundle)
 			}
+			for _, p := range b.MQ.Extras {
+				renderProp(w, 16, p)
+			}
 			if len(b.MQ.AddlProps) > 0 {
 				w.Line(16, "additional-properties:")
 				for _, p := range b.MQ.AddlProps {

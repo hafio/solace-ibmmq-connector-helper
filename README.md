@@ -31,6 +31,11 @@ so splitting them across connectors stays your decision.
   (`transform`, SpEL, and the deprecated `transform-headers`) through to the
   connector, and rejects a transform written anywhere it would otherwise be
   silently ignored.
+- Passes **any other `solace:`/`mq:` key** through to the connector verbatim
+  (`user-authentication-mqcsp`, `client-id`, `client-name`, a `pool:` block, ...),
+  with `solace-defaults` / `mq-defaults` for fleet-wide values, and refuses another
+  spelling of a key it writes itself
+  ([section 6.4](docs/userguide.md#64-destinations-durable-names-passthrough)).
 - Implements **[leader-election](docs/userguide.md#7-connector-defaults-envyaml-top-level)**
   (`standalone` / `active_active` / `active_standby`).
 - Wires **[TLS + mTLS](docs/userguide.md#7-connector-defaults-envyaml-top-level)**

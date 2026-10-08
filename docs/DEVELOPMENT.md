@@ -146,6 +146,10 @@ are kept in sync by `TestGeneratorPageGoldenInSync` and `TestGeneratorPageFindin
   `sampleModel` and the load path. Self-test's findings diff catches a drift in the ported
   rule itself, but not a schema change that never triggers one -- a page left behind can
   still emit configs the CLI rejects. The image and timezone hoist is the worked example.
+  The page's own copies of the side key sets (`SOLACE_KEYS`, `MQ_KEYS`, `SOLACE_MANAGED`,
+  `MQ_MANAGED`, `SOLACE_CREDS`, `MQ_CREDS`) are pinned against `spec` by
+  `TestGeneratorPageKnownKeysInSync`, so a key added to `rawSolace`/`rawMQ` fails the
+  build until the page lists it too.
 
 The port has no automated syntax gate, but it is plain JavaScript in one `<script>` block,
 so it can be checked outside a browser:

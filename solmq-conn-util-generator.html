@@ -127,7 +127,7 @@ details[open]>summary::before{content:"- "}
   <a class="sb-item" data-s="s-mgmt">Management</a>
   <a class="sb-item" data-s="s-sec">Security</a>
   <a class="sb-item" data-s="s-le">Leader Election</a>
-  <a class="sb-item" data-s="s-soldef">Solace Defaults</a>
+  <a class="sb-item" data-s="s-soldef">Connector Defaults</a>
   <div class="sb-hdr">Deploy Targets</div>
   <a class="sb-item" data-s="s-k8s">Kubernetes</a>
   <a class="sb-item" data-s="s-docker">Docker</a>
@@ -239,14 +239,16 @@ details[open]>summary::before{content:"- "}
         </div>
         <div class="f"><label>Key Alias (mTLS)</label><input id="i-le-alias" placeholder="solace-client"></div>
         <div class="f"><label>api-properties</label><textarea id="i-le-props" rows="2" placeholder="REAPPLY_SUBSCRIPTIONS: true"></textarea><div class="h">Emitted verbatim after the tool-managed TLS keys. One "key: value" per line.</div></div>
+        <div class="f"><label>Other connection properties</label><textarea id="i-le-extra" rows="2" placeholder="connect-retries-per-host: 3"></textarea><div class="h">Any other session property, one "key: value" per line, copied through verbatim after solace-defaults.</div></div>
       </div>
       <div class="f"><label>fail-over</label><textarea id="i-le-fo" rows="3" placeholder="max-attempts: 5"></textarea><div class="h">Emitted verbatim. One "key: value" per line.</div></div>
     </div>
   </div>
 
   <!-- Solace defaults -->
-  <div class="sec" id="s-soldef"><h3>Solace Defaults</h3>
-    <div class="f"><label>solace-defaults</label><textarea id="i-soldef" rows="3" placeholder="connect-retries: -1"></textarea><div class="h">Merged into every Solace binder's solace.java.* block and into the leader-election session.</div></div>
+  <div class="sec" id="s-soldef"><h3>Connector Defaults</h3>
+    <div class="f"><label>solace-defaults</label><textarea id="i-soldef" rows="3" placeholder="connect-retries: -1"></textarea><div class="h">Merged into every Solace binder's solace.java.* block and into the leader-election session. A connection's own other properties win over these.</div></div>
+    <div class="f"><label>mq-defaults</label><textarea id="i-mqdef" rows="3" placeholder="user-authentication-mqcsp: false"></textarea><div class="h">Merged into every MQ binder's ibm.mq.* block. A connection's own other properties win over these.</div></div>
   </div>
 
   <!-- Image, timezone and JVM options (shared by every platform) -->
@@ -683,7 +685,8 @@ function blk(name, body, ind){ return body ? `${ind}${name}:\n${body}` : ''; }
 // Textareas holding api-properties / additional-properties / consumer / producer /
 // logging.level / solace-defaults / fail-over parse into an ordered node list:
 //   {key, val}      scalar
-//   {key, children} nested mapping or sequence
+//   {key, children} nested mapping or sequence (indented, or "- " lines at the
+//                   key's own indent, as YAML allows)
 //   {item}          sequence entry
 // Order and formatting are preserved, matching the *yaml.Node passthrough the Go
 // spec package captures.
@@ -706,7 +709,9 @@ function parseProps(text, bad){
       if(!m){ if(bad) bad.push(ln.no); continue; }
       const key = m[1].trim(), val = m[2].trim();
       if(val !== ''){ out.push({ key: key, val: val }); continue; }
-      const kids = (pos < lines.length && lines[pos].indent > ln.indent) ? block(lines[pos].indent) : [];
+      let kids = [];
+      if(pos < lines.length && lines[pos].indent > ln.indent) kids = block(lines[pos].indent);
+      else while(pos < lines.length && lines[pos].indent === ln.indent && lines[pos].text.startsWith('- ')){ kids.push({ item: lines[pos].text.slice(2).trim() }); pos++; }
       out.push(kids.length ? { key: key, children: kids } : { key: key, val: '' });
     }
     return out;
@@ -767,6 +772,7 @@ function sideHTML(cls){
   <details><summary>Advanced passthrough</summary>
     <div class="f"><label>api-properties / additional-properties</label><textarea class="x-props" rows="2"></textarea><div class="h">Inline sides only; a conn-ref side inherits the connection's.</div></div>
     <div class="f"><label>consumer / producer tuning</label><textarea class="x-tune" rows="2"></textarea><div class="h">Emitted under consumer: on a source, producer: on a target.</div></div>
+    <div class="f opt-fields x-extra-f"><label>Other connection properties</label><textarea class="x-extra" rows="2" placeholder="user-authentication-mqcsp: false"></textarea><div class="h">Any other connector property for this connection, one <b>key: value</b> per line (indent to nest), copied through verbatim beside the keys the tool writes. Inline sides only; a conn-ref side inherits the connection's.</div></div>
   </details>`;
 }
 
@@ -808,6 +814,7 @@ function addConn(c){
   </div>
   <details><summary>Advanced passthrough</summary>
     <div class="f"><label>api-properties / additional-properties</label><textarea class="c-props" rows="2"></textarea></div>
+    <div class="f"><label>Other connection properties</label><textarea class="c-extra" rows="2" placeholder="user-authentication-mqcsp: false"></textarea><div class="h">Any other connector property, one key: value per line (indent to nest), copied through verbatim beside the keys the tool writes.</div></div>
   </details>`;
   $('conns-list').appendChild(d);
   if(c) fillConn(d, c);
@@ -901,6 +908,8 @@ function syncSide(el){
   box.querySelector('.x-ref-f').classList.toggle('vis', ref);
   box.querySelector('.x-sol').classList.toggle('vis', !ref && !mq);
   box.querySelector('.x-mq').classList.toggle('vis', !ref && mq);
+  // Other properties belong to the connection, so a conn-ref side has no box.
+  box.querySelector('.x-extra-f').classList.toggle('vis', !ref);
   gen();
 }
 // syncWfTransform shows the fields of the transform mode a workflow card has
@@ -1008,7 +1017,7 @@ function readSide(box){
     host: '', msgVpn: '', clientUser: emptyCred(), clientPass: emptyCred(), keyAlias: '',
     connName: '', queueManager: '', channel: '', user: emptyCred(), password: emptyCred(), tls: false, cipher: '',
     destKind: q('x-dk').value, dest: q('x-dest').value.trim(),
-    props: [], tune: []
+    props: [], tune: [], extra: []
   };
   if(!ref){
     if(sys === 'solace'){
@@ -1022,10 +1031,19 @@ function readSide(box){
       s.cipher = q('x-cipher').value.trim(); s.keyAlias = q('x-mqalias').value.trim();
     }
     s.props = parseProps(q('x-props').value);
+    s.extra = parseProps(q('x-extra').value);
   }
   s.tune = parseProps(q('x-tune').value);
   return s;
 }
+
+// keyedProps drops the "- item" lines of a parsed block: a block's other
+// properties are a mapping, so an item has nowhere to go. The model keeps
+// them, for checkExtraKeys to report; the files and the preview take only
+// these. carriedExtras also leaves out a transform-looking key, which Go keeps
+// out of Side.Extra (the file still carries it, for the CLI to refuse too).
+function keyedProps(props){ return (props || []).filter(p => p.key !== undefined); }
+function carriedExtras(props){ return keyedProps(props).filter(p => p.key.indexOf('transform') !== 0); }
 
 function readModel(){
   const m = {};
@@ -1038,7 +1056,7 @@ function readModel(){
       system: sys, connRef: '',
       host: '', msgVpn: '', clientUser: emptyCred(), clientPass: emptyCred(), keyAlias: '',
       connName: '', queueManager: '', channel: '', user: emptyCred(), password: emptyCred(), tls: false, cipher: '',
-      destKind: '', dest: '', props: parseProps(q('c-props').value), tune: []
+      destKind: '', dest: '', props: parseProps(q('c-props').value), tune: [], extra: parseProps(q('c-extra').value)
     };
     if(sys === 'solace'){
       s.host = q('c-host').value.trim(); s.msgVpn = q('c-vpn').value.trim();
@@ -1082,6 +1100,7 @@ function readModel(){
   m.loggingLevel = parseProps(V('i-log'));
   m.syslog = C('i-sl-on') ? { host: V('i-sl-host'), port: parseInt(V('i-sl-port') || '0', 10), protocol: V('i-sl-proto') } : null;
   m.solaceDefaults = parseProps(V('i-soldef'));
+  m.mqDefaults = parseProps(V('i-mqdef'));
   m.management = C('i-mgmt-on')
     ? { present: true, port: V('i-mgmt-port'), healthShowDetails: V('i-mgmt-hsd') }
     : { present: false };
@@ -1108,7 +1127,7 @@ function readModel(){
         system: 'solace', connRef: '', host: V('i-le-host'), msgVpn: V('i-le-vpn'),
         clientUser: readCredById('i-le-user', 'i-le-user-env'), clientPass: readCredById('i-le-pass', 'i-le-pass-env'), keyAlias: V('i-le-alias'),
         connName: '', queueManager: '', channel: '', user: emptyCred(), password: emptyCred(), tls: false, cipher: '',
-        destKind: '', dest: '', props: parseProps(V('i-le-props')), tune: []
+        destKind: '', dest: '', props: parseProps(V('i-le-props')), tune: [], extra: parseProps(V('i-le-extra'))
       };
     }
   }
@@ -1202,6 +1221,8 @@ function sideBody(s, ind, withDest){
   if(!s.connRef && s.props.length){
     o += blk(s.system === 'solace' ? 'api-properties' : 'additional-properties', emitProps(s.props, ind + '  '), ind);
   }
+  // Other properties are siblings of the keys above, verbatim.
+  if(!s.connRef && keyedProps(s.extra).length) o += emitProps(keyedProps(s.extra), ind);
   return o;
 }
 
@@ -1270,6 +1291,7 @@ function emitEnv(m){
   }
 
   if(m.solaceDefaults.length) y += '\nsolace-defaults:\n' + emitProps(m.solaceDefaults, '  ');
+  if(keyedProps(m.mqDefaults).length) y += '\nmq-defaults:\n' + emitProps(keyedProps(m.mqDefaults), '  ');
 
   // Shared by every platform, so emitted once above the target sections.
   const img = m.image || {};
@@ -1472,8 +1494,8 @@ const TRANSFORM_HEADERS_DEPRECATED = 'transform-headers is deprecated by Solace 
 // transform-headers textarea -- an indented or "- " line becomes a nested value
 // rather than one SpEL expression, and a header can be typed twice -- and the
 // deprecation notice the CLI's validate (Lint) prints, which is the run these
-// findings mirror. Misplaced transforms cannot arise either: the page only ever
-// writes the top-level keys.
+// findings mirror. A transform-looking key typed into an "Other connection
+// properties" box is reported by checkExtraKeys, as the CLI's scan would.
 function checkTransforms(add, warn, m){
   m.wfs.forEach(wf => {
     if(!wf.file || !wf.transforms || !wf.transforms.length) return;
@@ -1526,6 +1548,18 @@ function validateModel(m){
     checkSide(add, warn, wf.file, 'source', wf.source, true, haveKeystore, m.connections);
     checkSide(add, warn, wf.file, 'target', wf.target, false, haveKeystore, m.connections);
   });
+
+  // A block's other keys, every run (Go: checkAllExtraKeys, after the sides):
+  // connections by name, each workflow's sides, the session, mq-defaults.
+  m.connections.filter(c => c.name).slice().sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+    .forEach(c => checkExtraKeys(add, warn, ENV_FILE, 'connections.' + c.name, c.side, m, false));
+  m.wfs.forEach(wf => {
+    if(!wf.file) return;
+    checkExtraKeys(add, warn, wf.file, 'source', wf.source, m, false);
+    checkExtraKeys(add, warn, wf.file, 'target', wf.target, m, false);
+  });
+  if(m.leader.session) checkExtraKeys(add, warn, ENV_FILE, 'leader-election session', m.leader.session, m, false);
+  if((m.mqDefaults || []).length) checkExtraKeys(add, warn, ENV_FILE, 'mq-defaults', { system: 'mq', tls: false, cipher: '', extra: m.mqDefaults }, m, true);
 
   checkDefaultsCredentials(add, warn, m);
   checkTransforms(add, warn, m);
@@ -1766,6 +1800,142 @@ function checkExpansion(warn, file, label, value){
   if(!vars.length) return;
   const names = vars.map(v => '\${' + v + '}').join(', ');
   warn(file, `${label} "${value}" references ${names}; solmq-conn-util expands \${VAR} and \${VAR:default} placeholders from its OWN environment at generate time, so this preview may differ from the generated application.yml. If a referenced variable is unset and has no default, the text passes through unchanged and the CLI emits its own warning naming it`);
+}
+
+// The tool's own key sets per system, mirroring spec.KnownKeys,
+// spec.ToolManagedKeys and spec.CredentialKeys; pinned against them by
+// TestGeneratorPageKnownKeysInSync. Every other key passes through.
+const SOLACE_KEYS = ['api-properties', 'client-password', 'client-password-env', 'client-username', 'client-username-env', 'conn-ref', 'consumer', 'host', 'key-alias', 'msg-vpn', 'producer', 'queue', 'topic'];
+const MQ_KEYS = ['additional-properties', 'channel', 'cipher', 'conn-name', 'conn-ref', 'consumer', 'key-alias', 'password', 'password-env', 'producer', 'queue', 'queue-manager', 'tls', 'topic', 'user', 'user-env'];
+const SOLACE_MANAGED = ['host', 'msg-vpn', 'client-username', 'client-password', 'api-properties'];
+const MQ_MANAGED = ['queue-manager', 'channel', 'conn-name', 'user', 'password', 'ssl-bundle', 'additional-properties'];
+const SOLACE_CREDS = ['client-username', 'client-password'];
+const MQ_CREDS = ['user', 'password'];
+const EXTRA_KEY_RE = /^[A-Za-z0-9_][A-Za-z0-9_.\-\[\]]*$/;
+const SECRET_KEY_RE = /password|passwd|secret|token|passphrase/i;
+
+function canonicalMatch(ck, keys){ return keys.find(k => canonicalKey(k) === ck) || ''; }
+// plainVal is the value Go sees once yaml decodes a props line: one pair of
+// surrounding quotes removed, or else a trailing " # comment" dropped.
+function plainVal(v){
+  const s = String(v == null ? '' : v).trim();
+  const q = s[0];
+  if(q === '"' || q === "'"){
+    for(let i = 1; i < s.length; i++){
+      if(q === '"' && s[i] === '\\'){ i++; continue; }
+      if(s[i] === q){ if(q === "'" && s[i + 1] === "'"){ i++; continue; } return s.slice(1, i); }
+    }
+    return s;
+  }
+  const h = s.search(/\s#/);
+  return h >= 0 ? s.slice(0, h).trim() : s;
+}
+function isLiteralVal(v){ if(typeof v !== 'string') return false; const s = plainVal(v); return s !== '' && s.indexOf('${') < 0; }
+function isFalseVal(v){ return ['false', 'no', 'off', '0'].indexOf(plainVal(v).toLowerCase()) >= 0; }
+// editDistance is the Levenshtein distance between a and b. Mirrors validate's.
+function editDistance(a, b){
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for(let i = 1; i <= a.length; i++){
+    const cur = [i];
+    for(let j = 1; j <= b.length; j++){
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+// nearestKnownKey mirrors validate's: the schema key ck is most likely a typo
+// of, within one edit of a short key or two of a longer one, never equal, only
+// for a key of four characters or more; the first key in sorted order wins a tie.
+function nearestKnownKey(ck, known){
+  if(ck.length < 4) return '';
+  let best = '', bestDist = -1;
+  known.forEach(k => {
+    const kc = canonicalKey(k), limit = kc.length < 6 ? 1 : 2;
+    const dist = editDistance(ck, kc);
+    if(dist === 0 || dist > limit) return;
+    if(bestDist < 0 || dist < bestDist){ best = k; bestDist = dist; }
+  });
+  return best;
+}
+// warnSecretLiterals mirrors validate's: a key (or a nested leaf key) that reads
+// like a secret, carrying a literal value, is worth a look.
+function warnSecretLiterals(warn, file, label, sys, path, p){
+  if(p.children){
+    p.children.forEach(c => { if(c.key !== undefined) warnSecretLiterals(warn, file, label, sys, path + '.' + c.key, c); });
+    return;
+  }
+  const leaf = path.slice(path.lastIndexOf('.') + 1);
+  if(SECRET_KEY_RE.test(leaf) && isLiteralVal(p.val)){
+    warn(file, label + ' ' + sys + ': ' + goQuote(path) + ' looks like a secret, but its value is written into application.yml as a literal; if it is sensitive, reference a credential the tool already mounts as ${NAME} instead (user guide section 9.2)');
+  }
+}
+// misplacedTransformMsg mirrors validate.checkMisplacedTransform for one
+// transform-looking key at dotted path p in a workflow file; ENV_TRANSFORM_MSG
+// is the CLI's text for one in env.yaml, where no transform is read at all.
+function misplacedTransformMsg(p){
+  const k = p.slice(p.lastIndexOf('.') + 1);
+  if(k === 'transform') return p + ' is in the wrong place: a transform applies to the whole workflow, so transform: goes at the top level of this file, beside source: and target:';
+  if(k === 'transform-headers') return p + ' is in the wrong place: header transforms apply to the whole workflow, so transform-headers: goes at the top level of this file, beside source: and target:';
+  if(k === 'transform-payload' || k === 'transform-payloads') return p + " is not read by this tool: payload transforms are written as target['payload'] expressions in a transform: block at the top level of this file, not as a transform-payload section";
+  return p + " is not a key: a workflow file's transforms are written transform: (current) or transform-headers: (deprecated) at the top level of this file";
+}
+const ENV_TRANSFORM_MSG = ' is not read here: a transform belongs to one workflow, so write transform: (or the deprecated transform-headers:) at the top level of each workflow file it applies to';
+// checkExtraKeys mirrors validate.checkExtraKeys, message for message: a block's
+// other keys are passed through, so what is caught is a spelling of a key the
+// tool handles, a key that cannot be a YAML key, and the warnings worth a look.
+// Two findings are the page's own: a "- item" line, which has no key to land
+// under (the CLI would refuse the file as YAML), and a transform-looking key,
+// which Go keeps out of Side.Extra and reports from its transform scan instead.
+// The conn-ref rule needs no mirror: a conn-ref side has no box for these.
+function checkExtraKeys(add, warn, file, label, s, m, defaults){
+  const extra = s.extra || [];
+  if(!extra.length) return;
+  const sys = s.system, where = label + ' ' + sys;
+  const prop = label === 'leader-election session' ? 'solace.connector.management.session' : (sys === 'solace' ? 'solace.java' : 'ibm.mq');
+  const creds = sys === 'solace' ? SOLACE_CREDS : MQ_CREDS;
+  const known = sys === 'solace' ? SOLACE_KEYS : MQ_KEYS;
+  const mode = m.leader && m.leader.present ? m.leader.mode : '';
+  const haveTruststore = !!(m.tls.truststore && m.tls.truststore.file);
+  const seen = {};
+  extra.forEach(p => {
+    if(p.item !== undefined){ add(file, `${where}: "- ${p.item}" has no key: a list is written under its key, indented below it`); return; }
+    const k = p.key;
+    if(!defaults && k.indexOf('transform') === 0){
+      add(file, label === 'source' || label === 'target'
+        ? misplacedTransformMsg(`${label}.${sys}.${k}`)
+        : (label === 'leader-election session' ? 'leader-election.session.' : `${label}.${sys}.`) + k + ENV_TRANSFORM_MSG);
+      return;
+    }
+    if(seen[k]) add(file, `${where} sets ${goQuote(k)} twice; keep one`);
+    seen[k] = true;
+    if(!EXTRA_KEY_RE.test(k)){ add(file, `${where}: key ${goQuote(k)} is not a plain property name (letters, digits and . _ - [ ] only), so it cannot be written into application.yml as a key; rename it`); return; }
+    const ck = canonicalKey(k);
+    if(sys === 'mq' && ck === 'sslbundle'){ add(file, `${where}: ${goQuote(k)} is written by the tool itself (from tls: true and tls.truststore), so it cannot be set here; remove it and enable TLS with tls: true and a tls.truststore in env.yaml instead`); return; }
+    const cred = canonicalMatch(ck, creds);
+    if(cred){
+      add(file, defaults
+        ? `${where}: ${goQuote(k)} is a credential, which belongs on each connection as ${cred} (or ${cred}-env), not in ${label}`
+        : `${where}: ${goQuote(k)} is another spelling of ${cred}, a credential: written this way its value would land in application.yml as a literal instead of being mounted as a secret; write ${cred} (or ${cred}-env) instead`);
+      return;
+    }
+    const schema = canonicalMatch(ck, known);
+    if(schema){
+      add(file, defaults
+        ? `${where}: ${goQuote(k)} is a key the tool reads on each connection, not a default; set ${schema} on the connection instead`
+        : `${where}: ${goQuote(k)} is another spelling of ${schema}, which the tool reads only in that form; write ${schema}`);
+      return;
+    }
+    if(sys === 'mq' && ck === 'sslciphersuite' && s.cipher){ add(file, `${where}: ${goQuote(k)} and cipher: both set the cipher suite (the tool writes cipher: as additional-properties.WMQ_SSL_CIPHER_SUITE); keep one of the two`); return; }
+    if(sys === 'mq' && ck === 'useibmciphermappings' && s.tls && !isFalseVal(p.val)) warn(file, `${where}: ${goQuote(k)} overrides the -Dcom.ibm.mq.cfg.useIBMCipherMappings=false the tool sets for a TLS connection, so the JCE cipher names in cipher: may no longer apply`);
+    if(sys === 'mq' && ck === 'jks' && s.tls && haveTruststore) warn(file, `${where}: jks.* is ignored by the connector while ssl-bundle is set; the stores in effect are env.yaml tls.truststore/keystore`);
+    if(sys === 'solace' && ck === 'clientname' && (mode === 'active_active' || mode === 'active_standby') && isLiteralVal(p.val)) warn(file, where + ': ' + goQuote(k) + ' is fixed, but every replica shares this file and a client name must be unique per connection; use a per-instance value such as ${HOSTNAME}, or leave it for the connector to generate');
+    const lk = k.toLowerCase();
+    if(lk.endsWith('-env') || lk.endsWith('_env')) warn(file, `${where}: ${goQuote(k)} is not a credential the tool resolves, so it is passed through as ${prop}.${k} unchanged and the connector reads it as a plain property; the credential keys are ${creds[0]} and ${creds[1]}, each with an -env twin`);
+    else warnSecretLiterals(warn, file, label, sys, k, p);
+    const near = nearestKnownKey(ck, known);
+    if(near) warn(file, `${where}: ${goQuote(k)} is not a key this tool knows; did you mean ${goQuote(near)}? It is passed through as ${prop}.${k}, which the connector ignores unless it reads that name`);
+  });
 }
 
 // checkSideExpansion runs checkExpansion over the non-credential string
@@ -2166,11 +2336,14 @@ function displayName(a){
   if(a.connName) return a.connName;
   return a.kind === 'solace' ? 'solace:' + a.vpn : 'mq:' + a.qm;
 }
+// sameChildren mirrors consolidate.go's sameNode for the nested case: the same
+// block arriving again from a shared connection is not a change.
+function sameChildren(a, b){ return JSON.stringify(a || null) === JSON.stringify(b || null); }
 function mergeProp(list, p, warns, binder){
   if(p.key === undefined) return list;
   for(let i = 0; i < list.length; i++){
     if(list[i].key === p.key){
-      if(list[i].val !== p.val || p.children){
+      if(list[i].val !== p.val || !sameChildren(list[i].children, p.children)){
         warns.push(`binder "${binder}": passthrough key "${p.key}" set more than once; last (by filename) wins`);
         list[i] = p;
       }
@@ -2185,6 +2358,35 @@ function mergeProp(list, p, warns, binder){
 // leaderSessionOwner.
 function binderOwner(name){ return `binder "${name}"`; }
 const LEADER_SESSION_OWNER = 'leader-election session';
+// canonicalKey folds a property name the way Spring's relaxed binding matches
+// it: case and the - and _ separators are ignored. Mirrors spec.CanonicalKey.
+function canonicalKey(k){ return String(k).replace(/[-_]/g, '').toLowerCase(); }
+// overlayExtras lays a connection's own other keys over a defaults block: a key
+// the connection also sets (by canonical name) is replaced where the default
+// stood, anything else is appended, no warning. Mirrors consolidate.go.
+function overlayExtras(base, over){
+  if(!over || !over.length) return base;
+  const out = (base || []).slice();
+  over.forEach(p => {
+    const ck = canonicalKey(p.key);
+    const i = out.findIndex(q => canonicalKey(q.key) === ck);
+    if(i >= 0) out[i] = p; else out.push(p);
+  });
+  return out;
+}
+// dropManaged drops, with the passthrough warning, any other key that names in
+// any spelling a property the tool writes itself under this system's block.
+// Mirrors consolidate.go's dropManaged; validate refuses these first.
+function dropManaged(props, system, warns, owner){
+  const managed = (system === 'solace' ? SOLACE_MANAGED : MQ_MANAGED).map(canonicalKey);
+  return (props || []).filter(p => {
+    if(managed.indexOf(canonicalKey(p.key)) >= 0){
+      warns.push(`${owner}: passthrough overrides tool-managed key "${p.key}"; tool value kept`);
+      return false;
+    }
+    return true;
+  });
+}
 // appendPassthrough appends verbatim props after the tool-managed props, dropping
 // (with a warning) any passthrough key that collides with a tool-managed key.
 // owner is the ready-made label the warning opens with.
@@ -2414,7 +2616,7 @@ function consolidateBuild(wfs, m, statusPassword){
     if(!a){
       a = { key: key, kind: s.system, name: '', host: '', vpn: '', user: emptyCred(), pass: emptyCred(),
             conn: '', qm: '', ch: '', mqUser: emptyCred(), mqPass: emptyCred(), tls: false, keyAlias: '',
-            cipher: '', connName: '', pass2: [], binder: null };
+            cipher: '', connName: '', pass2: [], extra: [], binder: null };
       if(s.system === 'solace'){
         a.host = s.host; a.vpn = s.msgVpn;
         a.user = sideUsername(s); a.pass = sideSecret(s);
@@ -2438,6 +2640,7 @@ function consolidateBuild(wfs, m, statusPassword){
       }
     }
     (s.props || []).forEach(p => { a.pass2 = mergeProp(a.pass2, p, warns, displayName(a)); });
+    carriedExtras(s.extra).forEach(p => { a.extra = mergeProp(a.extra, p, warns, displayName(a)); });
     return a;
   }
   rwfs.forEach(w => { register(w.src); register(w.tgt); });
@@ -2458,13 +2661,15 @@ function consolidateBuild(wfs, m, statusPassword){
     a.name = assign(base);
   });
 
-  // finalize binders + bundles
+  // finalize binders + bundles. mq-defaults is read once, so a managed key in
+  // it is reported once, not per binder (Go: Build's mqDefaults).
+  const mqDefaults = dropManaged(keyedProps(m.mqDefaults), 'mq', warns, 'mq-defaults');
   accs.forEach(a => {
     if(a.kind === 'solace'){
       const sb = { host: a.host, msgVpn: a.vpn,
                    clientUser: secretRef(stableName(a.name, 'CLIENT_USERNAME'), binderOwner(a.name) + ' client-username', a.user),
                    clientPass: secretRef(stableName(a.name, 'CLIENT_PASSWORD'), binderOwner(a.name) + ' client-password', a.pass),
-                   extras: (m.solaceDefaults || []).slice(), apiProps: [] };
+                   extras: overlayExtras((m.solaceDefaults || []).slice(), dropManaged(a.extra, 'solace', warns, binderOwner(a.name))), apiProps: [] };
       let props = [];
       if(a.tls) props = solaceProps(m, a.keyAlias, secretRef);
       sb.apiProps = appendPassthrough(props, a.pass2, warns, binderOwner(a.name));
@@ -2473,7 +2678,7 @@ function consolidateBuild(wfs, m, statusPassword){
       const mb = { queueManager: a.qm, channel: a.ch, connName: a.conn,
                    user: secretRef(stableName(a.name, 'USER'), binderOwner(a.name) + ' user', a.mqUser),
                    password: secretRef(stableName(a.name, 'PASSWORD'), binderOwner(a.name) + ' password', a.mqPass),
-                   sslBundle: '', addlProps: [] };
+                   sslBundle: '', extras: overlayExtras(mqDefaults, dropManaged(a.extra, 'mq', warns, binderOwner(a.name))), addlProps: [] };
       if(a.tls){
         model.mqTLS = true;
         // No truststore configured means no bundle to reference: the connection
@@ -2624,7 +2829,7 @@ function buildLeaderElection(m, secretRef, leaderNames, warns){
       host: sess.host, msgVpn: sess.msgVpn,
       clientUser: secretRef(names[0], LEADER_SESSION_OWNER + ' client-username', sideUsername(sess)),
       clientPass: secretRef(names[1], LEADER_SESSION_OWNER + ' client-password', sideSecret(sess)),
-      extras: (m.solaceDefaults || []).slice(), apiProps: []
+      extras: overlayExtras((m.solaceDefaults || []).slice(), dropManaged(carriedExtras(sess.extra), 'solace', warns, LEADER_SESSION_OWNER)), apiProps: []
     };
     const props = isTCPS(sess.host) ? solaceProps(m, sess.keyAlias, secretRef) : [];
     // One session resolves to exactly one connection, so unlike a binder -- which
@@ -2703,6 +2908,7 @@ function renderCloudStream(line, mm){
       if(b.mq.user) line(16, 'user: ' + yq(b.mq.user));
       if(b.mq.password) line(16, 'password: ' + yq(b.mq.password));
       if(b.mq.sslBundle) line(16, 'ssl-bundle: ' + b.mq.sslBundle);
+      (b.mq.extras || []).forEach(p => renderProp(line, 16, p));
       if(b.mq.addlProps.length){
         line(16, 'additional-properties:');
         b.mq.addlProps.forEach(p => renderProp(line, 18, p));
@@ -3163,7 +3369,7 @@ function mkSide(o){
   return Object.assign({
     system: 'mq', connRef: '', host: '', msgVpn: '', clientUser: emptyCred(), clientPass: emptyCred(), keyAlias: '',
     connName: '', queueManager: '', channel: '', user: emptyCred(), password: emptyCred(), tls: false, cipher: '',
-    destKind: 'queue', dest: '', props: [], tune: []
+    destKind: 'queue', dest: '', props: [], tune: [], extra: []
   }, o);
 }
 // litCred/envCred build a {literal, env} pair for the sample fixture -- mirrors
@@ -3272,6 +3478,7 @@ function fillConn(card, c){
   q('c-cipher').value = c.side.cipher;
   q('c-mqalias').value = c.side.system === 'mq' ? c.side.keyAlias : '';
   q('c-props').value = emitProps(c.side.props, '');
+  q('c-extra').value = emitProps(c.side.extra || [], '');
 }
 function fillSide(box, s){
   const q = cls => box.querySelector('.' + cls);
@@ -3288,6 +3495,7 @@ function fillSide(box, s){
   q('x-mqalias').value = s.system === 'mq' ? s.keyAlias : '';
   q('x-props').value = emitProps(s.props, '');
   q('x-tune').value = emitProps(s.tune, '');
+  q('x-extra').value = emitProps(s.extra || [], '');
   syncSide(q('x-sys'));
 }
 function fillWf(card, w){
@@ -3312,7 +3520,7 @@ function clearForm(){
    'i-sl-on', 'i-k8s-svc', 'i-dk-libs-on', 'i-pd-libs-on'].forEach(id => setC(id, false));
   ['i-ts-pass-env', 'i-ks-pass-env', 'i-le-user-env', 'i-le-pass-env',
    'i-img-user-env', 'i-img-pass-env'].forEach(id => setC(id, true));
-  ['i-log', 'i-soldef', 'i-le-queue', 'i-le-fo', 'i-le-props', 'i-k8s-name', 'i-k8s-ns',
+  ['i-log', 'i-soldef', 'i-mqdef', 'i-le-queue', 'i-le-fo', 'i-le-props', 'i-le-extra', 'i-k8s-name', 'i-k8s-ns',
    'i-k8s-cpu', 'i-k8s-mem', 'i-k8s-ipull-name',
    'i-img-repo', 'i-img-name', 'i-img-tag', 'i-img-user', 'i-img-pass', 'i-tz', 'i-jto', 'i-jjo',
    'i-ts-file', 'i-ts-pass', 'i-ks-file', 'i-ks-pass'].forEach(id => setV(id, ''));
@@ -3357,6 +3565,7 @@ function loadSample(){
     setV('i-sl-proto', m.syslog.protocol);
   }
   setV('i-soldef', emitProps(m.solaceDefaults, ''));
+  setV('i-mqdef', emitProps(m.mqDefaults || [], ''));
 
   setC('i-mgmt-on', true);
   setV('i-mgmt-port', m.management.port);

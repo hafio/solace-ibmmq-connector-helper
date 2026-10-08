@@ -532,9 +532,10 @@ msg-vpn: ${VPN:prod}          # ${VAR:default} -- default used when VAR is unset
   literal credential already triggers its own warning telling you to switch to
   `-env`.
 - **Verbatim passthrough never expands** either -- `api-properties`,
-  `additional-properties`, `consumer`, `producer`, a workflow's `transform` and
-  `transform-headers`, `solace-defaults`, `logging.level` and the leader-election
-  `fail-over` block are copied through
+  `additional-properties`, any other key of a `solace:`/`mq:` block, `consumer`,
+  `producer`, a workflow's `transform` and `transform-headers`, `solace-defaults`,
+  `mq-defaults`, `logging.level` and the leader-election `fail-over` block are
+  copied through
   untouched ([section 6.4](#64-destinations-durable-names-passthrough)), so a
   `${...}` inside one reaches the connector as typed and is resolved by Spring at
   runtime, not by `solmq-conn-util` at generate time.
@@ -610,6 +611,7 @@ Solace pattern is allowed but emits an advisory **warning** (see
 | `topic` | one of | Solace topic to **produce** to; **not valid on a `source`** -- a Solace source must be a `queue` ([section 6.5](#65-event-driven-guidance-errors-and-warnings)) |
 | `api-properties` | no | verbatim map -> `solace.java.api-properties`, and -> the leader-election `session.api-properties` when this connection is the management session |
 | `consumer` / `producer` | no | verbatim per-binding tuning |
+| _any other key_ | no | copied through verbatim as `solace.java.<key>` -- the connector's own session properties, e.g. `client-name`, `connect-retries-per-host`, `reconnect-retry-wait-in-millis` ([section 6.4](#64-destinations-durable-names-passthrough)). Another spelling of a key above (`msgVpn`, `clientPassword`) is an error |
 
 ### 6.3 `mq:` options
 
@@ -625,14 +627,15 @@ Solace pattern is allowed but emits an advisory **warning** (see
 | `key-alias` | no | client key from the shared keystore -> **mTLS**; requires `tls: true` and a keystore |
 | `queue` | one of | consume from / produce to an MQ queue |
 | `topic` | one of | MQ topic; a `topic:` **source** is always a durable subscription (auto-named) |
-| `additional-properties` | no | verbatim map -> `ibm.mq.additional-properties` |
+| `additional-properties` | no | verbatim map -> `ibm.mq.additional-properties`: JMS connection-factory properties by their `WMQ_*` constant name or raw `XMSC_*` name (the starter resolves only `WMQ_*` names, so `USER_AUTHENTICATION_MQCSP` must be written `XMSC_USER_AUTHENTICATION_MQCSP`); a value that reads as a number or `true`/`false` is typed as such |
 | `consumer` / `producer` | no | verbatim per-binding tuning |
+| _any other key_ | no | copied through verbatim as `ibm.mq.<key>` -- the IBM MQ starter's properties, e.g. `user-authentication-mqcsp: false` (send the password in the pre-MQ-9.2.1 compatibility mode rather than an MQCSP structure; the starter applies it when a password is set), `application-name`, `client-id`, `ccdt-url`, `reconnect`, a nested `pool:` block. `userAuthenticationMQCSP` binds the same ([section 6.4](#64-destinations-durable-names-passthrough)). Another spelling of a key above (`queueManager`, `Password`) is an error |
 
 > [!NOTE]
 > A `solace:`/`mq:` side may instead set **`conn-ref: <name>`** to reuse a connection
 > from `env.yaml` ([section 6.6](#66-reusable-connections-conn-ref)). A conn-ref side
 > then sets *only* its `queue:`/`topic:` plus the per-binding `consumer:`/`producer:`
-> tuning -- any *connection* field is an error.
+> tuning -- any *connection* field, any other key included, is an error.
 
 ### 6.4 Destinations, durable names, passthrough
 
@@ -648,6 +651,31 @@ Solace pattern is allowed but emits an advisory **warning** (see
 - `api-properties`, `additional-properties`, `consumer`, `producer`, and the
   workflow's own `transform` (or deprecated `transform-headers`) are copied through
   **verbatim**, preserving key order and scalar quoting.
+- **Any other key under `solace:` or `mq:` is a connection property and passes
+  through verbatim too**, as a sibling of the keys the tool writes -- `solace.java.<key>`,
+  `ibm.mq.<key>`, and `solace.connector.management.session.<key>` for the management
+  session -- in file order, a nested block whole. There is no allowlist: the
+  connector owns that vocabulary (IBM's `mq-jms-spring-boot-starter`, Solace's
+  `solace-java` starter), and a property it does not read it ignores. A few rules
+  apply, on every command. Another spelling of a key the tool reads itself
+  (`queueManager`, `apiProperties`, `clientPassword`) is an **error**: Spring binds
+  `queue-manager`, `queueManager` and `QUEUE_MANAGER` to one property, so the
+  connector would receive it twice -- or, for a credential, its value would land in
+  `application.yml` as a literal. `ssl-bundle` is derived from `tls:` and the
+  truststore and cannot be set. A key must be a plain property name (letters,
+  digits and `. _ - [ ]`), since it is written unquoted into `application.yml`, and
+  `ssl-cipher-suite` beside `cipher:` on one side sets the cipher suite twice; both
+  are **errors** too. A key within a typo of one the tool reads **warns** ("did you
+  mean"). Two sides on one binder merge their keys like `api-properties` (last by
+  filename wins a disagreement, with a warning). The tool also warns on an `-env`
+  name (not a credential the tool resolves), on a secret-looking key with a literal
+  value (reference a mounted credential as `${NAME}` instead,
+  [section 9.2](#92-mount-names)), on two keys that fight the TLS wiring of a
+  `tls: true` side -- `use-ibm-cipher-mappings` (the tool sets the JVM flag to
+  `false`) and `jks.*` (ignored while `ssl-bundle` is set) -- and on a fixed
+  `client-name` under `active_*` (every replica shares the file, and a client name
+  must be unique; use `${HOSTNAME}`). A `${...}` inside any of these reaches Spring
+  as typed ([section 5.1](#51-variable-expansion-var)).
 
 ### 6.5 Event-driven guidance (errors and warnings)
 
@@ -704,8 +732,8 @@ target:
 ```
 
 - A `conn-ref` side is **strict** about *connection* fields: host, creds, tls, cipher,
-  key-alias and api/additional-properties alongside `conn-ref` are an **error** -- they
-  belong on the connection itself. `queue:`/`topic:` and the per-binding
+  key-alias, api/additional-properties and any other key alongside `conn-ref` are an
+  **error** -- they belong on the connection itself. `queue:`/`topic:` and the per-binding
   `consumer:`/`producer:` blocks are the side's own and stay allowed.
 - The referenced connection must exist and its system must match the side's
   `solace:`/`mq:` block.
@@ -948,6 +976,8 @@ leader-election:                 # standalone | active_active | active_standby
 solace-defaults:
   connect-retries: -1
   reconnect-retries: -1
+mq-defaults:                     # optional; merged into every MQ binder's ibm.mq.*
+  user-authentication-mqcsp: false
 ```
 
 | Section | Option | Notes |
@@ -965,7 +995,8 @@ solace-defaults:
 | `leader-election` | `queue` | management queue; **required** for `active_*` |
 | `leader-election` | `conn-ref` / `session` | the Solace management **session** (`conn-ref` to a solace connection, or inline `session:`); required for `active_*`. Set exactly one -- both together is an error. The block is a connection only: `queue:`, `topic:`, `consumer:` and `producer:` inside it are rejected (the management queue is `leader-election.queue`, one level up) |
 | `leader-election` | `fail-over` | optional map, emitted verbatim under `leader-election.fail-over` |
-| `solace-defaults` | `<key>: <value>` | merged verbatim into every Solace binder's `solace.java.*` **and into the leader-election `session`** (e.g. connect/reconnect retries) |
+| `solace-defaults` | `<key>: <value>` | merged verbatim into every Solace binder's `solace.java.*` **and into the leader-election `session`** (e.g. connect/reconnect retries); a connection's own key of the same name, in any spelling, replaces it in place ([section 6.4](#64-destinations-durable-names-passthrough)) |
+| `mq-defaults` | `<key>: <value>` | merged verbatim into every MQ binder's `ibm.mq.*` (e.g. `user-authentication-mqcsp: false` fleet-wide); a connection's own key of the same name replaces it in place. A key the tool reads on each connection (`channel`, `user`) is rejected here |
 
 `active_active` and `active_standby` render a `solace.connector.management.leader-election`
 block with the `queue` and a Solace `session`; `standalone` (or an absent block) emits
@@ -2193,9 +2224,9 @@ building the file.
 binders (connections sharing a broker/queue-manager tuple collapse into one binder),
 numbered workflows, the mandatory `undefined` binder (always emitted, always last),
 derived destination-types, auto `durable-subscription-name` for MQ topic consumers,
-verbatim `api-properties` / `additional-properties` (the one place a `${VAR}`
-survives into the output, for Spring to resolve at runtime -- everywhere else it is
-expanded at generate time, [section 5.1](#51-variable-expansion-var)), and the
+verbatim `api-properties` / `additional-properties` and any other connection key
+(the places a `${VAR}` survives into the output, for Spring to resolve at runtime --
+everywhere else it is expanded at generate time, [section 5.1](#51-variable-expansion-var)), and the
 Solace + MQ TLS/mTLS blocks. It is always a single document (a folder holding more
 than 20 workflows is rejected -- see [section 5](#5-the-config-file-and-workflow-discovery)).
 Point `-o` **outside** the workflow folder so the output is not re-scanned as a
@@ -3074,6 +3105,19 @@ container is called something else, is not reachable with `cli` -- reach it with
 - **Renaming a workflow file changes its MQ durable subscription name** (it is part
   of the UUIDv5 key). Rename deliberately, or the old durable subscription is
   orphaned.
+- **Any other key under `solace:`/`mq:` reaches the connector, typos included.** The
+  connector ignores a property it does not read, silently, so `validate` warns on a
+  key within a typo of one the tool reads ("did you mean"); a wrong name with no
+  near neighbour passes through unremarked. Coming from a release that dropped
+  unknown keys: regenerating can add keys to `application.yml` that were silently
+  ignored before (and `deploy` then rolls the pods), and a camelCase spelling of a
+  tool key that used to be ignored is now an error
+  ([section 6.4](#64-destinations-durable-names-passthrough)).
+- **An `-env` suffix means something only on the credential pairs.** `client-id-env`
+  under `mq:` is a plain property, passed through as written, and `validate` says so.
+- **A cipher clash across two sides of one binder is not detected.** `cipher:` on one
+  side and `ssl-cipher-suite:` on another that dedup onto the same binder both reach
+  the connector; on one side it is an error.
 - **`generate` fails fast; `validate` reports everything.** Use `validate` while
   authoring, `generate`/`deploy`/`remove` to produce or apply output.
 - **One shared truststore + keystore** for all connections; per-connection client

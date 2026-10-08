@@ -335,6 +335,103 @@ func TestConfigNumbersWorkflowsInLsOrder(t *testing.T) {
 	}
 }
 
+// extraKeysEnv is env.yaml for the extra-key end-to-end tests: a reusable
+// Solace connection carrying another key, the management session built from
+// it, and an mq-defaults block.
+const extraKeysEnv = `connections:
+  prod-solace:
+    solace:
+      host: tcp://b:55555
+      msg-vpn: prod
+      client-username: u
+      client-password-env: SOL_PASSWORD
+      client-name: ${HOSTNAME}
+leader-election:
+  mode: active_standby
+  queue: mgmt-q
+  conn-ref: prod-solace
+mq-defaults:
+  application-name: fleet
+`
+
+// extraKeysWorkflow is a workflow with an inline MQ source carrying other
+// keys (one in IBM's camelCase spelling, one nested) and a conn-ref target.
+const extraKeysWorkflow = `source:
+  mq:
+    conn-name: h(1414)
+    queue-manager: QM
+    channel: C
+    user: u
+    password: p
+    queue: IN
+    userAuthenticationMQCSP: false
+    pool:
+      max-connections: 5
+target:
+  solace:
+    conn-ref: prod-solace
+    queue: OUT
+`
+
+// extraKeysResolver resolves every -env credential, so the only findings are
+// the ones under test.
+var extraKeysResolver = Resolver{Env: func(string) (string, bool) { return "v", true }, Rand: fixedStatusRand}
+
+// TestConfigCarriesExtraKeysEndToEnd pins the whole path through gen.Config:
+// an inline side's other keys land under its own binder beside the tool's
+// keys, after the mq-defaults entry; a connection's other key reaches both
+// the binder a conn-ref side builds from it and the management session; and a
+// ${...} inside one reaches application.yml as typed.
+func TestConfigCarriesExtraKeysEndToEnd(t *testing.T) {
+	req := Request{Env: &File{Name: "env.yaml", Data: []byte(extraKeysEnv)}, Workflows: []File{{Name: "wf-00.yaml", Data: []byte(extraKeysWorkflow)}}}
+	out, errs, warns := Config(req, extraKeysResolver)
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if issuesContain(warns, "HOSTNAME") || issuesContain(warns, "userAuthenticationMQCSP") {
+		t.Errorf("no finding is due on these keys, got %v", warns)
+	}
+	extras := "                application-name: fleet\n                userAuthenticationMQCSP: false\n                pool:\n                  max-connections: 5\n"
+	for _, want := range []string{
+		extras,
+		"                client-password: ${SOL_PASSWORD}\n                client-name: ${HOSTNAME}\n",
+		"        client-password: ${SOL_PASSWORD}\n        client-name: ${HOSTNAME}\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing:\n%s\nin:\n%s", want, out)
+		}
+	}
+	// Siblings of the tool's own keys, after them, not inside an
+	// additional-properties block.
+	if strings.Index(out, "                conn-name: h(1414)\n") > strings.Index(out, extras) || strings.Contains(out, "additional-properties") {
+		t.Errorf("the extra keys must follow the tool's keys as siblings:\n%s", out)
+	}
+}
+
+// TestConfigRejectsExtraKeysBesideConnRef pins that another key beside
+// conn-ref fails the render like any connection field there would.
+func TestConfigRejectsExtraKeysBesideConnRef(t *testing.T) {
+	wf := strings.Replace(extraKeysWorkflow, "    conn-ref: prod-solace\n", "    conn-ref: prod-solace\n    client-name: mine\n", 1)
+	req := Request{Env: &File{Name: "env.yaml", Data: []byte(extraKeysEnv)}, Workflows: []File{{Name: "wf-00.yaml", Data: []byte(wf)}}}
+	if out, errs, _ := Config(req, extraKeysResolver); out != "" || !issuesContain(errs, "may set only queue/topic") {
+		t.Errorf("an extra key beside conn-ref must fail the render, got out=%q errs=%v", out, errs)
+	}
+}
+
+// TestConfigWarnsOnANearMissKeyButStillRenders pins that a probable typo is a
+// warning, not a block: the key passes through and the config still renders.
+func TestConfigWarnsOnANearMissKeyButStillRenders(t *testing.T) {
+	wf := strings.Replace(extraKeysWorkflow, "    userAuthenticationMQCSP: false\n", "    queue-managr: QM\n", 1)
+	req := Request{Env: &File{Name: "env.yaml", Data: []byte(extraKeysEnv)}, Workflows: []File{{Name: "wf-00.yaml", Data: []byte(wf)}}}
+	out, errs, warns := Config(req, extraKeysResolver)
+	if len(errs) != 0 || !strings.Contains(out, "                queue-managr: QM\n") {
+		t.Errorf("the typo must pass through and render, got errs=%v out:\n%s", errs, out)
+	}
+	if !issuesContain(warns, `did you mean "queue-manager"?`) {
+		t.Errorf("want the near-miss warning, got %v", warns)
+	}
+}
+
 // TestConfigWorkflowCap pins the new hard cap: a folder holding more than
 // validate.MaxWorkflows workflows is a fatal error through the real
 // gen.Config path (no sharding, no output).

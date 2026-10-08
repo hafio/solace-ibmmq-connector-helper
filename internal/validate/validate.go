@@ -141,6 +141,9 @@ func Run(ctx Context) (errs, warns []Issue) {
 	// Reusable connection definitions + per-workflow structural checks.
 	checkConnections(add, warn, ctx.Env, d, haveKeystore)
 	checkWorkflowSides(add, warn, ctx.Env, ctx.Workflows, haveKeystore, d.Connections)
+	// Every run: a block's other keys are passed through verbatim, so another
+	// spelling of a key the tool handles, or a typo, is not harmless to ignore.
+	checkAllExtraKeys(add, warn, ctx.Workflows, d)
 	checkDefaultsCredentials(add, warn, ctx, d)
 	// Every run, not just validate's: a transform in the wrong place is not
 	// harmless to ignore -- the connector would start without it. Only the

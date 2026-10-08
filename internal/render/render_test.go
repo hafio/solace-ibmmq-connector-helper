@@ -851,3 +851,185 @@ target:
 		t.Errorf("want no config.import block when ConfigImport is empty\n---\n%s", out2)
 	}
 }
+
+// truststoreDefs is an env.yaml holding only a truststore, so the MQ binder
+// carries ssl-bundle; extraDefs adds both defaults blocks to it, for the
+// extra-key render tests.
+const truststoreDefs = `
+tls:
+  truststore:
+    file: ./certs/truststore.jks
+    password-env: TS
+    type: JKS
+`
+
+const extraDefs = truststoreDefs + `solace-defaults:
+  connect-retries: -1
+  reconnect-retries: -1
+mq-defaults:
+  application-name: fleet
+`
+
+// TestApplicationRendersExtraKeys pins where a block's other keys land in
+// application.yml: an MQ binder's after ssl-bundle and before
+// additional-properties, mq-defaults first and the connection's own after; a
+// Solace binder's where solace-defaults render, the connection's value in
+// place of the default it overrides; a nested mapping whole. The document
+// reads back with the key as a sibling of queue-manager, never inside
+// additional-properties.
+func TestApplicationRendersExtraKeys(t *testing.T) {
+	d, err := spec.ParseDefaults([]byte(extraDefs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := `
+source:
+  mq:
+    conn-name: h(1414)
+    queue-manager: QM1
+    channel: C
+    user: u
+    password-env: MQP
+    tls: true
+    cipher: TLS_X
+    queue: IN
+    user-authentication-mqcsp: false
+    pool:
+      max-connections: 5
+target:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: v
+    client-username: u
+    client-password-env: SOLP
+    queue: OUT
+    connect-retries: 5
+    connect-retries-per-host: 3
+    api-properties:
+      REAPPLY_SUBSCRIPTIONS: true
+`
+	m, warns := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{MountStores: true})
+	if len(warns) != 0 {
+		t.Errorf("unexpected warnings: %v", warns)
+	}
+	out := Application(m)
+	for _, want := range []string{
+		`                ssl-bundle: mq-conn-1-bundle
+                application-name: fleet
+                user-authentication-mqcsp: false
+                pool:
+                  max-connections: 5
+                additional-properties:
+                  WMQ_SSL_CIPHER_SUITE: TLS_X
+`,
+		`                client-password: ${SOLP}
+                connect-retries: 5
+                reconnect-retries: -1
+                connect-retries-per-host: 3
+                api-properties:
+                  REAPPLY_SUBSCRIPTIONS: true
+`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("want:\n%s\nin:\n%s", want, out)
+		}
+	}
+
+	var doc struct {
+		Spring struct {
+			Cloud struct {
+				Stream struct {
+					Binders map[string]struct {
+						Environment struct {
+							IBM struct {
+								MQ map[string]any `yaml:"mq"`
+							} `yaml:"ibm"`
+						} `yaml:"environment"`
+					} `yaml:"binders"`
+				} `yaml:"stream"`
+			} `yaml:"cloud"`
+		} `yaml:"spring"`
+	}
+	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("application.yml does not read back: %v", err)
+	}
+	mq := doc.Spring.Cloud.Stream.Binders["mq-conn-1"].Environment.IBM.MQ
+	if v, ok := mq["user-authentication-mqcsp"].(bool); !ok || v {
+		t.Errorf("user-authentication-mqcsp reads back as %#v, want the bool false", mq["user-authentication-mqcsp"])
+	}
+	if pool, ok := mq["pool"].(map[string]any); !ok || pool["max-connections"] != 5 {
+		t.Errorf("pool reads back as %#v, want max-connections 5", mq["pool"])
+	}
+	if addl, _ := mq["additional-properties"].(map[string]any); addl["user-authentication-mqcsp"] != nil {
+		t.Errorf("the key must be a sibling of queue-manager, not an additional property: %v", addl)
+	}
+}
+
+// TestApplicationSessionCarriesExtraKeysLikeTheBinder extends the anti-drift
+// guard to a connection's other keys: the management session built from the
+// same connection as a binder renders the same key set, extra keys included.
+func TestApplicationSessionCarriesExtraKeysLikeTheBinder(t *testing.T) {
+	defs := strings.Replace(leaderDefs, "      key-alias: sc\n", "      key-alias: sc\n      client-name: ${HOSTNAME}\n", 1)
+	d, err := spec.ParseDefaults([]byte(defs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", leaderSrc)}, d, consolidate.Opts{MountStores: true})
+	out := Application(m)
+	binder := blockKeys(t, out, "              java:")
+	session := blockKeys(t, out, "      session:")
+	if !slices.Contains(binder, "client-name") {
+		t.Fatalf("binder block has no client-name: %q", binder)
+	}
+	if !slices.Equal(binder, session) {
+		t.Errorf("session key set drifted from the binder\nbinder:  %q\nsession: %q\n---\n%s", binder, session, out)
+	}
+}
+
+// TestApplicationEmitsExactlyTheToolManagedKeys pins the render against
+// spec.ToolManagedKeys: the keys render writes at the top of a binder's
+// solace.java / ibm.mq block are exactly the ones validate refuses a
+// passthrough for, so a key added to one but not the other fails here. No
+// defaults block is in play: those keys would render as siblings.
+func TestApplicationEmitsExactlyTheToolManagedKeys(t *testing.T) {
+	d, err := spec.ParseDefaults([]byte(truststoreDefs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := `
+source:
+  mq:
+    conn-name: h(1414)
+    queue-manager: QM1
+    channel: C
+    user: u
+    password-env: MQP
+    tls: true
+    cipher: TLS_X
+    queue: IN
+target:
+  solace:
+    host: tcps://b:55443
+    msg-vpn: v
+    client-username: u
+    client-password-env: SOLP
+    queue: OUT
+`
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{MountStores: true})
+	out := Application(m)
+	topLevel := func(keys []string) []string {
+		var top []string
+		for _, k := range keys {
+			if !strings.HasPrefix(k, " ") {
+				top = append(top, k)
+			}
+		}
+		return top
+	}
+	if got, want := topLevel(blockKeys(t, out, "              mq:")), spec.ToolManagedKeys(spec.SystemMQ); !slices.Equal(got, want) {
+		t.Errorf("mq block keys = %q, want ToolManagedKeys %q", got, want)
+	}
+	if got, want := topLevel(blockKeys(t, out, "              java:")), spec.ToolManagedKeys(spec.SystemSolace); !slices.Equal(got, want) {
+		t.Errorf("solace.java block keys = %q, want ToolManagedKeys %q", got, want)
+	}
+}

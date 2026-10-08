@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -128,6 +129,42 @@ func TestWorkflow0TransformExampleValidWhenUncommented(t *testing.T) {
 	}
 	if !strings.Contains(out, "      0:\n        enabled: true\n        transform:\n          expressions:\n") {
 		t.Errorf("the example's transform is not rendered under workflow 0:\n%s", out)
+	}
+}
+
+// TestEnvExtraKeysExampleValidWhenUncommented keeps the other-key examples
+// shipped in env.yaml honest: uncommented -- the connection lines and the
+// mq-defaults block -- the set still generates, with no finding about them,
+// and each key lands under its binder.
+func TestEnvExtraKeysExampleValidWhenUncommented(t *testing.T) {
+	dir := t.TempDir()
+	req := shippedExamplesRequest(t, dir)
+	marker := regexp.MustCompile(`^(\s*)# ((?:  )?(?:connect-retries-per-host|user-authentication-mqcsp|mq-defaults)\b)`)
+	lines := strings.Split(string(req.Env.Data), "\n")
+	uncommented := 0
+	for i, l := range lines {
+		if marker.MatchString(l) {
+			lines[i] = marker.ReplaceAllString(l, "${1}${2}")
+			uncommented++
+		}
+	}
+	if uncommented != 4 {
+		t.Fatalf("env.yaml no longer carries the four commented other-key example lines, found %d", uncommented)
+	}
+	req.Env.Data = []byte(strings.Join(lines, "\n"))
+	out, errs, warns := gen.Config(req, testResolver(dir))
+	if len(errs) != 0 {
+		t.Fatalf("the uncommented examples must generate, got: %v", errs)
+	}
+	for _, w := range warns {
+		if strings.Contains(w.Msg, "mqcsp") || strings.Contains(w.Msg, "connect-retries-per-host") {
+			t.Errorf("the uncommented examples raised a finding: %v", w)
+		}
+	}
+	for _, want := range []string{"                user-authentication-mqcsp: false\n", "                connect-retries-per-host: 3\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q under its binder:\n%s", want, out)
+		}
 	}
 }
 

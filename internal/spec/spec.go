@@ -68,6 +68,7 @@ type Side struct {
 	AddlProps *yaml.Node // MQ      -> ibm.mq.additional-properties
 	Consumer  *yaml.Node // per-binding consumer tuning
 	Producer  *yaml.Node // per-binding producer tuning
+	Extra     *yaml.Node // every other key of the block, verbatim -> ibm.mq.* / solace.java.* siblings (see extra.go)
 }
 
 // Workflow is one parsed workflow file (one input-<N>/output-<N> pair).
@@ -125,6 +126,9 @@ type rawSolace struct {
 	APIProps      yaml.Node `yaml:"api-properties"`
 	Consumer      yaml.Node `yaml:"consumer"`
 	Producer      yaml.Node `yaml:"producer"`
+	// Extra is not decoded here: UnmarshalYAML (extra.go) fills it with every
+	// key the fields above do not name, so none is dropped.
+	Extra yaml.Node `yaml:"-"`
 }
 
 type rawMQ struct {
@@ -144,6 +148,9 @@ type rawMQ struct {
 	AddlProps    yaml.Node `yaml:"additional-properties"`
 	Consumer     yaml.Node `yaml:"consumer"`
 	Producer     yaml.Node `yaml:"producer"`
+	// Extra is not decoded here: UnmarshalYAML (extra.go) fills it with every
+	// key the fields above do not name, so none is dropped.
+	Extra yaml.Node `yaml:"-"`
 }
 
 // nodePtr returns a pointer to n, or nil when n captured nothing (absent key).
@@ -233,6 +240,7 @@ func (r *rawSide) toSide() Side {
 			APIProps:      nodePtr(r.Solace.APIProps),
 			Consumer:      nodePtr(r.Solace.Consumer),
 			Producer:      nodePtr(r.Solace.Producer),
+			Extra:         nodePtr(r.Solace.Extra),
 		}
 		applyDest(&s, r.Solace.Queue, r.Solace.Topic)
 		return s
@@ -253,6 +261,7 @@ func (r *rawSide) toSide() Side {
 			AddlProps:    nodePtr(r.MQ.AddlProps),
 			Consumer:     nodePtr(r.MQ.Consumer),
 			Producer:     nodePtr(r.MQ.Producer),
+			Extra:        nodePtr(r.MQ.Extra),
 		}
 		applyDest(&s, r.MQ.Queue, r.MQ.Topic)
 		return s
@@ -281,7 +290,8 @@ func (s Side) HasSystem() bool { return s.System == SystemSolace || s.System == 
 
 // SetsConnFields reports whether the side declared any *connection* field beyond
 // its system, conn-ref, and destination — used to enforce that a conn-ref side
-// sets only what it is allowed to.
+// sets only what it is allowed to. Any other key of the block (Extra) is a
+// connection property too, so it counts.
 //
 // consumer:/producer: are deliberately excluded: they tune one binding, not the
 // connection, so a side is free to reference a shared connection and still set
@@ -290,7 +300,7 @@ func (s Side) HasSystem() bool { return s.System == SystemSolace || s.System == 
 func (s Side) SetsConnFields() bool {
 	return s.Host != "" || s.MsgVPN != "" || s.ConnName != "" || s.QueueManager != "" ||
 		s.Channel != "" || s.TLS || s.Cipher != "" || s.KeyAlias != "" ||
-		s.APIProps != nil || s.AddlProps != nil ||
+		s.APIProps != nil || s.AddlProps != nil || s.Extra != nil ||
 		!s.Username().Empty() || !s.Secret().Empty()
 }
 
