@@ -986,7 +986,7 @@ mq-defaults:                     # optional; merged into every MQ binder's ibm.m
 | `tls.truststore` | `file`, `password`, `type` | the single shared truststore; `type` is `JKS` or `PKCS12` |
 | `tls.keystore` | `file`, `password`, `type` | the single shared keystore; required only for mTLS (`key-alias`) |
 | `logging.level` | `<logger>: <level>` | verbatim, order preserved -> `logging.level` |
-| `logging.syslog` | `host`, `port`, `protocol` | optional; ships log lines to syslog **on every platform**, in addition to the console. Emits a `logback-spring.xml` (a ConfigMap key on kubernetes, an inlined compose config on docker, a mounted file on podman) plus `LOGGING_SYSLOG_*` env vars, appname = the instance name. `protocol` is `udp` (default) or `tcp` -- **tcp requires the `logstash-logback-encoder` jar on the connector classpath** (provide it via `libs`; fetch it with `solmq-conn-util download jar syslog`, [section 10](#10-download-jar)) |
+| `logging.syslog` | `host`, `port`, `protocol` | optional; ships log lines to syslog **on every platform**, in addition to the console. Emits a `logback-spring.xml` (a ConfigMap key on kubernetes, an inlined compose config on docker, a podman secret on podman) plus `LOGGING_SYSLOG_*` env vars, appname = the instance name. `protocol` is `udp` (default) or `tcp` -- **tcp requires the `logstash-logback-encoder` jar on the connector classpath** (provide it via `libs`; fetch it with `solmq-conn-util download jar syslog`, [section 10](#10-download-jar)) |
 | `management` | `port` | -> `management.server.port`; always emitted, default `8090`. The docker/podman published port and the kubernetes `service.port` ([section 8](#8-platform-sections-kubernetes-docker-podman)) default to it |
 | `management` | `health-show-details` | -> `management.endpoint.health.show-details`; always emitted, default `always`, so `/actuator/health` names each component -- the status script's `health components` block and the failing component in a DOWN report depend on it. `when-authorized` or `never` restricts it; the details only ever reach an authenticated caller, since the actuator is always behind the tool's account ([section 7.1](#71-the-reserved-status-account-solmq-status)) |
 | `security` | `users` | list of `{ name, password` (or `password-env`)`, roles }` -> `solace.connector.security`; adds accounts on top of the tool's own reserved one ([section 7.1](#71-the-reserved-status-account-solmq-status)); the tool always injects a read-only probing account itself, so this key is for an `admin` account, the only way to POST to `/actuator/workflows` |
@@ -1042,9 +1042,8 @@ block yourself, and in every leader-election mode.
   so there is nothing for the secrets model to mount separately. That means the
   password is **readable by anyone who can read the artifact it lands in**: the
   Kubernetes ConfigMap, the Docker Compose file (which inlines
-  `application.yml`), or the Podman on-disk `application.yml` -- which is why
-  that last one is written with file mode `0600`
-  ([section 8.3](#83-podman)) rather than the platform's normal default.
+  `application.yml`), or the Podman secret store entry `<name>-application.yml`
+  ([section 8.3](#83-podman)), which never touches the host disk.
 - **The account is GET-only** against the actuator endpoints it needs
   (`health`, `leaderelection`, `workflows`); it cannot mutate anything on the
   connector.
@@ -1177,8 +1176,9 @@ them first.
 
 Credentials need no schema in any platform section: they come from the connection
 fields themselves. The stores are configured only under `kubernetes:`, which has to
-build a Secret; docker and podman bind-mount them from the `tls.*.file` paths
-directly. See [section 9](#9-secrets-model).
+build a Secret; docker bind-mounts them from the `tls.*.file` paths directly, and
+podman's `deploy` loads them into podman's secret store. See
+[section 9](#9-secrets-model).
 
 ### 8.0 Image, timezone and JVM options (shared by every platform)
 
@@ -1534,24 +1534,40 @@ docker:
 ### 8.3 podman
 
 `generate --platform podman` emits a `.container` quadlet unit; `deploy` / `remove`
-install and tear down that same unit through **systemctl**. Because a quadlet unit
-cannot inline file content, **`deploy`** also writes the rendered `application.yml`,
-the status script, and the logback config (when syslog is configured) under
-**`base-dir`** (below) and bind-mounts them in -- only the unit itself goes to the
-quadlet directory. `generate` writes nothing to disk, so its unit is a preview: the
-`application.yml` and status-script mounts name files that do not exist yet, and it
-is not meant to be installed by hand. Credentials do not go on disk: `deploy` loads
-each into **podman's secret store** and the unit mounts every one back in
-(`Secret=<name>-<KEY>,type=mount,target=/app/external/var/secrets/<KEY>`). A
-`type=mount` secret materializes as one file inside the container, and `target=`
+install and tear down that same unit through **systemctl**. A quadlet unit cannot
+inline file content, so everything the connector reads from a file reaches it from
+**podman's secret store**: `deploy` loads each credential, the rendered
+`application.yml`, the status script, the logback config (when syslog is
+configured) and the TLS stores (when `tls.*.file` is set) into the store -- values
+on stdin, never in argv -- and the unit mounts every one back in with a `Secret=`
+line. A podman deployment keeps **nothing on the host but the unit itself and your
+`libs.dir`**, the one `Volume=` the unit can carry. `generate` writes nothing, so
+its unit is a preview: it names secrets that only `deploy` creates, and it is not
+meant to be installed by hand.
+
+| Secret store entry | Mounted at |
+|---|---|
+| `<name>-<KEY>`, one per credential | `/app/external/var/secrets/<KEY>` |
+| `<name>-application.yml` | `/app/external/spring/config/application.yml` |
+| `<name>-tls-truststore`, `<name>-tls-keystore` | `/app/external/classpath/truststores/<file name of tls.*.file>` |
+| `<name>-status-script` | `/app/external/.status-script` |
+| `<name>-logback-spring.xml` (syslog only) | `/app/external/classpath/logback-spring.xml` |
+
+A `type=mount` secret materializes as one file inside the container, and `target=`
 says where. The full path is the load-bearing part: given only a bare file name,
 podman places a mount secret in its own `/run/secrets` directory, while the
 generated `application.yml` imports credentials only from
 `/app/external/var/secrets/` -- the one directory every platform shares -- so the
-unit names that path outright and each secret lands exactly where the import
-looks. Requires **podman 4.5+** (the tool's floor; the path-valued `target=`
-form itself needs podman 4.x or newer). To check delivery on a running
-instance, `cli` in and list `/app/external/var/secrets/`: one file per
+unit names each path outright and every file lands exactly where it is read.
+Inside the container each one is a read-only file, owned by root with mode `0444`,
+as compose gives its configs. Podman holds a secret of 1 to 511999 bytes, so
+`deploy` refuses an empty store file or one of 512000 bytes or more before it
+creates anything. A store's **file name** becomes the end of its mount path, so on
+podman it may hold only letters, digits, `.`, `_` and `-`, and the truststore's and
+keystore's file names must differ; `validate` reports either problem. Requires
+**podman 4.5+** (the tool's floor; the path-valued `target=` form itself needs
+podman 4.x or newer). To check delivery, `podman secret ls` lists the entries, and
+on a running instance `cli` in and list `/app/external/var/secrets/`: one file per
 credential.
 
 **The unit declares a healthcheck.** The `[Container]` section carries
@@ -1581,37 +1597,40 @@ is no directory to choose, so a deploy can never target one the running account
 cannot write to. Setting `podman.quadlet` or `podman.mode` in `env.yaml` is
 rejected outright: `validate` reports an error naming whichever key was set.
 
-**`base-dir` is required**, and is the one directory you do choose. It holds the
-files the unit bind-mounts -- the rendered `application.yml`, the status script, and
-the logback config when syslog is configured. `application.yml` is written file
-mode `0600` (it carries the `solmq-status` account's literal password); the status
-script, the logback config, and the unit itself are `0644`. A relative value
-resolves against `env.yaml`, as `tls.*.file` and `libs.dir` do, and `deploy`
-creates the directory if it does not exist. There is no default: the path is baked
-into the unit's `Volume=` lines, and a guess would put generated data among
-systemd's own units or somewhere unwritable.
+> **NOTE: `podman.base-dir` is no longer used.** Earlier releases wrote
+> `application.yml`, the status script and the logback config to that directory and
+> bind-mounted them. The key is now ignored, so an older `env.yaml` keeps working:
+> `generate` and `deploy` say nothing about it, and `validate` prints one warning
+> naming the files earlier deploys left there -- `<name>-application.yml`,
+> `<name>-status` and `<name>-logback-spring.xml`. Delete them and the key: the
+> first holds the `solmq-status` account's password in clear, and nothing reads or
+> removes them any more.
 
-`deploy --platform podman` loads the credentials into the secret store first, then
-writes the files under `base-dir` and the unit, then `systemctl [--user]
-daemon-reload` and `start`; `remove --platform podman` `stop`s, removes the unit,
-reloads, deletes the files under `base-dir` (two, or three when syslog is
-configured; the directory itself is left alone), and removes the secrets last,
-once the unit that referenced them is gone.
+`deploy --platform podman` first resolves everything the unit mounts -- every
+credential, every document and both stores, which it reads from the `tls.*.file`
+paths -- so a missing variable or an unreadable or oversized store stops it before
+anything is created. It then loads each into the secret store, deletes the file
+secrets this spec no longer mounts (a keystore or syslog dropped since the last
+deploy), writes the unit, and runs `systemctl [--user] daemon-reload`. Last it asks
+systemd whether the service is running: a **new, stopped or failed** unit is
+`start`ed, and a **running** one is `restart`ed, because podman copies a secret
+into the container when it creates it, so only a new container sees the
+configuration this deploy loaded. `remove --platform podman` `stop`s, removes the
+unit and reloads, then removes the secrets last, once the unit that mounted them is
+gone: the credentials and every file secret the instance can own, whether or not
+the current spec mounts it.
 
 ```yaml
 podman:
   command: podman
-  base-dir: /opt/solmq-connector # REQUIRED; where the mounted application.yml,
-                                 # status script and logback config are written.
-                                 # The only dir you choose -- the unit goes where
-                                 # systemd loads it for the user running the tool
   name: solmq-connector
   restart: unless-stopped
   ports:
     - 8090                       # bare: publish to the same host port (8090:8090)
     - "8081:8090"                # or "host:container" to map a distinct host port
   # No secrets: section -- credentials come from the connection fields themselves.
-  # No stores: section either -- the tls.*.file paths are bind-mounted for you.
+  # No stores: section either -- deploy loads the tls.*.file stores into podman's
+  # secret store for you. No base-dir: nothing else is written to the host.
   # libs:
   #   dir: ./libs                # the only key: the host dir, bind-mounted to the image's
                                  # fixed /app/external/libs. Populate it with
@@ -1631,9 +1650,9 @@ and `libs`, whose one key is `dir`.
 Every in-container path is fixed by the image, so no section configures one.
 `libs.dir` names the host directory to bind-mount and it lands at
 `/app/external/libs`, which the connector already launches with on its classpath;
-the truststore/keystore are bind-mounted onto `/app/external/classpath/truststores`
-whenever `tls.*.file` is set. Accordingly neither section takes a `secrets:`, a
-`stores:` or a `libs.mount-path` key -- setting any of them is a rejected key,
+the truststore/keystore land in `/app/external/classpath/truststores` whenever
+`tls.*.file` is set (bind-mounted on docker, from the secret store on podman).
+Accordingly neither section takes a `secrets:`, a `stores:` or a `libs.mount-path` key -- setting any of them is a rejected key,
 since docker and podman fix those paths themselves and take no such option. `project-name`
 is **not** shared: it names a compose project, and podman has no equivalent
 grouping, so the key exists only under `docker:`.
@@ -1800,9 +1819,9 @@ names until deploying to a platform does.
 
 The stores wiring is separate and follows its own naming rule: the shared
 truststore/keystore is base64-embedded into a Kubernetes Secret mounted at
-`/app/external/classpath/truststores/`, or bind-mounted there from the host for
-docker/podman -- which needs no configuration, since setting `tls.*.file` is
-itself the request. Kubernetes does need telling, so its
+`/app/external/classpath/truststores/`, bind-mounted there from the host for
+docker, or loaded into podman's secret store and mounted there for podman -- which
+needs no configuration, since setting `tls.*.file` is itself the request. Kubernetes does need telling, so its
 `kubernetes.secrets.stores` takes the same `create` XOR `existing` choice as
 `credentials`, and a `stores.existing`
 Secret's keys are the **base filenames** of `tls.truststore.file` /
@@ -2237,7 +2256,8 @@ workflow on the next run.
 those files already live. The container platforms rewrite them to a mount path -- the
 `application.yml` that kubernetes/docker/podman ship points at
 `/app/external/classpath/truststores/<file>` because the stores are mounted there (a
-Secret volume for kubernetes, a bind mount onto that same fixed dir for docker/podman).
+Secret volume for kubernetes, a bind mount onto that same fixed dir for docker, a
+secret-store mount for podman).
 
 **The status script and its labels ship on every platform.** All
 three platforms always carry the rendered status script
@@ -2286,10 +2306,10 @@ mounts for stores/libs, and the `solace-connector/le-mode`/`role`
 labels above on the service. **`generate --platform podman` -> a `.container`
 quadlet unit**; because it cannot inline file content, the rendered
 `application.yml`, the status script, **and** the logback config when syslog is
-configured are bind-mounted in read-only rather than embedded, and **`deploy`** is
-what writes them to `base-dir` ([section 8.3](#83-podman)) -- credentials go to the
-platform's secret store, not to disk (see [section 9](#9-secrets-model)) -- with
-the same labels applied via `Label=`.
+configured are mounted from podman's secret store rather than embedded, and
+**`deploy`** is what loads them there ([section 8.3](#83-podman)), beside the
+credentials and the stores -- nothing is written to the host but the unit (see
+[section 9](#9-secrets-model)) -- with the same labels applied via `Label=`.
 
 ---
 
@@ -3038,7 +3058,7 @@ Useful places to look once you are inside:
 |------|---------------|
 | `/app/external/spring/config/application.yml` | the configuration the process actually loaded |
 | `/app/external/libs` | the jars `download jar` put there ([section 10](#10-download-jar)) |
-| `/app/external/classpath/truststores` | the truststores, bind-mounted from `tls.*.file` on docker/podman and Secret-mounted on kubernetes |
+| `/app/external/classpath/truststores` | the truststores, bind-mounted from `tls.*.file` on docker, mounted from podman's secret store on podman and Secret-mounted on kubernetes |
 | `/app/external/var/secrets` | the credentials, on every platform |
 
 ### 14.3 The one-shot form, and when it is the only form
@@ -3138,11 +3158,19 @@ container is called something else, is not reachable with `cli` -- reach it with
   these values reaches a shell; quotes, backslash, backtick, `$`, control
   characters and a comment left inside a `>-` block are rejected ([section 8.0](#80-image-timezone-and-jvm-options-shared-by-every-platform)).
 - **The safe-charset gate covers more than `command:`.** `image`, `restart` and
-  the top-level `timezone`, the `tls.*.file` paths the docker/podman sections
-  bind-mount, `libs.dir`, `podman.base-dir`, the referenced (`existing:`) kubernetes Secret names, and
+  the top-level `timezone`, the `tls.*.file` paths the docker section bind-mounts,
+  `libs.dir`, the referenced (`existing:`) kubernetes Secret names, and
   `libs.pvc.create.nfs.*` are all rejected when they carry whitespace, quotes,
   control characters, or shell metacharacters -- each one lands unquoted in a
-  generated script, unit, or manifest.
+  generated script, unit, or manifest. Podman never names a store's path, only
+  its file name, which may hold letters, digits, `.`, `_` and `-`
+  ([section 8.3](#83-podman)).
+- **Upgrading a podman deployment moves its files into the secret store.** The
+  first `deploy` with this release loads `application.yml`, the status script, the
+  logback config and the stores into podman's secret store and restarts the running
+  unit. What earlier releases wrote under `podman.base-dir` stays until you delete
+  it -- `validate` names the files -- and a store of 512000 bytes or more now fails
+  a podman deploy.
 - **`name` and `docker.project-name` are held to DNS-1123, not to that gate.** Both
   are labels rather than argv tokens, so they must be lowercase alphanumerics and
   hyphens starting and ending alphanumeric. That is deliberately stricter than

@@ -104,9 +104,10 @@ func BaseName(p string) string {
 }
 
 // StoresMount was the docker/podman stores: block. The block is removed: the
-// tls.*.file store files are bind-mounted whenever they are set, onto the fixed
-// in-container path DefaultStoresMountPath, so there was nothing left for it to
-// decide -- its one field could only ever hold that same fixed path.
+// tls.*.file store files are mounted whenever they are set (bind-mounted on
+// docker, from podman's secret store on podman), onto the fixed in-container
+// path DefaultStoresMountPath, so there was nothing left for it to decide -- its
+// one field could only ever hold that same fixed path.
 //
 // The type survives with no fields so an old env.yaml still decodes into a non-nil
 // pointer and validate can reject it by name. ParseEnv decodes without
@@ -221,16 +222,14 @@ type Quadlet struct{}
 type Podman struct {
 	Command string `yaml:"command"` // default podman
 	Mode    string `yaml:"mode"`    // removed; non-empty is a validation error
-	// BaseDir is the host directory the mounted files live in: the rendered
-	// application.yml, the status script, and the logback config when syslog is
-	// configured. Required -- a quadlet unit cannot inline file content, so these
-	// have to exist somewhere the operator chose, and the path is baked into the
-	// unit's Volume= lines.
-	//
-	// The unit itself lands in a directory systemd derives from the invoking
-	// uid, not a configurable one: only these files need a chosen location.
-	// Relative values resolve against env.yaml, as tls.*.file and libs.dir do.
-	BaseDir  string       `yaml:"base-dir"`
+	// BaseDir is ignored. It named the host directory deploy wrote the rendered
+	// application.yml, status script and logback config to; those now go into
+	// podman's secret store with the credentials and the TLS stores, so a podman
+	// deployment keeps nothing on the host but its unit and libs.dir. The key
+	// still parses so an older env.yaml keeps working: validate notes it and
+	// names the files earlier deploys left there. Nothing reads its value, so it
+	// is never expanded either.
+	BaseDir  string       `yaml:"base-dir" expand:"no"`
 	Quadlet  *Quadlet     `yaml:"quadlet"` // removed; non-nil is a validation error
 	Image    string       `yaml:"image"`   // removed; non-empty is a validation error (see Docker)
 	Name     string       `yaml:"name"`

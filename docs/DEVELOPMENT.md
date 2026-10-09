@@ -210,9 +210,10 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
   probes login/daemon reachability read-only; the real Runner resolves argv[0] via
   `exec.LookPath` (rejecting an `exec.ErrDot` same-directory match) and prints
   nothing of its own -- the child's combined output is returned to the caller,
-  which reports it. Credential
-  env-files are written `0600` and never logged. Kubernetes manifests are piped on
-  **stdin** (`apply -f -`), not argv.
+  which reports it. Secret material crosses on **stdin**, never argv, and is never
+  logged: `podman secret create <name> -` takes each credential, the rendered podman
+  documents and the TLS store bytes that way, and Kubernetes manifests are piped
+  the same way (`apply -f -`).
 - **Teardown reverses the manifest order.** `remove` pipes the document set `deploy`
   renders -- minus the Namespace document, which is handled as its own confirmed
   step -- reversed, to `<command> delete -f -`. kubectl deletes documents
@@ -221,13 +222,19 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
   holds the claim while a pod still mounts it, and the Deployment that owns that pod
   is queued behind it in the file. Reversed, the workload goes first and everything
   it holds is free by the time its turn comes.
-- **base-dir vs quadlet-dir split (podman).** The spec names `podman.base-dir`, and that
-  is where the rendered `application.yml`, status script, and logback config land. The
+- **Podman keeps nothing on the host but the unit.** The rendered `application.yml`,
+  status script and logback config, the TLS stores and the credentials all go into
+  podman's secret store (`gen.ResolvePodmanFiles` / `gen.ResolveCredentials`, read
+  before anything is created) and come back as `Secret=...,type=mount,target=<abs>`
+  lines, under fixed per-role names (`gen.PodmanFileSecretNames`) so deploy can delete
+  the ones a spec stops mounting and remove can delete them all. `libs.dir` is the one
+  `Volume=`. `podman.base-dir` is ignored and noted only by `validate` (Lint). The
   unit directory is deliberately not configurable: systemd only scans
   `/etc/containers/systemd` (root) or `~/.config/containers/systemd` (everyone else), so
   the deploy derives it from the invoking uid and writes only the `.container` unit
   there -- a spec key could only ever name a directory systemd ignores or the account
-  cannot write.
+  cannot write. A mount secret is copied into the container when it is created, so
+  `runner.PodmanDeploy` restarts a running unit and starts any other.
 - **Streaming seam.** `runner.Runner` is one method (`Run`) and fully buffered: it returns
   only once the process has exited, with stdout and stderr merged into one string for error
   context. `runner.Streamer` is the optional second capability for the case that cannot

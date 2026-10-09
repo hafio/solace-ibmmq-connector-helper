@@ -1,9 +1,10 @@
 // Package podmangen renders the podman deployment artifact for the Solace PubSub+
 // Connector for IBM MQ: a systemd .container quadlet unit. It is pure: no os/exec,
 // no filesystem, no globals, no network -- it only builds strings. The caller
-// resolves credentials to secret-store references and stores/libs to host bind
-// mounts before calling; exec safety is the runner's job, so this package emits
-// the values it is given verbatim.
+// resolves credentials, the rendered documents and the TLS stores to
+// secret-store references and libs to a host bind mount before calling; exec
+// safety is the runner's job, so this package emits the values it is given
+// verbatim.
 package podmangen
 
 import (
@@ -16,39 +17,50 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/yamlwriter"
 )
 
-// appYAMLTarget is the in-container path the application.yml is bind-mounted to
-// (read-only); podman cannot inline file content.
+// appYAMLTarget is the in-container path the application.yml secret is mounted
+// at. A quadlet unit cannot inline file content, so the document reaches the
+// container from podman's secret store, like the credentials.
 const appYAMLTarget = "/app/external/spring/config/application.yml"
 
-// statusTarget is the in-container path the rendered status script is
-// bind-mounted to (read-only); like application.yml, podman cannot inline
-// file content, so the script has to be a bind mount too. It comes from
-// statusscript rather than being repeated here, so moving the path is one edit
-// instead of four.
+// statusTarget is the in-container path the rendered status script's secret is
+// mounted at. It comes from statusscript rather than being repeated here, so
+// moving the path is one edit instead of four.
 const statusTarget = statusscript.ContainerPath
 
-// Instance is the connector: its container name and on-disk config path.
+// Instance is the connector: its container name and the secret-store names of
+// the documents rendered for it.
 type Instance struct {
-	Name             string // container name
-	Image            string // the reference to pull, from the top-level image: block
-	Timezone         string // container TZ, from the top-level timezone: key
-	AppYAMLPath      string // host path to the application.yml on disk (bind-mounted)
-	MQTLS            bool   // when true, add JAVA_TOOL_OPTIONS env for IBM cipher mappings
-	StatusScriptPath string // host path to the rendered status script on disk (bind-mounted); empty omits the mount
-	// LogbackPath is the host path to the rendered logback-spring.xml
-	// (bind-mounted); empty omits the mount. podman cannot inline file content,
-	// so unlike compose this has to exist on disk before the unit starts.
-	LogbackPath string
-	LeaderMode  string // leader-election mode; empty means standalone (see leaderLabels)
+	Name     string // container name
+	Image    string // the reference to pull, from the top-level image: block
+	Timezone string // container TZ, from the top-level timezone: key
+	// AppYAMLSecret is the secret-store name holding the rendered
+	// application.yml, mounted at appYAMLTarget; empty omits the mount.
+	AppYAMLSecret string
+	MQTLS         bool // when true, add JAVA_TOOL_OPTIONS env for IBM cipher mappings
+	// StatusScriptSecret is the secret-store name holding the rendered status
+	// script; empty omits the mount and the healthcheck that runs it.
+	StatusScriptSecret string
+	// LogbackSecret is the secret-store name holding the rendered
+	// logback-spring.xml; empty (no syslog) omits the mount.
+	LogbackSecret string
+	LeaderMode    string // leader-election mode; empty means standalone (see leaderLabels)
 	// JavaOptions is the top-level java-options: block, nil when absent. It is
 	// merged with the MQTLS flag by spec.JavaEnv, as on every platform.
 	JavaOptions *spec.JavaOptions
 }
 
-// Mount is one read-only bind mount (host path -> container path).
+// Mount is one read-only bind mount (host path -> container path). Only the
+// libs directory is one: everything else comes from the secret store.
 type Mount struct {
 	Source string // host path
 	Target string // absolute container path
+}
+
+// FileSecret is one file mounted out of podman's secret store at an absolute
+// in-container path: a TLS store, at the path application.yml names it by.
+type FileSecret struct {
+	StoreName string
+	Target    string // absolute container path
 }
 
 // SecretRef is one credential from podman's secret store, mounted into the
@@ -61,17 +73,18 @@ type SecretRef struct {
 	Target    string
 }
 
-// Input is everything the podman renderers need. The caller resolves stores/libs
-// to host bind mounts and credentials to secret-store references before calling.
+// Input is everything the podman renderers need. The caller resolves
+// credentials and stores to secret-store references and libs to a host bind
+// mount before calling.
 type Input struct {
 	Podman   *spec.Podman
 	Instance Instance
 	// Syslog is the top-level logging.syslog block, nil when absent. It supplies
 	// the three env vars the mounted logback config reads at runtime.
 	Syslog  *spec.Syslog
-	Secrets []SecretRef // podman secret store entries to mount; nil/empty when none
-	Stores  []Mount     // .jks bind mounts (read-only); nil/empty when none
-	Libs    *Mount      // libs dir bind mount (read-only); nil when none
+	Secrets []SecretRef  // credentials from podman's secret store; nil/empty when none
+	Stores  []FileSecret // TLS stores from podman's secret store; nil/empty when none
+	Libs    *Mount       // libs dir bind mount (read-only); nil when none
 }
 
 // Unit is one rendered quadlet file.
@@ -98,6 +111,17 @@ func systemdEnv(name, value string) string {
 		return "Environment=" + name + "=" + v
 	}
 	return `Environment="` + name + "=" + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(v) + `"`
+}
+
+// secretMount writes one Secret= line mounting the named secret as a file at
+// the absolute target. No mode= is set: podman's default, 0444 owned by root,
+// matches what compose gives a config and what the credentials already get. An
+// empty name writes nothing.
+func secretMount(w *sw, name, target string) {
+	if name == "" {
+		return
+	}
+	w.Line(0, "Secret="+name+",type=mount,target="+target)
 }
 
 // seconds spells a duration the way the quadlet Health* keys want it.
@@ -164,22 +188,19 @@ func RenderQuadlet(in Input) Unit {
 		// secret in podman's default /run/secrets, the directory
 		// spec.SecretsMountPath exists to avoid. Needs podman 4.x or newer, where
 		// target= accepts a path.
-		w.Line(0, "Secret="+s.StoreName+",type=mount,target="+spec.SecretsMountPath+"/"+s.Target)
+		secretMount(w, s.StoreName, spec.SecretsMountPath+"/"+s.Target)
 	}
-	w.Line(0, "Volume="+inst.AppYAMLPath+":"+appYAMLTarget+":ro")
-	for _, m := range in.Stores {
-		w.Line(0, "Volume="+m.Source+":"+m.Target+":ro")
+	// The rendered documents and the TLS stores come from the secret store too,
+	// each at the fixed path the image or application.yml reads it from, so the
+	// unit names no host file: the libs directory below is the one bind mount.
+	secretMount(w, inst.AppYAMLSecret, appYAMLTarget)
+	for _, st := range in.Stores {
+		secretMount(w, st.StoreName, st.Target)
 	}
+	secretMount(w, inst.StatusScriptSecret, statusTarget)
+	secretMount(w, inst.LogbackSecret, logback.ContainerPath)
 	if in.Libs != nil {
 		w.Line(0, "Volume="+in.Libs.Source+":"+in.Libs.Target+":ro")
-	}
-	if inst.StatusScriptPath != "" {
-		// Emitted after the libs volume so this single-file mount nests inside it
-		// instead of being shadowed by a libs directory mount at the same path.
-		w.Line(0, "Volume="+inst.StatusScriptPath+":"+statusTarget+":ro")
-	}
-	if inst.LogbackPath != "" {
-		w.Line(0, "Volume="+inst.LogbackPath+":"+logback.ContainerPath+":ro")
 	}
 	// The healthcheck runs the status script in its --health mode, so it is
 	// emitted only when that script is actually mounted -- unlike compose,
@@ -193,7 +214,7 @@ func RenderQuadlet(in Input) Unit {
 	// scope the unit lives in, so this works the same rootful and rootless.
 	//
 	// These keys need podman 4.5+, which is already this tool's floor.
-	if inst.StatusScriptPath != "" {
+	if inst.StatusScriptSecret != "" {
 		w.Line(0, "HealthCmd="+statusscript.HealthShell+" "+statusTarget+" "+statusscript.HealthArg)
 		w.Line(0, "HealthInterval="+seconds(statusscript.HealthIntervalSeconds))
 		w.Line(0, "HealthTimeout="+seconds(statusscript.HealthTimeoutSeconds))

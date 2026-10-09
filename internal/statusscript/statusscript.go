@@ -37,7 +37,7 @@ const HealthArg = "--health"
 
 // HealthShell is what every platform invokes the script through. The mounted
 // copy is never executable -- a kubernetes ConfigMap subPath, a compose
-// configs entry and a podman bind mount all land it read-only without the
+// configs entry and a podman secret mount all land it read-only without the
 // execute bit -- so the healthcheck passes it to a shell rather than running
 // it, the same way runner.RunStatusScript reaches it for the report.
 const HealthShell = "sh"

@@ -43,7 +43,8 @@ so splitting them across connectors stays your decision.
 - **[One secrets model](docs/userguide.md#9-secrets-model) everywhere**: each
   credential is declared as a literal or an `-env` variable name and mounted
   as a file under `/app/external/var/secrets/` -- a Kubernetes Secret volume,
-  a compose environment-provider secret, or a podman secret, never an
+  a compose environment-provider secret, or a podman secret (podman's
+  secret store also carries the rendered config and the TLS stores), never an
   environment variable and never written to disk as a value. The one
   exception is the tool's own reserved `solmq-status` account, whose password
   is rendered as a literal by design

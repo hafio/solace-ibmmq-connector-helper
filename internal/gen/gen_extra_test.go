@@ -3,10 +3,14 @@ package gen
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/podmangen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
@@ -90,9 +94,84 @@ func TestToIssues(t *testing.T) {
 
 // ---- names, paths, mounts (docker/podman plumbing) --------------------------
 
-func TestNamesAndPaths(t *testing.T) {
-	if pathIn("", "a") != "a" || pathIn("/base/", "a") != "/base/a" || pathIn("/base", "a") != "/base/a" {
-		t.Error("pathIn")
+// TestPodmanFileSecretNames pins the five file secrets a podman instance can
+// own, and that none of them can take a credential's name: a credential is
+// stored as <name>-<stable>, and a stable name matches [A-Za-z_][A-Za-z0-9_]*,
+// which no file suffix does.
+func TestPodmanFileSecretNames(t *testing.T) {
+	got := PodmanFileSecretNames("c")
+	want := []string{"c-application.yml", "c-tls-truststore", "c-tls-keystore", "c-status-script", "c-logback-spring.xml"}
+	if !slices.Equal(got, want) {
+		t.Errorf("PodmanFileSecretNames = %q, want %q", got, want)
+	}
+	stable := regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	for _, n := range got {
+		if suffix := strings.TrimPrefix(n, "c-"); stable.MatchString(suffix) {
+			t.Errorf("file secret suffix %q could also be a credential's stable name", suffix)
+		}
+	}
+}
+
+// TestResolvePodmanFiles covers what deploy loads into podman's secret store
+// for the files a unit mounts: a document as rendered, a store read byte for
+// byte (binary content included), and every way a file can fail podman's
+// limits -- each stopping before anything is created, naming the file and
+// never its content.
+func TestResolvePodmanFiles(t *testing.T) {
+	const binary = "\x00\xfe\xedJKS\xff\r\n"
+	files := map[string][]byte{
+		"./certs/t.jks":     []byte(binary),
+		"./certs/max.jks":   []byte(strings.Repeat("k", 511999)),
+		"./certs/big.jks":   []byte(strings.Repeat("S", 512000)),
+		"./certs/empty.jks": {},
+	}
+	res := Resolver{ReadFile: func(p string) ([]byte, error) {
+		if b, ok := files[p]; ok {
+			return b, nil
+		}
+		return nil, fs.ErrNotExist
+	}}
+	doc := PodmanFile{StoreName: "c-application.yml", Data: "a: 1\n"}
+	store := func(src string) PodmanFile {
+		return PodmanFile{StoreName: "c-tls-truststore", Source: src, Field: "tls.truststore.file"}
+	}
+
+	kvs, err := ResolvePodmanFiles([]PodmanFile{doc, store("./certs/t.jks"), store("./certs/max.jks")}, res)
+	if err != nil {
+		t.Fatalf("ResolvePodmanFiles: %v", err)
+	}
+	if len(kvs) != 3 || kvs[0] != (KV{Key: "c-application.yml", Val: "a: 1\n"}) || kvs[1] != (KV{Key: "c-tls-truststore", Val: binary}) || len(kvs[2].Val) != 511999 {
+		t.Errorf("resolved = %q", kvs)
+	}
+
+	for _, c := range []struct {
+		name  string
+		file  PodmanFile
+		res   Resolver
+		want  string
+		cause error
+	}{
+		{"missing store", store("./certs/gone.jks"), res, `reading tls.truststore.file "./certs/gone.jks" for podman's secret store`, fs.ErrNotExist},
+		{"no file access", store("./certs/t.jks"), Resolver{}, `cannot read tls.truststore.file "./certs/t.jks" for podman's secret store (no file access)`, nil},
+		{"empty store", store("./certs/empty.jks"), res, `tls.truststore.file "./certs/empty.jks" is empty, and podman's secret store cannot hold an empty secret`, nil},
+		{"over the limit", store("./certs/big.jks"), res, `tls.truststore.file "./certs/big.jks" is 512000 bytes, over the 511999 bytes podman's secret store holds per secret`, nil},
+		{"empty document", PodmanFile{StoreName: "c-application.yml"}, res, "c-application.yml is empty", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			kvs, err := ResolvePodmanFiles([]PodmanFile{doc, c.file}, c.res)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want it to contain %q", err, c.want)
+			}
+			if kvs != nil {
+				t.Errorf("a failure must return nothing to load, got %d entries", len(kvs))
+			}
+			if c.cause != nil && !errors.Is(err, c.cause) {
+				t.Errorf("err = %v, want it to wrap %v", err, c.cause)
+			}
+			if strings.Contains(err.Error(), "SSSS") || strings.Contains(err.Error(), "a: 1") {
+				t.Errorf("error carries file content: %v", err)
+			}
+		})
 	}
 }
 
@@ -642,7 +721,6 @@ image:
   tag: "9.9"
 podman:
   command: podman
-  base-dir: /opt/solmq
   name: solmq-connector
   restart: unless-stopped
   ports:
@@ -661,8 +739,12 @@ podman:
 	if plan.Unit.Filename != "solmq-connector.container" {
 		t.Errorf("unit filename = %q", plan.Unit.Filename)
 	}
-	if plan.AppYAML.Name != "solmq-connector-application.yml" {
-		t.Errorf("app yaml = %+v", plan.AppYAML)
+	var files []string
+	for _, f := range plan.Files {
+		files = append(files, f.StoreName)
+	}
+	if want := []string{"solmq-connector-application.yml", "solmq-connector-status-script"}; !slices.Equal(files, want) {
+		t.Errorf("file secrets = %q, want %q", files, want)
 	}
 	if plan.Service != "solmq-connector.service" {
 		t.Errorf("service = %q", plan.Service)
@@ -883,7 +965,7 @@ func TestGenerateJavaOptionsReachEveryPlatform(t *testing.T) {
 		block  = "java-options:\n  tool: >-\n    -Xms512m\n    -Xmx${HEAP:768m}\n  jdk: -Dregion=${REGION}\n"
 		kube   = "kubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n"
 		docker = "docker:\n  command: docker\n  name: solmq\n"
-		podman = "podman:\n  command: podman\n  base-dir: /opt/solmq\n  name: solmq\n"
+		podman = "podman:\n  command: podman\n  name: solmq\n"
 	)
 	res := Resolver{Rand: fixedStatusRand, Env: func(name string) (string, bool) {
 		if name == "REGION" {
@@ -974,7 +1056,6 @@ func TestGeneratePodmanRejectsModeKey(t *testing.T) {
   tag: "9.9"
 podman:
   command: podman
-  base-dir: /opt/solmq
   mode: ` + mode + `
   name: solmq-connector
 `
@@ -998,7 +1079,6 @@ func TestGeneratePodmanNoModeKeyIsClean(t *testing.T) {
   tag: "9.9"
 podman:
   command: podman
-  base-dir: /opt/solmq
   name: solmq-connector
 `
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
@@ -1140,12 +1220,13 @@ func TestGenerateDockerCarriesStatusScript(t *testing.T) {
 	}
 }
 
-// TestGeneratePodmanCarriesStatusScript pins the podman wiring:
-// PodmanPlan.StatusScript names <name>-status and carries the rendered
-// script, and the on-disk mount path is resolved under podman.base-dir exactly
-// like AppYAML.
+// TestGeneratePodmanCarriesStatusScript pins the podman wiring for the
+// rendered documents: application.yml and the status script ride on the plan
+// as <name>-application.yml and <name>-status-script with their content, and
+// the unit mounts each from podman's secret store at its fixed path rather
+// than from a host file.
 func TestGeneratePodmanCarriesStatusScript(t *testing.T) {
-	envData := "image:\n  name: img\n  tag: v1\npodman:\n  command: podman\n  base-dir: /base\n  name: solmq-connector\n"
+	envData := "image:\n  name: img\n  tag: v1\npodman:\n  command: podman\n  name: solmq-connector\n"
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
 	res := Resolver{Env: func(string) (string, bool) { return "v", true }, Rand: fixedStatusRand}
 
@@ -1153,20 +1234,148 @@ func TestGeneratePodmanCarriesStatusScript(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	if plan.StatusScript.Name != "solmq-connector-status" {
-		t.Errorf("StatusScript.Name = %q, want %q", plan.StatusScript.Name, "solmq-connector-status")
+	byName := map[string]PodmanFile{}
+	for _, f := range plan.Files {
+		byName[f.StoreName] = f
 	}
-	if !strings.Contains(plan.StatusScript.Data, "USER_NAME="+spec.StatusUserName) {
-		t.Errorf("StatusScript.Data missing the rendered script:\n%s", plan.StatusScript.Data)
+	if st := byName["solmq-connector-status-script"]; !strings.Contains(st.Data, "USER_NAME="+spec.StatusUserName) || st.Source != "" {
+		t.Errorf("status script file = %+v, want the rendered script", st)
 	}
-	// Same BaseDir resolution as AppYAML (pathIn), not a bare name -- systemd
-	// starts the unit with no useful cwd, so a relative Volume= source would not
-	// resolve.
-	if want := "Volume=/base/solmq-connector-application.yml"; !strings.Contains(plan.Unit.Content, want) {
-		t.Errorf("unit missing BaseDir-resolved AppYAML volume %q:\n%s", want, plan.Unit.Content)
+	if app := byName["solmq-connector-application.yml"]; !strings.Contains(app.Data, "solace:") || app.Source != "" {
+		t.Errorf("application.yml file = %+v, want the rendered document", app)
 	}
-	if want := "Volume=/base/solmq-connector-status:" + statusscript.ContainerPath; !strings.Contains(plan.Unit.Content, want) {
-		t.Errorf("unit missing BaseDir-resolved status volume %q:\n%s", want, plan.Unit.Content)
+	for _, want := range []string{
+		"Secret=solmq-connector-application.yml,type=mount,target=/app/external/spring/config/application.yml\n",
+		"Secret=solmq-connector-status-script,type=mount,target=" + statusscript.ContainerPath + "\n",
+	} {
+		if !strings.Contains(plan.Unit.Content, want) {
+			t.Errorf("unit missing %q:\n%s", want, plan.Unit.Content)
+		}
+	}
+	if strings.Contains(plan.Unit.Content, "Volume=") {
+		t.Errorf("no host file may be mounted without libs:\n%s", plan.Unit.Content)
+	}
+}
+
+// TestGeneratePodmanCarriesLogbackOnlyWithSyslog pins the podman half of the
+// syslog block: with logging.syslog set the plan carries the rendered
+// logback-spring.xml as <name>-logback-spring.xml and the unit mounts it from
+// the secret store where the image reads it; without it there is neither.
+func TestGeneratePodmanCarriesLogbackOnlyWithSyslog(t *testing.T) {
+	const env = "image:\n  name: img\n  tag: v1\npodman:\n  command: podman\n  name: c\n"
+	res := Resolver{Env: func(string) (string, bool) { return "v", true }, Rand: fixedStatusRand}
+	for _, c := range []struct {
+		name   string
+		syslog bool
+	}{{"no syslog", false}, {"syslog", true}} {
+		t.Run(c.name, func(t *testing.T) {
+			envData := env
+			if c.syslog {
+				envData += "logging:\n  syslog:\n    host: syslog.corp\n    port: 514\n"
+			}
+			req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
+			plan, errs, _ := GeneratePodman(req, res)
+			if len(errs) > 0 {
+				t.Fatalf("unexpected errors: %v", errs)
+			}
+			var lb *PodmanFile
+			for i := range plan.Files {
+				if plan.Files[i].StoreName == "c-logback-spring.xml" {
+					lb = &plan.Files[i]
+				}
+			}
+			line := "Secret=c-logback-spring.xml,type=mount,target=" + logback.ContainerPath + "\n"
+			if !c.syslog {
+				if lb != nil || strings.Contains(plan.Unit.Content, "logback") {
+					t.Errorf("no syslog must mean no logback file or mount: %+v\n%s", lb, plan.Unit.Content)
+				}
+				return
+			}
+			if lb == nil || !strings.Contains(lb.Data, "<configuration") || lb.Source != "" {
+				t.Errorf("logback file = %+v, want the rendered logback-spring.xml", lb)
+			}
+			if !strings.Contains(plan.Unit.Content, line) {
+				t.Errorf("unit missing %q:\n%s", line, plan.Unit.Content)
+			}
+		})
+	}
+}
+
+// TestGeneratePodmanNeverReadsTheStores pins that the TLS stores ride on the
+// plan by name only: generate (and remove, which renders the same plan) must
+// work on a host where the store files are not present, so only deploy reads
+// them. The unit mounts each from the secret store at the path application.yml
+// reads it from.
+func TestGeneratePodmanNeverReadsTheStores(t *testing.T) {
+	envData := `image:
+  name: img
+  tag: v1
+tls:
+  truststore:
+    file: ./certs/trust.p12
+    password: ts
+    type: PKCS12
+  keystore:
+    file: ./certs/key.p12
+    password: ks
+    type: PKCS12
+podman:
+  command: podman
+  name: c
+`
+	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
+	res := Resolver{Env: func(string) (string, bool) { return "v", true }, Rand: fixedStatusRand, ReadFile: func(p string) ([]byte, error) {
+		t.Errorf("generate read %s; only deploy may read a store", p)
+		return nil, fs.ErrNotExist
+	}}
+	plan, errs, _ := GeneratePodman(req, res)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	want := []PodmanFile{
+		{StoreName: "c-tls-truststore", Source: "./certs/trust.p12", Field: "tls.truststore.file"},
+		{StoreName: "c-tls-keystore", Source: "./certs/key.p12", Field: "tls.keystore.file"},
+	}
+	if len(plan.Files) < 3 || !slices.Equal(plan.Files[1:3], want) {
+		t.Errorf("store files = %+v, want %+v after application.yml", plan.Files, want)
+	}
+	for _, line := range []string{
+		"Secret=c-tls-truststore,type=mount,target=" + spec.DefaultStoresMountPath + "/trust.p12\n",
+		"Secret=c-tls-keystore,type=mount,target=" + spec.DefaultStoresMountPath + "/key.p12\n",
+	} {
+		if !strings.Contains(plan.Unit.Content, line) {
+			t.Errorf("unit missing %q:\n%s", line, plan.Unit.Content)
+		}
+	}
+	if strings.Contains(plan.Unit.Content, "Volume=") {
+		t.Errorf("a store must not be bind-mounted:\n%s", plan.Unit.Content)
+	}
+}
+
+// TestGeneratePodmanIgnoresBaseDir pins that podman.base-dir decides nothing
+// any more: with it set -- even to a value the old host-path gate refused,
+// holding an unset variable -- generate renders the same unit and plan as
+// without it, with no error and no warning (validate alone notes it).
+func TestGeneratePodmanIgnoresBaseDir(t *testing.T) {
+	const env = "image:\n  name: img\n  tag: v1\npodman:\n  command: podman\n  name: c\n"
+	res := Resolver{Env: func(n string) (string, bool) { return "v", n != "UNSET" }, Rand: fixedStatusRand}
+	gen := func(envData string) (PodmanPlan, []Issue, []Issue) {
+		req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
+		return GeneratePodman(req, res)
+	}
+	plain, errs, warns := gen(env)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	with, errs2, warns2 := gen(env + "  base-dir: \"/old dir/${UNSET}\"\n")
+	if len(errs2) > 0 {
+		t.Fatalf("base-dir must not be an error, got %v", errs2)
+	}
+	if with.Unit != plain.Unit || !slices.Equal(with.Files, plain.Files) {
+		t.Errorf("base-dir changed the plan:\n%s\nvs\n%s", with.Unit.Content, plain.Unit.Content)
+	}
+	if !slices.Equal(warns2, warns) {
+		t.Errorf("base-dir must add no warning outside validate: %v", warns2)
 	}
 }
 

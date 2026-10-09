@@ -3,7 +3,7 @@
 //
 // It is its own package because all three renderers need it: kubernetes puts
 // the content in a ConfigMap key, docker inlines it as a compose config, and
-// podman bind-mounts it from a file. Having dockergen or podmangen reach into
+// podman mounts it from its secret store. Having dockergen or podmangen reach into
 // internal/deploy for it would be a cross-module import between sibling
 // renderers, so the payload and its path live here instead -- the same shape
 // internal/statusscript already uses for the status script.

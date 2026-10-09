@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
@@ -247,14 +248,15 @@ func checkTargets(add, warn func(string, string, ...any), ctx Context, resolved 
 		}
 	}
 	// docker and podman carry no stores warning: the tls.*.file paths are always
-	// bind-mounted now, so "TLS configured but nothing mounted" cannot arise. The
+	// mounted now (bind mounts on docker, podman's secret store on podman), so
+	// "TLS configured but nothing mounted" cannot arise. The
 	// kubernetes one above stays -- it embeds store content in a Secret, which is
 	// still something the operator has to wire up.
 	if ctx.CheckDocker && ctx.Docker != nil {
 		checkDocker(add, ctx)
 	}
 	if ctx.CheckPodman && ctx.Podman != nil {
-		checkPodman(add, ctx)
+		checkPodman(add, warn, ctx)
 	}
 }
 
@@ -1308,9 +1310,14 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 	}
 	// Gone for the same reason: its one field could only ever hold the fixed
 	// in-container path, and the host side always came from tls.*.file, so the
-	// block decided nothing. The bind mount is now derived from those paths.
+	// block decided nothing. The mount is now derived from those paths: a bind
+	// mount on docker, a secret-store mount on podman.
 	if t.Stores != nil {
-		add(fileEnv, "%s.stores is no longer configured: the tls.truststore.file / tls.keystore.file store files are bind-mounted at %s whenever they are set. Remove the %s.stores section", section, spec.DefaultStoresMountPath, section)
+		how := "bind-mounted"
+		if t.Platform == PlatformPodman {
+			how = "loaded into podman's secret store and mounted"
+		}
+		add(fileEnv, "%s.stores is no longer configured: the tls.truststore.file / tls.keystore.file store files are %s at %s whenever they are set. Remove the %s.stores section", section, how, spec.DefaultStoresMountPath, section)
 	}
 	if !isDNS1123(t.Name) {
 		add(fileEnv, "%s.name %q is not a valid DNS-1123 label", section, t.Name)
@@ -1328,23 +1335,7 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 		add(fileEnv, "%s.timezone is no longer configured here: the container timezone moved to the top-level timezone: key so one declaration serves every platform. Remove %s.timezone", section, section)
 	}
 	checkPorts(add, section, t.Ports)
-	// The tls.*.file paths are always bind-mount sources in a docker or podman
-	// artifact, so they are always gated -- an unsafe character would add content
-	// to a compose YAML line or a quadlet Volume= directive that the spec never
-	// declared. This runs unconditionally because the mount is no longer opt-in.
-	// Kubernetes is still exempt: it embeds the store content in a Secret rather
-	// than naming a host path, and it does not reach this function.
-	for _, st := range []struct {
-		field string
-		store *spec.Store
-	}{{"tls.truststore.file", ctx.Defaults.TLS.Truststore}, {"tls.keystore.file", ctx.Defaults.TLS.Keystore}} {
-		if st.store == nil || st.store.File == "" {
-			continue
-		}
-		if !safeHostPath(st.store.File) {
-			add(fileEnv, "%s bind-mounts %s %q, which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", section, st.field, st.store.File)
-		}
-	}
+	checkContainerStores(add, section, t.Platform, ctx.Defaults.TLS)
 	if t.Libs != nil {
 		// dir is the only key libs takes. The container side is fixed at
 		// DefaultLibsMountPath by the image, which launches with that directory
@@ -1359,6 +1350,49 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 		} else if !safeHostPath(t.Libs.Dir) {
 			add(fileEnv, "%s.libs.dir %q contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", section, t.Libs.Dir)
 		}
+	}
+}
+
+// podmanStoreNameRE is what a store's file name may look like on podman: the
+// name becomes the end of a Secret= target, where a ',' would start another
+// option and a '%' is a systemd specifier.
+var podmanStoreNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// checkContainerStores gates the tls.*.file paths by what each platform does
+// with them; they are always mounted, so this runs whenever a store is set.
+// Kubernetes is exempt: it embeds the store content in a Secret, and it does
+// not reach checkContainerTarget.
+//
+// Docker bind-mounts the path itself, so an unsafe character would add content
+// to a compose YAML line the spec never declared. Podman never names the path:
+// deploy reads the file into podman's secret store, and only its file name
+// reaches the unit, as the end of the mount target application.yml reads the
+// store from -- so that name is what is held to a narrow set, and the two
+// stores' names must differ or both would mount at one path.
+func checkContainerStores(add func(string, string, ...any), section, platform string, tls spec.TLSConfig) {
+	seen := ""
+	for _, st := range []struct {
+		field string
+		store *spec.Store
+	}{{"tls.truststore.file", tls.Truststore}, {"tls.keystore.file", tls.Keystore}} {
+		if st.store == nil || st.store.File == "" {
+			continue
+		}
+		if platform != PlatformPodman {
+			if !safeHostPath(st.store.File) {
+				add(fileEnv, "%s bind-mounts %s %q, which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", section, st.field, st.store.File)
+			}
+			continue
+		}
+		base := spec.BaseName(st.store.File)
+		if !podmanStoreNameRE.MatchString(base) {
+			add(fileEnv, "podman mounts %s %q from podman's secret store at %s/%s, so its file name may hold only letters, digits, '.', '_' and '-'; rename the file", st.field, st.store.File, spec.DefaultStoresMountPath, base)
+			continue
+		}
+		if base == seen {
+			add(fileEnv, "tls.truststore.file and tls.keystore.file share the file name %q, so podman would mount both at %s/%s; rename one of them", base, spec.DefaultStoresMountPath, base)
+		}
+		seen = base
 	}
 }
 
@@ -1395,7 +1429,7 @@ func checkDocker(add func(string, string, ...any), ctx Context) {
 }
 
 // checkPodman validates the podman section, including the quadlet scope.
-func checkPodman(add func(string, string, ...any), ctx Context) {
+func checkPodman(add, warn func(string, string, ...any), ctx Context) {
 	p := ctx.Podman
 	checkContainerTarget(add, ctx, containerTarget{
 		Section:  "podman",
@@ -1418,16 +1452,14 @@ func checkPodman(add func(string, string, ...any), ctx Context) {
 	if p.Mode != "" {
 		add(fileEnv, "podman.mode is no longer configured: generate emits the .container quadlet unit that deploy and remove install. Remove podman.mode")
 	}
-	// base-dir is required, not defaulted: it is where the mounted application.yml
-	// and status script are written, and the path is baked into the unit's Volume=
-	// lines. There is no safe default -- the quadlet directory would put generated
-	// data among systemd's own units, and a guess would be silently wrong on a host
-	// where it is unwritable. Better to be told once than to find files somewhere
-	// unexpected.
-	if p.BaseDir == "" {
-		add(fileEnv, "podman.base-dir is required: it names the host directory the rendered application.yml and status script are written to and bind-mounted from. Relative paths resolve against env.yaml")
-	} else if !safeHostPath(p.BaseDir) {
-		add(fileEnv, "podman.base-dir %q contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", p.BaseDir)
+	// base-dir held the documents deploy wrote to the host; they now go into
+	// podman's secret store, so the key decides nothing. Ignored rather than
+	// rejected -- an older env.yaml keeps working -- and noted only by validate,
+	// which names what earlier deploys left there: one of those files holds the
+	// status account's password in clear.
+	if ctx.Lint && p.BaseDir != "" {
+		warn(fileEnv, "podman.base-dir %q is no longer used: deploy loads application.yml, the status script, the logback config and the tls stores into podman's secret store and writes nothing there. Remove podman.base-dir and delete what earlier deploys left in it: %s, %s and %s (the first holds the %s password)",
+			p.BaseDir, p.Name+"-application.yml", p.Name+"-status", p.Name+"-"+logback.FileName, spec.StatusUserName)
 	}
 	// The whole block is gone, both keys. scope followed the invoking uid in every
 	// case that actually worked, and dir could only move the unit somewhere

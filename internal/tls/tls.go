@@ -10,7 +10,7 @@ import (
 
 // MountDir is where the shared stores are mounted in the container. It aliases
 // spec.DefaultStoresMountPath so the application.yml store path and the
-// docker/podman bind-mount target share one source of truth.
+// docker bind-mount and podman secret-mount targets share one source of truth.
 const MountDir = spec.DefaultStoresMountPath
 
 // KV is one ordered scalar property (Key: Val).

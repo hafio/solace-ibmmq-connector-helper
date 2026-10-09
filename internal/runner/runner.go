@@ -587,10 +587,16 @@ func (sc QuadletScope) systemctlArgs(args ...string) []string {
 	return append(argv, args...)
 }
 
-// PodmanDeploy reloads the systemd generator and starts one service per unit.
-// Unit files must already be written into sc.Dir by the caller (their bind-mount
-// paths are baked into the rendered Volume= lines). services are the systemd
-// unit names to start, e.g. "solmq-connector.service".
+// PodmanDeploy reloads the systemd generator and brings up one service per unit.
+// Unit files must already be written into sc.Dir, and the secrets they mount
+// already be in podman's store, by the caller. services are the systemd unit
+// names, e.g. "solmq-connector.service".
+//
+// A service that is already running is restarted rather than started: podman
+// copies a mount secret into the container when it creates it, so a running
+// container would keep the old application.yml and stores, and start on an
+// active unit does nothing. Anything else -- a new unit, a stopped or a failed
+// one -- is started.
 func PodmanDeploy(r Runner, sc QuadletScope, services []string) (string, error) {
 	var out strings.Builder
 	o, err := r.Run(Cmd{Argv: sc.systemctlArgs("daemon-reload")})
@@ -599,10 +605,18 @@ func PodmanDeploy(r Runner, sc QuadletScope, services []string) (string, error) 
 		return out.String(), fmt.Errorf("systemctl daemon-reload: %w", err)
 	}
 	for _, s := range services {
-		o, err = r.Run(Cmd{Argv: sc.systemctlArgs("start", s)})
+		verb := "start"
+		// is-active exits 0 only for an active unit. Any failure -- inactive,
+		// failed, unknown, or systemctl itself erroring -- means start, whose own
+		// error then says what is wrong.
+		if _, aerr := r.Run(Cmd{Argv: sc.systemctlArgs("is-active", "--quiet", s)}); aerr == nil {
+			verb = "restart"
+			out.WriteString(s + " was running; restarting it to load the new configuration\n")
+		}
+		o, err = r.Run(Cmd{Argv: sc.systemctlArgs(verb, s)})
 		out.WriteString(o)
 		if err != nil {
-			return out.String(), fmt.Errorf("systemctl start %s: %w", s, err)
+			return out.String(), fmt.Errorf("systemctl %s %s: %w", verb, s, err)
 		}
 	}
 	return out.String(), nil

@@ -634,11 +634,17 @@ func actPodman(o actionOpts, r runner.Runner) int {
 }
 
 func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, res gen.Resolver, r runner.Runner, extraAllowed []string) int {
-	// Credentials first: a missing one should stop the deploy before any unit is
-	// written, and the units reference secrets that must already exist.
+	// Everything the unit mounts is resolved first -- the credentials, then the
+	// documents and stores -- so a missing variable or an unreadable or
+	// oversized store stops the deploy before anything is created: the unit
+	// references secrets that must already exist.
 	kvs, cerr := gen.ResolveCredentials(plan.Secrets, res)
 	if cerr != nil {
 		return errExit(cerr)
+	}
+	files, ferr := gen.ResolvePodmanFiles(plan.Files, res)
+	if ferr != nil {
+		return errExit(ferr)
 	}
 	for _, kv := range kvs {
 		out, err := runner.PodmanSecretCreate(r, p.Command, gen.PodmanSecretStoreName(p.Name, kv.Key), kv.Val, extraAllowed)
@@ -646,27 +652,30 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 			return report(runner.ActionDeploy, tgtPodman, out, err)
 		}
 	}
-	// application.yml now carries a live read-only credential (the reserved
-	// status account's password, read back out of this same file by the
-	// generated status script at run time -- see statusscript.Render), so it is
-	// written 0600 rather than world/group-readable. The status script and the
-	// unit carry no secret of their own -- the script only reads one back out,
-	// the unit only stable secret names -- so 0644 is right for both.
-	// The three mounted documents go to podman.base-dir, the same directory whose
-	// paths are already baked into the unit's Volume= lines. Only the unit itself
-	// goes to the quadlet directory, which is the one place systemd scans.
-	// WriteFile creates the parent, so a base-dir that does not exist yet is made
-	// rather than being an error the operator has to pre-empt.
-	if err := runner.WriteFile(filepath.Join(plan.BaseDir, plan.AppYAML.Name), plan.AppYAML.Data, 0o600); err != nil {
-		return errExit(err)
-	}
-	if plan.Logback.Name != "" {
-		if err := runner.WriteFile(filepath.Join(plan.BaseDir, plan.Logback.Name), plan.Logback.Data, 0o644); err != nil {
-			return errExit(err)
+	// application.yml carries a live credential (the reserved status account's
+	// password, read back out of this same file by the status script at run
+	// time -- see statusscript.Render) and the stores are key material, so the
+	// documents and stores travel like the credentials, on stdin into podman's
+	// secret store, and never touch the host disk. Only the unit is written, to
+	// the quadlet directory, the one place systemd scans.
+	mounted := make(map[string]bool, len(files))
+	for _, kv := range files {
+		mounted[kv.Key] = true
+		out, err := runner.PodmanSecretCreate(r, p.Command, kv.Key, kv.Val, extraAllowed)
+		if err != nil {
+			return report(runner.ActionDeploy, tgtPodman, out, err)
 		}
 	}
-	if err := runner.WriteFile(filepath.Join(plan.BaseDir, plan.StatusScript.Name), plan.StatusScript.Data, 0o644); err != nil {
-		return errExit(err)
+	// A file secret this spec no longer mounts -- syslog or a keystore dropped
+	// since the last deploy -- is deleted, so the store holds what the unit uses.
+	var stale []string
+	for _, n := range gen.PodmanFileSecretNames(p.Name) {
+		if !mounted[n] {
+			stale = append(stale, n)
+		}
+	}
+	if out, err := runner.PodmanSecretRemove(r, p.Command, stale, extraAllowed); err != nil {
+		return report(runner.ActionDeploy, tgtPodman, out, err)
 	}
 	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.Unit.Filename), plan.Unit.Content, 0o644); err != nil {
 		return errExit(err)
@@ -677,22 +686,16 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 
 func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r runner.Runner, extraAllowed []string) int {
 	out, rerr := runner.PodmanRemove(r, sc, []string{plan.Service}, []string{plan.Unit.Filename})
-	// Best-effort cleanup of the files we generated, from the base-dir they were
-	// written to. The directory itself is left alone: the operator chose it and it
-	// may hold things this tool did not put there.
-	_ = os.Remove(filepath.Join(plan.BaseDir, plan.AppYAML.Name))
-	_ = os.Remove(filepath.Join(plan.BaseDir, plan.StatusScript.Name))
-	if plan.Logback.Name != "" {
-		_ = os.Remove(filepath.Join(plan.BaseDir, plan.Logback.Name))
-	}
-	// Credentials are removed from podman's store last, after the units that
-	// referenced them are gone. Leaving credential material behind is worth
-	// reporting even when the teardown itself succeeded, so a failure here
-	// surfaces rather than being swallowed like the file cleanup above.
+	// The secrets go last, after the unit that mounted them is gone: the
+	// credentials, and every file secret the instance can own, whether or not
+	// this spec still mounts it. Leaving credential or key material behind is
+	// worth reporting even when the teardown itself succeeded. Files an old
+	// podman.base-dir still holds are not touched; validate names them.
 	names := make([]string, 0, len(plan.Secrets))
 	for _, s := range plan.Secrets {
 		names = append(names, gen.PodmanSecretStoreName(p.Name, s.Stable))
 	}
+	names = append(names, gen.PodmanFileSecretNames(p.Name)...)
 	so, serr := runner.PodmanSecretRemove(r, p.Command, names, extraAllowed)
 	out += so
 	if rerr == nil {
@@ -1329,12 +1332,13 @@ func loadEnv(envPath string) (gen.Request, *spec.Env, string, error) {
 	}
 	// envDir is grounded absolutely, not left as the operator spelled -e. It is
 	// what every host path in a generated artifact resolves against (Resolver.Abs
-	// -> absPath), and those land in a podman quadlet Volume= or a compose
-	// volumes: entry. `-e env.yaml` would otherwise give envDir "." and emit
-	// `Volume=certs/truststore.jks:...`, which systemd cannot resolve -- it runs
-	// the unit with no useful cwd -- and which podman reads as a NAMED VOLUME when
-	// the source has no ./ or / prefix, silently mounting an empty volume over the
-	// truststore or the libs directory instead of failing.
+	// -> absPath), and those land in a podman quadlet Volume= (libs.dir, the one
+	// host path a unit names) or a compose volumes: entry. `-e env.yaml` would
+	// otherwise give envDir "." and emit `Volume=libs:...`, which systemd cannot
+	// resolve -- it runs the unit with no useful cwd -- and which podman reads as a
+	// NAMED VOLUME when the source has no ./ or / prefix, silently mounting an
+	// empty volume over the libs directory instead of failing. It is also where
+	// deploy reads the tls.*.file stores from (Resolver.ReadFile).
 	//
 	// Abs only fails when the process has no working directory, which is also when
 	// the relative form would be meaningless; keep the raw dir in that case rather

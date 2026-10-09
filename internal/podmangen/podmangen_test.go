@@ -21,13 +21,13 @@ func fullInput() Input {
 			Ports:   []spec.Port{{Host: 8090, Container: 8090}, {Host: 8080, Container: 8091}},
 			Restart: "unless-stopped",
 		},
-		Instance: Instance{Name: "solmq-connector", Image: testImage, Timezone: "Asia/Singapore", AppYAMLPath: "./solmq-connector-application.yml", MQTLS: true, StatusScriptPath: "./solmq-connector-status", LeaderMode: spec.LeaderActiveActive},
+		Instance: Instance{Name: "solmq-connector", Image: testImage, Timezone: "Asia/Singapore", AppYAMLSecret: "solmq-connector-application.yml", MQTLS: true, StatusScriptSecret: "solmq-connector-status-script", LeaderMode: spec.LeaderActiveActive},
 		Secrets: []SecretRef{
 			{StoreName: "solmq-connector-MQ_CONN_1_USER", Target: "MQ_CONN_1_USER"},
 			{StoreName: "solmq-connector-MQ_CONN_1_PASSWORD", Target: "MQ_CONN_1_PASSWORD"},
 		},
-		Stores: []Mount{
-			{Source: "/abs/certs/truststore.jks", Target: "/app/external/classpath/truststores/truststore.jks"},
+		Stores: []FileSecret{
+			{StoreName: "solmq-connector-tls-truststore", Target: "/app/external/classpath/truststores/truststore.jks"},
 		},
 		Libs: &Mount{Source: "/abs/libs", Target: "/app/external/libs"},
 	}
@@ -41,14 +41,14 @@ func minimalInput() Input {
 			Name:  "solmq-connector",
 			Ports: []spec.Port{{Host: 8090, Container: 8090}},
 		},
-		Instance: Instance{Name: "solmq-connector", Image: testImage, AppYAMLPath: "./solmq-connector-application.yml", MQTLS: false, StatusScriptPath: "./solmq-connector-status", LeaderMode: ""},
+		Instance: Instance{Name: "solmq-connector", Image: testImage, AppYAMLSecret: "solmq-connector-application.yml", MQTLS: false, StatusScriptSecret: "solmq-connector-status-script", LeaderMode: ""},
 	}
 }
 
 // TestRenderQuadletSecretsCarryNoValues asserts the unit references each
 // credential by its stable store name only. The value itself lives in podman's
-// secret store, placed there by deploy; a unit is a world-readable file next to
-// the application.yml, so a value appearing here would be a credential on disk.
+// secret store, placed there by deploy; a unit is a world-readable file in the
+// quadlet directory, so a value appearing here would be a credential on disk.
 func TestRenderQuadletSecretsCarryNoValues(t *testing.T) {
 	in := minimalInput()
 	in.Secrets = []SecretRef{
@@ -87,10 +87,10 @@ Environment=TZ=Asia/Singapore
 Environment=JAVA_TOOL_OPTIONS=-Dcom.ibm.mq.cfg.useIBMCipherMappings=false
 Secret=solmq-connector-MQ_CONN_1_USER,type=mount,target=/app/external/var/secrets/MQ_CONN_1_USER
 Secret=solmq-connector-MQ_CONN_1_PASSWORD,type=mount,target=/app/external/var/secrets/MQ_CONN_1_PASSWORD
-Volume=./solmq-connector-application.yml:/app/external/spring/config/application.yml:ro
-Volume=/abs/certs/truststore.jks:/app/external/classpath/truststores/truststore.jks:ro
+Secret=solmq-connector-application.yml,type=mount,target=/app/external/spring/config/application.yml
+Secret=solmq-connector-tls-truststore,type=mount,target=/app/external/classpath/truststores/truststore.jks
+Secret=solmq-connector-status-script,type=mount,target=/app/external/.status-script
 Volume=/abs/libs:/app/external/libs:ro
-Volume=./solmq-connector-status:/app/external/.status-script:ro
 HealthCmd=sh /app/external/.status-script --health
 HealthInterval=30s
 HealthTimeout=10s
@@ -122,8 +122,8 @@ ContainerName=solmq-connector
 Label=solace-connector/le-mode=standalone
 Label=solace-connector/role=active
 PublishPort=8090:8090
-Volume=./solmq-connector-application.yml:/app/external/spring/config/application.yml:ro
-Volume=./solmq-connector-status:/app/external/.status-script:ro
+Secret=solmq-connector-application.yml,type=mount,target=/app/external/spring/config/application.yml
+Secret=solmq-connector-status-script,type=mount,target=/app/external/.status-script
 HealthCmd=sh /app/external/.status-script --health
 HealthInterval=30s
 HealthTimeout=10s
@@ -170,37 +170,54 @@ func TestLeaderLabelsPerMode(t *testing.T) {
 	}
 }
 
-// TestStatusScriptMountNestsAfterLibs asserts the status script mount is
-// emitted after the libs volume, so the single-file mount nests inside the libs
-// directory mount instead of being shadowed by it.
-func TestStatusScriptMountNestsAfterLibs(t *testing.T) {
+// TestQuadletMountsNothingFromTheHostButLibs pins the point of mounting every
+// file from podman's secret store: with everything set -- credentials, a
+// store, the status script, syslog and libs -- the libs directory is the one
+// Volume= line, and every Secret= line mounts at an absolute target, since a
+// bare one would land in podman's /run/secrets where nothing reads it.
+func TestQuadletMountsNothingFromTheHostButLibs(t *testing.T) {
 	in := fullInput()
-
-	unit := RenderQuadlet(in)
-	libsIdx := strings.Index(unit.Content, "Volume=/abs/libs:/app/external/libs:ro")
-	statusIdx := strings.Index(unit.Content, "Volume=./solmq-connector-status:/app/external/.status-script:ro")
-	if libsIdx == -1 || statusIdx == -1 || statusIdx < libsIdx {
-		t.Errorf("RenderQuadlet status mount must follow the libs volume, got:\n%s", unit.Content)
+	in.Syslog = &spec.Syslog{Host: "syslog.corp", Port: 514, Protocol: spec.SyslogUDP}
+	in.Instance.LogbackSecret = "solmq-connector-logback-spring.xml"
+	var volumes, secrets []string
+	for _, line := range strings.Split(RenderQuadlet(in).Content, "\n") {
+		switch {
+		case strings.HasPrefix(line, "Volume="):
+			volumes = append(volumes, line)
+		case strings.HasPrefix(line, "Secret="):
+			secrets = append(secrets, line)
+			if !strings.Contains(line, ",type=mount,target=/") {
+				t.Errorf("secret mount without an absolute target: %s", line)
+			}
+		}
+	}
+	if len(volumes) != 1 || volumes[0] != "Volume=/abs/libs:/app/external/libs:ro" {
+		t.Errorf("the libs directory must be the only Volume=, got %q", volumes)
+	}
+	// Two credentials, application.yml, the truststore, the status script and
+	// the logback config.
+	if len(secrets) != 6 {
+		t.Errorf("want 6 Secret= lines, got %d: %q", len(secrets), secrets)
 	}
 }
 
-// TestStatusScriptMountOmittedWhenPathEmpty asserts a caller that has not
-// yet resolved the status script's host path (a preview/partial render)
-// gets no mount for it, rather than a mount with an empty source.
+// TestStatusScriptMountOmittedWhenSecretEmpty asserts a caller that names no
+// status script secret (a partial render) gets no mount for it, rather than a
+// Secret= line with an empty name.
 //
 // It covers the healthcheck in the same breath: HealthCmd execs that same
 // path, so a unit that mounts no script must declare no check either, or
 // podman would report every such container unhealthy.
-func TestStatusScriptMountOmittedWhenPathEmpty(t *testing.T) {
+func TestStatusScriptMountOmittedWhenSecretEmpty(t *testing.T) {
 	in := fullInput()
-	in.Instance.StatusScriptPath = ""
+	in.Instance.StatusScriptSecret = ""
 
 	unit := RenderQuadlet(in)
 	if strings.Contains(unit.Content, statusTarget) {
-		t.Errorf("RenderQuadlet with empty StatusScriptPath must omit the status mount, got:\n%s", unit.Content)
+		t.Errorf("RenderQuadlet with empty StatusScriptSecret must omit the status mount, got:\n%s", unit.Content)
 	}
 	if strings.Contains(unit.Content, "Health") {
-		t.Errorf("RenderQuadlet with empty StatusScriptPath must omit the healthcheck, got:\n%s", unit.Content)
+		t.Errorf("RenderQuadlet with empty StatusScriptSecret must omit the healthcheck, got:\n%s", unit.Content)
 	}
 }
 
@@ -293,13 +310,13 @@ func TestSystemdEnvEscapes(t *testing.T) {
 	}
 }
 
-// syslogInput is minimalInput plus a syslog block and the logback file path the
-// CLI would have written beside application.yml. podman cannot inline file
-// content, so unlike compose the config has to exist on disk and be mounted.
+// syslogInput is minimalInput plus a syslog block and the secret the logback
+// config is loaded into. podman cannot inline file content, so unlike compose
+// the config reaches the container from podman's secret store.
 func syslogInput() Input {
 	in := minimalInput()
 	in.Syslog = &spec.Syslog{Host: "syslog.corp", Port: 514, Protocol: spec.SyslogUDP}
-	in.Instance.LogbackPath = "./solmq-connector-logback-spring.xml"
+	in.Instance.LogbackSecret = "solmq-connector-logback-spring.xml"
 	return in
 }
 
@@ -309,7 +326,7 @@ func syslogInput() Input {
 func TestQuadletSyslogMountsAndSetsEnv(t *testing.T) {
 	out := RenderQuadlet(syslogInput()).Content
 	for _, want := range []string{
-		"Volume=./solmq-connector-logback-spring.xml:" + logback.ContainerPath + ":ro",
+		"Secret=solmq-connector-logback-spring.xml,type=mount,target=" + logback.ContainerPath + "\n",
 		"Environment=LOGGING_SYSLOG_APPNAME=solmq-connector",
 		"Environment=LOGGING_SYSLOG_HOST=syslog.corp",
 		"Environment=LOGGING_SYSLOG_PORT=514",

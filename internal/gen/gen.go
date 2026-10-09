@@ -22,6 +22,7 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/render"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/tls"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
 
@@ -348,38 +349,97 @@ func stableNames(refs []consolidate.SecretRef) []string {
 	return out
 }
 
-// NamedDoc is one on-disk document (podman writes application.yml files to
-// podman.base-dir because a container cannot inline file content).
-type NamedDoc struct {
-	Name string
-	Data string
+// PodmanFile is one file the quadlet unit mounts out of podman's secret store
+// rather than from the host: a rendered document, carried whole in Data, or a
+// TLS store, named by Source and read only when deploy loads it
+// (ResolvePodmanFiles) -- generate and remove never open a store.
+type PodmanFile struct {
+	StoreName string // the secret's name in podman's store: <name>-<role>
+	Data      string // a rendered document; empty for a store
+	Source    string // a store's tls.*.file as written in env.yaml; empty for a document
+	Field     string // a store's env.yaml key, e.g. tls.truststore.file, for errors
 }
 
-// PodmanPlan carries the rendered quadlet unit plus the on-disk material a deploy
-// must write before activating it.
+// PodmanPlan carries the rendered quadlet unit plus everything a deploy loads
+// into podman's secret store before activating it. Nothing but the unit itself
+// is written to the host.
 type PodmanPlan struct {
 	Unit podmangen.Unit // the .container quadlet unit
-	// BaseDir is the resolved absolute directory the three documents below belong
-	// in, from podman.base-dir. It is carried on the plan rather than recomputed
-	// by each caller so what deploy writes and what remove deletes cannot drift
-	// from the paths already baked into the unit's Volume= lines.
-	BaseDir string
-	AppYAML NamedDoc // application.yml (write to disk)
-	// StatusScript is the rendered status script (write to disk): like
-	// AppYAML, a container cannot inline file content, so it too has to be a
-	// bind-mounted file rather than embedded in the quadlet unit.
-	StatusScript NamedDoc
-	// Logback is the rendered logback-spring.xml (write to disk), for the same
-	// reason. Zero when no syslog is configured, which is how callers know not
-	// to write or remove it.
-	Logback NamedDoc
+	// Files are the documents and stores the unit mounts from the secret store,
+	// in unit order, under the same names its Secret= lines carry, so what
+	// deploy creates cannot drift from what the unit mounts.
+	Files   []PodmanFile
 	Secrets []consolidate.SecretRef // credentials to place in podman's secret store
 	Service string                  // systemd service name, e.g. name.service
 }
 
-// GeneratePodman parses+validates and renders the .container quadlet unit.
-// application.yml documents are returned separately for the caller to write to
-// disk.
+// The secret-store names of the files a podman unit mounts, one per role, each
+// appended to the container name by PodmanSecretStoreName. Every suffix holds
+// a '-' or a '.', which no credential's stable name can (those match
+// [A-Za-z_][A-Za-z0-9_]*), so a file never takes a credential's name. The names
+// follow the role rather than the file, so a renamed store or a dropped syslog
+// block strands nothing: deploy deletes the ones it no longer mounts.
+const (
+	podmanAppYAMLSuffix    = "application.yml"
+	podmanTruststoreSuffix = "tls-truststore"
+	podmanKeystoreSuffix   = "tls-keystore"
+	podmanStatusSuffix     = "status-script"
+	podmanLogbackSuffix    = logback.FileName
+)
+
+// PodmanFileSecretNames lists every file secret an instance can own, mounted by
+// its current spec or not: deploy deletes the ones it no longer mounts, and
+// remove deletes them all.
+func PodmanFileSecretNames(container string) []string {
+	suffixes := []string{podmanAppYAMLSuffix, podmanTruststoreSuffix, podmanKeystoreSuffix, podmanStatusSuffix, podmanLogbackSuffix}
+	out := make([]string, 0, len(suffixes))
+	for _, s := range suffixes {
+		out = append(out, PodmanSecretStoreName(container, s))
+	}
+	return out
+}
+
+// podmanSecretMax is the most data one podman secret holds: containers/common
+// refuses empty data and anything of 512000 bytes or more.
+const podmanSecretMax = 511999
+
+// ResolvePodmanFiles turns a plan's files into the name/value pairs deploy
+// loads into podman's secret store: a rendered document as it stands, a TLS
+// store read from its tls.*.file (resolved against env.yaml, as resolveStores
+// reads it for kubernetes). Every value is held to podman's size limit here, so
+// a file podman would refuse stops the deploy before any secret is created.
+// The result is secret material -- callers hand it straight to the store.
+//
+// Errors name the file or secret and its size, never its content.
+func ResolvePodmanFiles(files []PodmanFile, res Resolver) ([]KV, error) {
+	out := make([]KV, 0, len(files))
+	for _, f := range files {
+		data, what := f.Data, f.StoreName
+		if f.Source != "" {
+			what = fmt.Sprintf("%s %q", f.Field, f.Source)
+			if res.ReadFile == nil {
+				return nil, fmt.Errorf("cannot read %s for podman's secret store (no file access)", what)
+			}
+			b, err := res.ReadFile(f.Source)
+			if err != nil {
+				return nil, fmt.Errorf("reading %s for podman's secret store: %w", what, err)
+			}
+			data = string(b)
+		}
+		switch {
+		case len(data) == 0:
+			return nil, fmt.Errorf("%s is empty, and podman's secret store cannot hold an empty secret; point it at the real file", what)
+		case len(data) > podmanSecretMax:
+			return nil, fmt.Errorf("%s is %d bytes, over the %d bytes podman's secret store holds per secret; trim it to what this connector needs (for a truststore, the CA certificates of the brokers and queue managers it connects to)", what, len(data), podmanSecretMax)
+		}
+		out = append(out, KV{Key: f.StoreName, Val: data})
+	}
+	return out, nil
+}
+
+// GeneratePodman parses+validates and renders the .container quadlet unit. The
+// documents and stores it mounts are returned on the plan for deploy to load
+// into podman's secret store; nothing is read from or written to the host here.
 //
 // extraAllowed threads deploy/remove's --allow-command values into the
 // podman.command allowlist check; plain `generate podman` calls this with none.
@@ -411,40 +471,51 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 
 	plan.Secrets = b.model.Secrets
 
-	// base-dir is resolved the way every other host path in the spec is, against
-	// env.yaml, so a relative value still reaches the unit as an absolute path --
-	// systemd starts the unit with no useful cwd, and podman would read a bare
-	// source as a named volume rather than a bind mount.
-	plan.BaseDir = res.abs(p.BaseDir)
-
-	sm, lm := targetMounts(e.Defaults.TLS, p.Libs, res)
-	appName := p.Name + "-application.yml"
-	statusName := p.Name + "-status"
-	plan.AppYAML = NamedDoc{Name: appName, Data: b.appYAML}
-	logbackPath := ""
-	if sl := e.Defaults.Syslog; sl != nil {
-		logbackName := p.Name + "-" + logback.FileName
-		plan.Logback = NamedDoc{Name: logbackName, Data: logback.XML(sl.Protocol)}
-		logbackPath = pathIn(plan.BaseDir, logbackName)
+	// Everything the unit mounts but the libs directory comes from podman's
+	// secret store, in unit order: application.yml, the stores (at the path
+	// application.yml names each one by), the status script, the logback config.
+	// podman.base-dir, which used to hold the documents, is ignored.
+	appSecret := PodmanSecretStoreName(p.Name, podmanAppYAMLSuffix)
+	plan.Files = append(plan.Files, PodmanFile{StoreName: appSecret, Data: b.appYAML})
+	var stores []podmangen.FileSecret
+	for _, st := range []struct {
+		field, suffix string
+		store         *spec.Store
+	}{{"tls.truststore.file", podmanTruststoreSuffix, e.Defaults.TLS.Truststore}, {"tls.keystore.file", podmanKeystoreSuffix, e.Defaults.TLS.Keystore}} {
+		if st.store == nil || st.store.File == "" {
+			continue
+		}
+		name := PodmanSecretStoreName(p.Name, st.suffix)
+		plan.Files = append(plan.Files, PodmanFile{StoreName: name, Source: st.store.File, Field: st.field})
+		stores = append(stores, podmangen.FileSecret{StoreName: name, Target: tls.MountPath(st.store.File)})
 	}
-	plan.StatusScript = NamedDoc{Name: statusName, Data: statusscript.Render(e.Defaults.EffectiveManagementPort(), spec.StatusUserName)}
+	statusSecret := PodmanSecretStoreName(p.Name, podmanStatusSuffix)
+	plan.Files = append(plan.Files, PodmanFile{StoreName: statusSecret, Data: statusscript.Render(e.Defaults.EffectiveManagementPort(), spec.StatusUserName)})
+	logbackSecret := ""
+	if sl := e.Defaults.Syslog; sl != nil {
+		logbackSecret = PodmanSecretStoreName(p.Name, podmanLogbackSuffix)
+		plan.Files = append(plan.Files, PodmanFile{StoreName: logbackSecret, Data: logback.XML(sl.Protocol)})
+	}
+	// Only the libs directory stays a host path, resolved against env.yaml like
+	// every other; the stores are left out of targetMounts on purpose.
+	_, lm := targetMounts(spec.TLSConfig{}, p.Libs, res)
 	plan.Service = PodmanServiceName(p.Name)
 	in := podmangen.Input{
 		Podman:  p,
 		Syslog:  e.Defaults.Syslog,
 		Secrets: podmanSecretRefs(p.Name, plan.Secrets),
-		Stores:  toPodmanMounts(sm),
+		Stores:  stores,
 		Libs:    toPodmanMount(lm),
 		Instance: podmangen.Instance{
-			Name:             p.Name,
-			Image:            e.Image.Ref(),
-			Timezone:         e.Timezone,
-			AppYAMLPath:      pathIn(plan.BaseDir, appName),
-			MQTLS:            b.model.MQTLS,
-			StatusScriptPath: pathIn(plan.BaseDir, statusName),
-			LogbackPath:      logbackPath,
-			LeaderMode:       e.Defaults.LeaderElection.EffectiveMode(),
-			JavaOptions:      e.JavaOptions,
+			Name:               p.Name,
+			Image:              e.Image.Ref(),
+			Timezone:           e.Timezone,
+			AppYAMLSecret:      appSecret,
+			MQTLS:              b.model.MQTLS,
+			StatusScriptSecret: statusSecret,
+			LogbackSecret:      logbackSecret,
+			LeaderMode:         e.Defaults.LeaderElection.EffectiveMode(),
+			JavaOptions:        e.JavaOptions,
 		},
 	}
 	plan.Unit = podmangen.RenderQuadlet(in)
@@ -577,11 +648,12 @@ type mount struct{ Source, Target string }
 // fixed in-container store dir spec.DefaultStoresMountPath, matching where
 // application.yml references them) and the libs directory into host->container
 // mounts. Both container-side paths are constants: the image fixes them, and the
-// spec only chooses the host source.
+// spec only chooses the host source. Docker bind-mounts both; podman passes no
+// stores (they come from its secret store) and takes only the libs mount.
 //
 // The stores are not gated on an opt-in: application.yml always references the
-// mounted path for docker/podman (consolidate is called with MountStores true),
-// so a configured store that was not mounted left the config pointing at a file
+// mounted path for docker (consolidate is called with MountStores true), so a
+// configured store that was not mounted left the config pointing at a file
 // nothing supplied. A store with no file set is skipped, so a spec without TLS
 // still yields no store mounts. libs stays opt-in -- it has a host dir to name.
 func targetMounts(tls spec.TLSConfig, libs *spec.LibsMount, res Resolver) (sm []mount, lm *mount) {
@@ -610,14 +682,6 @@ func toDockerMount(m *mount) *dockergen.Mount {
 		return nil
 	}
 	return &dockergen.Mount{Source: m.Source, Target: m.Target}
-}
-
-func toPodmanMounts(ms []mount) []podmangen.Mount {
-	out := make([]podmangen.Mount, 0, len(ms))
-	for _, m := range ms {
-		out = append(out, podmangen.Mount{Source: m.Source, Target: m.Target})
-	}
-	return out
 }
 
 func toPodmanMount(m *mount) *podmangen.Mount {
@@ -653,15 +717,6 @@ func podmanSecretRefs(container string, refs []consolidate.SecretRef) []podmange
 		})
 	}
 	return out
-}
-
-// pathIn joins base and name with a forward slash (the on-target separator for
-// docker/podman). An empty base yields the bare name for a portable preview.
-func pathIn(base, name string) string {
-	if base == "" {
-		return name
-	}
-	return strings.TrimRight(base, "/\\") + "/" + name
 }
 
 // ---- parsing -----------------------------------------------------------------

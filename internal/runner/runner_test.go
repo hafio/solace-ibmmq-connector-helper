@@ -121,14 +121,19 @@ func TestHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+// TestOSRunWiresStdinToChild covers text, and binary content of the kind a
+// TLS store loaded into podman's secret store is: NUL, CR and bytes that are
+// not UTF-8 must reach the child byte for byte.
 func TestOSRunWiresStdinToChild(t *testing.T) {
 	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	out, err := (OS{}).Run(Cmd{Argv: helperProcessArgv(os.Args[0], "stdin"), Stdin: "hello-stdin\n"})
-	if err != nil {
-		t.Fatalf("Run returned error: %v (output %q)", err, out)
-	}
-	if out != "hello-stdin\n" {
-		t.Errorf("stdin content not visible to child: output = %q", out)
+	for _, in := range []string{"hello-stdin\n", "\xfe\xed\xfe\xed\x00\x00\x00\x02\r\n\xff"} {
+		out, err := (OS{}).Run(Cmd{Argv: helperProcessArgv(os.Args[0], "stdin"), Stdin: in})
+		if err != nil {
+			t.Fatalf("Run returned error: %v (output %q)", err, out)
+		}
+		if out != in {
+			t.Errorf("stdin content not visible to child unchanged: output = %q, want %q", out, in)
+		}
 	}
 }
 
@@ -381,20 +386,50 @@ func TestResolveQuadletScope(t *testing.T) {
 	}
 }
 
+// TestPodmanDeployReloadThenStart pins how a deploy brings the unit up: reload,
+// ask systemd whether the service is running, then start it if it is not (a
+// new, stopped or failed unit) or restart it if it is -- a running container
+// keeps the secrets it was created with, so only a restart loads the new ones.
 func TestPodmanDeployReloadThenStart(t *testing.T) {
-	f := &fakeRunner{}
-	sc := QuadletScope{Dir: t.TempDir(), UserMode: true}
-	if _, err := PodmanDeploy(f, sc, []string{"solmq-connector.service"}); err != nil {
-		t.Fatal(err)
-	}
-	want := [][]string{
-		{"systemctl", "--user", "daemon-reload"},
-		{"systemctl", "--user", "start", "solmq-connector.service"},
-	}
-	for i, w := range want {
-		if !reflect.DeepEqual(f.calls[i].argv, w) {
-			t.Errorf("call %d argv = %v, want %v", i, f.calls[i].argv, w)
-		}
+	for _, c := range []struct {
+		name    string
+		user    bool
+		running bool
+		verb    string
+	}{
+		{"new or stopped unit, user scope", true, false, "start"},
+		{"running unit, user scope", true, true, "restart"},
+		{"new or stopped unit, system scope", false, false, "start"},
+		{"running unit, system scope", false, true, "restart"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeRunner{}
+			if !c.running {
+				// is-active exits 3 for an inactive unit.
+				f.errByCall = map[int]error{1: fmt.Errorf("exit status 3")}
+			}
+			sc := QuadletScope{Dir: t.TempDir(), UserMode: c.user}
+			out, err := PodmanDeploy(f, sc, []string{"solmq-connector.service"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := [][]string{
+				sc.systemctlArgs("daemon-reload"),
+				sc.systemctlArgs("is-active", "--quiet", "solmq-connector.service"),
+				sc.systemctlArgs(c.verb, "solmq-connector.service"),
+			}
+			if len(f.calls) != len(want) {
+				t.Fatalf("want %d calls, got %+v", len(want), f.calls)
+			}
+			for i, w := range want {
+				if !reflect.DeepEqual(f.calls[i].argv, w) {
+					t.Errorf("call %d argv = %v, want %v", i, f.calls[i].argv, w)
+				}
+			}
+			if said := strings.Contains(out, "was running; restarting it"); said != c.running {
+				t.Errorf("output %q: restart notice present = %v, want %v", out, said, c.running)
+			}
+		})
 	}
 }
 
@@ -438,19 +473,30 @@ func TestPodmanRemoveStopsRemovesReloads(t *testing.T) {
 }
 
 func TestPodmanDeployStartFailureIsReported(t *testing.T) {
-	// daemon-reload (call 0) succeeds so the per-service start (call 1) is actually
-	// reached; injecting the failure only on call 1 exercises the start branch.
-	f := &fakeRunner{errByCall: map[int]error{1: fmt.Errorf("boom")}}
-	sc := QuadletScope{Dir: t.TempDir(), UserMode: true}
-	_, err := PodmanDeploy(f, sc, []string{"a.service"})
-	if err == nil {
-		t.Fatal("a systemctl start failure must surface")
-	}
-	if !strings.Contains(err.Error(), "start a.service") {
-		t.Errorf("error should name the failed start, got %v", err)
-	}
-	if len(f.calls) != 2 {
-		t.Fatalf("want daemon-reload + start = 2 calls, got %d", len(f.calls))
+	// daemon-reload is call 0 and is-active (call 1) decides the verb for the
+	// start or restart (call 2); a failure injected at any step must surface
+	// naming the step, and nothing after it may run.
+	for _, c := range []struct {
+		name      string
+		errs      map[int]error
+		wantErr   string
+		wantCalls int
+	}{
+		{"daemon-reload", map[int]error{0: fmt.Errorf("boom")}, "systemctl daemon-reload: boom", 1},
+		{"start", map[int]error{1: fmt.Errorf("exit status 3"), 2: fmt.Errorf("boom")}, "systemctl start a.service: boom", 3},
+		{"restart", map[int]error{2: fmt.Errorf("boom")}, "systemctl restart a.service: boom", 3},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeRunner{errByCall: c.errs}
+			sc := QuadletScope{Dir: t.TempDir(), UserMode: true}
+			_, err := PodmanDeploy(f, sc, []string{"a.service"})
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("err = %v, want it to contain %q", err, c.wantErr)
+			}
+			if len(f.calls) != c.wantCalls {
+				t.Fatalf("want %d calls, got %d", c.wantCalls, len(f.calls))
+			}
+		})
 	}
 }
 

@@ -475,28 +475,52 @@ func TestCheckPodmanModeAndScope(t *testing.T) {
 	}
 }
 
-// TestCheckPodmanBaseDirRequired pins the one podman key with no default. It is
-// where the mounted application.yml and status script are written, and the path
-// is baked into the unit's Volume= lines, so there is nothing safe to guess.
-func TestCheckPodmanBaseDirRequired(t *testing.T) {
-	p := podmanOK()
-	p.BaseDir = ""
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true}); !hasErr(e, "podman.base-dir is required") {
-		t.Errorf("an omitted base-dir must be rejected, got %v", e)
-	}
-	// It reaches a Volume= line unquoted, so it takes the same host-path gate as
-	// libs.dir and the tls.*.file stores.
-	p2 := podmanOK()
-	p2.BaseDir = "/opt/my dir"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p2, CheckPodman: true}); !hasErr(e, "podman.base-dir") {
-		t.Errorf("an unsafe base-dir must be rejected, got %v", e)
-	}
-	// A relative value is accepted: it resolves against env.yaml at render time,
-	// exactly as libs.dir and tls.*.file do.
-	p3 := podmanOK()
-	p3.BaseDir = "./data"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p3, CheckPodman: true}); hasErr(e, "base-dir") {
-		t.Errorf("a relative base-dir should be accepted, got %v", e)
+// TestPodmanBaseDirIgnoredButNotedByValidate pins what is left of
+// podman.base-dir: deploy writes nothing there any more, so the key is never an
+// error -- set, unset, or holding what the old host-path gate refused -- and
+// only validate (Lint) notes it, once, naming the value and the files earlier
+// deploys left there, the first of which holds the status password.
+func TestPodmanBaseDirIgnoredButNotedByValidate(t *testing.T) {
+	for _, c := range []struct {
+		name, baseDir string
+		lint, noted   bool
+	}{
+		{"unset", "", true, false},
+		{"set, under validate", "/opt/solmq", true, true},
+		{"set, under generate or deploy", "/opt/solmq", false, false},
+		{"unsafe value, under validate", "/opt/my dir", true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p := podmanOK()
+			p.BaseDir = c.baseDir
+			errs, warns := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true, Lint: c.lint})
+			if hasErr(errs, "base-dir") {
+				t.Errorf("base-dir must never be an error, got %v", errs)
+			}
+			var notes []string
+			for _, w := range warns {
+				if strings.Contains(w.Msg, "podman.base-dir") {
+					notes = append(notes, w.Msg)
+				}
+			}
+			if !c.noted {
+				if len(notes) != 0 {
+					t.Errorf("want no base-dir note, got %q", notes)
+				}
+				return
+			}
+			if len(notes) != 1 {
+				t.Fatalf("want exactly one base-dir note, got %q", notes)
+			}
+			for _, want := range []string{
+				"podman.base-dir " + strconv.Quote(c.baseDir) + " is no longer used: deploy loads application.yml, the status script, the logback config and the tls stores into podman's secret store and writes nothing there.",
+				"delete what earlier deploys left in it: c-application.yml, c-status and c-logback-spring.xml (the first holds the solmq-status password)",
+			} {
+				if !strings.Contains(notes[0], want) {
+					t.Errorf("note %q\nmissing %q", notes[0], want)
+				}
+			}
+		})
 	}
 }
 
@@ -507,8 +531,7 @@ func TestCheckPodmanBaseDirRequired(t *testing.T) {
 // failure precisely because no fixture had a tilde in it; this one does.
 //
 // The check is on safeHostPath directly because it guards every host path
-// (tls.*.file, libs.dir, podman.base-dir, nfs.path), not just the one that
-// surfaced it.
+// (docker's tls.*.file, libs.dir, nfs.path), not just the one that surfaced it.
 func TestSafeHostPathAllowsWindowsShortNames(t *testing.T) {
 	for _, ok := range []string{
 		`C:\Users\RUNNER~1\AppData\Local\Temp\x`,
@@ -560,8 +583,8 @@ func TestCheckLibsMountPathRemoved(t *testing.T) {
 func TestCheckPodmanStoresRemoved(t *testing.T) {
 	p := podmanOK()
 	p.Stores = &spec.StoresMount{}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true}); !hasErr(e, "podman.stores is no longer configured") {
-		t.Errorf("want stores-removed error, got %v", e)
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true}); !hasErr(e, "podman.stores is no longer configured: the tls.truststore.file / tls.keystore.file store files are loaded into podman's secret store and mounted at "+spec.DefaultStoresMountPath) {
+		t.Errorf("want stores-removed error naming podman's secret store, got %v", e)
 	}
 	// Nil stores -- the only shape left -- trips no such error.
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); hasErr(e, "stores is no longer configured") {
@@ -652,7 +675,7 @@ func TestConnectionDefinitionValidation(t *testing.T) {
 }
 
 func podmanOK() *spec.Podman {
-	return &spec.Podman{Command: "podman", Name: "c", BaseDir: "/opt/solmq", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
+	return &spec.Podman{Command: "podman", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
 }
 
 func TestCheckContainerNameRejected(t *testing.T) {
@@ -681,9 +704,10 @@ func TestCheckContainerNameRejected(t *testing.T) {
 }
 
 // TestDockerPodmanTLSNeedsNoStoresOptIn replaces the old TLS-without-stores
-// warning. The store files are bind-mounted whenever tls.*.file is set, so a TLS
-// workflow with no stores: block is now complete rather than half-wired, and
-// neither section has anything to warn about.
+// warning. The store files are mounted whenever tls.*.file is set (bind mounts
+// on docker, podman's secret store on podman), so a TLS workflow with no
+// stores: block is now complete rather than half-wired, and neither section has
+// anything to warn about.
 func TestDockerPodmanTLSNeedsNoStoresOptIn(t *testing.T) {
 	tlsWF := []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}
 
@@ -695,27 +719,59 @@ func TestDockerPodmanTLSNeedsNoStoresOptIn(t *testing.T) {
 	}
 }
 
-// TestDockerPodmanStorePathAlwaysGated pins the security boundary the derived
-// mount widened. The tls.*.file paths become bind-mount sources in a compose
-// document or a quadlet Volume= line with no stores: block to opt in, so the
-// unsafe-character gate has to run on them unconditionally -- it used to fire
-// only when the operator had opted in, which is exactly the case that no longer
-// exists.
-func TestDockerPodmanStorePathAlwaysGated(t *testing.T) {
+// TestContainerStorePathsGatedPerPlatform pins the store-path gate by what
+// each platform does with tls.*.file, with no stores: block to opt in. Docker
+// bind-mounts the path into a compose document, so the whole path takes the
+// host-path gate. Podman never names the path -- deploy reads the file into its
+// secret store -- so a spaced directory is fine there, but the file name ends
+// the Secret= mount target, where ',' starts another option and '%' is a
+// systemd specifier, so it is held to letters, digits, '.', '_' and '-'.
+func TestContainerStorePathsGatedPerPlatform(t *testing.T) {
 	defs := defsWithStores()
 	defs.TLS.Truststore.File = "./certs/$(evil).jks"
 
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defs, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "unsafe character") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defs, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "docker bind-mounts tls.truststore.file") {
 		t.Errorf("docker should reject an unsafe tls.truststore.file with no stores: block, got %v", e)
 	}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defs, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); !hasErr(e, "unsafe character") {
-		t.Errorf("podman should reject an unsafe tls.truststore.file with no stores: block, got %v", e)
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defs, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); !hasErr(e, `podman mounts tls.truststore.file "./certs/$(evil).jks" from podman's secret store at /app/external/classpath/truststores/$(evil).jks, so its file name may hold only letters, digits, '.', '_' and '-'; rename the file`) {
+		t.Errorf("podman should reject an unsafe store file name, got %v", e)
+	}
+	spaced := defsWithStores()
+	spaced.TLS.Truststore.File = "/opt/my certs/truststore.jks"
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: spaced, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); hasErr(e, "tls.truststore.file") {
+		t.Errorf("podman reads the store itself, so a spaced directory is fine, got %v", e)
+	}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: spaced, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "unsafe character") {
+		t.Errorf("docker bind-mounts the path, so a spaced directory is refused, got %v", e)
+	}
+	for _, bad := range []string{"trust,store.jks", "trust%n.jks", "trust store.jks"} {
+		d := defsWithStores()
+		d.TLS.Keystore.File = "./certs/" + bad
+		if e, _ := Run(Context{Workflows: wfOK(), Defaults: d, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); !hasErr(e, "podman mounts tls.keystore.file") {
+			t.Errorf("podman should reject the store file name %q, got %v", bad, e)
+		}
 	}
 	// Kubernetes stays exempt: it embeds the store content in a Secret rather
 	// than naming a host path, so it never reaches this gate.
 	k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand}
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defs, Image: imageOK(), Kube: k, CheckKubernetes: true}); hasErr(e, "unsafe character") {
 		t.Errorf("kubernetes should not gate the host store path, got %v", e)
+	}
+}
+
+// TestPodmanStoreFileNamesMustDiffer pins the second rule the secret store
+// adds: both stores mount under one directory by file name, so a truststore and
+// a keystore sharing a name would mount at one path, one shadowing the other.
+func TestPodmanStoreFileNamesMustDiffer(t *testing.T) {
+	d := defsWithStores()
+	d.TLS.Truststore.File = "./trust/store.p12"
+	d.TLS.Keystore.File = "./key/store.p12"
+	want := `tls.truststore.file and tls.keystore.file share the file name "store.p12", so podman would mount both at /app/external/classpath/truststores/store.p12; rename one of them`
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: d, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); !hasErr(e, want) {
+		t.Errorf("want the shared-name error, got %v", e)
+	}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); hasErr(e, "share the file name") {
+		t.Errorf("distinct store file names must pass, got %v", e)
 	}
 }
 
@@ -817,9 +873,9 @@ func TestCheckContainerRestartUnsafe(t *testing.T) {
 }
 
 func TestCheckContainerHostPathsUnsafe(t *testing.T) {
-	// The tls.*.file paths are bind-mount sources for docker/podman, and libs.dir
-	// is one too: whitespace or a metacharacter would split or extend the mount
-	// argument, so both are gated. A Windows-style path keeps validating -- '\'
+	// The tls.*.file paths are bind-mount sources for docker, and libs.dir is one
+	// on docker and podman: whitespace or a metacharacter would split or extend
+	// the mount argument, so both are gated. A Windows-style path keeps validating -- '\'
 	// and ':' cannot escape any of the three sinks.
 	badStores := defsWithStores()
 	badStores.TLS.Truststore.File = "t.jks\nprivileged: true"

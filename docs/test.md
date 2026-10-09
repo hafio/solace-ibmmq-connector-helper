@@ -48,7 +48,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 868 test functions, 1151 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 873 test functions, 1165 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -498,15 +498,15 @@ Tests: [podmangen_test.go](../internal/podmangen/podmangen_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
-| TestRenderQuadletSecretsCarryNoValues | - | each credential appears only as a Secret= directive naming its store entry and absolute target; the value itself never reaches the unit, which sits on disk beside application.yml |
-| TestRenderQuadletFull | - | full input yields 1 unit named solmq-connector.container with content matching golden string |
-| TestRenderQuadletMinimal | - | minimal input yields 1 unit with content matching golden string (no Service section, no restart) |
+| TestRenderQuadletSecretsCarryNoValues | - | each credential appears only as a Secret= directive naming its store entry and absolute target; the value itself never reaches the unit, a world-readable file in the quadlet directory |
+| TestRenderQuadletFull | - | full input yields 1 unit named solmq-connector.container with content matching golden string: application.yml, the truststore and the status script as Secret= mounts, the libs directory the only Volume= |
+| TestRenderQuadletMinimal | - | minimal input yields 1 unit with content matching golden string (no Service section, no restart, no Volume=) |
 | TestLeaderLabelsPerMode | empty defaults to standalone / standalone / active_active | the unit carries the le-mode label and role: active |
 | TestLeaderLabelsPerMode | active_standby | the unit carries le-mode active_standby and withholds role: active |
-| TestStatusScriptMountNestsAfterLibs | - | the status script volume is declared after the libs volume, so it nests rather than being shadowed |
-| TestStatusScriptMountOmittedWhenPathEmpty | - | an empty StatusScriptPath omits the status volume and the healthcheck that execs it, rather than mounting an empty source or declaring a check that cannot run |
+| TestQuadletMountsNothingFromTheHostButLibs | - | with credentials, a store, the status script, syslog and libs all set, the libs directory is the one Volume= line and all six Secret= lines mount at an absolute target |
+| TestStatusScriptMountOmittedWhenSecretEmpty | - | an empty StatusScriptSecret omits the status mount and the healthcheck that execs it, rather than writing a Secret= line with no name or declaring a check that cannot run |
 | TestHealthcheckRunsTheStatusScript | - | the unit declares HealthCmd and its cadence inside [Container], built from the statusscript constants, and leaves HealthOnFailure unset so the check reports without restarting anything |
-| TestQuadletSyslogMountsAndSetsEnv | - | podman cannot inline file content, so the unit bind-mounts the logback file read-only via Volume= and sets the three LOGGING_SYSLOG_* vars via Environment= |
+| TestQuadletSyslogMountsAndSetsEnv | - | podman cannot inline file content, so the unit mounts the logback config from podman's secret store via Secret= and sets the three LOGGING_SYSLOG_* vars via Environment= |
 | TestQuadletJavaOptionsEnvironment | - | both JVM options variables are set in the unit, the MQ TLS flag first, a value with spaces quoted whole (or systemd would split it), and neither appears when nothing is set |
 | TestSystemdEnvEscapes | - | systemdEnv doubles '%' so systemd does not expand the %p of a JVM error-file path, quotes a value with a space, escapes quotes and backslashes inside the quotes, and leaves a single option unquoted |
 | TestSyslogAbsentEmitsNoMountOrEnv | - | no block, no mount, no env |
@@ -530,7 +530,7 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestOSAttachRefusesACmdCarryingStdinText | - | "write this string to the child" and "give the child the terminal" are contradictory, so the Cmd is refused by name rather than one of them silently honoured |
 | TestOSAttachRefusesANilFile | no stdin / no stdout / no stderr | refused here rather than at the child's first write, where os/exec panics on a typed-nil *os.File |
 | TestOSAttachRejectsEmptyAndUnresolvableArgv | - | mirrors the Run and Stream refusals; all three go through resolveArgv0 so the rules cannot drift apart |
-| TestOSRunWiresStdinToChild | - | OS.Run passes stdin through to child, output equals hello-stdin |
+| TestOSRunWiresStdinToChild | text / binary | OS.Run passes stdin through to the child byte for byte: hello-stdin, and a JKS-like value with NUL, CR and non-UTF-8 bytes, as a TLS store loaded into podman's secret store is |
 | TestOSRunCombinesStdoutAndStderr | - | combined output contains both stdout-line and stderr-line |
 | TestOSRunNonZeroExitReturnsErrorWithOutput | - | non-zero exit returns non-nil error and output still contains before-exit |
 | TestOSRunAcceptsAbsolutePathArgv0 | - | absolute path as argv0 runs successfully, output equals abs-argv0-ok |
@@ -556,10 +556,10 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestDockerRejectsUnsafeCommand | - | unsafe command rejected, error returned, zero calls made |
 | TestResolveQuadletScope | follows euid | UserMode tracks `os.Geteuid() != 0`, and the directory pairs with it: user mode under the home dir, system mode at quadletSystem. Asserts the pairing rather than one fixed answer, since the answer legitimately differs for a root run |
 | TestResolveQuadletScope | home redirect | in user mode the dir tracks HOME/USERPROFILE, which is what lets a test (or a relocated home) move it without a config key -- there is no scope or dir key |
-| TestPodmanDeployReloadThenStart | - | user mode issues daemon-reload then start with `--user` flag in order |
+| TestPodmanDeployReloadThenStart | stopped / running x user / system scope | daemon-reload, then `is-active --quiet`, then start for a new or stopped unit and restart for a running one (a running container keeps the secrets it was created with), `--user` only in user scope; the output says when it restarts |
 | TestPodmanDeploySystemModeNoUserFlag | - | system mode issues systemctl daemon-reload without `--user` flag |
 | TestPodmanRemoveStopsRemovesReloads | - | stop then daemon-reload called and unit file removed from disk |
-| TestPodmanDeployStartFailureIsReported | - | start failure on call 1 surfaces error containing 'start a.service', 2 calls made |
+| TestPodmanDeployStartFailureIsReported | daemon-reload / start / restart | a failing daemon-reload stops at call 0; a failing start or restart (call 2, after daemon-reload and is-active) surfaces naming the verb, `systemctl start a.service` or `systemctl restart a.service`; nothing runs after the failure |
 | TestDockerUnknownAction | - | unknown action rejected, error returned, zero calls made |
 | TestPodmanRemoveStopFailureIsReported | - | stop failure surfaces error containing 'stop solmq-connector.service' |
 | TestPodmanSecretCreateRemovesThenCreatesValueOnStdin | - | PodmanSecretCreate issues rm `--ignore` then create with the value on stdin, never in argv |
@@ -734,9 +734,11 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckPodmanModeAndScope | valid-podman | valid podman section passes with no errors |
 | TestCheckPodmanModeAndScope | run / quadlet / swarm | every value of podman.mode errors `podman.mode is no longer configured` -- quadlet included, since it is the only artifact and the key decides nothing |
 | TestCheckPodmanModeAndScope | quadlet present / omitted | a present podman.quadlet block of any shape errors `podman.quadlet is no longer configured`; omitting it is clean. The unit directory follows the invoking uid -- the only thing that could ever decide it, so there is nothing left for a scope or dir key to configure |
-| TestCheckPodmanStoresRemoved | present / nil | a present podman.stores errors `podman.stores is no longer configured`; omitting it trips no such error |
-| TestCheckPodmanBaseDirRequired | omitted | `podman.base-dir is required` -- it is baked into the unit's Volume= lines, so there is no safe default to guess |
-| TestCheckPodmanBaseDirRequired | unsafe / relative | a whitespace-bearing base-dir is rejected by the same host-path gate as libs.dir; a relative one is accepted and resolves against env.yaml at render time |
+| TestCheckPodmanStoresRemoved | present / nil | a present podman.stores errors `podman.stores is no longer configured`, saying the stores are loaded into podman's secret store; omitting it trips no such error |
+| TestPodmanBaseDirIgnoredButNotedByValidate | unset | no error and no note |
+| TestPodmanBaseDirIgnoredButNotedByValidate | set, under validate | no error; one Lint warning naming the value and the files earlier deploys left there (`c-application.yml`, `c-status`, `c-logback-spring.xml`), the first holding the solmq-status password |
+| TestPodmanBaseDirIgnoredButNotedByValidate | set, under generate or deploy | no error and no warning: only validate notes the ignored key |
+| TestPodmanBaseDirIgnoredButNotedByValidate | unsafe value, under validate | a value the old host-path gate refused is no error either, just the same note |
 | TestCheckCommandMultiToken | safe-multi-token | docker command with extra safe tokens has no unsafe-character error |
 | TestCheckCommandMultiToken | unsafe-token | docker command with $(evil) token errors unsafe character |
 | TestCheckDeployCommandAcceptReject | kubectl / oc / kubectl with flags / docker with flag / podman / kubectl.exe / sudo podman with extraAllowed | accept matrix: bare allowlisted argv[0], flag-shaped args, .exe-stripped comparison, and a chained binary approved via extraAllowed all pass |
@@ -786,15 +788,17 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckContainerNameRejected | ../evil | rejected for both docker.name and podman.name |
 | TestCheckContainerNameRejected | Bad_Name | rejected for both docker.name and podman.name |
 | TestCheckContainerNameRejected | valid-default-name | solmq-connector accepted with no docker.name error |
-| TestDockerPodmanTLSNeedsNoStoresOptIn | docker / podman | a TLS workflow with no stores: block warns about nothing, since the store files are bind-mounted whenever tls.*.file is set |
-| TestDockerPodmanStorePathAlwaysGated | docker / podman | an unsafe character in tls.truststore.file is rejected with no stores: block present, since those paths are always bind-mount sources |
-| TestDockerPodmanStorePathAlwaysGated | kubernetes | the same path is not gated for kubernetes, which embeds the store content in a Secret rather than naming a host path |
+| TestDockerPodmanTLSNeedsNoStoresOptIn | docker / podman | a TLS workflow with no stores: block warns about nothing, since the store files are mounted whenever tls.*.file is set (bind mounts on docker, the secret store on podman) |
+| TestContainerStorePathsGatedPerPlatform | docker | an unsafe character in tls.truststore.file, or a spaced directory, is rejected with no stores: block present, since docker bind-mounts the path itself |
+| TestContainerStorePathsGatedPerPlatform | podman | the path is never named, so a spaced directory passes; the file name ends the Secret= target and must be letters, digits, '.', '_' or '-' (`$(evil)`, ',', '%' and a space are refused) |
+| TestContainerStorePathsGatedPerPlatform | kubernetes | the same path is not gated for kubernetes, which embeds the store content in a Secret rather than naming a host path |
+| TestPodmanStoreFileNamesMustDiffer | shared / distinct | a truststore and keystore sharing a file name would mount at one path on podman, so it is an error naming the path; distinct names pass |
 | TestUsesTLS | solace-tcps-host | solace side with tcps host returns usesTLS true |
 | TestUsesTLS | mq-tls-true-no-tcps | no solace side, mq tls true returns usesTLS true |
 | TestUsesTLS | plain-tcp-mq-false | plain tcp solace and mq tls false returns usesTLS false |
 | TestCheckContainerRestartUnsafe | newline in restart | docker.restart is rejected; image and timezone are top-level keys, covered by their own per-platform-rejection and charset tests |
 | TestCheckContainerRestartUnsafe | realistic value | on-failure:5 is accepted |
-| TestCheckContainerHostPathsUnsafe | newline in tls.truststore.file | bind-mounted store path rejected |
+| TestCheckContainerHostPathsUnsafe | newline in tls.truststore.file | docker's bind-mounted store path rejected |
 | TestCheckContainerHostPathsUnsafe | space in libs.dir | podman.libs.dir rejected |
 | TestCheckContainerHostPathsUnsafe | windows paths | `C:\certs\...` store paths and `C:\libs` accepted (backslash and colon permitted) |
 | TestCheckKubeSecretNames | cred existing bad | non-DNS-1123 credentials existing rejected |
@@ -880,7 +884,9 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestResolveStores | ReadFile returns error | read error propagates |
 | TestResolveStores | no stores configured | empty Defaults yields 0 stores, no error |
 | TestToIssues | - | toIssues wraps each string into an Issue carrying it as Msg |
-| TestNamesAndPaths | pathIn base variants | empty base returns bare path; trailing/no-trailing slash both join to /base/a |
+| TestPodmanFileSecretNames | - | the five file secrets an instance can own (application.yml, tls-truststore, tls-keystore, status-script, logback-spring.xml), none of whose suffixes could also be a credential's stable name |
+| TestResolvePodmanFiles | document / binary store / 511999 bytes | a document passes through as rendered, a store is read byte for byte (NUL, CR and non-UTF-8 included), and 511999 bytes is accepted |
+| TestResolvePodmanFiles | missing / no file access / empty / 512000 bytes / empty document | each fails before anything is loaded, naming the field and path (wrapping the read error) and never the content |
 | TestTargetMounts | tls+libs configured | 2 store mounts at the fixed default store path, and a libs mount whose source is the resolved abs host dir and whose target is the fixed default libs path -- both container-side paths come from constants, not from the spec |
 | TestTargetMounts | no tls, no libs | yields nil,nil -- with stores derived, an absent tls block is the only way to get no store mounts |
 | TestTargetMounts | store with no file | a tls.*.store present but with an empty file is skipped rather than mounted from an empty source |
@@ -901,7 +907,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestConfigCarriesSecurityUserRoles | - | end-to-end: a roles-bearing env.yaml validates clean and its role reaches the rendered application.yml, while the reserved account still renders none |
 | TestConfigNoSecretsLeak | - | every rendered password is a ${STABLE} placeholder except the one permitted literal: the reserved spec.StatusUserName account |
 | TestGenerateDockerBasics | - | generates non-empty compose opening with the defaulted `name: solace-ibmmq-connectors` project line and containing the image; all four credential positions render as top-level environment-provider secrets, never inlined as values, and each ${STABLE} placeholder in application.yml is doubled so compose cannot interpolate the value in |
-| TestGeneratePodmanQuadlet | - | produces the `<name>.container` unit with the app yaml name, service name and 4 secrets, each mounted from podman's store by its namespaced name at an absolute target under the secrets mount |
+| TestGeneratePodmanQuadlet | - | produces the `<name>.container` unit with the application.yml and status-script file secrets, the service name and 4 credentials, each mounted from podman's store by its namespaced name at an absolute target under the secrets mount |
 | TestGenerateJavaOptionsReachEveryPlatform | - | a java-options block written as a >- folded block with ${VAR} references reaches the kubernetes manifest, the compose file and the quadlet unit as the same single line, and an unsafe value stops every platform's generation |
 | TestGeneratePodmanRejectsModeKey | run / quadlet | podman.mode is rejected at generate for either value |
 | TestGeneratePodmanNoModeKeyIsClean | - | an omitted mode: generates cleanly, guarding against applyPodmanDefaults ever defaulting the key, which would trip the rejection for every section |
@@ -912,7 +918,11 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestConfigStatusPasswordRandErrorNoOutput | - | the same Rand failure through Config is a hard error with no output |
 | TestGenerateKubernetesCarriesStatusScript | - | the ConfigMap gets a "status: \|" key carrying the rendered script, addressed to spec.StatusUserName on the resolved management port |
 | TestGenerateDockerCarriesStatusScript | - | compose gets a second top-level config (`<name>-status`) inlining the rendered script, mounted at statusscript.ContainerPath |
-| TestGeneratePodmanCarriesStatusScript | - | PodmanPlan.StatusScript names `<name>-status` and the unit's Volume= for it is BaseDir-resolved exactly like AppYAML, since systemd starts the unit with no useful cwd |
+| TestGeneratePodmanCarriesStatusScript | - | the plan carries `<name>-application.yml` and `<name>-status-script` with their rendered content, the unit mounts each from podman's secret store at its fixed path, and no Volume= appears without libs |
+| TestGeneratePodmanCarriesLogbackOnlyWithSyslog | no syslog | neither a `<name>-logback-spring.xml` file on the plan nor any logback mount in the unit |
+| TestGeneratePodmanCarriesLogbackOnlyWithSyslog | syslog | the plan carries the rendered logback-spring.xml as `<name>-logback-spring.xml` and the unit mounts it from the secret store at the image's logback path |
+| TestGeneratePodmanNeverReadsTheStores | - | with a truststore and keystore set, generate never calls ReadFile: the plan names each store by its tls.*.file, the unit mounts `<name>-tls-truststore` / `<name>-tls-keystore` at /app/external/classpath/truststores/<file>, and neither is a Volume= |
+| TestGeneratePodmanIgnoresBaseDir | - | a base-dir, even a spaced one holding an unset variable, changes neither the unit nor the plan and adds no error or warning outside validate |
 | TestGenerateMissingTargetSection | kubernetes | error contains kubernetes target requires a 'kubernetes:' section in env.yaml |
 | TestGenerateMissingTargetSection | docker | error contains docker target requires a 'docker:' section in env.yaml |
 | TestGenerateMissingTargetSection | podman | error contains podman target requires a 'podman:' section in env.yaml |
@@ -1144,7 +1154,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestAllowCommandFlagRepeatableThreadsToRunner | - | "sudo podman" rejects with zero runner calls without the flag; repeating `--allow-command` sudo twice threads through to preflight (argv [sudo podman info]) and to the podman secret calls |
 | TestDeployKubernetesPreflightFailureStopsBeforeApply | - | a failing kubernetes preflight (auth can-i argv incl. `--namespace`) stops with exit 1 and exactly 1 runner call |
 | TestDeployDockerPreflightFailureStopsBeforeWrite | - | a failing docker preflight (argv [docker info]) stops before the compose file is written, exit 1, exactly 1 runner call |
-| TestDeployPodmanPreflightFailureStopsBeforeWrite | - | a failing podman preflight (argv [podman info]) stops before the unit/app-yaml files are written, exit 1, exactly 1 runner call |
+| TestDeployPodmanPreflightFailureStopsBeforeWrite | - | a failing podman preflight (argv [podman info]) stops before the unit is written, exit 1, exactly 1 runner call |
 | TestValidateOKAndErrors | valid spec | validate exits 0 |
 | TestValidateOKAndErrors | invalid spec | validate exits 1 |
 | TestExamplesWriteSkipForceThenGenerate | first write | examples command exits 0 creating env.yaml |
@@ -1173,18 +1183,22 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestGenerateKubernetesStdout | - | exit 0 and stdout contains kind: Deployment |
 | TestGenerateDockerToFile | - | exit 0 and compose file opens with the defaulted project line, then contains services: and image: img:1 |
 | TestGeneratePodmanQuadletStdout | - | exit 0 and stdout contains unit banner '# === solmq-conn-util.container ===' |
-| TestGeneratePodmanVolumeSourcesAreAbsolute | -e env.yaml from the file's own dir | the truststore and libs Volume= sources are absolute even when -e is spelled relatively. A relative source is not a near-miss in a quadlet: systemd starts the unit with no useful cwd, and podman reads a source with no ./ or / prefix as a named volume, so `Volume=libs:...` would silently mount an empty volume over the jars |
+| TestGeneratePodmanOnlyLibsIsAHostPath | -e env.yaml from the file's own dir | the libs Volume= source is absolute even when -e is spelled relatively, and it is the only Volume=: the truststore set in the same spec is a Secret= mount. A relative source is not a near-miss in a quadlet: systemd starts the unit with no useful cwd, and podman reads a source with no ./ or / prefix as a named volume, so `Volume=libs:...` would silently mount an empty volume over the jars |
 | TestDeployDockerSeamWritesComposeAndRuns | - | exit 0, compose file written, 2 runner calls (preflight then up) argv [docker compose -f <compose> up -d] -- no -p, since the project is declared by the file's own name: key |
 | TestDeployDockerSeamComposeFileSurvivesFailedRun | - | preflight succeeds but the real `up` call fails; compose file still exists on disk afterward, exit 1 |
 | TestDeployDockerSeamChildEnvCarriesCredentials | - | preflight call carries no env; the real `up` call (index 1) carries the resolved literal and -env credentials as STABLE=value pairs |
 | TestRemoveDockerSeam | - | exit 0, 2 runner calls (preflight then down) argv [docker compose -f <compose> down] |
-| TestDeployPodmanSeamWritesUnitsAndStarts | - | exit 0, a leading `podman info` preflight, `podman secret rm --ignore`/`create` per credential, the app yaml (0600) and status script (0644) written under base-dir with only the `.container` unit (0644) in the quadlet dir, then `systemctl daemon-reload` and `start` |
-| TestDeployPodmanMissingBaseDirFailsBeforeAnyWrite | - | a podman section with no base-dir exits non-zero, makes zero runner calls (not even the preflight probe) and writes no file. Being rejected is not enough on its own: the steps after validation have side effects outside the process -- secrets in podman's store, files on disk, systemctl -- so a late failure would leave a half-built deployment |
-| TestDeployPodmanSplitsBaseDirFromQuadletDir | distinct dirs | the mounted application.yml and status script go to podman.base-dir (created on demand) and not to the quadlet dir; only the .container unit goes to the quadlet dir -- which the spec cannot name, so the test redirects HOME to reach it -- and the unit's Volume= names the base-dir path |
-| TestRemovePodmanSeamStopsRemovesReloads | - | exit 0, a leading `podman info` preflight, `systemctl stop` then unit removal and `daemon-reload`, all three written files cleared (unit, app yaml, status script), and `podman secret rm --ignore` for the credentials only after the unit is gone |
+| TestDeployPodmanSeamWritesUnitsAndStarts | - | exit 0, a leading `podman info` preflight, `podman secret rm --ignore`/`create` per credential, then for application.yml, the truststore (its bytes on stdin, unchanged) and the status script, one batched `secret rm --ignore` of the unmounted keystore and logback secrets, then `systemctl daemon-reload`, `is-active` and `restart` (the fake reports the unit running); the `.container` unit (0644) is the only file written, and a leftover base-dir is not even created |
+| TestDeployPodmanUnresolvedInputFailsBeforeAnyWrite | unreadable truststore | a truststore file that cannot be read fails the deploy naming tls.truststore.file and its path, after only the read-only preflight probe and before any secret is created or the unit written: the steps that follow have side effects outside the process, so a late failure would leave a half-built deployment |
+| TestDeployPodmanUnresolvedInputFailsBeforeAnyWrite | unset credential variable | a password-env naming an unset variable fails the same way, naming the variable, before any secret is created |
+| TestDeployPodmanFailureStopsBeforeSystemctl | credential | a failing `podman secret rm` for the first credential stops the deploy there (exit 1, the failed call named), with no unit written and no systemctl call |
+| TestDeployPodmanFailureStopsBeforeSystemctl | document | a failing secret call for application.yml stops the deploy the same way |
+| TestDeployPodmanFailureStopsBeforeSystemctl | unmounted file secret | a failing batched `secret rm` of the file secrets the spec no longer mounts stops the deploy before the unit, which would otherwise run beside a stale secret |
+| TestDeployPodmanFailureStopsBeforeSystemctl | unit write | a quadlet directory that cannot be created (a file where ~/.config should be) fails the deploy naming it, after every secret call and before any systemctl call |
+| TestRemovePodmanSeamStopsRemovesReloads | - | exit 0, a leading `podman info` preflight, `systemctl stop` then unit removal and `daemon-reload`, then one `podman secret rm --ignore` for the credentials and all five file secrets, only after the unit is gone; files an older deploy left under base-dir are left alone |
 | TestPlatformFlagHitOverridesInference | - | an explicit `--platform` is used even when another section is also present in env.yaml |
 | TestPlatformFlagMissingSectionIsLoudError | - | a `--platform` value with no matching section fails loud, naming both the requested and the present sections, before the runner is invoked |
-| TestPlatformAliasesResolveToCanonical | kube / dk / pm | each short `--platform` spelling reaches the same platform binary as its canonical name |
+| TestPlatformAliasesResolveToCanonical | kube / dk / pm | each short `--platform` spelling reaches the same platform binary as its canonical name; the podman case redirects HOME, so its deploy never writes into the real quadlet directory |
 | TestPlatformAliasMissingSectionNamesCanonicalSection | - | an alias is resolved before the section check, so the error names the `kubernetes:` section to add rather than echoing `kube` |
 | TestPlatformUnknownValueListsEverySpelling | - | a bogus value (k8s) is rejected with every accepted spelling listed, canonical and short |
 | TestPlatformSpellingsAreDeterministic | - | platformSpellings is built from an ordered slice, not map iteration, so the rejection message cannot vary between runs; canonical names lead |

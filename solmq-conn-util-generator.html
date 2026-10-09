@@ -373,9 +373,7 @@ details[open]>summary::before{content:"- "}
         <div class="f"><label>Deploy Command</label><input id="i-pd-cmd" value="podman"></div>
         <div class="f"><label>Container Name</label><input id="i-pd-name" value="connector"></div>
       </div>
-      <div class="fr">
-        <div class="f"><label>Base Directory</label><input id="i-pd-base" placeholder="/opt/solmq-connector"><div class="h">Required. Host dir the rendered application.yml, status script and logback config are written to and bind-mounted from. Relative paths resolve against env.yaml. It is the only directory you choose: the .container unit goes to the one systemd loads for whoever runs the tool -- root system-wide, anyone else their own home.</div></div>
-      </div>
+      <div class="h">Nothing here names a host directory: deploy loads application.yml, the status script, the logback config and the TLS stores into podman's secret store, and the .container unit goes to the directory systemd loads for whoever runs the tool -- root system-wide, anyone else their own home.</div>
       <div class="fr">
         <div class="f"><label>Restart Policy</label><input id="i-pd-restart" value="unless-stopped"></div>
       </div>
@@ -385,7 +383,7 @@ details[open]>summary::before{content:"- "}
       <div class="sub-h">Credentials</div>
       <div class="h">Derived automatically from the connection fields above and mounted at /app/external/var/secrets; nothing to configure here.</div>
       <div class="sub-h">Mounts</div>
-      <div class="h">The TLS stores are bind-mounted at /app/external/classpath/truststores whenever tls.*.file is set; nothing to configure here.</div>
+      <div class="h">The TLS stores are loaded into podman's secret store and mounted at /app/external/classpath/truststores whenever tls.*.file is set; nothing to configure here. The jar directory below is the one host path the unit mounts.</div>
       <div class="tgl"><input type="checkbox" id="i-pd-libs-on" onchange="togOpt('i-pd-libs-on','pd-libs-f')"><label for="i-pd-libs-on">Bind-mount an IBM MQ jar directory</label></div>
       <div class="opt-fields" id="pd-libs-f"><div class="f"><label>Host Directory</label><input id="i-pd-libs-dir" placeholder="./libs"></div></div>
     </div>
@@ -1163,13 +1161,11 @@ function readModel(){
   } : null;
 
   // project-name is docker-only, so it extends readCtr here rather than living
-  // in it -- the same shape podman uses below for base-dir.
+  // in it. Podman has no key of its own (base-dir is ignored by the CLI).
   m.docker = C('i-dk-on') ? Object.assign(readCtr('dk', 'docker'), {
     projectName: V('i-dk-project') || 'solace-ibmmq-connectors'
   }) : null;
-  m.podman = C('i-pd-on') ? Object.assign(readCtr('pd', 'podman'), {
-    baseDir: V('i-pd-base')
-  }) : null;
+  m.podman = C('i-pd-on') ? readCtr('pd', 'podman') : null;
   return m;
 }
 
@@ -1202,6 +1198,7 @@ function readCtr(p, section){
 
 // ===== env.yaml =====
 const SECRETS_MOUNT = '/app/external/var/secrets';   // mirrors spec.SecretsMountPath
+const STORES_MOUNT = '/app/external/classpath/truststores';   // mirrors spec.DefaultStoresMountPath
 
 function sideBody(s, ind, withDest){
   let o = '';
@@ -1359,8 +1356,8 @@ function emitKube(k){
 function emitCtr(c){
   let y = `# ---- ${c.section} target ----\n${c.section}:\n` + kv('command', c.command, '  ');
   // No quadlet: block -- the unit directory follows the user running the tool,
-  // which is the only directory systemd loads units from.
-  if(c.section === 'podman') y += kv('base-dir', c.baseDir, '  ');
+  // which is the only directory systemd loads units from -- and no base-dir:
+  // podman's deploy keeps the documents in its secret store.
   y += kv('name', c.name, '  ');
   // The compose project. Docker only: podman has no equivalent grouping.
   if(c.section === 'docker') y += kv('project-name', c.projectName, '  ');
@@ -1369,7 +1366,8 @@ function emitCtr(c){
   // No secrets: block at all -- credentials are derived from the connection's
   // own client-username/-password (or user/password) fields and mounted at
   // SECRETS_MOUNT by the deploy step. No stores: block either: the tls.*.file
-  // stores are bind-mounted whenever they are set.
+  // stores are mounted whenever they are set (bind mounts on docker, podman's
+  // secret store on podman).
   if(c.libsDir) y += '  libs:\n' + kv('dir', c.libsDir, '    ');
   return y;
 }
@@ -1626,22 +1624,17 @@ function validateModel(m){
       add(ENV_FILE, `docker.project-name "${m.docker.projectName}" is not a valid DNS-1123 label`);
     }
   }
-  if(m.podman){
-    checkContainerTarget(add, warn, m, m.podman);
-    if(!m.podman.baseDir){
-      add(ENV_FILE, 'podman.base-dir is required: it names the host directory the rendered application.yml and status script are written to and bind-mounted from. Relative paths resolve against env.yaml');
-    } else if(!safeHostPath(m.podman.baseDir)){
-      add(ENV_FILE, `podman.base-dir "${m.podman.baseDir}" contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
-    }
-    checkExpansion(warn, ENV_FILE, 'podman.base-dir', m.podman.baseDir);
-  }
+  // The CLI's validate notes a leftover podman.base-dir; the page never writes
+  // one, so there is nothing here to mirror.
+  if(m.podman) checkContainerTarget(add, warn, m, m.podman);
   const tlsInUse = usesTLS(resolved);
   if(m.kube && tlsInUse && !m.kube.stores){
     warn(ENV_FILE, 'a TLS/mTLS connection exists but secrets.stores is omitted; the store files will be missing at runtime');
   }
-  // docker/podman carry no equivalent warning: their store files are bind-mounted
-  // whenever tls.*.file is set, so "TLS configured but nothing mounted" cannot
-  // arise. Kubernetes still has to be told to build the Secret.
+  // docker/podman carry no equivalent warning: their store files are mounted
+  // whenever tls.*.file is set (bind mounts on docker, podman's secret store on
+  // podman), so "TLS configured but nothing mounted" cannot arise. Kubernetes
+  // still has to be told to build the Secret.
 
   // checkStatusUser: management security is always on, so this always runs --
   // no author-configured user may claim the reserved status account's name, as
@@ -2292,20 +2285,44 @@ function checkContainerTarget(add, warn, m, c){
       if(n < 1 || n > 65535) add(ENV_FILE, `${c.section}.ports ${i === 0 && parts.length === 2 ? 'host' : 'container'} port ${n} must be 1-65535`);
     });
   });
-  // The tls.*.file paths are always bind-mount sources for docker/podman, so they
-  // are always gated. Kubernetes embeds the store content in a Secret instead and
-  // never reaches this function.
-  [['tls.truststore.file', m.tls.truststore], ['tls.keystore.file', m.tls.keystore]].forEach(([field, store]) => {
-    if(!store || !store.file) return;
-    if(!safeHostPath(store.file)){
-      add(ENV_FILE, `${c.section} bind-mounts ${field} "${store.file}", which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
-    }
-  });
+  checkContainerStores(add, c.section, m.tls);
   if(c.libsDir && !safeHostPath(c.libsDir)){
     add(ENV_FILE, `${c.section}.libs.dir "${c.libsDir}" contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
   }
   checkExpansion(warn, ENV_FILE, `${c.section}.libs.dir`, c.libsDir);
 }
+// checkContainerStores mirrors validate.checkContainerStores: the tls.*.file
+// paths are always mounted, so they are always gated, by what each platform
+// does with them. Docker bind-mounts the path itself. Podman reads the file
+// into its secret store at deploy, so only the file name reaches the unit, as
+// the end of a Secret= target: it is held to a narrow set, and the two stores'
+// names must differ. Kubernetes embeds the content in a Secret and never
+// reaches this function.
+const PODMAN_STORE_NAME_RE = /^[A-Za-z0-9._-]+$/;
+function checkContainerStores(add, section, tls){
+  let seen = '';
+  [['tls.truststore.file', tls.truststore], ['tls.keystore.file', tls.keystore]].forEach(([field, store]) => {
+    if(!store || !store.file) return;
+    if(section !== 'podman'){
+      if(!safeHostPath(store.file)){
+        add(ENV_FILE, `${section} bind-mounts ${field} "${store.file}", which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
+      }
+      return;
+    }
+    const base = specBaseName(store.file);
+    if(!PODMAN_STORE_NAME_RE.test(base)){
+      add(ENV_FILE, `podman mounts ${field} ${goQuote(store.file)} from podman's secret store at ${STORES_MOUNT}/${base}, so its file name may hold only letters, digits, '.', '_' and '-'; rename the file`);
+      return;
+    }
+    if(base === seen){
+      add(ENV_FILE, `tls.truststore.file and tls.keystore.file share the file name ${goQuote(base)}, so podman would mount both at ${STORES_MOUNT}/${base}; rename one of them`);
+    }
+    seen = base;
+  });
+}
+// specBaseName mirrors spec.BaseName: the last element of a path written with
+// either separator.
+function specBaseName(p){ return String(p).split(/[\\/]/).pop(); }
 function usesTLS(resolved){
   return resolved.some(wf => [wf.source, wf.target].some(s =>
     (s.system === 'solace' && isTCPS(s.host)) || (s.system === 'mq' && s.tls)));
@@ -3448,8 +3465,7 @@ function sampleModel(){
     podman: {
       section: 'podman', command: 'podman', name: 'connector',
       restart: 'unless-stopped', ports: ['8090'],
-      cred: null, libsDir: '',
-      baseDir: '/opt/solmq-connector'
+      cred: null, libsDir: ''
     }
   };
 }
@@ -3603,9 +3619,8 @@ function loadSample(){
     setV('i-' + p + '-name', c.name); setV('i-' + p + '-restart', c.restart);
     c.ports.forEach(v => addPort(p + '-ports', v));
   });
-  // Both docker-only and podman-only keys are set outside the shared loop above.
+  // The docker-only key is set outside the shared loop above.
   setV('i-dk-project', m.docker.projectName);
-  setV('i-pd-base', m.podman.baseDir);
 
   applyAllToggles();
   // conn-ref pickers are populated after the connections exist; re-apply the refs.
