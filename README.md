@@ -62,8 +62,9 @@ so splitting them across connectors stays your decision.
   sha1-verified, into a local directory for the `libs.dir`/`libs.pvc`/
   `libs.download` deploy options. It is image-aware: a jar the connector
   image already ships at an equal-or-newer version is skipped and reported
-  rather than re-fetched, against a snapshot of one specific image --
-  deploying to a different one needs its own list.
+  rather than re-fetched, judged against built-in snapshots of the connector
+  image (2.x, 3.1.0, 3.2.0) picked by the release you deploy -- a custom image
+  needs a list of its own.
 
 Every term above links straight through to where
 [userguide.md](docs/userguide.md) explains it in full.

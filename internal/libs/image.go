@@ -23,8 +23,9 @@ import (
 //     already had it there would be no reason to run the command at all.
 //   - "download jar syslog" must keep fetching the encoder even against an
 //     image that already ships it (2.13.0 ships logstash-logback-encoder
-//     8.0), because the same command also has to work against an OLDER image
-//     that lacks it entirely, and there is no per-image special case here.
+//     8.0, 3.1.0 ships 9.0), because the same command also has to work
+//     against an OLDER image that lacks it entirely, and there is no
+//     per-image special case here.
 //   - it makes a stale or hostile omit list unable to skip the one jar that
 //     matters -- a crafted line such as "com.ibm.mq.jakarta.client-99999.jar"
 //     would otherwise omit the MQ client itself.
@@ -65,13 +66,14 @@ const embeddedListImage = "solace-pubsub-connector-ibmmq"
 
 // embeddedList is one jar list captured from a connector image and built into
 // the binary, with the connector releases it is known to describe. A list is
-// named for the single tag its bytes came from, but it describes a RANGE: the
-// classpath does not move between releases of one line (2.13.0's capture and
-// 2.14.1's are byte-for-byte identical), while connector 3.x moved to Spring
-// Boot 4 and Jackson 3, which no 2.x list can speak for. Keeping the captured
-// tag apart from the range keeps that distinction in the type rather than in
-// a comment: the file name stays an honest record of where the bytes came
-// from, and the range is what a deployed tag is checked against.
+// named for the single tag its bytes came from, but it describes a RANGE: a
+// classpath can stay put across releases (2.13.0's capture and 2.14.1's are
+// byte-for-byte identical), while connector 3.x moved to Spring Boot 4 and
+// Jackson 3, which no 2.x list can speak for -- and within 3.x, 3.2.0 already
+// ships newer versions of the same jars than 3.1.0. Keeping the captured tag
+// apart from the range keeps that distinction in the type rather than in a
+// comment: the file name stays an honest record of where the bytes came from,
+// and the range is what a deployed tag is checked against.
 type embeddedList struct {
 	capturedAt string // the tag the list was captured from; names its file
 	from       string // the earliest release it describes
@@ -88,6 +90,10 @@ type embeddedList struct {
 // capture means that list already covers the release and only its range moves.
 var embeddedLists = []embeddedList{
 	{capturedAt: "2.13.0", from: "2.10.0", before: "3.0.0"},
+	// No 3.0.x release has been captured, so the 3.x line starts at 3.1.0: a
+	// 3.0.x deployment falls outside every range and is warned about.
+	{capturedAt: "3.1.0", from: "3.1.0", before: "3.2.0"},
+	{capturedAt: "3.2.0", from: "3.2.0"},
 }
 
 //go:embed imagelibs/*.list

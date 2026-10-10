@@ -5,9 +5,9 @@
 # to but not including 3.0.0 (its row in libs.embeddedLists): the classpath
 # does not move between releases of one line, and 2.14.1's capture is
 # byte-for-byte identical to this file. Connector 3.x moved to Spring Boot 4
-# and Jackson 3, so it needs a list of its own. Recapture from a newer image
-# and diff before adding one -- an identical capture means this file already
-# covers that release and only its range's evidence changed.
+# and Jackson 3, so it has lists of its own (3.1.0, 3.2.0). Recapture from
+# a newer image and diff before adding one -- an identical capture means this
+# file already covers that release and only its range's evidence changed.
 #
 # Regenerate with:
 #   docker run --rm --entrypoint sh solace/solace-pubsub-connector-ibmmq:2.13.0 -c 'find / -name "*.jar" -not -path "/proc/*" 2>/dev/null | xargs -n1 basename | sort'

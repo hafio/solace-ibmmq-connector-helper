@@ -266,6 +266,20 @@ func TestEmbeddedListsTable(t *testing.T) {
 			t.Errorf("%s: %s is not embedded: %v", l.capturedAt, l.file(), err)
 		}
 		rows[l.file()] = true
+		// A capture identical to the list before it means that list already
+		// describes the release, so its range should have been widened rather
+		// than a second copy built in.
+		if i > 0 {
+			prev := embeddedLists[i-1]
+			a, aerr := loadImageLibs("", prev)
+			b, berr := loadImageLibs("", l)
+			if aerr != nil || berr != nil {
+				t.Fatalf("loading %s / %s: %v / %v", prev.name(), l.name(), aerr, berr)
+			}
+			if reflect.DeepEqual(a.Libs, b.Libs) {
+				t.Errorf("%s is identical to %s: widen %s's range instead of shipping a second copy", l.name(), prev.name(), prev.name())
+			}
+		}
 	}
 	entries, err := fs.ReadDir(embeddedListFiles, "imagelibs")
 	if err != nil {
@@ -275,6 +289,38 @@ func TestEmbeddedListsTable(t *testing.T) {
 		if f := "imagelibs/" + e.Name(); !rows[f] {
 			t.Errorf("%s is embedded but has no row in embeddedLists", f)
 		}
+	}
+}
+
+// TestEmbeddedListsMatchTheirConnectorLine checks each built-in list against
+// the connector line its capture tag names: 2.x ships Spring Boot 3 and
+// Jackson 2, 3.x Spring Boot 4 and Jackson 3. A capture saved under the wrong
+// tag fails here, before download judges a deployment against the wrong
+// generation. A list for a line with no expectation yet fails too, so a new
+// line's generation is stated here when its first list is added.
+func TestEmbeddedListsMatchTheirConnectorLine(t *testing.T) {
+	generation := map[string]map[string]string{
+		"2": {"spring-boot": "3", "jackson-databind": "2"},
+		"3": {"spring-boot": "4", "jackson-databind": "3"},
+	}
+	for _, l := range embeddedLists {
+		t.Run(l.capturedAt, func(t *testing.T) {
+			line, _, _ := strings.Cut(l.capturedAt, ".")
+			want, ok := generation[line]
+			if !ok {
+				t.Fatalf("no generation recorded for connector %s.x; add one to this test", line)
+			}
+			loaded, err := loadImageLibs("", l)
+			if err != nil {
+				t.Fatalf("loadImageLibs: %v", err)
+			}
+			for art, major := range want {
+				got := loaded.Libs[art]
+				if gotMajor, _, _ := strings.Cut(got, "."); gotMajor != major {
+					t.Errorf("%s ships %s %q, want major %s for connector %s.x", l.name(), art, got, major, line)
+				}
+			}
+		})
 	}
 }
 
@@ -374,6 +420,10 @@ func TestImageNameTag(t *testing.T) {
 // learn to skip past.
 func TestBuiltinList(t *testing.T) {
 	first, newest := embeddedLists[0], embeddedLists[len(embeddedLists)-1]
+	byTag := map[string]embeddedList{}
+	for _, l := range embeddedLists {
+		byTag[l.capturedAt] = l
+	}
 	silent := []struct {
 		name, ref string
 		want      embeddedList
@@ -383,6 +433,10 @@ func TestBuiltinList(t *testing.T) {
 		{"a newer release the same list covers", "solace/solace-pubsub-connector-ibmmq:2.14.1", first},
 		{"the floor itself is covered", "solace/solace-pubsub-connector-ibmmq:" + first.from, first},
 		{"a private registry mirror of a covered release", "registry.internal:5000/team/solace-pubsub-connector-ibmmq:2.14.1", first},
+		{"the first 3.x capture", "solace/solace-pubsub-connector-ibmmq:3.1.0", byTag["3.1.0"]},
+		{"a 3.1 point release stays on the 3.1.0 list", "solace/solace-pubsub-connector-ibmmq:3.1.4", byTag["3.1.0"]},
+		{"3.2.0 gets its own list", "solace/solace-pubsub-connector-ibmmq:3.2.0", byTag["3.2.0"]},
+		{"past the newest capture stays on it until a release proves otherwise", "solace/solace-pubsub-connector-ibmmq:3.3.0", newest},
 	}
 	for _, c := range silent {
 		t.Run("silent/"+c.name, func(t *testing.T) {
@@ -407,6 +461,10 @@ func TestBuiltinList(t *testing.T) {
 		// 3.x is Spring Boot 4 and Jackson 3, which a 2.x capture cannot speak
 		// for.
 		{"the first release past a list's range", "solace/solace-pubsub-connector-ibmmq:" + first.before, first.name(), first},
+		// No 3.0.x release was captured: it falls in the gap between the 2.x
+		// list and the first 3.x one, and is judged against the 2.x list with
+		// a warning rather than silently.
+		{"a 3.0.x release no capture covers", "solace/solace-pubsub-connector-ibmmq:3.0.2", first.name(), first},
 		{"a different image entirely", "solace/some-other-connector:2.14.1", embeddedListImage, newest},
 		// A digest pin or a tag like latest names no release any list could
 		// have been captured under, so it cannot be confirmed to be covered
@@ -435,12 +493,11 @@ func TestBuiltinList(t *testing.T) {
 	}
 }
 
-// TestBuiltinListPicksTheNearestLine runs the pick against a two-line table --
-// the shape the table takes once a 3.x capture is added -- so the choice
-// between lines is pinned before there is a second list to ship: a release
-// gets its own line, one in the gap between lines or past the last gets the
-// nearest line captured at or before it, and one older than every capture
-// gets the oldest.
+// TestBuiltinListPicksTheNearestLine runs the pick against a fixed two-line
+// table, so the choice between lines stays pinned however the shipped table
+// grows: a release gets its own line, one in the gap between lines or past
+// the last gets the nearest line captured at or before it, and one older than
+// every capture gets the oldest.
 func TestBuiltinListPicksTheNearestLine(t *testing.T) {
 	orig := embeddedLists
 	t.Cleanup(func() { embeddedLists = orig })

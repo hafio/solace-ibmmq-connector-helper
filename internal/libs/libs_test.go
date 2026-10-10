@@ -1288,6 +1288,82 @@ func TestDownloadImageMismatchReported(t *testing.T) {
 	})
 }
 
+// TestDownloadMQOmitsAgainstTheDeployedLine runs `download jar mq` against
+// the built-in list of each connector line: the IBM MQ client's POM needs
+// BouncyCastle 1.84, jakarta.jms-api 3.0.0 and org.json 20251224. Every image
+// ships the first two at an equal-or-newer version, but only the 3.x images
+// ship org.json 20251224 -- the 2.x image's 20250517 is older -- so the 2.x
+// line downloads it beside the client, and both 3.x lines fetch the client
+// alone. Each line is judged against its own list, silently.
+func TestDownloadMQOmitsAgainstTheDeployedLine(t *testing.T) {
+	seed := Coord{Group: "com.ibm.mq", Artifact: "com.ibm.mq.jakarta.client"}
+	bcprov := Coord{Group: "org.bouncycastle", Artifact: "bcprov-jdk18on"}
+	jms := Coord{Group: "jakarta.jms", Artifact: "jakarta.jms-api"}
+	orgJSON := Coord{Group: "org.json", Artifact: "json"}
+	fixtures := map[string]response{
+		metadataURL(seed): {body: metaXML("9.4.3.0", "9.4.3.0")},
+		pomURL(seed, "9.4.3.0"): {body: pomXMLBody(
+			dep("org.bouncycastle", "bcprov-jdk18on", "1.84", "", "", ""),
+			dep("jakarta.jms", "jakarta.jms-api", "3.0.0", "", "", ""),
+			dep("org.json", "json", "20251224", "", "", ""),
+		)},
+		pomURL(bcprov, "1.84"):      {body: pomXMLBody()},
+		pomURL(jms, "3.0.0"):        {body: pomXMLBody()},
+		pomURL(orgJSON, "20251224"): {body: pomXMLBody()},
+	}
+	for _, a := range []artifact{{Coord: seed, Version: "9.4.3.0"}, {Coord: orgJSON, Version: "20251224"}} {
+		body := a.Artifact + "-bytes"
+		u := jarURL(a)
+		fixtures[u] = response{body: body}
+		fixtures[u+".sha1"] = response{body: sha1Hex(body)}
+	}
+	for _, c := range []struct {
+		tag, list string
+		written   []string
+		omitted   []string
+	}{
+		{"2.14.1", "2.13.0", []string{"com.ibm.mq.jakarta.client-9.4.3.0.jar", "json-20251224.jar"}, []string{"bcprov-jdk18on-1.84.jar", "jakarta.jms-api-3.0.0.jar"}},
+		{"3.1.0", "3.1.0", []string{"com.ibm.mq.jakarta.client-9.4.3.0.jar"}, []string{"bcprov-jdk18on-1.84.jar", "jakarta.jms-api-3.0.0.jar", "json-20251224.jar"}},
+		{"3.2.0", "3.2.0", []string{"com.ibm.mq.jakarta.client-9.4.3.0.jar"}, []string{"bcprov-jdk18on-1.84.jar", "jakarta.jms-api-3.0.0.jar", "json-20251224.jar"}},
+	} {
+		t.Run(c.tag, func(t *testing.T) {
+			dir := t.TempDir()
+			rep, err := Download(Input{
+				Dir: dir, Set: SetMQ, Version: "9.4.3.0",
+				DeployedImage: "solace/solace-pubsub-connector-ibmmq:" + c.tag, HTTP: &fakeDoer{byURL: fixtures},
+			})
+			if err != nil {
+				t.Fatalf("Download: %v", err)
+			}
+			var want []string
+			for _, n := range c.written {
+				want = append(want, filepath.Join(dir, n))
+			}
+			if !reflect.DeepEqual(rep.Written, want) {
+				t.Errorf("Written = %v, want %v", rep.Written, want)
+			}
+			for _, n := range c.omitted {
+				found := false
+				for _, o := range rep.Omitted {
+					found = found || strings.HasPrefix(o, n+":")
+				}
+				if !found {
+					t.Errorf("Omitted = %v, want %s among them", rep.Omitted, n)
+				}
+			}
+			if len(rep.Omitted) != len(c.omitted) {
+				t.Errorf("Omitted = %v, want exactly %d entries", rep.Omitted, len(c.omitted))
+			}
+			if want := embeddedListImage + "-" + c.list; rep.OmitListProvenance != want {
+				t.Errorf("OmitListProvenance = %q, want %q", rep.OmitListProvenance, want)
+			}
+			if rep.OmitListImageMismatch != "" {
+				t.Errorf("connector %s is covered by a built-in list, want silence, got %q", c.tag, rep.OmitListImageMismatch)
+			}
+		})
+	}
+}
+
 // TestDownloadSyslogEncoderFollowsConnectorLine covers the encoder line pick.
 // logstash-logback-encoder 9.0 moved to Jackson 3, which only connector 3.x
 // ships, so with no --version a 2.x connector gets the newest 8.x -- never the

@@ -1219,11 +1219,12 @@ naming no release, it leaves the tool unable to tell which line it is deploying.
 
 What the tool does differently per line, all driven by `tag`:
 
-- **`download jar`** judges omissions against the built-in jar list for that line,
-  and picks the syslog encoder its Jackson needs -- the newest 8.x for 2.x, the
-  newest release for 3.x ([section 10](#10-download-jar)). There is no built-in 3.x
-  list yet, so a 3.x deployment is warned that its omissions are approximate; pass
-  `--omit-lib-file` with a list captured from the image
+- **`download jar`** judges omissions against the built-in jar list for the
+  release you deploy, and picks the syslog encoder its Jackson needs -- the newest
+  8.x for 2.x, the newest release for 3.x ([section 10](#10-download-jar)). The
+  built-in lists cover 2.10.0 up to 3.0.0, 3.1.0 up to 3.2.0, and 3.2.0 on; a
+  release outside them (a 3.0.x) is warned that its omissions are approximate, so
+  pass `--omit-lib-file` with a list captured from that image
   ([section 10.4](#104-the-image-jar-list-built-in---omit-lib-file-and---include-provided)).
 - **The status script** reads the instance's health under either line: Spring Boot 4
   sorts the keys of `/actuator/health` alphabetically, which puts its status last
@@ -1990,16 +1991,19 @@ ships produces wrong omissions for dependencies, by design. This is the
 sharpest edge in the feature: using a list while deploying an image it does
 not describe can omit a jar that image does not really have.
 
-**The built-in lists are one per connector line, and each describes a range
-of releases, not one tag.** The 2.x list was captured from
-`solace/solace-pubsub-connector-ibmmq:2.13.0`, but the classpath does not move
-between releases of one line -- a capture from 2.14.1 is byte-for-byte
-identical -- so it judges omission correctly for **2.10.0 and later, before
-3.0.0**. Connector 3.x moved to Spring Boot 4 and Jackson 3, so the 2.x list
-cannot speak for it: a 3.x release needs a list of its own, and until one is
-built in, a 3.x deployment is warned about (below) rather than silently judged
-against the wrong classpath. The filename records where the bytes came from;
-the range is what the tool checks against, and it is printed on every run:
+**Each built-in list describes a range of releases, not one tag.** A new
+list is added only when a capture shows the classpath moved:
+
+| Built-in list | Describes | Why the range ends there |
+|---|---|---|
+| captured from `2.13.0` | 2.10.0 and later, before 3.0.0 | a capture from 2.14.1 is byte-for-byte identical; connector 3.x moved to Spring Boot 4 and Jackson 3 |
+| captured from `3.1.0` | 3.1.0 and later, before 3.2.0 | 3.2.0 ships the same jars at newer versions (connector framework, JMS binders, Jackson, Solace starters) |
+| captured from `3.2.0` | 3.2.0 and later | the newest capture: open until a later release proves to ship a different classpath |
+
+No 3.0.x release has been captured, so a 3.0.x deployment falls outside every
+range and is warned about (below) rather than silently judged against the
+wrong classpath. The filename records where the bytes came from; the range is
+what the tool checks against, and it is printed on every run:
 
 ```text
 omit list: solace-pubsub-connector-ibmmq-2.13.0 (built in; describes 2.10.0 and later, before 3.0.0)
@@ -2008,19 +2012,19 @@ omit list: solace-pubsub-connector-ibmmq-2.13.0 (built in; describes 2.10.0 and 
 **The command picks the list, and tells you when none covers your image.**
 `download jar` reads `-e env.yaml` (default `env.yaml`) for exactly one thing
 -- the `image` block -- and uses the list whose range holds the release you
-deploy. When no list's does -- a release older than the oldest list, one past a
-list's ceiling (connector 3.x today), a different image entirely, or a
+deploy. When no list's does -- a release older than the oldest list, one in a
+gap between lists (a 3.0.x), a different image entirely, or a
 reference naming no release at all (a digest pin, or a tag such as `latest`)
 -- it warns, naming what the omissions were judged against instead: the nearest
 list at or before your release, or the newest when there is no release to go
 by.
 
 ```text
-omit list warning: env.yaml deploys solace/solace-pubsub-connector-ibmmq:3.1.0,
+omit list warning: env.yaml deploys solace/solace-pubsub-connector-ibmmq:3.0.2,
   which no built-in jar list describes (they cover 2.10.0 and later, before
-  3.0.0) -- every omission above is judged against
-  solace-pubsub-connector-ibmmq-2.13.0, so it may name a jar that image does
-  not ship.
+  3.0.0; 3.1.0 and later, before 3.2.0; 3.2.0 and later) -- every omission
+  above is judged against solace-pubsub-connector-ibmmq-2.13.0, so it may name
+  a jar that image does not ship.
 ```
 
 Deploying a release a list covers is silent: the list does describe it, and a
@@ -2054,7 +2058,12 @@ below):
 | `download jar mq` | latest stable (e.g. `9.4.3.0`) | `com.ibm.mq.jakarta.client` downloads (absent from the image); `org.json:json` downloads (the image's `20250517` is older than the `20251224` this release's POM needs); the BouncyCastle trio and `jakarta.jms-api` are omitted (the image already has each at an equal-or-newer version) |
 | `download jar mq --version 9.4.2.0` | pinned `9.4.2.0` | only `com.ibm.mq.jakarta.client-9.4.2.0.jar` downloads -- that release's POM needs BouncyCastle `1.80`, `jakarta.jms-api` `3.0.0` and `org.json:json` `20250107`, and the image satisfies every one of those at an equal-or-newer version |
 | `download jar syslog`, `env.yaml` deploying 2.x | the newest 8.x (e.g. `8.1`) -- see [section 10.5](#105-logstash-logback-encoder-and-jackson-the-encoder-follows-the-connector-line) | `logstash-logback-encoder` downloads anyway (the seed is never omitted, and the image's `8.0` is older); its Jackson 2 dependencies are omitted -- the image's `2.22` copies already satisfy them |
-| `download jar syslog`, no `env.yaml` | latest stable (e.g. `9.0`) | the encoder downloads; `jackson-databind`/`jackson-core` (groupId `tools.jackson.core`, Jackson 3) download because the 2.x list has those jar names only at Jackson 2's lower versions; `jackson-annotations` is omitted (the image's `2.22` satisfies the `2.20` required). Right for a 3.x image, wrong for a 2.x one -- which is why the command asks `env.yaml` |
+| `download jar syslog`, no `env.yaml` | latest stable (e.g. `9.0`) | judged against the newest list (3.2.0): the encoder downloads, and its Jackson 3 dependencies are omitted -- that image ships `jackson-databind`/`jackson-core` `3.2.2` and `jackson-annotations` `2.22`. Right for a 3.x image, wrong for a 2.x one, which ships no Jackson 3 -- which is why the command asks `env.yaml` |
+
+Against the 3.x lists (3.1.0, 3.2.0) the image also ships `org.json:json`
+`20251224`, so `download jar mq` fetches the IBM MQ client alone, and
+`download jar syslog` fetches only the encoder -- its Jackson 3 dependencies are
+already in the image.
 
 Exact version numbers above are illustrative -- "latest stable" moves, so
 re-run the command to see what your seed actually resolves today.
@@ -2066,16 +2075,18 @@ per line -- the format
 [`internal/libs/imagelibs/solace-pubsub-connector-ibmmq-2.13.0.list`](../internal/libs/imagelibs/solace-pubsub-connector-ibmmq-2.13.0.list)
 (the tracked source of the **built-in 2.x list**, captured from
 `solace/solace-pubsub-connector-ibmmq:2.13.0` and describing 2.10.0 and later,
-before 3.0.0) shows firsthand. Its header records both the probe command and the
-evidence for that range. Each connector line gets a file like it, picked by the
-release `env.yaml` deploys ([section 10.3](#103-image-aware-omission)).
+before 3.0.0) shows firsthand; the 3.x lists sit beside it as
+`solace-pubsub-connector-ibmmq-3.1.0.list` and
+`solace-pubsub-connector-ibmmq-3.2.0.list`. Each header records the probe
+command and the evidence for its range, and the one whose range holds the
+release `env.yaml` deploys is picked ([section 10.3](#103-image-aware-omission)).
 
 `--omit-lib-file <file>` **replaces the built-in list completely** -- it
 never merges with it. An empty file omits nothing at all, which is itself a
 valid way to get the whole closure without reaching for `--include-provided`.
 
 Running a different (custom or slimmed) image, or a release no built-in list
-covers -- one older than 2.10.0, or a 3.x release until its list is built in?
+covers -- one older than 2.10.0, or a 3.0.x release?
 Point `--omit-lib-file` at a list captured from *that* image instead, or the
 omission check will be comparing against a classpath you do not actually
 have. Probe a running image directly for its jar list:
@@ -2135,9 +2146,9 @@ and how to pin. `--version` always wins, with no `seed:` line, and `mq` has no
 such choice to make.
 
 The seed is never omitted ([section 10.3](#103-image-aware-omission)), and the
-image already ships an encoder of its own (2.x ships `8.0`), so **two
-`logstash-logback-encoder` versions end up across the image classpath and the
-`libs` mount** -- of the same Jackson generation now, but nothing in this tool
+image already ships an encoder of its own (2.x ships `8.0`, 3.x ships `9.0`), so
+**two `logstash-logback-encoder` copies end up across the image classpath and
+the `libs` mount** -- of the same Jackson generation now, but nothing in this tool
 confirms the resulting classpath actually loads with
 `logging.syslog.protocol: tcp` at runtime. If you rely on tcp syslog in
 production, verify the deployed classpath yourself, or pin a known-good
