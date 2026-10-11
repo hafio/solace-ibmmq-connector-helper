@@ -869,6 +869,12 @@ func writeAtomic(resp *http.Response, dst string, expectedSHA1 string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("closing temp file: %w", err)
 	}
+	// A jar is a public artifact, not a secret, and the connector reads it as
+	// its run-as uid, which does not own this file: os.CreateTemp made it 0600,
+	// so it is opened to everyone before it takes its final name.
+	if err := os.Chmod(tmpPath, 0o644); err != nil {
+		return fmt.Errorf("making %s readable: %w", filepath.Base(dst), err)
+	}
 	if err := os.Rename(tmpPath, dst); err != nil {
 		return fmt.Errorf("renaming into place: %w", err)
 	}

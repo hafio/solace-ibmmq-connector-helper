@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -157,6 +158,35 @@ func TestDownloadRejectsNonHTTPSURL(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dir); statErr == nil {
 		t.Errorf("dir %q was created, want untouched", dir)
+	}
+}
+
+// TestDownloadWritesJarsWorldReadable pins the mode a downloaded jar lands
+// with. The connector reads the libs directory as its run-as uid, which does
+// not own these files, so a jar has to be readable by everyone; os.CreateTemp
+// would leave it 0600. Windows keeps no Unix modes, so there is nothing to
+// check there.
+func TestDownloadWritesJarsWorldReadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows file modes carry no Unix permission bits")
+	}
+	dir := t.TempDir()
+	urlStr := "https://repo1.maven.org/maven2/a/b/1/b-1.jar"
+	body := "jar-bytes"
+	fd := &fakeDoer{byURL: map[string]response{
+		urlStr:           {status: http.StatusOK, body: body},
+		urlStr + ".sha1": {status: http.StatusOK, body: sha1Hex(body)},
+	}}
+	rep, err := Download(Input{Dir: dir, URLs: []string{urlStr}, HTTP: fd})
+	if err != nil || len(rep.Written) != 1 {
+		t.Fatalf("Download: %v, written %v", err, rep.Written)
+	}
+	info, err := os.Stat(rep.Written[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("jar mode = %04o, want 0644", got)
 	}
 }
 

@@ -47,6 +47,9 @@ type Instance struct {
 	// JavaOptions is the top-level java-options: block, nil when absent. It is
 	// merged with the MQTLS flag by spec.JavaEnv, as on every platform.
 	JavaOptions *spec.JavaOptions
+	// RunAs is the identity the container runs as, from podman.run-as. Its
+	// zero value is root, so the caller always sets it.
+	RunAs spec.RunAsID
 }
 
 // Mount is one read-only bind mount (host path -> container path). Only the
@@ -165,6 +168,19 @@ func RenderQuadlet(in Input) Unit {
 	for _, l := range leaderLabels(inst.LeaderMode) {
 		w.Line(0, "Label="+l[0]+"="+l[1])
 	}
+	// Identity and privileges are stated, never inherited. The image declares
+	// no USER, so without User= the connector would run as root -- host root on
+	// a rootful deploy. Deployed rootless, the ids map into the invoking user's
+	// subuid and subgid ranges, and Group=0 is the invoker's own group. run-as:
+	// image leaves out User=/Group= alone. Quadlet has no privileged key: a
+	// container is unprivileged unless asked, and nothing here asks. All four
+	// keys need podman 4.4, inside the tool's 4.5 floor.
+	if !inst.RunAs.Image {
+		w.Line(0, "User="+strconv.Itoa(inst.RunAs.UID))
+		w.Line(0, "Group="+strconv.Itoa(inst.RunAs.GID))
+	}
+	w.Line(0, "NoNewPrivileges=true")
+	w.Line(0, "DropCapability=all")
 	for _, port := range p.Ports {
 		w.Line(0, "PublishPort="+port.String())
 	}

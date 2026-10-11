@@ -286,6 +286,7 @@ details[open]>summary::before{content:"- "}
         <div class="f"><label>CPU</label><input id="i-k8s-cpu" placeholder="1"></div>
         <div class="f"><label>Memory</label><input id="i-k8s-mem" placeholder="1Gi"></div>
       </div>
+      <div class="f"><label>Run As</label><input id="i-k8s-runas" placeholder="1000:0"><div class="h">uid[:gid] the connector runs as. Empty means the non-root default 1000:0; a bare uid runs with gid 0. "image" keeps the image's own user, which is root -- use it on OpenShift, where the SCC assigns the ids. The gid is also the pod's fsGroup.</div></div>
       <div class="tgl"><input type="checkbox" id="i-k8s-svc"><label for="i-k8s-svc">Create a Service</label></div>
       <div class="f"><label>Service Port</label><input id="i-k8s-svcport" type="number" min="1" max="65535" value="8090"></div>
 
@@ -353,6 +354,7 @@ details[open]>summary::before{content:"- "}
         <div class="f"><label>Compose Project Name</label><input id="i-dk-project" value="solace-ibmmq-connectors"></div>
         <div class="f"><label>Restart Policy</label><input id="i-dk-restart" value="unless-stopped"></div>
       </div>
+      <div class="f"><label>Run As</label><input id="i-dk-runas" placeholder="1000:0"><div class="h">uid[:gid] the connector runs as. Empty means the non-root default 1000:0; a bare uid runs with gid 0. "image" keeps the image's own user, which is root. The TLS store files and libs jars it mounts must be readable by that uid or group.</div></div>
       <div class="sub-h">Published Ports</div>
       <div id="dk-ports"></div>
       <button type="button" class="add" onclick="addPort('dk-ports');gen()">+ Add port</button>
@@ -377,6 +379,7 @@ details[open]>summary::before{content:"- "}
       <div class="fr">
         <div class="f"><label>Restart Policy</label><input id="i-pd-restart" value="unless-stopped"></div>
       </div>
+      <div class="f"><label>Run As</label><input id="i-pd-runas" placeholder="1000:0"><div class="h">uid[:gid] the connector runs as. Empty means the non-root default 1000:0; a bare uid runs with gid 0. "image" keeps the image's own user, which is root. Deployed rootless, the ids map into your subuid and subgid ranges (65536 ids by default).</div></div>
       <div class="sub-h">Published Ports</div>
       <div id="pd-ports"></div>
       <button type="button" class="add" onclick="addPort('pd-ports');gen()">+ Add port</button>
@@ -1152,6 +1155,7 @@ function readModel(){
       cpu: V('i-k8s-cpu'), memory: V('i-k8s-mem')
     },
     service: { enabled: C('i-k8s-svc'), port: V('i-k8s-svcport') },
+    runAs: V('i-k8s-runas'),
     libs: readLibs(),
     cred: readCred('k8s'),
     stores: V('i-k8s-stores') === 'create' ? { create: true }
@@ -1192,7 +1196,8 @@ function readCtr(p, section){
     restart: V('i-' + p + '-restart') || 'unless-stopped',
     ports: Array.from(document.querySelectorAll('#' + p + '-ports .p-val')).map(i => i.value.trim()).filter(Boolean),
     cred: readCred(p),
-    libsDir: C('i-' + p + '-libs-on') ? V('i-' + p + '-libs-dir') : ''
+    libsDir: C('i-' + p + '-libs-on') ? V('i-' + p + '-libs-dir') : '',
+    runAs: V('i-' + p + '-runas')
   };
 }
 
@@ -1324,6 +1329,8 @@ function emitKube(k){
      + knum('replicas', d.replicas, '    ');
   if(d.cpu || d.memory) y += '    resources:\n' + kv('cpu', d.cpu, '      ') + kv('memory', d.memory, '      ');
   y += '  service:\n' + kbool('enabled', k.service.enabled, '    ') + knum('port', k.service.port, '    ');
+  // run-as is written only when set: unset is the CLI's non-root default.
+  y += kv('run-as', k.runAs, '  ');
   const lb = k.libs;
   if(lb){
     y += '  libs:\n';
@@ -1362,6 +1369,8 @@ function emitCtr(c){
   // The compose project. Docker only: podman has no equivalent grouping.
   if(c.section === 'docker') y += kv('project-name', c.projectName, '  ');
   y += kv('restart', c.restart, '  ');
+  // run-as is written only when set: unset is the CLI's non-root default.
+  y += kv('run-as', c.runAs, '  ');
   y += klist('ports', c.ports, '  ');
   // No secrets: block at all -- credentials are derived from the connection's
   // own client-username/-password (or user/password) fields and mounted at
@@ -1615,7 +1624,10 @@ function validateModel(m){
   // config-only render (application.yml) pulls nothing.
   if(m.kube || m.docker || m.podman) checkImageBlock(add, warn, m);
 
-  if(m.kube) checkKube(add, warn, m);
+  if(m.kube){
+    checkKube(add, warn, m);
+    checkRunAs(add, warn, 'kubernetes', m.kube.runAs);
+  }
   if(m.docker){
     checkContainerTarget(add, warn, m, m.docker);
     // Held to the same DNS-1123 rule as name, and checked here rather than in
@@ -1623,10 +1635,15 @@ function validateModel(m){
     if(!isDNS1123(m.docker.projectName)){
       add(ENV_FILE, `docker.project-name "${m.docker.projectName}" is not a valid DNS-1123 label`);
     }
+    checkRunAs(add, warn, 'docker', m.docker.runAs);
   }
   // The CLI's validate notes a leftover podman.base-dir; the page never writes
   // one, so there is nothing here to mirror.
-  if(m.podman) checkContainerTarget(add, warn, m, m.podman);
+  if(m.podman){
+    checkContainerTarget(add, warn, m, m.podman);
+    checkRunAs(add, warn, 'podman', m.podman.runAs);
+    checkRootlessRange(warn, m.podman.runAs); // validate (Lint) only in Go; the page mirrors validate
+  }
   const tlsInUse = usesTLS(resolved);
   if(m.kube && tlsInUse && !m.kube.stores){
     warn(ENV_FILE, 'a TLS/mTLS connection exists but secrets.stores is omitted; the store files will be missing at runtime');
@@ -2323,6 +2340,58 @@ function checkContainerStores(add, section, tls){
 // specBaseName mirrors spec.BaseName: the last element of a path written with
 // either separator.
 function specBaseName(p){ return String(p).split(/[\\/]/).pop(); }
+// The run-as grammar and its findings, mirroring spec.ParseRunAs and
+// validate.checkRunAs message for message. An empty field is the CLI's
+// default, which is what the CLI sees when the page writes no run-as.
+const RUN_AS_DEFAULT = '1000:0';     // mirrors spec.DefaultRunAs
+const RUN_AS_IMAGE = 'image';        // mirrors spec.RunAsImage
+const RUN_AS_MAX = 2147483647;
+const ROOTLESS_ID_RANGE = 65536;     // mirrors validate's rootlessIDRange
+function parseRunAsID(s){
+  if(s === '') return { err: 'is empty' };
+  if(!/^[0-9]+$/.test(s)) return { err: goQuote(s) + ' is not a decimal number' };
+  if(s.length > 1 && s[0] === '0') return { err: goQuote(s) + ' has a leading zero' };
+  const n = Number(s);
+  if(!Number.isSafeInteger(n) || n > RUN_AS_MAX) return { err: goQuote(s) + ' is larger than ' + RUN_AS_MAX };
+  return { n: n };
+}
+function parseRunAs(s){
+  if(s === RUN_AS_IMAGE) return { image: true };
+  const i = s.indexOf(':');
+  const u = parseRunAsID(i < 0 ? s : s.slice(0, i));
+  if(u.err) return { err: 'the uid ' + u.err };
+  let gid = 0;
+  if(i >= 0){
+    const g = parseRunAsID(s.slice(i + 1));
+    if(g.err) return { err: 'the gid ' + g.err };
+    gid = g.n;
+  }
+  return { uid: u.n, gid: gid };
+}
+function checkRunAs(add, warn, section, raw){
+  const v = (raw == null || raw === '') ? RUN_AS_DEFAULT : raw;
+  const r = parseRunAs(v);
+  if(r.err){
+    add(ENV_FILE, `${section}.run-as ${goQuote(v)} is not a uid[:gid] or ${goQuote(RUN_AS_IMAGE)}: ${r.err}. Write a decimal uid with an optional :gid, such as ${goQuote(RUN_AS_DEFAULT)} (the default), or ${goQuote(RUN_AS_IMAGE)} to keep the image's own user`);
+    return;
+  }
+  if(r.image) return;
+  if(r.uid === 0){
+    const host = { docker: '; docker runs the container without a user namespace, so that is root on the host',
+                   podman: '; deployed as root, podman runs it without a user namespace, so that is root on the host' }[section] || '';
+    warn(ENV_FILE, `${section}.run-as ${goQuote(v)} runs the connector as root${host}. Leave run-as unset for the non-root default ${goQuote(RUN_AS_DEFAULT)}`);
+  }
+}
+// Port of validate's checkRootlessRange: container ids 1..65536 fit a stock
+// rootless subordinate range, a larger one does not.
+function checkRootlessRange(warn, raw){
+  const v = (raw == null || raw === '') ? RUN_AS_DEFAULT : raw;
+  const r = parseRunAs(v);
+  if(r.err || r.image) return;
+  if(r.uid > ROOTLESS_ID_RANGE || r.gid > ROOTLESS_ID_RANGE){
+    warn(ENV_FILE, `podman.run-as ${goQuote(v)} names an id above ${ROOTLESS_ID_RANGE}: deployed rootless, podman maps container ids 1 and up into the invoking user's subordinate uid and gid ranges, which useradd makes ${ROOTLESS_ID_RANGE} ids wide, so a larger id is unmapped and the unit will not start. Widen the ranges (usermod --add-subuids / --add-subgids, then podman system migrate), deploy as root, or pick a smaller id; deploy checks the actual ranges when it runs rootless`);
+  }
+}
 function usesTLS(resolved){
   return resolved.some(wf => [wf.source, wf.target].some(s =>
     (s.system === 'solace' && isTCPS(s.host)) || (s.system === 'mq' && s.tls)));
@@ -3454,18 +3523,19 @@ function sampleModel(){
       deployment: { name: 'solmq-connector', namespace: 'solace-connectors',
                     replicas: 2, cpu: '1', memory: '1Gi' },
       service: { enabled: true, port: '8090' },
+      runAs: '',
       libs: null, cred: cred, stores: { create: true }, imagePull: null
     },
     docker: {
       section: 'docker', command: 'docker', name: 'connector',
       projectName: 'solace-ibmmq-connectors',
       restart: 'unless-stopped', ports: ['8090'],
-      cred: null, libsDir: ''
+      cred: null, libsDir: '', runAs: ''
     },
     podman: {
       section: 'podman', command: 'podman', name: 'connector',
       restart: 'unless-stopped', ports: ['8090'],
-      cred: null, libsDir: ''
+      cred: null, libsDir: '', runAs: ''
     }
   };
 }
@@ -3537,7 +3607,7 @@ function clearForm(){
   ['i-ts-pass-env', 'i-ks-pass-env', 'i-le-user-env', 'i-le-pass-env',
    'i-img-user-env', 'i-img-pass-env'].forEach(id => setC(id, true));
   ['i-log', 'i-soldef', 'i-mqdef', 'i-le-queue', 'i-le-fo', 'i-le-props', 'i-le-extra', 'i-k8s-name', 'i-k8s-ns',
-   'i-k8s-cpu', 'i-k8s-mem', 'i-k8s-ipull-name',
+   'i-k8s-cpu', 'i-k8s-mem', 'i-k8s-ipull-name', 'i-k8s-runas', 'i-dk-runas', 'i-pd-runas',
    'i-img-repo', 'i-img-name', 'i-img-tag', 'i-img-user', 'i-img-pass', 'i-tz', 'i-jto', 'i-jjo',
    'i-ts-file', 'i-ts-pass', 'i-ks-file', 'i-ks-pass'].forEach(id => setV(id, ''));
   setV('i-wf-dir', '.'); setV('i-wf-pat', '*');
@@ -3605,6 +3675,7 @@ function loadSample(){
   setV('i-k8s-ns', k.deployment.namespace);
   setV('i-k8s-rep', k.deployment.replicas); setV('i-k8s-cpu', k.deployment.cpu);
   setV('i-k8s-mem', k.deployment.memory);
+  setV('i-k8s-runas', k.runAs || '');
   setC('i-k8s-svc', k.service.enabled); setV('i-k8s-svcport', k.service.port);
   setV('i-k8s-cred', 'create');
   setV('i-k8s-stores', 'create');
@@ -3617,6 +3688,7 @@ function loadSample(){
     setC('i-' + p + '-on', true);
     setV('i-' + p + '-cmd', c.command);
     setV('i-' + p + '-name', c.name); setV('i-' + p + '-restart', c.restart);
+    setV('i-' + p + '-runas', c.runAs || '');
     c.ports.forEach(v => addPort(p + '-ports', v));
   });
   // The docker-only key is set outside the shared loop above.

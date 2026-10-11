@@ -222,6 +222,20 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
   holds the claim while a pod still mounts it, and the Deployment that owns that pod
   is queued behind it in the file. Reversed, the workload goes first and everything
   it holds is free by the time its turn comes.
+- **Container posture is stated, never inherited.** The connector image declares no
+  `USER`, so every artifact writes the run-as identity (`spec.ParseRunAs`, default
+  `spec.DefaultRunAs`, per-platform `run-as`) and a fixed set of restrictions:
+  kubernetes `allowPrivilegeEscalation: false`, `privileged: false` and
+  `capabilities.drop: [ALL]` on every container plus the pod's `seccompProfile:
+  RuntimeDefault`; compose `privileged: false`, `cap_drop: [ALL]` and
+  `security_opt: [no-new-privileges=true]`; quadlet `NoNewPrivileges=true` and
+  `DropCapability=all`. `internal/gen`'s `TestArtifactsStateTheirPosture` pins
+  what each platform writes and `TestArtifactsCarryNoWideningTokens` forbids the
+  spellings that would widen it, so a renderer change that loosens the posture fails
+  the build. On kubernetes the run-as gid is also `fsGroup`: it is what makes the
+  0400 credentials Secret readable to a non-root uid. With every capability dropped
+  even uid 0 has no `CAP_DAC_OVERRIDE`, so deploy's mount check
+  (`cmd/solmq-conn-util/runas.go`) judges root by the mode bits like any uid.
 - **Podman keeps nothing on the host but the unit.** The rendered `application.yml`,
   status script and logback config, the TLS stores and the credentials all go into
   podman's secret store (`gen.ResolvePodmanFiles` / `gen.ResolveCredentials`, read

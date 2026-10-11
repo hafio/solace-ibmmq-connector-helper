@@ -29,6 +29,9 @@ type Instance struct {
 	// JavaOptions is the top-level java-options: block, nil when absent. It is
 	// merged with the MQTLS flag by spec.JavaEnv, as on every platform.
 	JavaOptions *spec.JavaOptions
+	// RunAs is the identity the container runs as, from docker.run-as. Its
+	// zero value is root, so the caller always sets it.
+	RunAs spec.RunAsID
 }
 
 // Mount is one read-only bind mount (host path -> container path).
@@ -127,6 +130,19 @@ func renderService(w *yw, in Input, inst Instance) {
 	if d.Restart != "" {
 		w.Line(4, "restart: "+d.Restart)
 	}
+	// Identity and privileges are stated, never inherited. The image declares
+	// no USER, so without user: the connector would run as root -- host root,
+	// since docker runs it without a user namespace. run-as: image leaves out
+	// the user: line alone; the rest of the posture holds either way, and the
+	// connector needs no capability (it binds an unprivileged port).
+	if !inst.RunAs.Image {
+		w.Line(4, `user: "`+inst.RunAs.String()+`"`)
+	}
+	w.Line(4, "privileged: false")
+	w.Line(4, "cap_drop:")
+	w.Line(6, "- ALL")
+	w.Line(4, "security_opt:")
+	w.Line(6, "- no-new-privileges=true")
 	if len(d.Ports) > 0 {
 		w.Line(4, "ports:")
 		for _, p := range d.Ports {

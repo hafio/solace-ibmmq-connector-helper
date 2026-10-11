@@ -31,7 +31,8 @@ curl -fsS "$STATUS_URL"
 // TestRenderFull_WithEverything is the primary full-string golden: a single
 // instance with creds (rendered as a per-service secrets list plus a
 // top-level environment-provider secrets block -- never an env_file), a store
-// mount, a libs mount, MQTLS, ports and a timezone.
+// mount, a libs mount, MQTLS, ports, a timezone, and the default non-root
+// run-as with the posture every service carries.
 func TestRenderFull_WithEverything(t *testing.T) {
 	in := Input{
 		Docker: &spec.Docker{
@@ -48,6 +49,7 @@ func TestRenderFull_WithEverything(t *testing.T) {
 			MQTLS:        true,
 			StatusScript: statusScript1,
 			LeaderMode:   spec.LeaderActiveActive,
+			RunAs:        spec.RunAsID{UID: 1000, GID: 0},
 		},
 		Secrets: []string{"SOLACE_CLIENT_USERNAME", "SOLACE_CLIENT_PASSWORD", "TRUSTSTORE_PASSWORD"},
 		Stores: []Mount{
@@ -65,6 +67,12 @@ services:
       solace-connector/le-mode: active_active
       solace-connector/role: active
     restart: unless-stopped
+    user: "1000:0"
+    privileged: false
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges=true
     ports:
       - "8090:8090"
       - "8080:8091"
@@ -133,7 +141,9 @@ secrets:
 
 // TestRenderFull_Minimal is the second full-string golden: no creds, no stores,
 // no libs, MQTLS false, empty timezone, no restart and no ports -- so the
-// restart, ports, environment, secrets and volumes blocks are all omitted.
+// restart, ports, environment, secrets and volumes blocks are all omitted --
+// and run-as image, which leaves out the user: line and nothing else of the
+// posture.
 //
 // It also carries no project-name, which is the other half of the pair with
 // TestRenderFull_WithEverything: one full document pins the leading name: line,
@@ -143,7 +153,7 @@ func TestRenderFull_Minimal(t *testing.T) {
 		Docker: &spec.Docker{
 			Name: "solmq",
 		},
-		Instance: Instance{Name: "solmq", Image: "img:1", AppYAML: "key: value\n", MQTLS: false, StatusScript: "echo ok\n"},
+		Instance: Instance{Name: "solmq", Image: "img:1", AppYAML: "key: value\n", MQTLS: false, StatusScript: "echo ok\n", RunAs: spec.RunAsID{Image: true}},
 	}
 
 	want := `services:
@@ -153,6 +163,11 @@ func TestRenderFull_Minimal(t *testing.T) {
     labels:
       solace-connector/le-mode: standalone
       solace-connector/role: active
+    privileged: false
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges=true
     configs:
       - source: solmq-app
         target: /app/external/spring/config/application.yml

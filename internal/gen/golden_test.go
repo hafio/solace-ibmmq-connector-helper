@@ -342,7 +342,8 @@ spec:
 // two directories the connector's spring.config.import configtree names, S3: no secret in an env var a
 // child process or crash dump could see) -- and automountServiceAccountToken
 // is always false regardless of hasCreds (the connector never calls the
-// Kubernetes API).
+// Kubernetes API). The pod runs as the default non-root run-as with the
+// posture every pod carries.
 func deploymentDoc(hasCreds, stores, syslog, libs bool) string {
 	var b strings.Builder
 	b.WriteString(`apiVersion: apps/v1
@@ -362,9 +363,22 @@ spec:
         solace-connector/le-mode: active_standby
     spec:
       automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 0
+        fsGroup: 0
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: connector
           image: solace/solace-pubsub-connector-ibmmq:2.13.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
           ports:
             - name: management
               containerPort: 8090

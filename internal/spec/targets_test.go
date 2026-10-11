@@ -96,6 +96,10 @@ docker:
 	if d.Stores != nil || d.Libs != nil {
 		t.Errorf("stores/libs should stay nil when absent: %+v / %+v", d.Stores, d.Libs)
 	}
+	// The image declares no USER, so an unset run-as must not mean root.
+	if d.RunAs != DefaultRunAs {
+		t.Errorf("run-as = %q want the non-root default %q", d.RunAs, DefaultRunAs)
+	}
 }
 
 func TestApplyDockerDefaultsOverrideWins(t *testing.T) {
@@ -106,6 +110,7 @@ docker:
   name: custom-name
   project-name: custom-project
   restart: always
+  run-as: image
   ports:
     - 9000
     - "8000:8001"
@@ -128,6 +133,9 @@ docker:
 	}
 	if d.Restart != "always" {
 		t.Errorf("restart = %q", d.Restart)
+	}
+	if d.RunAs != RunAsImage {
+		t.Errorf("run-as = %q, want the written %q", d.RunAs, RunAsImage)
 	}
 	want := []Port{{Host: 9000, Container: 9000}, {Host: 8000, Container: 8001}}
 	if len(d.Ports) != len(want) || d.Ports[0] != want[0] || d.Ports[1] != want[1] {
@@ -173,6 +181,9 @@ podman:
 	if p.Quadlet != nil {
 		t.Errorf("quadlet = %+v, want nil: it is a removed block, and defaulting it non-nil would trip validate's rejection", p.Quadlet)
 	}
+	if p.RunAs != DefaultRunAs {
+		t.Errorf("run-as = %q want the non-root default %q", p.RunAs, DefaultRunAs)
+	}
 }
 
 func TestApplyPodmanDefaultsOverrideWins(t *testing.T) {
@@ -182,6 +193,7 @@ podman:
   image: myimg
   name: custom-name
   restart: always
+  run-as: "2000:2000"
   ports:
     - 9000
   quadlet:
@@ -198,8 +210,8 @@ podman:
 	if p.Command != "podman --context foo" {
 		t.Errorf("command = %q", p.Command)
 	}
-	if p.Name != "custom-name" || p.Restart != "always" {
-		t.Errorf("name/restart = %q/%q", p.Name, p.Restart)
+	if p.Name != "custom-name" || p.Restart != "always" || p.RunAs != "2000:2000" {
+		t.Errorf("name/restart/run-as = %q/%q/%q", p.Name, p.Restart, p.RunAs)
 	}
 	want := Port{Host: 9000, Container: 9000}
 	if len(p.Ports) != 1 || p.Ports[0] != want {

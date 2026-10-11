@@ -12,7 +12,7 @@ import (
 const testImage = "solace/solace-pubsub-connector-ibmmq:2.13.0"
 
 // fullInput is the representative single-instance case: creds + one store + libs
-// + MQTLS, restart and timezone set.
+// + MQTLS, restart and timezone set, running as the default non-root 1000:0.
 func fullInput() Input {
 	return Input{
 		Podman: &spec.Podman{
@@ -21,7 +21,7 @@ func fullInput() Input {
 			Ports:   []spec.Port{{Host: 8090, Container: 8090}, {Host: 8080, Container: 8091}},
 			Restart: "unless-stopped",
 		},
-		Instance: Instance{Name: "solmq-connector", Image: testImage, Timezone: "Asia/Singapore", AppYAMLSecret: "solmq-connector-application.yml", MQTLS: true, StatusScriptSecret: "solmq-connector-status-script", LeaderMode: spec.LeaderActiveActive},
+		Instance: Instance{Name: "solmq-connector", Image: testImage, Timezone: "Asia/Singapore", AppYAMLSecret: "solmq-connector-application.yml", MQTLS: true, StatusScriptSecret: "solmq-connector-status-script", LeaderMode: spec.LeaderActiveActive, RunAs: spec.RunAsID{UID: 1000, GID: 0}},
 		Secrets: []SecretRef{
 			{StoreName: "solmq-connector-MQ_CONN_1_USER", Target: "MQ_CONN_1_USER"},
 			{StoreName: "solmq-connector-MQ_CONN_1_PASSWORD", Target: "MQ_CONN_1_PASSWORD"},
@@ -34,14 +34,15 @@ func fullInput() Input {
 }
 
 // minimalInput is the bare case: no creds/stores/libs, MQTLS false, empty
-// timezone, empty restart. Only a single port remains.
+// timezone, empty restart, run-as image (no User=/Group=, the rest of the
+// posture still). Only a single port remains.
 func minimalInput() Input {
 	return Input{
 		Podman: &spec.Podman{
 			Name:  "solmq-connector",
 			Ports: []spec.Port{{Host: 8090, Container: 8090}},
 		},
-		Instance: Instance{Name: "solmq-connector", Image: testImage, AppYAMLSecret: "solmq-connector-application.yml", MQTLS: false, StatusScriptSecret: "solmq-connector-status-script", LeaderMode: ""},
+		Instance: Instance{Name: "solmq-connector", Image: testImage, AppYAMLSecret: "solmq-connector-application.yml", MQTLS: false, StatusScriptSecret: "solmq-connector-status-script", LeaderMode: "", RunAs: spec.RunAsID{Image: true}},
 	}
 }
 
@@ -81,6 +82,10 @@ Image=solace/solace-pubsub-connector-ibmmq:2.13.0
 ContainerName=solmq-connector
 Label=solace-connector/le-mode=active_active
 Label=solace-connector/role=active
+User=1000
+Group=0
+NoNewPrivileges=true
+DropCapability=all
 PublishPort=8090:8090
 PublishPort=8080:8091
 Environment=TZ=Asia/Singapore
@@ -121,6 +126,8 @@ Image=solace/solace-pubsub-connector-ibmmq:2.13.0
 ContainerName=solmq-connector
 Label=solace-connector/le-mode=standalone
 Label=solace-connector/role=active
+NoNewPrivileges=true
+DropCapability=all
 PublishPort=8090:8090
 Secret=solmq-connector-application.yml,type=mount,target=/app/external/spring/config/application.yml
 Secret=solmq-connector-status-script,type=mount,target=/app/external/.status-script

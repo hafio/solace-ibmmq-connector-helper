@@ -20,6 +20,10 @@ so splitting them across connectors stays your decision.
 - **One config file.** `env.yaml` holds the connector defaults, workflow
   discovery, and a per-platform (`kubernetes:` / `docker:` / `podman:`) deploy
   section ([section 8](docs/userguide.md#8-platform-sections-kubernetes-docker-podman)).
+- **Non-root and hardened by default.** Every artifact runs the connector as
+  `1000:0` instead of the image's root (`run-as` per platform) with no privilege
+  escalation and every capability dropped
+  ([section 8.4](docs/userguide.md#84-run-as-and-container-hardening)).
 - **Reusable connections**: define `connections.<name>` once in `env.yaml`,
   reference it with `conn-ref`; identical connections dedup into shared
   **[binders](docs/userguide.md#66-reusable-connections-conn-ref)**.

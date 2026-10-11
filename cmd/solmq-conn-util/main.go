@@ -577,6 +577,15 @@ func actDocker(o actionOpts, r runner.Runner) int {
 	if cerr != nil {
 		return errExit(cerr)
 	}
+	if action == runner.ActionDeploy {
+		// docker bind-mounts the TLS stores and the libs jars, which the
+		// connector reads as its run-as identity with the host's own ids. The
+		// paths are the plan's, as the compose file mounts them: expanded and
+		// absolute.
+		for _, w := range unreadableMounts(sharedIDs(plan.RunAs), validate.PlatformDocker, mountChecks(validate.PlatformDocker, plan.Mounts)) {
+			fmt.Fprintln(os.Stderr, "warning:", w)
+		}
+	}
 	if code, ok := preflight(r, action, validate.PlatformDocker, e.Docker.Command, "", extraAllowed); !ok {
 		return code
 	}
@@ -629,6 +638,22 @@ func actPodman(o actionOpts, r runner.Runner) int {
 	}
 	if action == runner.ActionRemove {
 		return podmanRemove(sc, plan, e.Podman, r, extraAllowed)
+	}
+	// Everything but libs.dir reaches the container from podman's secret store,
+	// readable by any uid; the libs jars are a bind mount, read with the host's
+	// ids when deployed as root and through the subordinate ranges rootless --
+	// which also have to exist for the run-as ids to be mapped at all.
+	reader := sharedIDs(plan.RunAs)
+	if sc.UserMode {
+		reader = rootlessIDs(plan.RunAs)
+		if runtime.GOOS == "linux" {
+			for _, w := range subIDWarnings(plan.RunAs, os.ReadFile, os.Getuid(), currentUserName()) {
+				fmt.Fprintln(os.Stderr, "warning:", w)
+			}
+		}
+	}
+	for _, w := range unreadableMounts(reader, validate.PlatformPodman, mountChecks(validate.PlatformPodman, plan.Mounts)) {
+		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
 	return podmanDeploy(sc, plan, e.Podman, res, r, extraAllowed)
 }

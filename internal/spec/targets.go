@@ -197,6 +197,9 @@ type Docker struct {
 	Secrets     *Secrets     `yaml:"secrets"`  // removed; non-nil is a validation error
 	Stores      *StoresMount `yaml:"stores"`   // removed; non-nil is a validation error
 	Libs        *LibsMount   `yaml:"libs"`
+	// RunAs is the uid[:gid] the container runs as (ParseRunAs), or "image" to
+	// keep the image's own user. Defaulted to DefaultRunAs.
+	RunAs string `yaml:"run-as"`
 }
 
 // Quadlet was the podman quadlet: block. The whole block is removed, both keys.
@@ -239,9 +242,13 @@ type Podman struct {
 	Secrets  *Secrets     `yaml:"secrets"`  // removed; non-nil is a validation error (see Docker)
 	Stores   *StoresMount `yaml:"stores"`   // removed; non-nil is a validation error (see Docker)
 	Libs     *LibsMount   `yaml:"libs"`
+	// RunAs is the uid[:gid] the container runs as (ParseRunAs), or "image" to
+	// keep the image's own user. Defaulted to DefaultRunAs; deployed rootless,
+	// the ids map into the invoking user's subuid/subgid range.
+	RunAs string `yaml:"run-as"`
 }
 
-// applyDockerDefaults fills command/name/project-name/restart.
+// applyDockerDefaults fills command/name/project-name/restart/run-as.
 //
 // ports is deliberately not defaulted: publishing a container port to the host
 // is an exposure decision, and nothing the tool does needs one -- status execs
@@ -260,6 +267,9 @@ func applyDockerDefaults(d *Docker) {
 	}
 	if d.Restart == "" {
 		d.Restart = DefaultRestart
+	}
+	if d.RunAs == "" {
+		d.RunAs = DefaultRunAs
 	}
 }
 
@@ -280,6 +290,9 @@ func applyPodmanDefaults(p *Podman) {
 	}
 	if p.Restart == "" {
 		p.Restart = DefaultRestart
+	}
+	if p.RunAs == "" {
+		p.RunAs = DefaultRunAs
 	}
 	// Quadlet is deliberately NOT filled in when absent. It is a removed block
 	// that validate rejects when non-nil, so defaulting it to an empty struct

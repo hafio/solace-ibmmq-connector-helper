@@ -2577,6 +2577,64 @@ func TestDeployDockerSeamChildEnvCarriesCredentials(t *testing.T) {
 	}
 }
 
+// TestDeployDockerWarnsAboutMountsTheConnectorCannotRead pins the deploy-time
+// readability check on docker: a 0600 truststore and a 0600 jar under libs.dir,
+// owned by a uid and gid other than the run-as ones, are each named on stderr
+// with their mode, and the deploy still goes ahead. Both paths are written with
+// ${VAR}s, so the warning has to name the expanded path the compose file
+// mounts. Linux only: elsewhere Docker Desktop's file sharing does not carry
+// the host's modes into the container, so nothing is checked.
+func TestDeployDockerWarnsAboutMountsTheConnectorCannotRead(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the mount check runs on Linux only")
+	}
+	f := useFakeRunner(t)
+	dir := t.TempDir()
+	libs := filepath.Join(dir, "libs")
+	for _, d := range []string{filepath.Join(dir, "certs"), libs} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(d, 0o755); err != nil { // umask aside
+			t.Fatal(err)
+		}
+	}
+	truststore := filepath.Join(dir, "certs", "truststore.jks")
+	writeMode(t, truststore, 0o600)
+	jar := filepath.Join(libs, "com.ibm.mq.jakarta.client.jar")
+	writeMode(t, jar, 0o600)
+	runAs := fmt.Sprintf("%d:%d", os.Getuid()+1, os.Getgid()+1)
+	t.Setenv("SOLMQ_TEST_CERTS", filepath.Join(dir, "certs"))
+	t.Setenv("SOLMQ_TEST_LIBS", libs)
+	write(t, dir, "env.yaml", sharedEnv+`
+tls:
+  truststore:
+    file: ${SOLMQ_TEST_CERTS}/truststore.jks
+    password: ts
+    type: JKS
+`+dockerEnv+"  libs:\n    dir: ${SOLMQ_TEST_LIBS}\n  run-as: \""+runAs+"\"\n")
+	write(t, dir, "10.yaml", validWF)
+
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want the deploy to go ahead:\n%s", code, stderr)
+	}
+	for _, want := range []string{
+		"warning: docker mounts tls.truststore.file " + truststore + " (mode 0600) is not readable by the connector, which runs as " + runAs,
+		"warning: docker mounts libs.dir jar " + jar + " (mode 0600) is not readable by the connector, which runs as " + runAs,
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr should carry %q, got:\n%s", want, stderr)
+		}
+	}
+	if len(f.calls) != 2 {
+		t.Errorf("want the preflight and the up call, got %+v", f.calls)
+	}
+}
+
 func TestRemoveDockerSeam(t *testing.T) {
 	f := useFakeRunner(t)
 	// remove asks before it tears down; this test is about the argv that
@@ -2689,6 +2747,39 @@ tls:
 	}
 	if got := f.calls[12].stdin; got != truststore {
 		t.Errorf("truststore secret = %q, want the file's bytes %q", got, truststore)
+	}
+}
+
+// TestDeployPodmanRootlessWarnsAboutAnUnlistableLibsDir pins the deploy-time
+// check on rootless podman: the default run-as 1000:0 maps to no host uid and
+// to the invoking user's own group, so a libs.dir only its owner may enter
+// (0700) is named on stderr -- at its expanded path -- with the remedy, and the
+// deploy still goes ahead. Linux only, like the docker check.
+func TestDeployPodmanRootlessWarnsAboutAnUnlistableLibsDir(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the mount check runs on Linux only")
+	}
+	f := useFakeRunner(t)
+	podmanQuadletHome(t) // skips as root, so this deploy is rootless
+	dir := t.TempDir()
+	libs := filepath.Join(dir, "libs")
+	if err := os.Mkdir(libs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SOLMQ_TEST_LIBS", libs)
+	write(t, dir, "env.yaml", sharedEnv+podmanEnv()+"  libs:\n    dir: ${SOLMQ_TEST_LIBS}\n")
+	write(t, dir, "10.yaml", validWF)
+
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want the deploy to go ahead:\n%s", code, stderr)
+	}
+	want := "warning: podman mounts libs.dir " + libs + " (mode 0700) is not readable by the connector, which runs as 1000:0 with no capability to bypass file permissions: it would start and then fail when it needs it. Make it listable: chmod o+rx, or give it to group " + fmt.Sprint(os.Getgid()) + " with g+rx -- or change podman.run-as"
+	if !strings.Contains(stderr, want) {
+		t.Errorf("stderr should carry %q, got:\n%s", want, stderr)
 	}
 }
 

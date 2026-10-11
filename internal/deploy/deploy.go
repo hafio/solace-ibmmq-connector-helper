@@ -55,6 +55,9 @@ type Instance struct {
 	// JavaOptions is the top-level java-options: block, nil when absent. It is
 	// merged with Model.MQTLS by spec.JavaEnv, as on every platform.
 	JavaOptions *spec.JavaOptions
+	// RunAs is the identity the pod runs as, from kubernetes.run-as. Its zero
+	// value is root, so the caller always sets it.
+	RunAs spec.RunAsID
 }
 
 // Input is everything needed to render the manifests.
@@ -90,6 +93,42 @@ type Input struct {
 
 // yw is the indentation-aware line writer used by every renderer here.
 type yw = yamlwriter.Writer
+
+// renderPodSecurity writes the pod's securityContext. Identity is stated,
+// never inherited: the image declares no USER, so without runAsUser the
+// connector runs as root. fsGroup is the run-as gid, which is what lets that
+// uid read the credentials Secret (mounted 0400 and root-owned; given an
+// fsGroup the kubelet hands each file to that group as 0440) and lets the
+// libs-download init container write the libs PVC. runAsNonRoot makes the
+// kubelet refuse to start the pod as root should the ids ever say otherwise.
+// run-as: image leaves every id to the image -- or, on OpenShift, to the SCC --
+// and keeps only the seccomp profile, which applies to every container.
+func renderPodSecurity(w *yw, ra spec.RunAsID) {
+	w.Line(6, "securityContext:")
+	if !ra.Image {
+		w.Line(8, "runAsUser: "+strconv.Itoa(ra.UID))
+		w.Line(8, "runAsGroup: "+strconv.Itoa(ra.GID))
+		w.Line(8, "fsGroup: "+strconv.Itoa(ra.GID))
+		if ra.UID != 0 {
+			w.Line(8, "runAsNonRoot: true")
+		}
+	}
+	w.Line(8, "seccompProfile:")
+	w.Line(10, "type: RuntimeDefault")
+}
+
+// renderContainerSecurity writes one container's securityContext at indent:
+// no privilege escalation, not privileged, every capability dropped. The
+// connector binds an unprivileged port and the download init container only
+// writes into its volume, so neither needs a capability.
+func renderContainerSecurity(w *yw, indent int) {
+	w.Line(indent, "securityContext:")
+	w.Line(indent+2, "allowPrivilegeEscalation: false")
+	w.Line(indent+2, "privileged: false")
+	w.Line(indent+2, "capabilities:")
+	w.Line(indent+4, "drop:")
+	w.Line(indent+6, "- ALL")
+}
 
 var intOnly = regexp.MustCompile(`^[0-9]+$`)
 
@@ -354,6 +393,7 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 		w.Line(6, "imagePullSecrets:")
 		w.Line(8, "- name: "+ip.Name)
 	}
+	renderPodSecurity(w, inst.RunAs)
 	lb := in.Kube.Libs
 	if lb != nil && lb.Download != nil {
 		d := lb.Download
@@ -368,10 +408,12 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 		w.Line(10, "volumeMounts:")
 		w.Line(12, "- name: libs")
 		w.Line(14, "mountPath: /libs")
+		renderContainerSecurity(w, 10)
 	}
 	w.Line(6, "containers:")
 	w.Line(8, "- name: "+spec.ConnectorContainerName)
 	w.Line(10, "image: "+inst.Image)
+	renderContainerSecurity(w, 10)
 	w.Line(10, "ports:")
 	w.Line(12, "- name: management")
 	w.Line(14, "containerPort: "+strconv.Itoa(mgmtPort))

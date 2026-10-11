@@ -358,6 +358,10 @@ type Kubernetes struct {
 	Logging    *Logging   `yaml:"logging"` // removed; non-nil is a validation error
 	Libs       *Libs      `yaml:"libs"`
 	Secrets    Secrets    `yaml:"secrets"`
+	// RunAs is the uid[:gid] the pod runs as (ParseRunAs), or "image" to leave
+	// the ids to the image -- or, on OpenShift, to the SCC. Defaulted to
+	// DefaultRunAs; the gid is also the pod's fsGroup.
+	RunAs string `yaml:"run-as"`
 }
 
 // ParseKubernetes decodes a standalone kubernetes document (env.yaml reuses
@@ -374,7 +378,8 @@ func ParseKubernetes(data []byte) (*Kubernetes, error) {
 }
 
 // applyKubeDefaults fills in the defaults the connector runtime expects:
-// command kubectl, replicas 1, 1Gi libs storage, busybox download image. mgmtPort is the effective management.port (see
+// command kubectl, replicas 1, run-as DefaultRunAs, 1Gi libs storage, busybox
+// download image. mgmtPort is the effective management.port (see
 // EffectiveManagementPort): an unset service.port defaults to publishing that
 // port to itself, since that is the only port the pod actually listens on.
 func applyKubeDefaults(k *Kubernetes, mgmtPort int) {
@@ -383,6 +388,9 @@ func applyKubeDefaults(k *Kubernetes, mgmtPort int) {
 	}
 	if k.Deployment.Replicas == 0 {
 		k.Deployment.Replicas = 1
+	}
+	if k.RunAs == "" {
+		k.RunAs = DefaultRunAs
 	}
 	if k.Service.Port == (Port{}) {
 		k.Service.Port = Port{Host: mgmtPort, Container: mgmtPort}

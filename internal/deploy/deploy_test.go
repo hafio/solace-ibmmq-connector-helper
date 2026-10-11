@@ -20,9 +20,10 @@ func baseKube() *spec.Kubernetes {
 	}
 }
 
-// one builds a connector instance (the common test-fixture case).
+// one builds a connector instance (the common test-fixture case), running as
+// the default non-root identity.
 func one(name, appYAML string, m *consolidate.Model) Instance {
-	return Instance{Name: name, Image: "img:1", Timezone: "UTC", AppYAML: appYAML, StatusScript: "#!/bin/sh\necho status\n", Model: m}
+	return Instance{Name: name, Image: "img:1", Timezone: "UTC", AppYAML: appYAML, StatusScript: "#!/bin/sh\necho status\n", Model: m, RunAs: spec.RunAsID{UID: 1000, GID: 0}}
 }
 
 // fullFixtureInput builds the everything-on fixture shared by TestRenderFull
@@ -134,9 +135,22 @@ spec:
         solace-connector/role: active
     spec:
       automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 0
+        fsGroup: 0
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: connector
           image: img:1
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
           ports:
             - name: management
               containerPort: 8090

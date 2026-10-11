@@ -52,6 +52,7 @@ documentation index; this guide is the complete reference.
    1. [kubernetes](#81-kubernetes)
    2. [docker](#82-docker)
    3. [podman](#83-podman)
+   4. [Run-as and container hardening](#84-run-as-and-container-hardening)
 9. [Secrets model](#9-secrets-model)
    1. [Declaring a credential](#91-declaring-a-credential)
    2. [Mount names](#92-mount-names)
@@ -1260,6 +1261,7 @@ java-options:
     -Xms512m
     -Xmx${CONNECTOR_HEAP:1g}
     -XX:+HeapDumpOnOutOfMemoryError
+    -XX:HeapDumpPath=/tmp
   jdk: --add-opens=java.base/java.lang=ALL-UNNAMED   # -> JDK_JAVA_OPTIONS
 ```
 
@@ -1338,6 +1340,8 @@ kubernetes:
     port: 8090                   # optional; bare or "host:container" (same syntax as docker/podman
                                  # ports, sections 8.2/8.3); sets the Service port and its targetPort;
                                  # defaults to the management port when omitted
+  run-as: "1000:0"               # optional; this is the default. uid[:gid] the pod runs as, or
+                                 # "image" to leave the ids to the image or the SCC (section 8.4)
   libs:                          # entirely optional; exactly one of pvc/download; populate a PVC or the
                                  # URLs below with "solmq-conn-util download jar mq" (section 10)
     pvc:
@@ -1373,6 +1377,7 @@ kubernetes:
 | `deployment` | `resources.cpu`, `resources.memory` | one value each; emitted as identical requests **and** limits (guaranteed QoS); a bare integer like `cpu: 1` is auto-quoted |
 | `secrets.image-pull` | `name` \| `create` | optional registry credential for pulling the image. `name` alone references a Secret you made (`kubectl create secret docker-registry`); `create: true` instead has the tool build `<name>-image-pull` from the top-level `image` block, and takes no `name`. Omitted, nothing is created -- see [section 9](#9-secrets-model) |
 | `service` | `enabled`, `port` | emit a Service on this port; `port` accepts a bare port or `host:container`, the same syntax as docker/podman `ports` ([section 8.2](#82-docker)/[8.3](#83-podman)); unset defaults to the effective management port |
+| `run-as` | `"<uid>:<gid>"` \| `image` | optional, default `1000:0`; the identity the pod runs as, with `fsGroup` set to the gid, or `image` to leave the ids to the image or the SCC ([section 8.4](#84-run-as-and-container-hardening)) |
 | `libs` | `pvc` \| `download` | optional; exactly one mode; makes the IBM MQ java libraries available at `/app/external/libs` (read-only); `solmq-conn-util download jar mq` ([section 10](#10-download-jar)) fetches the jars themselves, into a PVC-mountable directory or ready to list under `libs.download.urls` |
 | `libs.pvc` | `create` / `existing` | `create` (`storage`, default `1Gi`, and `nfs.server`/`nfs.path`) emits an NFS-backed PersistentVolumeClaim named `<name>-libs` and the PersistentVolume behind it, `<namespace>-<name>-libs-pv`; `existing` references a pre-provisioned PVC (`create` XOR `existing`) |
 | `libs.download` | `urls`, `image`, `pvc` | an initContainer `wget`s each URL into `/libs` at pod start; the shared volume is an `emptyDir` unless `pvc` names an existing PVC |
@@ -1521,6 +1526,8 @@ docker:
   name: solmq-connector
   project-name: solace-ibmmq-connectors   # the compose project; docker only
   restart: unless-stopped
+  run-as: "1000:0"               # optional; this is the default. uid[:gid] the container runs as,
+                                 # or "image" to keep the image's own user (section 8.4)
   ports:
     - 8090                       # bare: publish to the same host port (8090:8090)
     - "8081:8090"                # or "host:container" to map a distinct host port
@@ -1626,6 +1633,8 @@ podman:
   command: podman
   name: solmq-connector
   restart: unless-stopped
+  run-as: "1000:0"               # optional; this is the default. uid[:gid] the container runs as,
+                                 # or "image" to keep the image's own user (section 8.4)
   ports:
     - 8090                       # bare: publish to the same host port (8090:8090)
     - "8081:8090"                # or "host:container" to map a distinct host port
@@ -1646,6 +1655,7 @@ connector container -- [section 14.5](#145-which-container-it-enters)); `restart
 **omit it and nothing is published** -- exposing a container port to the host is
 your decision, and `status` reaches the connector by exec'ing into it rather than
 over a published port, so the tool never needs one);
+`run-as`, the identity the container runs as ([section 8.4](#84-run-as-and-container-hardening));
 and `libs`, whose one key is `dir`.
 
 Every in-container path is fixed by the image, so no section configures one.
@@ -1657,6 +1667,101 @@ Accordingly neither section takes a `secrets:`, a `stores:` or a `libs.mount-pat
 since docker and podman fix those paths themselves and take no such option. `project-name`
 is **not** shared: it names a compose project, and podman has no equivalent
 grouping, so the key exists only under `docker:`.
+
+### 8.4 Run-as and container hardening
+
+The connector image declares no `USER`, so left to itself it runs as **root** --
+and on docker and on podman deployed as root, which run the container without a
+user namespace, that is root on the host. Every artifact therefore states the
+identity the connector runs as instead of inheriting it, together with a fixed
+set of restrictions. Each platform section takes its own `run-as`:
+
+| `run-as` | Means |
+|---|---|
+| unset | the default, `1000:0`: an unprivileged uid, and the group the image's own files belong to |
+| `"<uid>:<gid>"` | that uid and gid, decimal (up to 2147483647, no leading zeros) |
+| `"<uid>"` | that uid with gid 0 |
+| `image` | the image's own user, which is root; no ids are written. Use it on OpenShift, where the SCC assigns them |
+
+Quote the value (`run-as: "1000:0"`). A value outside that grammar is an error,
+and `run-as: "0"` (root) warns; `validate` also warns about a podman id above
+65536 (below).
+
+| Platform | Identity written | Restrictions, always |
+|---|---|---|
+| kubernetes | pod `securityContext`: `runAsUser`, `runAsGroup`, `fsGroup` (the gid) and, for a non-root uid, `runAsNonRoot: true` | `seccompProfile: RuntimeDefault` for the pod; `allowPrivilegeEscalation: false`, `privileged: false` and every capability dropped on the connector and on the `libs.download` init container |
+| docker | `user: "<uid>:<gid>"` | `privileged: false`, `cap_drop: [ALL]`, `security_opt: [no-new-privileges=true]` |
+| podman | `User=` and `Group=` | `NoNewPrivileges=true`, `DropCapability=all` (quadlet has no privileged key; a container is unprivileged unless asked) |
+
+The connector needs no capability -- it binds an unprivileged port, so keep
+`management.port` above 1023 -- and none is granted back. `image` leaves out the
+identity alone; the restrictions stay, so under `image` the connector is root
+without root's capabilities, held to file modes like any other uid.
+
+**What the run-as identity can write.** The connector's working directory is
+`/`, which only root may write. Anything the JVM writes there by default needs
+another path: a heap dump from `-XX:+HeapDumpOnOutOfMemoryError`, for one,
+takes `-XX:HeapDumpPath=/tmp` in `java-options.tool`. `/tmp` is writable by
+every uid.
+
+**What the run-as identity has to read.** Everything the tool mounts from a
+config map or secret store is readable by any uid: the ConfigMap files on
+kubernetes, compose `configs:` and `secrets:` on docker, and every podman secret
+(mode 0444). The rest:
+
+- **kubernetes**: the credentials Secret is mounted 0400 and owned by root, so it
+  is `fsGroup` that makes it readable -- the kubelet hands each file to that group
+  as 0440. `fsGroup` also makes a `libs` PVC writable for the `libs.download` init
+  container, which runs as the same identity. An **NFS** volume ignores `fsGroup`:
+  an NFS export behind `libs` (including `libs.pvc.create.nfs`) has to be
+  readable -- and, for `libs.download`, writable -- by the run-as uid or gid.
+- **docker**: the `tls.*.file` stores and the `libs.dir` jars are bind-mounted
+  with their host modes, read as the run-as uid and gid with the host's own ids
+  -- root included, since no capability lets it bypass the modes. A store kept
+  0600 by another user cannot be read. `deploy` warns, on Linux, about each
+  mounted path the identity cannot read, naming its mode and a fix: `chmod o+r`
+  for a truststore or a jar, `chmod o+rx` for the libs directory, and for the
+  keystore, which holds a private key, `chgrp` to the run-as gid with `chmod g+r`
+  rather than opening it to everyone -- or a `docker.run-as` naming the file's
+  owner. The check assumes rootful docker; rootless docker maps ids the way
+  rootless podman does, which it does not model.
+- **podman**: only `libs.dir` is a bind mount. Deployed as root it is read like on
+  docker; deployed rootless a non-zero uid maps to a subordinate id that owns no
+  host file, while uid 0 and gid 0 map to you -- so with the default `1000:0` a
+  jar has to be readable by others or by your group, and the directory listable
+  the same way. `deploy` warns the same way.
+
+`download jar` writes jars readable by everyone (0644), so a libs directory it
+filled needs nothing.
+
+**Rootless podman** maps container id 0 to you and ids 1 and up into your
+subordinate ranges in `/etc/subuid` and `/etc/subgid`, which `useradd` sizes at
+65536 ids. The default 1000 fits; an id above 65536 does not, and neither does
+any non-zero id for an account with no range at all -- the unit would not
+start. A rootless `deploy` reads both files and warns when the run-as uid or gid
+needs more than you are granted (unless `/etc/nsswitch.conf` takes subordinate
+ids from another source, such as SSSD); `validate` warns about any id above
+65536. Widen or add a range (`usermod --add-subuids`/`--add-subgids`, then
+`podman system migrate`), pick a smaller id, deploy as root, or set
+`podman.run-as: image`. Group 0 is your own group, so it needs no subgid entry.
+
+**OpenShift** runs a pod with ids its SCC assigns from the namespace's range and
+refuses one outside it: set `kubernetes.run-as: image`. The restrictions above
+are the ones the `restricted-v2` SCC asks for, so they stay.
+
+**The status script** is mounted by every deploy of this tool. An instance
+deployed some other way gets it installed by `status` into
+`/app/external` ([section 12.3](#123-first-run-installing-the-script)), which a
+non-root identity cannot write; redeploy it with the tool instead.
+
+> **NOTE: upgrading changes who the connector runs as.** The first `deploy` with
+> this release runs a running instance as `1000:0` instead of root: the pods roll,
+> the compose service is recreated and the podman unit restarts. Check that the
+> store files and libs jars it mounts are readable by that identity -- `deploy`
+> warns on docker and podman. `run-as: image` keeps the image's root but not
+> root's old reach: with every capability dropped, root reads only what the
+> modes allow too, so a file kept 0600 by another user needs its modes fixed
+> either way.
 
 ---
 
@@ -1774,11 +1879,13 @@ names until deploying to a platform does.
   a volume at `/app/external/var/secrets`, read-only, `defaultMode: 0400`. There is
   no `envFrom` -- credentials are never environment variables. The pod also sets
   `automountServiceAccountToken: false`, since the connector never calls the API and
-  an automounted token would land in the same tree configtree reads. `defaultMode:
-  0400` is a separate, latent hazard worth knowing about: under an arbitrary-UID
-  Security Context Constraint with no `fsGroup` set, `0400` files are unreadable by
-  the container's running user, so the volume mounts but the connector still cannot
-  read the credential.
+  an automounted token would land in the same tree configtree reads. The `0400`
+  files belong to root, so a non-root identity reads them through the pod's
+  `fsGroup`, which the tool sets to the run-as gid: the kubelet hands each file to
+  that group as 0440 ([section 8.4](#84-run-as-and-container-hardening)). Under
+  `run-as: image` no `fsGroup` is written; OpenShift's restricted SCCs assign one,
+  but a platform that runs an arbitrary uid without one leaves the credentials
+  unreadable -- the volume mounts and the connector still cannot read them.
 
   `create` and `existing` are mutually exclusive, and exactly one is required once
   the block is present (omit the whole block and no Secret is wired at all).
@@ -3176,6 +3283,13 @@ container is called something else, is not reachable with `cli` -- reach it with
   generated script, unit, or manifest. Podman never names a store's path, only
   its file name, which may hold letters, digits, `.`, `_` and `-`
   ([section 8.3](#83-podman)).
+- **The connector runs as `1000:0`, not root.** Every platform states a non-root
+  identity unless its section sets `run-as: image`, and a mounted host file the
+  identity cannot read -- a 0600 truststore on docker, a 0600 jar -- fails the
+  connector at runtime, not at deploy. `run-as: image` does not help: root runs
+  with every capability dropped. `deploy` warns about each one it finds on
+  Linux, and a rootless podman deploy also warns when your subordinate ranges
+  cannot map the run-as ids ([section 8.4](#84-run-as-and-container-hardening)).
 - **Upgrading a podman deployment moves its files into the secret store.** The
   first `deploy` with this release loads `application.yml`, the status script, the
   logback config and the stores into podman's secret store and restarts the running

@@ -427,6 +427,9 @@ func TestParseKubernetesReplicasDefault(t *testing.T) {
 	if k.Deployment.Replicas != 1 {
 		t.Errorf("replicas default = %d want 1", k.Deployment.Replicas)
 	}
+	if k.RunAs != DefaultRunAs {
+		t.Errorf("run-as default = %q want the non-root %q", k.RunAs, DefaultRunAs)
+	}
 }
 
 func TestParseKubernetesFull(t *testing.T) {

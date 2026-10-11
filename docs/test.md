@@ -48,7 +48,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 875 test functions, 1169 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 892 test functions, 1186 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -93,7 +93,7 @@ Tests: [scan_test.go](../internal/scan/scan_test.go)
 
 Parse env.yaml into the typed model -- workflows, defaults, named connections, the kubernetes/docker/podman platform sections, and ports -- and apply section defaults.
 
-Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/spec/env_test.go), [targets_test.go](../internal/spec/targets_test.go), [expand_test.go](../internal/spec/expand_test.go), [defaults_test.go](../internal/spec/defaults_test.go), [image_test.go](../internal/spec/image_test.go), [javaoptions_test.go](../internal/spec/javaoptions_test.go), [kubernetes_test.go](../internal/spec/kubernetes_test.go), [transform_test.go](../internal/spec/transform_test.go), [extra_test.go](../internal/spec/extra_test.go)
+Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/spec/env_test.go), [targets_test.go](../internal/spec/targets_test.go), [expand_test.go](../internal/spec/expand_test.go), [defaults_test.go](../internal/spec/defaults_test.go), [image_test.go](../internal/spec/image_test.go), [javaoptions_test.go](../internal/spec/javaoptions_test.go), [kubernetes_test.go](../internal/spec/kubernetes_test.go), [transform_test.go](../internal/spec/transform_test.go), [extra_test.go](../internal/spec/extra_test.go), [runas_test.go](../internal/spec/runas_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
@@ -132,7 +132,9 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestParseDefaultsSecurityEnabledKeyOmittedStaysNil | - | security.enabled is not a configurable key: an omitted key parses to Security.Enabled nil rather than being defaulted |
 | TestParseDefaultsEmpty | - | empty input yields a zero-valued Management (Management{}), Security.Enabled nil with no users, and TLS.Truststore nil |
 | TestParseDefaultsError | - | malformed tls yaml returns non-nil error |
-| TestParseKubernetesReplicasDefault | - | deployment without replicas defaults Replicas to 1 |
+| TestParseKubernetesReplicasDefault | - | deployment without replicas defaults Replicas to 1, and an unset run-as to the non-root default |
+| TestParseRunAs | valid: uid:gid / bare uid / 0 / the maximum / image. refused: empty / no uid / no gid / leading zero / sign / exponent / whitespace / a name / three fields / past 2147483647 / Image | the run-as grammar: decimal ids only, a bare uid runs with gid 0, image keeps the image's user, and every refusal says which id and why, since the ids are written into artifacts as-is |
+| TestDefaultRunAsIsNonRootAndParses | - | the default parses, is not root, and fits a stock rootless subuid/subgid range of 65536 ids |
 | TestParseKubernetesFull | - | parses replicas 2, service enabled port 8090, credentials create name, stores create present; source and variables set on credentials.create parse structurally regardless, so RemovedKeys can report them |
 | TestParseKubernetesError | - | deployment as sequence instead of map returns non-nil error |
 | TestParseKubernetesResources | - | parses deployment resources CPU '1' and Memory 1Gi |
@@ -152,10 +154,10 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestParseEnvPortsInvalid | more than one colon '1:2:3' | error 'env.yaml: ports entry "1:2:3" must be "host:container" (exactly one colon)' |
 | TestParseEnvPortsInvalid | non-integer host and container 'a:b' | error 'env.yaml: ports entry "a:b" must be "host:container" with integer ports' |
 | TestParseEnvPortsInvalid | mapping node {a: 1} | error 'env.yaml: ports entry must be an integer or "host:container", got a !!map' |
-| TestApplyDockerDefaultsFillsMissing | - | docker defaults command/name/project-name/restart applied, ports stay empty (publishing is opt-in), stores/libs stay nil |
-| TestApplyDockerDefaultsOverrideWins | - | explicit command/name/project-name/restart/ports override defaults exactly as given; a custom name does not drag project-name with it |
-| TestApplyPodmanDefaultsFillsMissing | - | podman defaults command/name/restart applied, ports stay empty (publishing is opt-in), and both rejected keys left alone: mode empty and Quadlet nil. Defaulting either would trip validate's rejection for something the operator never wrote, and nothing dereferences Quadlet -- the unit dir comes from the invoking uid |
-| TestApplyPodmanDefaultsOverrideWins | - | explicit command/name/restart/ports override defaults exactly, and a present quadlet: block still decodes non-nil so validate can reject it by name |
+| TestApplyDockerDefaultsFillsMissing | - | docker defaults command/name/project-name/restart/run-as applied (run-as the non-root default, since the image's own user is root), ports stay empty (publishing is opt-in), stores/libs stay nil |
+| TestApplyDockerDefaultsOverrideWins | - | explicit command/name/project-name/restart/run-as/ports override defaults exactly as given; a custom name does not drag project-name with it |
+| TestApplyPodmanDefaultsFillsMissing | - | podman defaults command/name/restart/run-as applied, ports stay empty (publishing is opt-in), and both rejected keys left alone: mode empty and Quadlet nil. Defaulting either would trip validate's rejection for something the operator never wrote, and nothing dereferences Quadlet -- the unit dir comes from the invoking uid |
+| TestApplyPodmanDefaultsOverrideWins | - | explicit command/name/restart/run-as/ports override defaults exactly, and a present quadlet: block still decodes non-nil so validate can reject it by name |
 | TestRemovedMountKeysDecodeButAreNotDefaulted | - | libs dir kept verbatim while mount-path is left empty (defaulting it would trip validate's rejection for a value nobody wrote), and a present stores: still decodes non-nil so validate can name it |
 | TestPortDefaultsFollowManagementPort | - | management.port 9091 with docker/podman/kubernetes present: kubernetes Service.Port defaults to {9091,9091}; docker/podman publish nothing with ports: omitted |
 | TestPortDefaultsFallBackWhenManagementPortUnset | - | no management.port set: kubernetes service.port falls back to {DefaultMgmtPort,DefaultMgmtPort} (8090); docker/podman still publish nothing |
@@ -418,7 +420,7 @@ Tests: [deploy_test.go](../internal/deploy/deploy_test.go), [imagepull_test.go](
 | Test | Case | Verifies |
 |------|------|----------|
 | TestRenderFull | - | rendered output contains all expected fragments: configmap, secrets, deployment env/mounts/probes/resources, service; blank line preserved in block scalar |
-| TestRenderFull_ExactDocument | - | Render output matches wantRenderFull golden document byte-for-byte |
+| TestRenderFull_ExactDocument | - | Render output matches wantRenderFull golden document byte-for-byte, including the pod securityContext of the default non-root run-as and the connector container's restrictions |
 | TestRenderNoSecretsNoServiceNoTLS | - | output omits JAVA_TOOL_OPTIONS, envFrom, Secret, Service, stores volume, logback-spring.xml, syslog host, libs volume, initContainers |
 | TestRenderJavaOptionsEnv | - | java-options.tool and .jdk become JAVA_TOOL_OPTIONS / JDK_JAVA_OPTIONS env entries, the MQ TLS flag first, and the operator's options alone open the env: list |
 | TestEnvValueQuoteEscapes | - | envValueQuote doubles '$' (kubernetes expands $(VAR) in env values) and escapes quotes and backslashes -- the render-side half of the java-options gate |
@@ -463,8 +465,8 @@ Tests: [dockergen_test.go](../internal/dockergen/dockergen_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
-| TestRenderFull_WithEverything | - | full golden output with project-name, creds, store, libs, MQTLS, ports, timezone matches exactly; the compose project is the document's first line |
-| TestRenderFull_Minimal | - | minimal golden output omits the leading name: line along with restart, ports, environment, env_file, volumes blocks |
+| TestRenderFull_WithEverything | - | full golden output with project-name, creds, store, libs, MQTLS, ports, timezone and the default run-as with its posture (user, privileged false, cap_drop ALL, no-new-privileges) matches exactly; the compose project is the document's first line |
+| TestRenderFull_Minimal | - | minimal golden output omits the leading name: line along with restart, ports, environment, env_file, volumes blocks; run-as image drops the user: line and keeps the rest of the posture |
 | TestEnvironmentBranches | TZ only, MQTLS false | environment block contains only TZ: UTC, no JAVA_TOOL_OPTIONS |
 | TestEnvironmentBranches | MQTLS only, no timezone | environment block contains only JAVA_TOOL_OPTIONS line, no TZ |
 | TestJavaOptionsEnvironment | - | both JVM options variables land in the service environment, the MQ TLS flag first in JAVA_TOOL_OPTIONS, jdk options alone open the block, and an empty java-options block adds nothing |
@@ -499,8 +501,8 @@ Tests: [podmangen_test.go](../internal/podmangen/podmangen_test.go)
 | Test | Case | Verifies |
 |------|------|----------|
 | TestRenderQuadletSecretsCarryNoValues | - | each credential appears only as a Secret= directive naming its store entry and absolute target; the value itself never reaches the unit, a world-readable file in the quadlet directory |
-| TestRenderQuadletFull | - | full input yields 1 unit named solmq-connector.container with content matching golden string: application.yml, the truststore and the status script as Secret= mounts, the libs directory the only Volume= |
-| TestRenderQuadletMinimal | - | minimal input yields 1 unit with content matching golden string (no Service section, no restart, no Volume=) |
+| TestRenderQuadletFull | - | full input yields 1 unit named solmq-connector.container with content matching golden string: User=/Group= of the default run-as, NoNewPrivileges and DropCapability, application.yml, the truststore and the status script as Secret= mounts, the libs directory the only Volume= |
+| TestRenderQuadletMinimal | - | minimal input yields 1 unit with content matching golden string (no Service section, no restart, no Volume=; run-as image writes no User=/Group= but keeps NoNewPrivileges and DropCapability) |
 | TestLeaderLabelsPerMode | empty defaults to standalone / standalone / active_active | the unit carries the le-mode label and role: active |
 | TestLeaderLabelsPerMode | active_standby | the unit carries le-mode active_standby and withholds role: active |
 | TestQuadletMountsNothingFromTheHostButLibs | - | with credentials, a store, the status script, syslog and libs all set, the libs directory is the one Volume= line and all six Secret= lines mount at an absolute target |
@@ -625,7 +627,7 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 
 Validate the parsed model -- per-side rules, connection refs, leader election, the docker/podman/kubernetes platform sections, ports, container names, TLS/stores wiring, and the safe-token charset.
 
-Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extra_test.go](../internal/validate/validate_extra_test.go), [validate_deploycommand_test.go](../internal/validate/validate_deploycommand_test.go), [validate_image_test.go](../internal/validate/validate_image_test.go), [validate_javaoptions_test.go](../internal/validate/validate_javaoptions_test.go), [validate_derivednames_test.go](../internal/validate/validate_derivednames_test.go), [validate_transform_test.go](../internal/validate/validate_transform_test.go), [validate_extrakeys_test.go](../internal/validate/validate_extrakeys_test.go)
+Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extra_test.go](../internal/validate/validate_extra_test.go), [validate_deploycommand_test.go](../internal/validate/validate_deploycommand_test.go), [validate_image_test.go](../internal/validate/validate_image_test.go), [validate_javaoptions_test.go](../internal/validate/validate_javaoptions_test.go), [validate_derivednames_test.go](../internal/validate/validate_derivednames_test.go), [validate_transform_test.go](../internal/validate/validate_transform_test.go), [validate_extrakeys_test.go](../internal/validate/validate_extrakeys_test.go), [validate_runas_test.go](../internal/validate/validate_runas_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
@@ -792,6 +794,8 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestContainerStorePathsGatedPerPlatform | docker | an unsafe character in tls.truststore.file, or a spaced directory, is rejected with no stores: block present, since docker bind-mounts the path itself |
 | TestContainerStorePathsGatedPerPlatform | podman | the path is never named, so a spaced directory passes; the file name ends the Secret= target and must be letters, digits, '.', '_' or '-' (`$(evil)`, ',', '%' and a space are refused) |
 | TestContainerStorePathsGatedPerPlatform | kubernetes | the same path is not gated for kubernetes, which embeds the store content in a Secret rather than naming a host path |
+| TestRunAsCheckedOnEveryPlatform | kubernetes / docker / podman | the default, unset, image and a non-root id are quiet; a value outside the grammar is an error naming the section and the reason; uid 0 warns it runs as root, adding that it is host root on docker and podman, which use no user namespace |
+| TestPodmanRunAsBeyondTheSubuidRangeWarns | 65536 / 65537 / gid 70000 / image / no Lint / docker / kubernetes | under Lint (validate) an id past 65536 warns on podman, which deployed rootless maps container ids 1..65536 into a stock 65536-wide subordinate range; 65536 fits, the gid counts, image is quiet, generate and deploy (no Lint) stay quiet, and docker and kubernetes never warn |
 | TestPodmanStoreFileNamesMustDiffer | shared / distinct | a truststore and keystore sharing a file name would mount at one path on podman, so it is an error naming the path; distinct names pass |
 | TestUsesTLS | solace-tcps-host | solace side with tcps host returns usesTLS true |
 | TestUsesTLS | mq-tls-true-no-tcps | no solace side, mq tls true returns usesTLS true |
@@ -874,7 +878,7 @@ Tests: [examples_test.go](../internal/examples/examples_test.go)
 
 Orchestrate parse -> validate -> consolidate -> render, resolve credentials/stores, and assert the byte-for-byte golden fixtures.
 
-Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](../internal/gen/golden_test.go), [htmlgolden_test.go](../internal/gen/htmlgolden_test.go), [imagepull_test.go](../internal/gen/imagepull_test.go)
+Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.go](../internal/gen/gen_runas_test.go), [golden_test.go](../internal/gen/golden_test.go), [htmlgolden_test.go](../internal/gen/htmlgolden_test.go), [imagepull_test.go](../internal/gen/imagepull_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
@@ -887,7 +891,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestPodmanFileSecretNames | - | the five file secrets an instance can own (application.yml, tls-truststore, tls-keystore, status-script, logback-spring.xml), none of whose suffixes could also be a credential's stable name |
 | TestResolvePodmanFiles | document / binary store / 511999 bytes | a document passes through as rendered, a store is read byte for byte (NUL, CR and non-UTF-8 included), and 511999 bytes is accepted |
 | TestResolvePodmanFiles | missing / no file access / empty / 512000 bytes / empty document | each fails before anything is loaded, naming the field and path (wrapping the read error) and never the content |
-| TestTargetMounts | tls+libs configured | 2 store mounts at the fixed default store path, and a libs mount whose source is the resolved abs host dir and whose target is the fixed default libs path -- both container-side paths come from constants, not from the spec |
+| TestTargetMounts | tls+libs configured | 2 store mounts at the fixed default store path, and a libs mount whose source is the resolved abs host dir and whose target is the fixed default libs path -- both container-side paths come from constants, not from the spec; each mount is named by its env.yaml key (tls.truststore.file, tls.keystore.file, libs.dir) |
 | TestTargetMounts | no tls, no libs | yields nil,nil -- with stores derived, an absent tls block is the only way to get no store mounts |
 | TestTargetMounts | store with no file | a tls.*.store present but with an empty file is skipped rather than mounted from an empty source |
 | TestResolveCredentials | nil refs | no kvs, no error |
@@ -907,6 +911,10 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [golden_test.go](
 | TestConfigCarriesSecurityUserRoles | - | end-to-end: a roles-bearing env.yaml validates clean and its role reaches the rendered application.yml, while the reserved account still renders none |
 | TestConfigNoSecretsLeak | - | every rendered password is a ${STABLE} placeholder except the one permitted literal: the reserved spec.StatusUserName account |
 | TestGenerateDockerBasics | - | generates non-empty compose opening with the defaulted `name: solace-ibmmq-connectors` project line and containing the image; all four credential positions render as top-level environment-provider secrets, never inlined as values, and each ${STABLE} placeholder in application.yml is doubled so compose cannot interpolate the value in |
+| TestArtifactsStateTheirPosture | default / 1234:5678 / 0 / image | kubernetes, compose and quadlet each carry the restrictions whatever the run-as, write its ids (fsGroup = the gid on kubernetes), add runAsNonRoot only for a non-root uid, write no ids for image, and harden the libs-download init container too |
+| TestArtifactsCarryNoWideningTokens | default / 1234:5678 / 0 / image | no artifact carries a spelling that would widen the container's privileges: privileged, privilege escalation, added capabilities, unconfined seccomp or SELinux, or the host's namespaces |
+| TestRunAsOfRefusesWhatValidateRefuses | - | the renderers' own parse of a run-as refuses what validate refuses, as an issue naming the section, never as the zero identity, which is root |
+| TestPlansCarryTheExpandedHostPathsTheyMount | docker stores+libs / podman / docker without mounts | each plan lists the host paths its artifact bind-mounts, named by env.yaml key, after ${VAR} expansion and resolution against env.yaml: docker the truststore, keystore and libs.dir, podman libs.dir alone (its stores come from the secret store), and a docker spec with neither nothing |
 | TestGeneratePodmanQuadlet | - | produces the `<name>.container` unit with the application.yml and status-script file secrets, the service name and 4 credentials, each mounted from podman's store by its namespaced name at an absolute target under the secrets mount |
 | TestGenerateJavaOptionsReachEveryPlatform | - | a java-options block written as a >- folded block with ${VAR} references reaches the kubernetes manifest, the compose file and the quadlet unit as the same single line, and an unsafe value stops every platform's generation |
 | TestGeneratePodmanRejectsModeKey | run / quadlet | podman.mode is rejected at generate for either value |
@@ -960,6 +968,7 @@ Tests: [libs_test.go](../internal/libs/libs_test.go), [maven_test.go](../interna
 |------|------|----------|
 | TestDownloadURLHappyPath | - | a single `--url` download writes the jar under its basename with no Failed/Skipped |
 | TestDownloadRejectsNonHTTPSURL | - | a plain http:// `--url` errors before any request or directory creation, Report stays zero-valued |
+| TestDownloadWritesJarsWorldReadable | - | a downloaded jar lands 0644, not the 0600 os.CreateTemp gives it, since the connector reads the libs directory as a non-root uid that does not own the file |
 | TestDownloadRedirectToHTTPRejected | - | a redirect Location that downgrades to http:// is rejected as a Failure, nothing written |
 | TestDownloadRedirectToHTTPSFollowed | - | an https redirect is followed and the file is written under the originally-requested URL's basename, not the redirect target's |
 | TestDownloadSkipsExistingWithoutForce | - | an existing file is reported Skipped and no HTTP request is made at all (skip before request) |
@@ -1118,10 +1127,16 @@ Tests: [statusreport_test.go](../internal/statusreport/statusreport_test.go), [p
 
 The CLI shell -- flag parsing, the exit-code contract, the generate/validate/examples/auto-complete commands, verb aliases, and the deploy/remove/status/logs/cli seams for all three engines. The progress tests cover the other half of a status run -- the stderr spinner and the `--verbose` step lines -- including the guarantee that stdout does not change when either is drawn. The completion tests also gate the four generated shell scripts against the command model, and the doc tests gate the two generated markdown references against it.
 
-Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.go](../cmd/solmq-conn-util/commands_doc_test.go), [abbreviation_doc_test.go](../cmd/solmq-conn-util/abbreviation_doc_test.go), [completion_test.go](../cmd/solmq-conn-util/completion_test.go), [testcatalog_test.go](../cmd/solmq-conn-util/testcatalog_test.go), [support_test.go](../cmd/solmq-conn-util/support_test.go)
+Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.go](../cmd/solmq-conn-util/commands_doc_test.go), [abbreviation_doc_test.go](../cmd/solmq-conn-util/abbreviation_doc_test.go), [completion_test.go](../cmd/solmq-conn-util/completion_test.go), [testcatalog_test.go](../cmd/solmq-conn-util/testcatalog_test.go), [support_test.go](../cmd/solmq-conn-util/support_test.go), [runas_test.go](../cmd/solmq-conn-util/runas_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
+| TestHostReaderFollowsTheKernelsRule | 0600 / 0640 / 0604 / 0644 / 0044 x stranger / owner / group | a host file is judged as the kernel does: the owner bits for the owning uid, else the group bits for the group, else the other bits -- an owner with no owner bits cannot read however open the rest is |
+| TestMountChecksLabelEachPathByItsKey | truststore / keystore / libs.dir / none | a plan's host mounts become checks labelled `<section> mounts <key>` at the plan's path, the keystore judged as a private key, libs.dir as a directory and the truststore as a public file; no mounts give no checks |
+| TestUnreadableMountsNamesWhatTheConnectorCannotRead | - | the deploy warning names a 0600 truststore, a 0600 keystore, a 0600 jar inside a readable libs dir and a 0700 libs dir, each with its mode, the run-as identity and a remedy for its kind -- o+r or the group for a truststore or jar, o+rx or the group for a directory, the group rather than everyone for a private key; readable files, non-jar files and missing paths are not named |
+| TestUnreadableMountsJudgesRootByTheModeBits | image / uid 0 | root -- the image's own under run-as image, or uid 0 -- gets no pass with every capability dropped: a 0600 file another uid owns is named, a 0644 one is not; the platform gate checks on linux only |
+| TestRootlessReaderSeesTheInvokersGroup | gid 0 / gid 1000 / uid 0 / image | rootless podman's non-zero uid owns no host file and its gid 0 is the invoker's group, so a 0640 jar is readable and a 0600 one is not; a non-zero gid maps to no host group; container root -- uid 0 or image -- is the invoking user and reads its own 0600 file |
+| TestSubIDWarningsNeedARangeWideEnough | default / 65536 / 65537 / ranges add up / by uid / no range / no files / root / image / gid 0 / nsswitch files / nsswitch sss | a rootless run-as id needs a subordinate range at least that wide, matched by the invoker's name or uid, several ranges adding up: 65536 fits a stock range, 65537 warns with the widen remedy, no range warns with the add remedy (uid and gid each); root, image and gid 0 need none; an nsswitch subid source other than files skips the check; currentUserName never returns empty |
 | TestDispatchHandlersMatchModel | verbs / generate targets / deploy platforms / completion shells | the dispatch handler sets and cliVerbs agree in *both* directions, so a command added to one cannot drift from the other |
 | TestPlatformMapsCoverThreeNames | - | platformNames, platformGenerators and actTargets agree in both directions -- a modeled platform with no handler, or a handler with no modeled entry, fails |
 | TestExitCodeContract | nil args | run(nil) returns exit code 2 |
@@ -1191,8 +1206,10 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestDeployDockerSeamWritesComposeAndRuns | - | exit 0, compose file written, 2 runner calls (preflight then up) argv [docker compose -f <compose> up -d] -- no -p, since the project is declared by the file's own name: key |
 | TestDeployDockerSeamComposeFileSurvivesFailedRun | - | preflight succeeds but the real `up` call fails; compose file still exists on disk afterward, exit 1 |
 | TestDeployDockerSeamChildEnvCarriesCredentials | - | preflight call carries no env; the real `up` call (index 1) carries the resolved literal and -env credentials as STABLE=value pairs |
+| TestDeployDockerWarnsAboutMountsTheConnectorCannotRead | - | linux only: a 0600 truststore and a 0600 jar under libs.dir, both written with ${VAR}s and owned by another uid and gid than the run-as ones, are each named on stderr at their expanded path with their mode, and the deploy still runs (preflight, then up) |
 | TestRemoveDockerSeam | - | exit 0, 2 runner calls (preflight then down) argv [docker compose -f <compose> down] |
 | TestDeployPodmanSeamWritesUnitsAndStarts | - | exit 0, a leading `podman info` preflight, `podman secret rm --ignore`/`create` per credential, then for application.yml, the truststore (its bytes on stdin, unchanged) and the status script, one batched `secret rm --ignore` of the unmounted keystore and logback secrets, then `systemctl daemon-reload`, `is-active` and `restart` (the fake reports the unit running); the `.container` unit (0644) is the only file written, and a leftover base-dir is not even created |
+| TestDeployPodmanRootlessWarnsAboutAnUnlistableLibsDir | - | linux only, rootless: the default 1000:0 maps to no host uid and to the invoker's group, so a 0700 libs.dir written as ${VAR} is named on stderr at its expanded path with the listable remedy, and the deploy still runs |
 | TestDeployPodmanUnresolvedInputFailsBeforeAnyWrite | unreadable truststore | a truststore file that cannot be read fails the deploy naming tls.truststore.file and its path, after only the read-only preflight probe and before any secret is created or the unit written: the steps that follow have side effects outside the process, so a late failure would leave a half-built deployment |
 | TestDeployPodmanUnresolvedInputFailsBeforeAnyWrite | unset credential variable | a password-env naming an unset variable fails the same way, naming the variable, before any secret is created |
 | TestDeployPodmanFailureStopsBeforeSystemctl | credential | a failing `podman secret rm` for the first credential stops the deploy there (exit 1, the failed call named), with no unit written and no systemctl call |

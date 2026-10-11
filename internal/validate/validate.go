@@ -94,7 +94,9 @@ type Context struct {
 	// deploy deliberately stay quiet about: keys that no longer mean anything
 	// but are harmless to ignore, and keys the connector still honours but has
 	// deprecated, so an old env.yaml or workflow file keeps deploying while
-	// validate still asks for it to be cleaned up.
+	// validate still asks for it to be cleaned up -- and guesses about the
+	// deploy host that deploy replaces with a look at the host itself (podman's
+	// subordinate id ranges).
 	Lint bool
 
 	// AllowCommands extends the platform binary allowlist for CheckDeployCommand,
@@ -233,6 +235,7 @@ func checkWorkflowSides(add, warn func(string, string, ...any), env func(string)
 func checkTargets(add, warn func(string, string, ...any), ctx Context, resolved []spec.Workflow) {
 	if ctx.CheckKubernetes && ctx.Kube != nil {
 		checkKube(add, warn, ctx)
+		checkRunAs(add, warn, PlatformKubernetes, ctx.Kube.RunAs)
 		// Warn: credentials are referenced but the credentials Secret is not
 		// wired. Without the block there is no volume and no mount, so every
 		// ${...} the config carries stays unresolved -- and because the
@@ -254,9 +257,65 @@ func checkTargets(add, warn func(string, string, ...any), ctx Context, resolved 
 	// still something the operator has to wire up.
 	if ctx.CheckDocker && ctx.Docker != nil {
 		checkDocker(add, ctx)
+		checkRunAs(add, warn, PlatformDocker, ctx.Docker.RunAs)
 	}
 	if ctx.CheckPodman && ctx.Podman != nil {
 		checkPodman(add, warn, ctx)
+		checkRunAs(add, warn, PlatformPodman, ctx.Podman.RunAs)
+		if ctx.Lint {
+			checkRootlessRange(warn, ctx.Podman.RunAs)
+		}
+	}
+}
+
+// rootlessIDRange is how many subordinate ids /etc/subuid and /etc/subgid hand
+// a user by default (useradd's SUB_UID_COUNT). Rootless podman maps container
+// id 0 to the invoking user and ids 1..n to the user's n subordinate ids, so
+// the largest container id a stock range maps is the range itself.
+const rootlessIDRange = 65536
+
+// checkRunAs checks one platform section's run-as. A value outside the grammar
+// is an error: the ids are written into the compose file, the quadlet unit or
+// the manifest as-is. uid 0 is allowed but warned about: it runs the connector
+// as root.
+func checkRunAs(add, warn func(string, string, ...any), section, raw string) {
+	// Parsing env.yaml fills an unset run-as with the default before validate
+	// sees it; a section built in code may leave it empty, which means the same.
+	if raw == "" {
+		raw = spec.DefaultRunAs
+	}
+	id, err := spec.ParseRunAs(raw)
+	if err != nil {
+		add(fileEnv, "%s.run-as %q is not a uid[:gid] or %q: %v. Write a decimal uid with an optional :gid, such as %q (the default), or %q to keep the image's own user", section, raw, spec.RunAsImage, err, spec.DefaultRunAs, spec.RunAsImage)
+		return
+	}
+	if id.Image {
+		return
+	}
+	if id.UID == 0 {
+		host := map[string]string{
+			PlatformDocker: "; docker runs the container without a user namespace, so that is root on the host",
+			PlatformPodman: "; deployed as root, podman runs it without a user namespace, so that is root on the host",
+		}[section]
+		warn(fileEnv, "%s.run-as %q runs the connector as root%s. Leave run-as unset for the non-root default %q", section, raw, host, spec.DefaultRunAs)
+	}
+}
+
+// checkRootlessRange warns, for validate alone, when podman.run-as names an id
+// a stock subordinate range cannot map: deployed rootless, the unit would not
+// start. It is a guess about a host validate may not be running on, so deploy
+// skips it and, when it deploys rootless, checks the invoking user's actual
+// ranges instead. A value outside the grammar is checkRunAs's to report.
+func checkRootlessRange(warn func(string, string, ...any), raw string) {
+	if raw == "" {
+		raw = spec.DefaultRunAs
+	}
+	id, err := spec.ParseRunAs(raw)
+	if err != nil || id.Image {
+		return
+	}
+	if id.UID > rootlessIDRange || id.GID > rootlessIDRange {
+		warn(fileEnv, "podman.run-as %q names an id above %d: deployed rootless, podman maps container ids 1 and up into the invoking user's subordinate uid and gid ranges, which useradd makes %d ids wide, so a larger id is unmapped and the unit will not start. Widen the ranges (usermod --add-subuids / --add-subgids, then podman system migrate), deploy as root, or pick a smaller id; deploy checks the actual ranges when it runs rootless", raw, rootlessIDRange, rootlessIDRange)
 	}
 }
 

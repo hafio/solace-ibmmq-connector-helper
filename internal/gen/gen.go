@@ -183,6 +183,10 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
 
+	runAs, rerrs := runAsOf("kubernetes", k.RunAs)
+	if rerrs != nil {
+		return "", rerrs, warns
+	}
 	in := deploy.Input{Kube: k, Defaults: &e.Defaults, Syslog: e.Defaults.Syslog, Teardown: opts.Teardown}
 	if c := k.Secrets.Credentials; c != nil && c.Create != nil {
 		kvs, err := ResolveCredentials(b.model.Secrets, res)
@@ -213,6 +217,7 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		StatusScript: statusscript.Render(deploy.ManagementPort(in), spec.StatusUserName),
 		Model:        b.model,
 		JavaOptions:  e.JavaOptions,
+		RunAs:        runAs,
 	}
 	return deploy.Render(in), nil, warns
 }
@@ -224,7 +229,24 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 type DockerPlan struct {
 	Compose string
 	Secrets []consolidate.SecretRef
+	RunAs   spec.RunAsID // the identity the compose service runs as, for deploy's mount checks
+	Mounts  []HostMount  // the host paths the compose file bind-mounts, for the same checks
 }
+
+// HostMount is one host path a compose file or podman unit bind-mounts, as the
+// artifact names it -- expanded and absolute -- so deploy checks the path the
+// container will read rather than the env.yaml spelling of it.
+type HostMount struct {
+	Field string // the env.yaml key it comes from: MountTruststore, MountKeystore or MountLibs
+	Path  string
+}
+
+// The env.yaml keys a HostMount comes from.
+const (
+	MountTruststore = "tls.truststore.file"
+	MountKeystore   = "tls.keystore.file"
+	MountLibs       = "libs.dir"
+)
 
 // GenerateDocker parses+validates and renders the docker-compose.yml (with
 // application.yml inlined under compose configs:). Store/libs host paths are
@@ -258,6 +280,10 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 		return DockerPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
 
+	runAs, rerrs := runAsOf("docker", d.RunAs)
+	if rerrs != nil {
+		return DockerPlan{}, rerrs, warns
+	}
 	sm, lm := targetMounts(e.Defaults.TLS, d.Libs, res)
 	in := dockergen.Input{
 		Docker:  d,
@@ -274,9 +300,10 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 			StatusScript: statusscript.Render(e.Defaults.EffectiveManagementPort(), spec.StatusUserName),
 			LeaderMode:   e.Defaults.LeaderElection.EffectiveMode(),
 			JavaOptions:  e.JavaOptions,
+			RunAs:        runAs,
 		},
 	}
-	return DockerPlan{Compose: dockergen.Render(in), Secrets: b.model.Secrets}, nil, warns
+	return DockerPlan{Compose: dockergen.Render(in), Secrets: b.model.Secrets, RunAs: runAs, Mounts: hostMounts(sm, lm)}, nil, warns
 }
 
 // resolvePullSecret turns the image-pull block into the wiring deploy renders.
@@ -371,6 +398,8 @@ type PodmanPlan struct {
 	Files   []PodmanFile
 	Secrets []consolidate.SecretRef // credentials to place in podman's secret store
 	Service string                  // systemd service name, e.g. name.service
+	RunAs   spec.RunAsID            // the identity the unit runs as, for deploy's mount checks
+	Mounts  []HostMount             // the host paths the unit bind-mounts (libs.dir alone), for the same checks
 }
 
 // The secret-store names of the files a podman unit mounts, one per role, each
@@ -470,6 +499,11 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 	}
 
 	plan.Secrets = b.model.Secrets
+	runAs, rerrs := runAsOf("podman", p.RunAs)
+	if rerrs != nil {
+		return PodmanPlan{}, rerrs, warns
+	}
+	plan.RunAs = runAs
 
 	// Everything the unit mounts but the libs directory comes from podman's
 	// secret store, in unit order: application.yml, the stores (at the path
@@ -499,6 +533,7 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 	// Only the libs directory stays a host path, resolved against env.yaml like
 	// every other; the stores are left out of targetMounts on purpose.
 	_, lm := targetMounts(spec.TLSConfig{}, p.Libs, res)
+	plan.Mounts = hostMounts(nil, lm)
 	plan.Service = PodmanServiceName(p.Name)
 	in := podmangen.Input{
 		Podman:  p,
@@ -516,10 +551,23 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 			LogbackSecret:      logbackSecret,
 			LeaderMode:         e.Defaults.LeaderElection.EffectiveMode(),
 			JavaOptions:        e.JavaOptions,
+			RunAs:              runAs,
 		},
 	}
 	plan.Unit = podmangen.RenderQuadlet(in)
 	return plan, nil, warns
+}
+
+// runAsOf parses a platform section's run-as for its renderer. validate.Run
+// has already refused every value ParseRunAs rejects, so a failure here means a
+// caller rendered without validating -- reported as an issue rather than
+// rendered as the zero identity, which would be root.
+func runAsOf(section, raw string) (spec.RunAsID, []Issue) {
+	id, err := spec.ParseRunAs(raw)
+	if err != nil {
+		return spec.RunAsID{}, []Issue{{File: fileEnv, Msg: fmt.Sprintf("%s.run-as %q: %v", section, raw, err)}}
+	}
+	return id, nil
 }
 
 // ResolveCredentials turns a model's secret references into the ordered
@@ -641,8 +689,9 @@ func secretConflictError(cs []consolidate.SecretConflict) error {
 // ---- mount resolution --------------------------------------------------------
 
 // mount is a resolved host->container bind mount, converted to the target
-// renderer's own Mount type at the call site.
-type mount struct{ Source, Target string }
+// renderer's own Mount type at the call site. Field is the env.yaml key the
+// source comes from (MountTruststore, MountKeystore, MountLibs).
+type mount struct{ Field, Source, Target string }
 
 // targetMounts resolves the store files (each tls.*.file bind-mounted onto the
 // fixed in-container store dir spec.DefaultStoresMountPath, matching where
@@ -657,16 +706,31 @@ type mount struct{ Source, Target string }
 // nothing supplied. A store with no file set is skipped, so a spec without TLS
 // still yields no store mounts. libs stays opt-in -- it has a host dir to name.
 func targetMounts(tls spec.TLSConfig, libs *spec.LibsMount, res Resolver) (sm []mount, lm *mount) {
-	for _, st := range []*spec.Store{tls.Truststore, tls.Keystore} {
-		if st == nil || st.File == "" {
+	for _, st := range []struct {
+		field string
+		store *spec.Store
+	}{{MountTruststore, tls.Truststore}, {MountKeystore, tls.Keystore}} {
+		if st.store == nil || st.store.File == "" {
 			continue
 		}
-		sm = append(sm, mount{Source: res.abs(st.File), Target: spec.DefaultStoresMountPath + "/" + spec.BaseName(st.File)})
+		sm = append(sm, mount{Field: st.field, Source: res.abs(st.store.File), Target: spec.DefaultStoresMountPath + "/" + spec.BaseName(st.store.File)})
 	}
 	if libs != nil && libs.Dir != "" {
-		lm = &mount{Source: res.abs(libs.Dir), Target: spec.DefaultLibsMountPath}
+		lm = &mount{Field: MountLibs, Source: res.abs(libs.Dir), Target: spec.DefaultLibsMountPath}
 	}
 	return sm, lm
+}
+
+// hostMounts lists the host side of a plan's bind mounts, stores first.
+func hostMounts(sm []mount, lm *mount) []HostMount {
+	var out []HostMount
+	for _, m := range sm {
+		out = append(out, HostMount{Field: m.Field, Path: m.Source})
+	}
+	if lm != nil {
+		out = append(out, HostMount{Field: lm.Field, Path: lm.Source})
+	}
+	return out
 }
 
 func toDockerMounts(ms []mount) []dockergen.Mount {

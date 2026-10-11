@@ -189,14 +189,14 @@ func TestTargetMounts(t *testing.T) {
 	if len(sm) != 2 {
 		t.Fatalf("store mounts=%d want 2", len(sm))
 	}
-	if sm[0].Source != "/abs/certs/t.jks" || sm[0].Target != spec.DefaultStoresMountPath+"/t.jks" {
+	if sm[0].Source != "/abs/certs/t.jks" || sm[0].Target != spec.DefaultStoresMountPath+"/t.jks" || sm[0].Field != MountTruststore {
 		t.Errorf("store mount 0 = %+v", sm[0])
 	}
-	if sm[1].Target != spec.DefaultStoresMountPath+"/k.jks" {
+	if sm[1].Target != spec.DefaultStoresMountPath+"/k.jks" || sm[1].Field != MountKeystore {
 		t.Errorf("store mount 1 = %+v", sm[1])
 	}
 	// The libs target is the fixed image path too; only Dir is the operator's.
-	if lm == nil || lm.Source != "/abs/libs" || lm.Target != spec.DefaultLibsMountPath {
+	if lm == nil || lm.Source != "/abs/libs" || lm.Target != spec.DefaultLibsMountPath || lm.Field != MountLibs {
 		t.Errorf("libs mount = %+v", lm)
 	}
 	// No TLS at all is now the only way to get no store mounts, and libs stays
@@ -711,6 +711,83 @@ docker:
 		if !strings.Contains(plan.Compose, "$${"+s.Stable+"}") {
 			t.Errorf("compose placeholder for %q is not escaped against interpolation:\n%s", s.Stable, plan.Compose)
 		}
+	}
+}
+
+// TestPlansCarryTheExpandedHostPathsTheyMount pins what deploy's mount checks
+// read: each plan lists the host paths its artifact bind-mounts, named by their
+// env.yaml key, after ${VAR} expansion and resolution against env.yaml -- the
+// path the container will read, not the spelling in the file. Docker mounts
+// the stores and libs.dir; podman, whose stores come from its secret store,
+// mounts libs.dir alone; neither lists anything it does not mount.
+func TestPlansCarryTheExpandedHostPathsTheyMount(t *testing.T) {
+	const tlsBlock = `tls:
+  truststore:
+    file: ${CERTS}/truststore.jks
+    password: ts
+    type: JKS
+  keystore:
+    file: ${CERTS}/keystore.jks
+    password: ks
+    type: JKS
+`
+	const image = `image:
+  name: solace/connector
+  tag: "9.9"
+`
+	res := Resolver{
+		Env: func(k string) (string, bool) {
+			switch k {
+			case "CERTS":
+				return "certs", true
+			case "LIBS":
+				return "jars", true
+			}
+			return "v", true
+		},
+		Abs: func(p string) string { return "/env/" + p },
+	}
+	req := func(env string) Request {
+		return Request{Env: &File{Name: "env.yaml", Data: []byte(env)}, Workflows: synthWorkflowFiles(1)}
+	}
+
+	dp, errs, _ := GenerateDocker(req(image+tlsBlock+`docker:
+  command: docker
+  name: solmq-connector
+  libs:
+    dir: ${LIBS}
+`), res)
+	if len(errs) > 0 {
+		t.Fatalf("docker: unexpected errors: %v", errs)
+	}
+	want := []HostMount{
+		{Field: MountTruststore, Path: "/env/certs/truststore.jks"},
+		{Field: MountKeystore, Path: "/env/certs/keystore.jks"},
+		{Field: MountLibs, Path: "/env/jars"},
+	}
+	if !slices.Equal(dp.Mounts, want) {
+		t.Errorf("docker mounts = %+v, want %+v", dp.Mounts, want)
+	}
+
+	pp, errs, _ := GeneratePodman(req(image+tlsBlock+`podman:
+  command: podman
+  name: solmq-connector
+  libs:
+    dir: ${LIBS}
+`), res)
+	if len(errs) > 0 {
+		t.Fatalf("podman: unexpected errors: %v", errs)
+	}
+	if want := []HostMount{{Field: MountLibs, Path: "/env/jars"}}; !slices.Equal(pp.Mounts, want) {
+		t.Errorf("podman mounts = %+v, want %+v", pp.Mounts, want)
+	}
+
+	dn, errs, _ := GenerateDocker(req(image+`docker:
+  command: docker
+  name: solmq-connector
+`), res)
+	if len(errs) > 0 || dn.Mounts != nil {
+		t.Errorf("docker with no stores and no libs should mount nothing: %+v %v", dn.Mounts, errs)
 	}
 }
 
