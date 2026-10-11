@@ -13,6 +13,7 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/tls"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/yamlwriter"
 )
 
@@ -27,8 +28,44 @@ type KV struct{ Key, Val string }
 
 // StoreFile is one resolved store entry for the stores Secret.
 type StoreFile struct {
-	Name   string // base name, e.g. truststore.jks
+	Name   string // the store's role (tls.Truststore, tls.Keystore), its key in the Secret
 	Base64 string // base64 of the file bytes
+}
+
+// storeItem maps one key of the stores Secret to the file name the pod mounts
+// it under.
+type storeItem struct{ key, path string }
+
+// storeItems is what the stores volume projects: each store env.yaml sets,
+// mounted under its role's fixed name (tls.MountPath), which is where
+// application.yml points. A Secret the tool creates is keyed by the role
+// itself; an existing one keeps the key operators have always been told to
+// use, the tls.*.file base name, so a Secret holding truststore.jks
+// (cert-manager's keystores name) works as it is. One key may feed both paths,
+// when one file serves as both stores. Listing the keys also makes a key the
+// Secret lacks fail the pod at start rather than the connector at its first
+// TLS handshake. Nil when no store file is set, which projects every key, as
+// before.
+func storeItems(in Input) []storeItem {
+	if in.Defaults == nil {
+		return nil
+	}
+	_, created := in.Kube.StoresSecretName()
+	var out []storeItem
+	for _, st := range []struct {
+		role  tls.Role
+		store *spec.Store
+	}{{tls.Truststore, in.Defaults.TLS.Truststore}, {tls.Keystore, in.Defaults.TLS.Keystore}} {
+		if st.store == nil || st.store.File == "" {
+			continue
+		}
+		key := string(st.role)
+		if !created {
+			key = spec.BaseName(st.store.File)
+		}
+		out = append(out, storeItem{key: key, path: string(st.role)})
+	}
+	return out
 }
 
 // PullSecret is the resolved registry-credential wiring for the pod template.
@@ -467,7 +504,7 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 	}
 	if hasStores {
 		w.Line(12, "- name: stores")
-		w.Line(14, "mountPath: /app/external/classpath/truststores")
+		w.Line(14, "mountPath: "+tls.MountDir)
 		w.Line(14, "readOnly: true")
 	}
 	if lb != nil {
@@ -528,6 +565,13 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 		w.Line(8, "- name: stores")
 		w.Line(10, "secret:")
 		w.Line(12, "secretName: "+storeRef)
+		if items := storeItems(in); len(items) > 0 {
+			w.Line(12, "items:")
+			for _, it := range items {
+				w.Line(14, "- key: "+strconv.Quote(it.key))
+				w.Line(16, "path: "+it.path)
+			}
+		}
 	}
 	if lb != nil {
 		w.Line(8, "- name: libs")

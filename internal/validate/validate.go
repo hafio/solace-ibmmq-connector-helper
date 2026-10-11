@@ -813,6 +813,7 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 		}
 		if s.Existing != "" {
 			checkSecretName(add, "kubernetes.secrets.stores.existing", s.Existing)
+			checkStoresSecretKeys(add, s.Existing, ctx.Defaults.TLS)
 		}
 	}
 	checkImagePull(add, warn, ctx)
@@ -1412,46 +1413,51 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 	}
 }
 
-// podmanStoreNameRE is what a store's file name may look like on podman: the
-// name becomes the end of a Secret= target, where a ',' would start another
-// option and a '%' is a systemd specifier.
-var podmanStoreNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-
-// checkContainerStores gates the tls.*.file paths by what each platform does
-// with them; they are always mounted, so this runs whenever a store is set.
-// Kubernetes is exempt: it embeds the store content in a Secret, and it does
-// not reach checkContainerTarget.
-//
-// Docker bind-mounts the path itself, so an unsafe character would add content
-// to a compose YAML line the spec never declared. Podman never names the path:
-// deploy reads the file into podman's secret store, and only its file name
-// reaches the unit, as the end of the mount target application.yml reads the
-// store from -- so that name is what is held to a narrow set, and the two
-// stores' names must differ or both would mount at one path.
-func checkContainerStores(add func(string, string, ...any), section, platform string, tls spec.TLSConfig) {
-	seen := ""
+// checkContainerStores gates the tls.*.file paths docker bind-mounts: the path
+// itself lands on a compose YAML line, so an unsafe character would add content
+// the spec never declared. They are always mounted, so this runs whenever a
+// store is set. Podman never names the path -- deploy reads the file into
+// podman's secret store -- and every platform mounts a store at its role's
+// fixed name (tls.MountPath), so on podman neither the path nor the file name
+// reaches the unit, and two stores may share a file name or be one file.
+// Kubernetes does not reach checkContainerTarget; see checkStoresSecretKeys.
+func checkContainerStores(add func(string, string, ...any), section, platform string, stores spec.TLSConfig) {
+	if platform == PlatformPodman {
+		return
+	}
 	for _, st := range []struct {
 		field string
 		store *spec.Store
-	}{{"tls.truststore.file", tls.Truststore}, {"tls.keystore.file", tls.Keystore}} {
+	}{{"tls.truststore.file", stores.Truststore}, {"tls.keystore.file", stores.Keystore}} {
 		if st.store == nil || st.store.File == "" {
 			continue
 		}
-		if platform != PlatformPodman {
-			if !safeHostPath(st.store.File) {
-				add(fileEnv, "%s bind-mounts %s %q, which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", section, st.field, st.store.File)
-			}
+		if !safeHostPath(st.store.File) {
+			add(fileEnv, "%s bind-mounts %s %q, which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", section, st.field, st.store.File)
+		}
+	}
+}
+
+// kubeSecretKeyRE is the character set of a Kubernetes Secret key.
+var kubeSecretKeyRE = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
+
+// checkStoresSecretKeys holds the keys an existing stores Secret is read by to
+// Kubernetes' grammar for a Secret key: each set store's file name is written
+// into the pod's stores volume as the key it maps to the store's fixed path
+// (a created Secret is keyed by role, so it needs no check). A name the API
+// server would refuse is reported here, at load, rather than by kubectl.
+func checkStoresSecretKeys(add func(string, string, ...any), existing string, stores spec.TLSConfig) {
+	for _, st := range []struct {
+		field string
+		store *spec.Store
+	}{{"tls.truststore.file", stores.Truststore}, {"tls.keystore.file", stores.Keystore}} {
+		if st.store == nil || st.store.File == "" {
 			continue
 		}
-		base := spec.BaseName(st.store.File)
-		if !podmanStoreNameRE.MatchString(base) {
-			add(fileEnv, "podman mounts %s %q from podman's secret store at %s/%s, so its file name may hold only letters, digits, '.', '_' and '-'; rename the file", st.field, st.store.File, spec.DefaultStoresMountPath, base)
-			continue
+		key := spec.BaseName(st.store.File)
+		if len(key) > 253 || !kubeSecretKeyRE.MatchString(key) || key == "." || strings.HasPrefix(key, "..") {
+			add(fileEnv, "kubernetes.secrets.stores.existing %q is mounted by key, and the key for %s is its file name %q, which is not a valid Secret key (letters, digits, '-', '_' and '.', at most 253 characters, not '.' and not starting '..'); rename the file to the key the Secret holds", existing, st.field, key)
 		}
-		if base == seen {
-			add(fileEnv, "tls.truststore.file and tls.keystore.file share the file name %q, so podman would mount both at %s/%s; rename one of them", base, spec.DefaultStoresMountPath, base)
-		}
-		seen = base
 	}
 }
 

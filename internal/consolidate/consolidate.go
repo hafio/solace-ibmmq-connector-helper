@@ -381,13 +381,13 @@ func buildBundle(a *acc, d *spec.Defaults, mount bool, secretRef secretFn) *Bund
 		return nil
 	}
 	b := &Bundle{Name: a.name + "-bundle"}
-	b.TruststoreLoc = tls.StorePath(ts.File, mount)
+	b.TruststoreLoc = tls.StorePath(tls.Truststore, ts.File, mount)
 	b.TruststorePwd = secretRef(TruststorePasswordName, storeOrigin(TruststorePasswordName), ts.Secret())
 	b.TruststoreTyp = ts.Type
 	if a.keyAlias != "" {
 		if ks := d.TLS.Keystore; ks != nil {
 			b.HasKeystore = true
-			b.KeystoreLoc = tls.StorePath(ks.File, mount)
+			b.KeystoreLoc = tls.StorePath(tls.Keystore, ks.File, mount)
 			b.KeystorePwd = secretRef(KeystorePasswordName, storeOrigin(KeystorePasswordName), ks.Secret())
 			b.KeystoreTyp = ks.Type
 			b.KeyAlias = a.keyAlias

@@ -1366,7 +1366,7 @@ kubernetes:
       # existing: my-credentials # ...or mount a Secret that already exists, left
                                  # untouched -- it must already carry those same keys
     stores:                      # truststore/keystore Secret (volume-mounted)
-      create: true               # <name>-stores: base64-embeds the .jks files from env.yaml tls.*.file
+      create: true               # <name>-stores: base64-embeds the .jks files from env.yaml tls.*.file, keyed truststore/keystore
       # existing: my-tls         # ...its keys are the tls.*.file base names (truststore.jks)
 ```
 
@@ -1383,8 +1383,8 @@ kubernetes:
 | `libs.download` | `urls`, `image`, `pvc` | an initContainer `wget`s each URL into `/libs` at pod start; the shared volume is an `emptyDir` unless `pvc` names an existing PVC |
 | `secrets.credentials.create` | `true` | the tool builds `<name>-credentials`: one key per credential the config references, each holding the resolved value -- read from the host variable for an `-env` credential, taken from the spec for a literal |
 | `secrets.credentials.existing` | `<name>` | reference a pre-existing Secret instead of creating one; exactly one of `create` / `existing` is required once the block is present, and the Secret's keys must be the ones [section 9.2](#92-mount-names) derives -- your `-env` variable names, plus a derived name per literal |
-| `secrets.stores.create` | `true` | the tool builds `<name>-stores`, base64-embedding the `env.yaml` `tls.*.file` stores; requires a `tls.truststore` |
-| `secrets.stores.existing` | `<name>` | reference a pre-existing stores Secret (`create` XOR `existing`, as above); its keys must be the base filenames of `tls.truststore.file` / `tls.keystore.file` |
+| `secrets.stores.create` | `true` | the tool builds `<name>-stores`, base64-embedding the `env.yaml` `tls.*.file` stores under the keys `truststore` and `keystore`; requires a `tls.truststore` |
+| `secrets.stores.existing` | `<name>` | reference a pre-existing stores Secret (`create` XOR `existing`, as above); its keys must be the base filenames of `tls.truststore.file` / `tls.keystore.file`, which the pod's volume lists by name and mounts as `truststore` and `keystore` -- so a key the Secret lacks keeps the pod from starting (a "couldn't find key" event) rather than failing the first TLS handshake, and a cert-manager Certificate with `keystores` enabled works as it is when `tls.*.file` are named `truststore.jks` / `keystore.jks` (or `.p12`). A file name that is not a valid Secret key (letters, digits, `-`, `_` and `.`, at most 253 characters, not `.` and not starting `..`) is an error at load |
 
 **Everything the tool creates is named after `deployment.name`.** The ConfigMap is
 `<name>-config`, the Secrets `<name>-credentials`, `<name>-stores` and
@@ -1452,11 +1452,12 @@ uses compose's long syntax (`source: <name>` plus an absolute `target:`) rather
 than the short `- <name>` form, because the short form always lands at compose's
 own `/run/secrets/<name>` with no way to point elsewhere; the long form's `target:`
 is `/app/external/var/secrets/<name>`, the same directory every platform uses. The
-`tls.*.file` host paths are bind-mounted onto the fixed in-container store dir
-`/app/external/classpath/truststores` whenever they are set -- the generated
-`application.yml` points there, so the mount follows the configuration rather than
-needing its own switch -- and `libs.dir` bind-mounts a host jar directory to
-`/app/external/libs`.
+`tls.*.file` host paths are bind-mounted onto fixed in-container names,
+`/app/external/classpath/truststores/truststore` and `.../keystore`, whenever they
+are set, whatever the files are called -- the generated `application.yml` points
+there, so the mount follows the configuration rather than needing its own switch,
+and two stores may share a file name or be one file -- and `libs.dir` bind-mounts a
+host jar directory to `/app/external/libs`.
 
 Every `$` inside those inlined `configs:` blocks is written **doubled** (`$$`).
 Docker Compose interpolates variables across the whole document, content blocks
@@ -1557,7 +1558,7 @@ meant to be installed by hand.
 |---|---|
 | `<name>-<KEY>`, one per credential | `/app/external/var/secrets/<KEY>` |
 | `<name>-application.yml` | `/app/external/spring/config/application.yml` |
-| `<name>-tls-truststore`, `<name>-tls-keystore` | `/app/external/classpath/truststores/<file name of tls.*.file>` |
+| `<name>-tls-truststore`, `<name>-tls-keystore` | `/app/external/classpath/truststores/truststore`, `.../keystore` |
 | `<name>-status-script` | `/app/external/.status-script` |
 | `<name>-logback-spring.xml` (syslog only) | `/app/external/classpath/logback-spring.xml` |
 
@@ -1570,9 +1571,9 @@ unit names each path outright and every file lands exactly where it is read.
 Inside the container each one is a read-only file, owned by root with mode `0444`,
 as compose gives its configs. Podman holds a secret of 1 to 511999 bytes, so
 `deploy` refuses an empty store file or one of 512000 bytes or more before it
-creates anything. A store's **file name** becomes the end of its mount path, so on
-podman it may hold only letters, digits, `.`, `_` and `-`, and the truststore's and
-keystore's file names must differ; `validate` reports either problem. Requires
+creates anything. Neither a store's path nor its file name reaches the unit, so
+both are free, and the truststore and keystore may share a file name or be one
+file. Requires
 **podman 4.5+** (the tool's floor; the path-valued `target=` form itself needs
 podman 4.x or newer). To check delivery, `podman secret ls` lists the entries, and
 on a running instance `cli` in and list `/app/external/var/secrets/`: one file per
@@ -1661,8 +1662,9 @@ and `libs`, whose one key is `dir`.
 Every in-container path is fixed by the image, so no section configures one.
 `libs.dir` names the host directory to bind-mount and it lands at
 `/app/external/libs`, which the connector already launches with on its classpath;
-the truststore/keystore land in `/app/external/classpath/truststores` whenever
-`tls.*.file` is set (bind-mounted on docker, from the secret store on podman).
+the truststore/keystore land in `/app/external/classpath/truststores` as
+`truststore` and `keystore` whenever `tls.*.file` is set (bind-mounted on docker,
+from the secret store on podman).
 Accordingly neither section takes a `secrets:`, a `stores:` or a `libs.mount-path` key -- setting any of them is a rejected key,
 since docker and podman fix those paths themselves and take no such option. `project-name`
 is **not** shared: it names a compose project, and podman has no equivalent
@@ -1925,17 +1927,20 @@ names until deploying to a platform does.
   every project on the host. `remove` removes them. Requires **podman 4.5+**
   ([section 8.3](#83-podman) explains the absolute `target=` path).
 
-The stores wiring is separate and follows its own naming rule: the shared
-truststore/keystore is base64-embedded into a Kubernetes Secret mounted at
-`/app/external/classpath/truststores/`, bind-mounted there from the host for
-docker, or loaded into podman's secret store and mounted there for podman -- which
-needs no configuration, since setting `tls.*.file` is itself the request. Kubernetes does need telling, so its
+The stores wiring is separate and follows its own naming rule: inside the
+container the shared truststore/keystore are always
+`/app/external/classpath/truststores/truststore` and `.../keystore`, whatever the
+files are called -- base64-embedded into a Kubernetes Secret mounted there,
+bind-mounted there from the host for docker, or loaded into podman's secret store
+and mounted there for podman -- which needs no configuration, since setting
+`tls.*.file` is itself the request. Kubernetes does need telling, so its
 `kubernetes.secrets.stores` takes the same `create` XOR `existing` choice as
-`credentials`, and a `stores.existing`
-Secret's keys are the **base filenames** of `tls.truststore.file` /
-`tls.keystore.file` -- `truststore.jks` and `keystore.jks` for the example in
-[section 7](#7-connector-defaults-envyaml-top-level) -- because that is the path
-the rendered config points at.
+`credentials`. A created Secret is keyed `truststore` and `keystore`; a
+`stores.existing` Secret's keys are the **base filenames** of
+`tls.truststore.file` / `tls.keystore.file` -- `truststore.jks` and
+`keystore.jks` for the example in
+[section 7](#7-connector-defaults-envyaml-top-level) -- and the pod's volume maps
+each to its fixed name, so one key may serve as both stores.
 
 There is **no `secrets:` section under `docker:` or `podman:`** -- credentials come
 from the connection fields, so there is nothing to configure. Setting one is an
@@ -2373,9 +2378,9 @@ workflow on the next run.
 `location` exactly as it appears in `env.yaml`, so you can run the connector wherever
 those files already live. The container platforms rewrite them to a mount path -- the
 `application.yml` that kubernetes/docker/podman ship points at
-`/app/external/classpath/truststores/<file>` because the stores are mounted there (a
-Secret volume for kubernetes, a bind mount onto that same fixed dir for docker, a
-secret-store mount for podman).
+`/app/external/classpath/truststores/truststore` and `.../keystore` because the
+stores are mounted there under those fixed names (a Secret volume for kubernetes, a
+bind mount for docker, a secret-store mount for podman).
 
 **The status script and its labels ship on every platform.** All
 three platforms always carry the rendered status script
@@ -3176,7 +3181,7 @@ Useful places to look once you are inside:
 |------|---------------|
 | `/app/external/spring/config/application.yml` | the configuration the process actually loaded |
 | `/app/external/libs` | the jars `download jar` put there ([section 10](#10-download-jar)) |
-| `/app/external/classpath/truststores` | the truststores, bind-mounted from `tls.*.file` on docker, mounted from podman's secret store on podman and Secret-mounted on kubernetes |
+| `/app/external/classpath/truststores` | the truststore and keystore, as `truststore` and `keystore`: bind-mounted from `tls.*.file` on docker, mounted from podman's secret store on podman and Secret-mounted on kubernetes |
 | `/app/external/var/secrets` | the credentials, on every platform |
 
 ### 14.3 The one-shot form, and when it is the only form
@@ -3280,9 +3285,10 @@ container is called something else, is not reachable with `cli` -- reach it with
   `libs.dir`, the referenced (`existing:`) kubernetes Secret names, and
   `libs.pvc.create.nfs.*` are all rejected when they carry whitespace, quotes,
   control characters, or shell metacharacters -- each one lands unquoted in a
-  generated script, unit, or manifest. Podman never names a store's path, only
-  its file name, which may hold letters, digits, `.`, `_` and `-`
-  ([section 8.3](#83-podman)).
+  generated script, unit, or manifest. Podman names neither a store's path nor
+  its file name. An existing kubernetes stores Secret is read by the `tls.*.file`
+  file names, so each must be a valid Secret key -- letters, digits, `-`, `_` and
+  `.` ([section 8.1](#81-kubernetes)).
 - **The connector runs as `1000:0`, not root.** Every platform states a non-root
   identity unless its section sets `run-as: image`, and a mounted host file the
   identity cannot read -- a 0600 truststore on docker, a 0600 jar -- fails the
@@ -3296,6 +3302,13 @@ container is called something else, is not reachable with `cli` -- reach it with
   unit. What earlier releases wrote under `podman.base-dir` stays until you delete
   it -- `validate` names the files -- and a store of 512000 bytes or more now fails
   a podman deploy.
+- **The stores moved to fixed names inside the container.** The truststore and
+  keystore are now `/app/external/classpath/truststores/truststore` and
+  `.../keystore` on every platform, whatever the files are called, so the first
+  `deploy` with this release changes `application.yml` and restarts (docker,
+  podman) or rolls (kubernetes) the connector. A created kubernetes stores Secret
+  is re-keyed `truststore` / `keystore`; an existing one needs no change. Two
+  stores sharing a file name, or one file used as both, now work everywhere.
 - **`name` and `docker.project-name` are held to DNS-1123, not to that gate.** Both
   are labels rather than argv tokens, so they must be lowercase alphanumerics and
   hyphens starting and ending alphanumeric. That is deliberately stricter than

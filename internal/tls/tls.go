@@ -16,22 +16,29 @@ const MountDir = spec.DefaultStoresMountPath
 // KV is one ordered scalar property (Key: Val).
 type KV struct{ Key, Val string }
 
-// MountPath returns the in-container path for a store file, using its base name.
-// It strips both '/' and '\' regardless of host OS (not the OS-dependent
-// filepath.Base), so a Windows-authored env.yaml path resolves to the same
-// mounted base name when the CLI runs on Linux/Mac, matching the stores-Secret
-// data key so the bundle location always points at a file the volume mounts.
-func MountPath(storeFile string) string {
-	return MountDir + "/" + spec.BaseName(storeFile)
+// Role is which of the two shared stores a file is. Its value is the store's
+// file name inside the container and its key in a stores Secret the tool
+// creates: the operator's own file name never reaches the container, so two
+// stores that share one, or one file serving as both, cannot collide.
+type Role string
+
+const (
+	Truststore Role = "truststore"
+	Keystore   Role = "keystore"
+)
+
+// MountPath returns the in-container path of the store playing role r.
+func MountPath(r Role) string {
+	return MountDir + "/" + string(r)
 }
 
 // StorePath is where generated config references a store file: the path exactly as
 // written in env.yaml when mount is false (`config`, so the connector can run
-// wherever those files already live), or the in-container MountPath when mount is
-// true (`deploy` mounts the stores Secret at MountDir).
-func StorePath(storeFile string, mount bool) string {
+// wherever those files already live), or the in-container MountPath of its role
+// when mount is true (`deploy` mounts the stores at MountDir).
+func StorePath(r Role, storeFile string, mount bool) string {
 	if mount {
-		return MountPath(storeFile)
+		return MountPath(r)
 	}
 	return storeFile
 }
@@ -60,7 +67,7 @@ func SolaceProps(d *spec.Defaults, keyAlias string, mount bool, secretRef func(s
 	if ts := d.TLS.Truststore; ts != nil {
 		out = append(out,
 			KV{"SSL_VALIDATE_CERTIFICATE", "true"},
-			KV{"SSL_TRUST_STORE", StorePath(ts.File, mount)},
+			KV{"SSL_TRUST_STORE", StorePath(Truststore, ts.File, mount)},
 			KV{"SSL_TRUST_STORE_PASSWORD", secretRef(TruststorePasswordName, ts.Secret())},
 			KV{"SSL_TRUST_STORE_FORMAT", ts.Type},
 		)
@@ -68,7 +75,7 @@ func SolaceProps(d *spec.Defaults, keyAlias string, mount bool, secretRef func(s
 	if keyAlias != "" {
 		if ks := d.TLS.Keystore; ks != nil {
 			out = append(out,
-				KV{"SSL_KEY_STORE", StorePath(ks.File, mount)},
+				KV{"SSL_KEY_STORE", StorePath(Keystore, ks.File, mount)},
 				KV{"SSL_KEY_STORE_PASSWORD", secretRef(KeystorePasswordName, ks.Secret())},
 				KV{"SSL_KEY_STORE_FORMAT", ks.Type},
 				KV{"SSL_PRIVATE_KEY_ALIAS", keyAlias},

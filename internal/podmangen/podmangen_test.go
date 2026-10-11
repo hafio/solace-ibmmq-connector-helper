@@ -27,7 +27,7 @@ func fullInput() Input {
 			{StoreName: "solmq-connector-MQ_CONN_1_PASSWORD", Target: "MQ_CONN_1_PASSWORD"},
 		},
 		Stores: []FileSecret{
-			{StoreName: "solmq-connector-tls-truststore", Target: "/app/external/classpath/truststores/truststore.jks"},
+			{StoreName: "solmq-connector-tls-truststore", Target: "/app/external/classpath/truststores/truststore"},
 		},
 		Libs: &Mount{Source: "/abs/libs", Target: "/app/external/libs"},
 	}
@@ -93,7 +93,7 @@ Environment=JAVA_TOOL_OPTIONS=-Dcom.ibm.mq.cfg.useIBMCipherMappings=false
 Secret=solmq-connector-MQ_CONN_1_USER,type=mount,target=/app/external/var/secrets/MQ_CONN_1_USER
 Secret=solmq-connector-MQ_CONN_1_PASSWORD,type=mount,target=/app/external/var/secrets/MQ_CONN_1_PASSWORD
 Secret=solmq-connector-application.yml,type=mount,target=/app/external/spring/config/application.yml
-Secret=solmq-connector-tls-truststore,type=mount,target=/app/external/classpath/truststores/truststore.jks
+Secret=solmq-connector-tls-truststore,type=mount,target=/app/external/classpath/truststores/truststore
 Secret=solmq-connector-status-script,type=mount,target=/app/external/.status-script
 Volume=/abs/libs:/app/external/libs:ro
 HealthCmd=sh /app/external/.status-script --health

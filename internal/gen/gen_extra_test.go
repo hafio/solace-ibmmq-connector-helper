@@ -14,6 +14,7 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/podmangen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/tls"
 )
 
 // TestParseExpandsNonCredentialAndWarnsOnUnsetDefaultless pins the wiring:
@@ -71,7 +72,7 @@ func TestResolveStores(t *testing.T) {
 		Keystore:   &spec.Store{File: "certs/k.jks"},
 	}}
 	sf, err := resolveStores(d, Resolver{ReadFile: func(string) ([]byte, error) { return []byte("BYTES"), nil }})
-	if err != nil || len(sf) != 2 || sf[0].Name != "t.jks" {
+	if err != nil || len(sf) != 2 || sf[0].Name != "truststore" || sf[1].Name != "keystore" {
 		t.Fatalf("sf=%+v err=%v", sf, err)
 	}
 	if _, err := resolveStores(d, Resolver{}); err == nil {
@@ -189,10 +190,10 @@ func TestTargetMounts(t *testing.T) {
 	if len(sm) != 2 {
 		t.Fatalf("store mounts=%d want 2", len(sm))
 	}
-	if sm[0].Source != "/abs/certs/t.jks" || sm[0].Target != spec.DefaultStoresMountPath+"/t.jks" || sm[0].Field != MountTruststore {
+	if sm[0].Source != "/abs/certs/t.jks" || sm[0].Target != spec.DefaultStoresMountPath+"/truststore" || sm[0].Field != MountTruststore {
 		t.Errorf("store mount 0 = %+v", sm[0])
 	}
-	if sm[1].Target != spec.DefaultStoresMountPath+"/k.jks" || sm[1].Field != MountKeystore {
+	if sm[1].Target != spec.DefaultStoresMountPath+"/keystore" || sm[1].Field != MountKeystore {
 		t.Errorf("store mount 1 = %+v", sm[1])
 	}
 	// The libs target is the fixed image path too; only Dir is the operator's.
@@ -1417,8 +1418,8 @@ podman:
 		t.Errorf("store files = %+v, want %+v after application.yml", plan.Files, want)
 	}
 	for _, line := range []string{
-		"Secret=c-tls-truststore,type=mount,target=" + spec.DefaultStoresMountPath + "/trust.p12\n",
-		"Secret=c-tls-keystore,type=mount,target=" + spec.DefaultStoresMountPath + "/key.p12\n",
+		"Secret=c-tls-truststore,type=mount,target=" + spec.DefaultStoresMountPath + "/truststore\n",
+		"Secret=c-tls-keystore,type=mount,target=" + spec.DefaultStoresMountPath + "/keystore\n",
 	} {
 		if !strings.Contains(plan.Unit.Content, line) {
 			t.Errorf("unit missing %q:\n%s", line, plan.Unit.Content)
@@ -1426,6 +1427,66 @@ podman:
 	}
 	if strings.Contains(plan.Unit.Content, "Volume=") {
 		t.Errorf("a store must not be bind-mounted:\n%s", plan.Unit.Content)
+	}
+}
+
+// TestStoresSharingAFileNameMountApart pins the fixed in-container store names
+// end to end: a truststore and keystore whose files share a name, and one file
+// serving as both, generate on docker, podman and kubernetes with each store at
+// its own path or key -- where naming them after their files collided on all
+// three.
+func TestStoresSharingAFileNameMountApart(t *testing.T) {
+	for _, c := range []struct{ name, trust, key string }{
+		{"shared file name", "./trust/store.p12", "./key/store.p12"},
+		{"one file as both", "./certs/combined.p12", "./certs/combined.p12"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			stores := "tls:\n  truststore:\n    file: " + c.trust + "\n    password: ts\n    type: PKCS12\n" +
+				"  keystore:\n    file: " + c.key + "\n    password: ks\n    type: PKCS12\n"
+			req := func(section string) Request {
+				return Request{Env: &File{Name: "env.yaml", Data: []byte("image:\n  name: img\n  tag: v1\n" + stores + section)}, Workflows: synthWorkflowFiles(1)}
+			}
+			res := Resolver{Rand: fixedStatusRand, Env: func(string) (string, bool) { return "v", true }, ReadFile: func(p string) ([]byte, error) { return []byte("STORE " + p), nil }}
+
+			dp, errs, _ := GenerateDocker(req("docker:\n  command: docker\n  name: c\n"), res)
+			if len(errs) > 0 {
+				t.Fatalf("docker: unexpected errors: %v", errs)
+			}
+			for _, want := range []string{":" + tls.MountPath(tls.Truststore) + ":ro\n", ":" + tls.MountPath(tls.Keystore) + ":ro\n"} {
+				if !strings.Contains(dp.Compose, want) {
+					t.Errorf("docker compose missing %q:\n%s", want, dp.Compose)
+				}
+			}
+
+			pp, errs, _ := GeneratePodman(req("podman:\n  command: podman\n  name: c\n"), res)
+			if len(errs) > 0 {
+				t.Fatalf("podman: unexpected errors: %v", errs)
+			}
+			for _, want := range []string{
+				"Secret=c-tls-truststore,type=mount,target=" + tls.MountPath(tls.Truststore) + "\n",
+				"Secret=c-tls-keystore,type=mount,target=" + tls.MountPath(tls.Keystore) + "\n",
+			} {
+				if !strings.Contains(pp.Unit.Content, want) {
+					t.Errorf("podman unit missing %q:\n%s", want, pp.Unit.Content)
+				}
+			}
+
+			k8s, errs, _ := GenerateKubernetes(req("kubernetes:\n  command: kubectl\n  deployment:\n    name: c\n    namespace: ns\n"+
+				"  secrets:\n    credentials:\n      create: true\n    stores:\n      create: true\n"), res, KubeOpts{})
+			if len(errs) > 0 {
+				t.Fatalf("kubernetes: unexpected errors: %v", errs)
+			}
+			for _, want := range []string{
+				"  truststore: " + b64([]byte("STORE "+c.trust)) + "\n",
+				"  keystore: " + b64([]byte("STORE "+c.key)) + "\n",
+				"- key: \"truststore\"\n                path: truststore\n",
+				"- key: \"keystore\"\n                path: keystore\n",
+			} {
+				if !strings.Contains(k8s, want) {
+					t.Errorf("kubernetes manifest missing %q:\n%s", want, k8s)
+				}
+			}
+		})
 	}
 }
 

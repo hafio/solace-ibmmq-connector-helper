@@ -153,8 +153,8 @@ func TestGoldenKubernetesCreate(t *testing.T) {
 	// kubernetes mounts the stores at MountDir, so the embedded application.yml uses
 	// the mount path where `config` keeps the raw env.yaml path.
 	appMounted := strings.NewReplacer(
-		"./certs/truststore.jks", "/app/external/classpath/truststores/truststore.jks",
-		"./certs/keystore.jks", "/app/external/classpath/truststores/keystore.jks",
+		"./certs/truststore.jks", "/app/external/classpath/truststores/truststore",
+		"./certs/keystore.jks", "/app/external/classpath/truststores/keystore",
 	).Replace(appYAML)
 	want := norm(strings.Join([]string{
 		namespaceDoc, // deploy always emits the Namespace first
@@ -184,8 +184,8 @@ func TestGoldenKubernetesNoSecrets(t *testing.T) {
 	// kubernetes mounts the stores at MountDir, so the embedded application.yml uses
 	// the mount path where `config` keeps the raw env.yaml path.
 	appMounted := strings.NewReplacer(
-		"./certs/truststore.jks", "/app/external/classpath/truststores/truststore.jks",
-		"./certs/keystore.jks", "/app/external/classpath/truststores/keystore.jks",
+		"./certs/truststore.jks", "/app/external/classpath/truststores/truststore",
+		"./certs/keystore.jks", "/app/external/classpath/truststores/keystore",
 	).Replace(appYAML)
 	want := norm(strings.Join([]string{
 		namespaceDoc,
@@ -287,8 +287,8 @@ metadata:
   namespace: solace-connectors
 type: Opaque
 data:
-  truststore.jks: VFJVU1RTVE9SRQo=
-  keystore.jks: S0VZU1RPUkUK
+  truststore: VFJVU1RTVE9SRQo=
+  keystore: S0VZU1RPUkUK
 `
 
 const pvDoc = `apiVersion: v1
@@ -453,7 +453,9 @@ spec:
 		b.WriteString("        - name: secrets\n          secret:\n            secretName: solmq-connector-credentials\n            defaultMode: 0400\n")
 	}
 	if stores {
-		b.WriteString("        - name: stores\n          secret:\n            secretName: solmq-connector-stores\n")
+		b.WriteString("        - name: stores\n          secret:\n            secretName: solmq-connector-stores\n" +
+			"            items:\n              - key: \"truststore\"\n                path: truststore\n" +
+			"              - key: \"keystore\"\n                path: keystore\n")
 	}
 	if libs {
 		b.WriteString(`        - name: libs

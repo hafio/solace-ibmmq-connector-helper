@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -723,9 +724,8 @@ func TestDockerPodmanTLSNeedsNoStoresOptIn(t *testing.T) {
 // each platform does with tls.*.file, with no stores: block to opt in. Docker
 // bind-mounts the path into a compose document, so the whole path takes the
 // host-path gate. Podman never names the path -- deploy reads the file into its
-// secret store -- so a spaced directory is fine there, but the file name ends
-// the Secret= mount target, where ',' starts another option and '%' is a
-// systemd specifier, so it is held to letters, digits, '.', '_' and '-'.
+// secret store -- and mounts each store at its role's fixed name, so no store
+// path or file name is refused there.
 func TestContainerStorePathsGatedPerPlatform(t *testing.T) {
 	defs := defsWithStores()
 	defs.TLS.Truststore.File = "./certs/$(evil).jks"
@@ -733,22 +733,17 @@ func TestContainerStorePathsGatedPerPlatform(t *testing.T) {
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defs, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "docker bind-mounts tls.truststore.file") {
 		t.Errorf("docker should reject an unsafe tls.truststore.file with no stores: block, got %v", e)
 	}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defs, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); !hasErr(e, `podman mounts tls.truststore.file "./certs/$(evil).jks" from podman's secret store at /app/external/classpath/truststores/$(evil).jks, so its file name may hold only letters, digits, '.', '_' and '-'; rename the file`) {
-		t.Errorf("podman should reject an unsafe store file name, got %v", e)
-	}
 	spaced := defsWithStores()
 	spaced.TLS.Truststore.File = "/opt/my certs/truststore.jks"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: spaced, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); hasErr(e, "tls.truststore.file") {
-		t.Errorf("podman reads the store itself, so a spaced directory is fine, got %v", e)
-	}
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: spaced, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "unsafe character") {
 		t.Errorf("docker bind-mounts the path, so a spaced directory is refused, got %v", e)
 	}
-	for _, bad := range []string{"trust,store.jks", "trust%n.jks", "trust store.jks"} {
+	for _, file := range []string{"./certs/$(evil).jks", "/opt/my certs/truststore.jks", "./certs/trust,store.jks", "./certs/trust%n.jks", "./certs/trust store.jks"} {
 		d := defsWithStores()
-		d.TLS.Keystore.File = "./certs/" + bad
-		if e, _ := Run(Context{Workflows: wfOK(), Defaults: d, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); !hasErr(e, "podman mounts tls.keystore.file") {
-			t.Errorf("podman should reject the store file name %q, got %v", bad, e)
+		d.TLS.Truststore.File = file
+		d.TLS.Keystore.File = file
+		if e, _ := Run(Context{Workflows: wfOK(), Defaults: d, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); hasErr(e, "tls.truststore.file") || hasErr(e, "tls.keystore.file") {
+			t.Errorf("podman reads the store itself and mounts it at a fixed name, so %q is fine, got %v", file, e)
 		}
 	}
 	// Kubernetes stays exempt: it embeds the store content in a Secret rather
@@ -759,19 +754,75 @@ func TestContainerStorePathsGatedPerPlatform(t *testing.T) {
 	}
 }
 
-// TestPodmanStoreFileNamesMustDiffer pins the second rule the secret store
-// adds: both stores mount under one directory by file name, so a truststore and
-// a keystore sharing a name would mount at one path, one shadowing the other.
-func TestPodmanStoreFileNamesMustDiffer(t *testing.T) {
-	d := defsWithStores()
-	d.TLS.Truststore.File = "./trust/store.p12"
-	d.TLS.Keystore.File = "./key/store.p12"
-	want := `tls.truststore.file and tls.keystore.file share the file name "store.p12", so podman would mount both at /app/external/classpath/truststores/store.p12; rename one of them`
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: d, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); !hasErr(e, want) {
-		t.Errorf("want the shared-name error, got %v", e)
+// TestStoresMayShareAFileName pins what the fixed in-container names buy: a
+// truststore and keystore sharing a file name, or one file serving as both,
+// mount at two paths on every container platform, so neither is a finding.
+func TestStoresMayShareAFileName(t *testing.T) {
+	for _, c := range []struct{ trust, key string }{
+		{"./trust/store.p12", "./key/store.p12"},
+		{"./certs/combined.jks", "./certs/combined.jks"},
+	} {
+		d := defsWithStores()
+		d.TLS.Truststore.File = c.trust
+		d.TLS.Keystore.File = c.key
+		for _, ctx := range []Context{
+			{Workflows: wfOK(), Defaults: d, Image: imageOK(), Docker: dockerOK(), CheckDocker: true},
+			{Workflows: wfOK(), Defaults: d, Image: imageOK(), Podman: podmanOK(), CheckPodman: true},
+		} {
+			if e, _ := Run(ctx); hasErr(e, "tls.truststore.file") || hasErr(e, "tls.keystore.file") {
+				t.Errorf("%s + %s: want no store finding, got %v", c.trust, c.key, e)
+			}
+		}
 	}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); hasErr(e, "share the file name") {
-		t.Errorf("distinct store file names must pass, got %v", e)
+}
+
+// TestKubernetesExistingStoresKeyIsASecretKey pins the grammar the keys of an
+// existing stores Secret are held to at load: each store's file name is
+// written into the pod's stores volume as a Secret key, so a name the API
+// server would refuse is an error naming the store and the key. A created
+// Secret is keyed by role, so its file names are free.
+func TestKubernetesExistingStoresKeyIsASecretKey(t *testing.T) {
+	long := strings.Repeat("a", 250) + ".jks" // 254 characters
+	for _, c := range []struct {
+		name     string
+		existing bool
+		file     string
+		keystore string // "" leaves the keystore unset
+		bad      bool
+	}{
+		{"plain name", true, "./certs/truststore.jks", "./certs/keystore.jks", false},
+		{"backslash path, plain name", true, `C:\certs\trust-store_1.p12`, "./certs/keystore.jks", false},
+		{"253 characters", true, "./" + strings.Repeat("a", 249) + ".jks", "./certs/keystore.jks", false},
+		{"keystore unset", true, "./certs/truststore.jks", "", false},
+		{"space", true, "./certs/trust store.jks", "./certs/keystore.jks", true},
+		{"comma", true, "./certs/trust,store.jks", "./certs/keystore.jks", true},
+		{"dot", true, "./certs/.", "./certs/keystore.jks", true},
+		{"leading dot dot", true, "./certs/..trust.jks", "./certs/keystore.jks", true},
+		{"254 characters", true, "./" + long, "./certs/keystore.jks", true},
+		{"created, odd name", false, "./certs/trust store.jks", "./certs/keystore.jks", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := defsWithStores()
+			d.TLS.Truststore.File = c.file
+			if c.keystore == "" {
+				d.TLS.Keystore = nil
+			} else {
+				d.TLS.Keystore.File = c.keystore
+			}
+			k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand}
+			k.Secrets.Stores = &spec.StoresSecret{Create: &spec.StoreCreate{}}
+			if c.existing {
+				k.Secrets.Stores = &spec.StoresSecret{Existing: "my-tls"}
+			}
+			e, _ := Run(Context{Workflows: wfOK(), Defaults: d, Image: imageOK(), Kube: k, CheckKubernetes: true})
+			want := fmt.Sprintf(`kubernetes.secrets.stores.existing "my-tls" is mounted by key, and the key for tls.truststore.file is its file name %q, which is not a valid Secret key (letters, digits, '-', '_' and '.', at most 253 characters, not '.' and not starting '..'); rename the file to the key the Secret holds`, spec.BaseName(c.file))
+			if got := hasErr(e, want); got != c.bad {
+				t.Errorf("%q: error = %v, want %v; errors %v", c.file, got, c.bad, e)
+			}
+			if !c.bad && hasErr(e, "not a valid Secret key") {
+				t.Errorf("%q: unexpected key error %v", c.file, e)
+			}
+		})
 	}
 }
 

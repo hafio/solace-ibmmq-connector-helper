@@ -514,14 +514,15 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 	var stores []podmangen.FileSecret
 	for _, st := range []struct {
 		field, suffix string
+		role          tls.Role
 		store         *spec.Store
-	}{{"tls.truststore.file", podmanTruststoreSuffix, e.Defaults.TLS.Truststore}, {"tls.keystore.file", podmanKeystoreSuffix, e.Defaults.TLS.Keystore}} {
+	}{{"tls.truststore.file", podmanTruststoreSuffix, tls.Truststore, e.Defaults.TLS.Truststore}, {"tls.keystore.file", podmanKeystoreSuffix, tls.Keystore, e.Defaults.TLS.Keystore}} {
 		if st.store == nil || st.store.File == "" {
 			continue
 		}
 		name := PodmanSecretStoreName(p.Name, st.suffix)
 		plan.Files = append(plan.Files, PodmanFile{StoreName: name, Source: st.store.File, Field: st.field})
-		stores = append(stores, podmangen.FileSecret{StoreName: name, Target: tls.MountPath(st.store.File)})
+		stores = append(stores, podmangen.FileSecret{StoreName: name, Target: tls.MountPath(st.role)})
 	}
 	statusSecret := PodmanSecretStoreName(p.Name, podmanStatusSuffix)
 	plan.Files = append(plan.Files, PodmanFile{StoreName: statusSecret, Data: statusscript.Render(e.Defaults.EffectiveManagementPort(), spec.StatusUserName)})
@@ -693,9 +694,9 @@ func secretConflictError(cs []consolidate.SecretConflict) error {
 // source comes from (MountTruststore, MountKeystore, MountLibs).
 type mount struct{ Field, Source, Target string }
 
-// targetMounts resolves the store files (each tls.*.file bind-mounted onto the
-// fixed in-container store dir spec.DefaultStoresMountPath, matching where
-// application.yml references them) and the libs directory into host->container
+// targetMounts resolves the store files (each tls.*.file bind-mounted at its
+// role's fixed name in the in-container store dir, tls.MountPath, which is where
+// application.yml references it) and the libs directory into host->container
 // mounts. Both container-side paths are constants: the image fixes them, and the
 // spec only chooses the host source. Docker bind-mounts both; podman passes no
 // stores (they come from its secret store) and takes only the libs mount.
@@ -705,15 +706,16 @@ type mount struct{ Field, Source, Target string }
 // configured store that was not mounted left the config pointing at a file
 // nothing supplied. A store with no file set is skipped, so a spec without TLS
 // still yields no store mounts. libs stays opt-in -- it has a host dir to name.
-func targetMounts(tls spec.TLSConfig, libs *spec.LibsMount, res Resolver) (sm []mount, lm *mount) {
+func targetMounts(stores spec.TLSConfig, libs *spec.LibsMount, res Resolver) (sm []mount, lm *mount) {
 	for _, st := range []struct {
 		field string
+		role  tls.Role
 		store *spec.Store
-	}{{MountTruststore, tls.Truststore}, {MountKeystore, tls.Keystore}} {
+	}{{MountTruststore, tls.Truststore, stores.Truststore}, {MountKeystore, tls.Keystore, stores.Keystore}} {
 		if st.store == nil || st.store.File == "" {
 			continue
 		}
-		sm = append(sm, mount{Field: st.field, Source: res.abs(st.store.File), Target: spec.DefaultStoresMountPath + "/" + spec.BaseName(st.store.File)})
+		sm = append(sm, mount{Field: st.field, Source: res.abs(st.store.File), Target: tls.MountPath(st.role)})
 	}
 	if libs != nil && libs.Dir != "" {
 		lm = &mount{Field: MountLibs, Source: res.abs(libs.Dir), Target: spec.DefaultLibsMountPath}
@@ -821,13 +823,14 @@ func parse(r Request, res Resolver) (wfs []spec.Workflow, e *spec.Env, issues, w
 
 // resolveStores reads the truststore/keystore files so the kubernetes stores
 // Secret can carry their bytes. Unlike credentials, these are files the cluster
-// must hold verbatim, so they are base64-embedded rather than named.
+// must hold verbatim, so they are base64-embedded rather than named. Each is keyed
+// by its role, the name it is mounted under, whatever the file is called.
 func resolveStores(d *spec.Defaults, res Resolver) ([]deploy.StoreFile, error) {
 	if res.ReadFile == nil {
 		return nil, fmt.Errorf("cannot read store files (no file access)")
 	}
 	var out []deploy.StoreFile
-	add := func(s *spec.Store) error {
+	add := func(r tls.Role, s *spec.Store) error {
 		if s == nil || s.File == "" {
 			return nil
 		}
@@ -835,13 +838,13 @@ func resolveStores(d *spec.Defaults, res Resolver) ([]deploy.StoreFile, error) {
 		if err != nil {
 			return fmt.Errorf("reading store %q: %v", s.File, err)
 		}
-		out = append(out, deploy.StoreFile{Name: spec.BaseName(s.File), Base64: b64(b)})
+		out = append(out, deploy.StoreFile{Name: string(r), Base64: b64(b)})
 		return nil
 	}
-	if err := add(d.TLS.Truststore); err != nil {
+	if err := add(tls.Truststore, d.TLS.Truststore); err != nil {
 		return nil, err
 	}
-	if err := add(d.TLS.Keystore); err != nil {
+	if err := add(tls.Keystore, d.TLS.Keystore); err != nil {
 		return nil, err
 	}
 	return out, nil

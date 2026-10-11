@@ -37,7 +37,7 @@ func fullFixtureInput() Input {
 	return Input{
 		Kube: k, Defaults: &spec.Defaults{},
 		CredKVs:  []KV{{Key: "A", Val: `sec"ret`}},
-		Stores:   []StoreFile{{Name: "truststore.jks", Base64: "QUJD"}},
+		Stores:   []StoreFile{{Name: "truststore", Base64: "QUJD"}},
 		Instance: one(k.Deployment.Name, "spring:\n  x: 1\n\n  y: 2\n", &consolidate.Model{MQTLS: true}),
 	}
 }
@@ -48,7 +48,7 @@ func TestRenderFull(t *testing.T) {
 		"kind: ConfigMap", "name: solmq-config", "application.yml: |", "    spring:",
 		"status: |", "    #!/bin/sh", "    echo status",
 		"kind: Secret", "name: solmq-credentials", "stringData:", `A: "sec\"ret"`,
-		"name: solmq-stores", "truststore.jks: QUJD",
+		"name: solmq-stores", "truststore: QUJD",
 		"kind: Deployment", "automountServiceAccountToken: false", "name: JAVA_TOOL_OPTIONS", "useIBMCipherMappings=false",
 		"solace-connector/le-mode: standalone", "solace-connector/role: active",
 		"- name: secrets", "mountPath: " + SecretsMountPath, "defaultMode: 0400",
@@ -115,7 +115,7 @@ metadata:
   namespace: ns
 type: Opaque
 data:
-  truststore.jks: QUJD
+  truststore: QUJD
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -386,7 +386,7 @@ func TestCreatedSecretsTakeDerivedNames(t *testing.T) {
 	out := Render(Input{
 		Kube: k, Defaults: &spec.Defaults{},
 		CredKVs:  []KV{{Key: "A", Val: "x"}},
-		Stores:   []StoreFile{{Name: "truststore.jks", Base64: "QUJD"}},
+		Stores:   []StoreFile{{Name: "truststore", Base64: "QUJD"}},
 		Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{}),
 	})
 	for _, want := range []string{
@@ -503,6 +503,61 @@ func TestRenderExistingSecrets(t *testing.T) {
 	}
 	if !strings.Contains(out, "secretName: my-creds") || !strings.Contains(out, "secretName: my-tls") {
 		t.Errorf("existing refs missing:\n%s", out)
+	}
+}
+
+// The stores volume mounts each store under its role's fixed name, whatever
+// the file is called: a created Secret is keyed by the role, an existing one by
+// the tls.*.file base name operators already key it by (one key may feed both
+// paths), and with no store file set nothing is listed, so every key projects.
+func TestStoresVolumeMapsKeysToFixedNames(t *testing.T) {
+	created := &spec.StoresSecret{Create: &spec.StoreCreate{}}
+	existing := &spec.StoresSecret{Existing: "my-tls"}
+	store := func(f string) *spec.Store { return &spec.Store{File: f} }
+	item := func(key, path string) string {
+		return "              - key: \"" + key + "\"\n                path: " + path + "\n"
+	}
+	for _, c := range []struct {
+		name   string
+		stores *spec.StoresSecret
+		tls    spec.TLSConfig
+		items  string // the items: block under the stores volume; "" for none
+	}{
+		{"created, both stores", created, spec.TLSConfig{Truststore: store("./certs/store.p12"), Keystore: store("./other/store.p12")},
+			item("truststore", "truststore") + item("keystore", "keystore")},
+		{"created, truststore only", created, spec.TLSConfig{Truststore: store("./certs/t.jks")},
+			item("truststore", "truststore")},
+		{"existing, keyed by base name", existing, spec.TLSConfig{Truststore: store("./certs/truststore.jks"), Keystore: store(`C:\certs\keystore.p12`)},
+			item("truststore.jks", "truststore") + item("keystore.p12", "keystore")},
+		{"existing, one file as both", existing, spec.TLSConfig{Truststore: store("./certs/combined.jks"), Keystore: store("./certs/combined.jks")},
+			item("combined.jks", "truststore") + item("combined.jks", "keystore")},
+		{"existing, no store file", existing, spec.TLSConfig{}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			k := baseKube()
+			k.Secrets = spec.Secrets{Stores: c.stores}
+			out := Render(Input{Kube: k, Defaults: &spec.Defaults{TLS: c.tls}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+			name, _ := k.StoresSecretName()
+			head := "        - name: stores\n          secret:\n            secretName: " + name + "\n"
+			if c.items == "" {
+				if !strings.Contains(out, head) || strings.Contains(out, "items:") {
+					t.Errorf("want the stores volume with no items:\n%s", out)
+				}
+				return
+			}
+			if want := head + "            items:\n" + c.items; !strings.Contains(out, want) {
+				t.Errorf("stores volume missing\n%s\nin:\n%s", want, out)
+			}
+			if !strings.Contains(out, "              mountPath: /app/external/classpath/truststores\n") {
+				t.Errorf("stores not mounted at the store dir:\n%s", out)
+			}
+		})
+	}
+	// With no defaults at all there is no store file to list.
+	k := baseKube()
+	k.Secrets = spec.Secrets{Stores: existing}
+	if got := storeItems(Input{Kube: k}); got != nil {
+		t.Errorf("storeItems with nil Defaults = %v, want nil", got)
 	}
 }
 

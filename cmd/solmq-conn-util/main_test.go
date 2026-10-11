@@ -2351,7 +2351,7 @@ tls:
 	if want := "Volume=" + filepath.Join(dir, "libs") + ":/app/external/libs:ro"; len(volumes) != 1 || volumes[0] != want {
 		t.Errorf("Volume= lines = %q, want only %q", volumes, want)
 	}
-	if want := "Secret=solmq-conn-tls-truststore,type=mount,target=/app/external/classpath/truststores/truststore.jks\n"; !strings.Contains(stdout, want) {
+	if want := "Secret=solmq-conn-tls-truststore,type=mount,target=/app/external/classpath/truststores/truststore\n"; !strings.Contains(stdout, want) {
 		t.Errorf("missing %q in:\n%s", want, stdout)
 	}
 }

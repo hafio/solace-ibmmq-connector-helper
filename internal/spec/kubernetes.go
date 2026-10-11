@@ -119,9 +119,10 @@ type StoreCreate struct {
 }
 
 // StoresSecret is the truststore/keystore Secret (volume mount). Create XOR
-// Existing, enforced by validate. An Existing Secret's keys are the base
-// filenames of tls.truststore.file / tls.keystore.file, which is what the
-// rendered config points at under the stores mount.
+// Existing, enforced by validate. A created Secret is keyed truststore and
+// keystore; an Existing Secret's keys are the base filenames of
+// tls.truststore.file / tls.keystore.file. Either way the pod mounts each at
+// its role's fixed name, which is what the rendered config points at.
 type StoresSecret struct {
 	Create   *StoreCreate `yaml:"create"`
 	Existing string       `yaml:"existing"`

@@ -48,7 +48,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 892 test functions, 1186 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 895 test functions, 1203 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -256,11 +256,11 @@ Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [cons
 | TestBuildMessageLoopWarning | same side used as source and target dest `SAME` | warnings contain message loop |
 | TestBuildSolaceTopicSourceEmitsConsumerTopic | solace topic source -> mq queue target | input-0 solace binding is consumer with DestType topic; consolidate renders whatever it is given, so this stays covered even though validate now rejects the combination |
 | TestBuildStorePathsRawVsMount | mount=false (config) | TruststoreLoc reflects env.yaml path verbatim ./certs/t.jks |
-| TestBuildStorePathsRawVsMount | mount=true (deploy) | TruststoreLoc rewritten to /app/external/classpath/truststores/t.jks |
+| TestBuildStorePathsRawVsMount | mount=true (deploy) | TruststoreLoc and KeystoreLoc rewritten to the fixed /app/external/classpath/truststores/truststore and .../keystore |
 | TestBuildLeaderElection | dangling conn-ref missing | le non-nil with Mode/Queue set but Session nil, no guard warning |
 | TestBuildLeaderElection | conn-ref happy path tcps host | Session host/vpn set and APIProps has SSL_TRUST_STORE, SSL_KEY_STORE, SSL_PRIVATE_KEY_ALIAS mounted paths and alias sc; Extras carry solace-defaults in authored order and the connection api-properties land last, after the tool TLS keys |
 | TestBuildLeaderElection | inline session non-tcps host | Session set from inline fields with no TLS APIProps, but the inline api-properties and solace-defaults still come through |
-| TestBuildLeaderElection | mount rewrite raw vs mnt for leader election truststore | raw keeps ./certs/truststore.jks verbatim, mnt rewrites to /app/external/classpath/truststores/truststore.jks |
+| TestBuildLeaderElection | mount rewrite raw vs mnt for leader election truststore | raw keeps ./certs/truststore.jks verbatim, mnt rewrites to /app/external/classpath/truststores/truststore |
 | TestBuildLeaderElectionSessionPassthroughCollision | - | a session passthrough key colliding with a tool TLS key keeps the tool value and warns as `leader-election session`, never as a binder |
 | TestBuildLeaderElectionWarningsReachBuild | - | the session collision warning escapes Build, proving the warns slice is threaded into buildLeaderElection |
 | TestBuildLeaderElectionSharesBinderSecretNames | shared connection | a session resolving to a workflow binder carries that binder CLIENT_USERNAME/PASSWORD and mounts no second secret |
@@ -288,15 +288,13 @@ Tests: [tls_test.go](../internal/tls/tls_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
-| TestMountPathSeparatorAgnostic | truststore.jks | unrooted plain name -> MountDir/truststore.jks |
-| TestMountPathSeparatorAgnostic | ./certs/truststore.jks | unix relative path -> MountDir/truststore.jks |
-| TestMountPathSeparatorAgnostic | .\certs\truststore.jks | windows relative backslash path -> MountDir/truststore.jks |
-| TestMountPathSeparatorAgnostic | C:\app\certs\keystore.jks | windows absolute path -> MountDir/keystore.jks |
-| TestMountPathSeparatorAgnostic | /abs/unix/path/keystore.jks | unix absolute path -> MountDir/keystore.jks |
-| TestMountPathSeparatorAgnostic | mixed/dir\store.jks | mixed slash and backslash path -> MountDir/store.jks |
-| TestSolacePropsUseMountedBaseName | - | mount=true rewrites SSL_TRUST_STORE and SSL_KEY_STORE to MountDir base names, not raw backslash paths |
-| TestStorePathConfigVsDeploy | mount=false | StorePath returns raw defaults path ./certs/t.jks unchanged |
-| TestStorePathConfigVsDeploy | mount=true | StorePath returns MountDir/t.jks base name from backslash input |
+| TestMountPathIsFixedPerRole | truststore | MountDir/truststore, whatever the file is called |
+| TestMountPathIsFixedPerRole | keystore | MountDir/keystore, so the two stores never share a path |
+| TestSolacePropsUseFixedMountPaths | - | mount=true sets SSL_TRUST_STORE and SSL_KEY_STORE to MountDir/truststore and MountDir/keystore, though both files are named store.p12 and written with backslashes |
+| TestStorePathConfigVsDeploy | truststore, mount=false | StorePath returns the raw defaults path ./certs/t.jks unchanged |
+| TestStorePathConfigVsDeploy | keystore, mount=false | a backslash path is kept exactly as written |
+| TestStorePathConfigVsDeploy | truststore, mount=true | MountDir/truststore from backslash input |
+| TestStorePathConfigVsDeploy | keystore, mount=true | MountDir/keystore even for a file named t.jks |
 | TestSolacePropsRawPathWhenNotMounted | - | mount=false keeps SSL_TRUST_STORE as raw ./certs/truststore.jks path |
 | TestSolacePropsStorePasswordIsStablePlaceholderNeverLiteral | - | store passwords reach api-properties only as ${TRUSTSTORE_PASSWORD}/${KEYSTORE_PASSWORD} placeholders; secretRef gets each store's own credential and no literal or env-var name leaks into any value |
 | TestSolacePropsSkipsSecretRefWhenStoreMissing | - | with no truststore/keystore SolaceProps emits nothing and never calls secretRef |
@@ -433,6 +431,12 @@ Tests: [deploy_test.go](../internal/deploy/deploy_test.go), [imagepull_test.go](
 | TestRenderLibsDownload | existing PVC download | download target uses claimName dl-pvc instead of emptyDir |
 | TestRenderNamespaceAlwaysFirst | - | Namespace doc is first in output and precedes ConfigMap |
 | TestRenderExistingSecrets | - | existing creds/tls secrets produce no Secret doc, referencing my-creds and secretName my-tls |
+| TestStoresVolumeMapsKeysToFixedNames | created, both stores | items map keys truststore and keystore to the same names, though both files are store.p12 |
+| TestStoresVolumeMapsKeysToFixedNames | created, truststore only | one item, truststore |
+| TestStoresVolumeMapsKeysToFixedNames | existing, keyed by base name | items map truststore.jks and keystore.p12 (from a backslash path) to truststore and keystore |
+| TestStoresVolumeMapsKeysToFixedNames | existing, one file as both | the one key combined.jks maps to both paths |
+| TestStoresVolumeMapsKeysToFixedNames | existing, no store file | the stores volume lists no items, so every key projects |
+| TestStoresVolumeMapsKeysToFixedNames | nil Defaults | storeItems returns nil: no store file to list |
 | TestRenderConfigMapStatusScript | - | the ConfigMap always carries the status script under its own `status` key, alongside application.yml |
 | TestRenderStatusScriptMountAfterLibs | - | the single-file status mount is declared after the libs directory mount, so it is not shadowed, and carries `subPath: status` |
 | TestProbesSplitLivenessFromReadiness | - | liveness stays a tcpSocket check so a slow downstream cannot become a restart loop, while readiness execs `sh <ContainerPath> --health` with an explicit timeoutSeconds (kubernetes defaults it to 1s) against a path the pod actually mounts |
@@ -792,11 +796,22 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckContainerNameRejected | valid-default-name | solmq-connector accepted with no docker.name error |
 | TestDockerPodmanTLSNeedsNoStoresOptIn | docker / podman | a TLS workflow with no stores: block warns about nothing, since the store files are mounted whenever tls.*.file is set (bind mounts on docker, the secret store on podman) |
 | TestContainerStorePathsGatedPerPlatform | docker | an unsafe character in tls.truststore.file, or a spaced directory, is rejected with no stores: block present, since docker bind-mounts the path itself |
-| TestContainerStorePathsGatedPerPlatform | podman | the path is never named, so a spaced directory passes; the file name ends the Secret= target and must be letters, digits, '.', '_' or '-' (`$(evil)`, ',', '%' and a space are refused) |
+| TestContainerStorePathsGatedPerPlatform | podman | neither the path nor the file name reaches the unit, which mounts each store at its role's fixed name, so `$(evil)`, a spaced directory, ',', '%' and a space all pass |
 | TestContainerStorePathsGatedPerPlatform | kubernetes | the same path is not gated for kubernetes, which embeds the store content in a Secret rather than naming a host path |
 | TestRunAsCheckedOnEveryPlatform | kubernetes / docker / podman | the default, unset, image and a non-root id are quiet; a value outside the grammar is an error naming the section and the reason; uid 0 warns it runs as root, adding that it is host root on docker and podman, which use no user namespace |
 | TestPodmanRunAsBeyondTheSubuidRangeWarns | 65536 / 65537 / gid 70000 / image / no Lint / docker / kubernetes | under Lint (validate) an id past 65536 warns on podman, which deployed rootless maps container ids 1..65536 into a stock 65536-wide subordinate range; 65536 fits, the gid counts, image is quiet, generate and deploy (no Lint) stay quiet, and docker and kubernetes never warn |
-| TestPodmanStoreFileNamesMustDiffer | shared / distinct | a truststore and keystore sharing a file name would mount at one path on podman, so it is an error naming the path; distinct names pass |
+| TestStoresMayShareAFileName | shared file name | ./trust/store.p12 and ./key/store.p12 give no store finding on docker or podman |
+| TestStoresMayShareAFileName | one file as both | the same file as truststore and keystore gives no store finding on docker or podman |
+| TestKubernetesExistingStoresKeyIsASecretKey | plain name | truststore.jks is a valid key: no error |
+| TestKubernetesExistingStoresKeyIsASecretKey | backslash path, plain name | the key is the base name after the last backslash: no error |
+| TestKubernetesExistingStoresKeyIsASecretKey | 253 characters | the longest valid key: no error |
+| TestKubernetesExistingStoresKeyIsASecretKey | keystore unset | only the truststore's key is checked: no error |
+| TestKubernetesExistingStoresKeyIsASecretKey | space | an error naming the Secret, tls.truststore.file and the key |
+| TestKubernetesExistingStoresKeyIsASecretKey | comma | an error |
+| TestKubernetesExistingStoresKeyIsASecretKey | dot | a key of '.' is an error |
+| TestKubernetesExistingStoresKeyIsASecretKey | leading dot dot | a key starting '..' is an error |
+| TestKubernetesExistingStoresKeyIsASecretKey | 254 characters | one character too long is an error |
+| TestKubernetesExistingStoresKeyIsASecretKey | created, odd name | a created Secret is keyed by role, so a spaced file name is no error |
 | TestUsesTLS | solace-tcps-host | solace side with tcps host returns usesTLS true |
 | TestUsesTLS | mq-tls-true-no-tcps | no solace side, mq tls true returns usesTLS true |
 | TestUsesTLS | plain-tcp-mq-false | plain tcp solace and mq tls false returns usesTLS false |
@@ -883,7 +898,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | Test | Case | Verifies |
 |------|------|----------|
 | TestParseExpandsNonCredentialAndWarnsOnUnsetDefaultless | - | parse() expands host/msg-vpn from Lookup, leaves client-password-env verbatim, and returns exactly one warning naming TYPO for the unset defaultless conn-name variable |
-| TestResolveStores | truststore+keystore with ReadFile | resolves 2 store files, first named t.jks |
+| TestResolveStores | truststore+keystore with ReadFile | resolves 2 store files keyed by role, truststore then keystore |
 | TestResolveStores | no ReadFile provided | missing ReadFile returns error |
 | TestResolveStores | ReadFile returns error | read error propagates |
 | TestResolveStores | no stores configured | empty Defaults yields 0 stores, no error |
@@ -891,7 +906,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestPodmanFileSecretNames | - | the five file secrets an instance can own (application.yml, tls-truststore, tls-keystore, status-script, logback-spring.xml), none of whose suffixes could also be a credential's stable name |
 | TestResolvePodmanFiles | document / binary store / 511999 bytes | a document passes through as rendered, a store is read byte for byte (NUL, CR and non-UTF-8 included), and 511999 bytes is accepted |
 | TestResolvePodmanFiles | missing / no file access / empty / 512000 bytes / empty document | each fails before anything is loaded, naming the field and path (wrapping the read error) and never the content |
-| TestTargetMounts | tls+libs configured | 2 store mounts at the fixed default store path, and a libs mount whose source is the resolved abs host dir and whose target is the fixed default libs path -- both container-side paths come from constants, not from the spec; each mount is named by its env.yaml key (tls.truststore.file, tls.keystore.file, libs.dir) |
+| TestTargetMounts | tls+libs configured | 2 store mounts at the fixed per-role store paths (MountDir/truststore, MountDir/keystore), and a libs mount whose source is the resolved abs host dir and whose target is the fixed default libs path -- both container-side paths come from constants, not from the spec; each mount is named by its env.yaml key (tls.truststore.file, tls.keystore.file, libs.dir) |
 | TestTargetMounts | no tls, no libs | yields nil,nil -- with stores derived, an absent tls block is the only way to get no store mounts |
 | TestTargetMounts | store with no file | a tls.*.store present but with an empty file is skipped rather than mounted from an empty source |
 | TestResolveCredentials | nil refs | no kvs, no error |
@@ -929,7 +944,9 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestGeneratePodmanCarriesStatusScript | - | the plan carries `<name>-application.yml` and `<name>-status-script` with their rendered content, the unit mounts each from podman's secret store at its fixed path, and no Volume= appears without libs |
 | TestGeneratePodmanCarriesLogbackOnlyWithSyslog | no syslog | neither a `<name>-logback-spring.xml` file on the plan nor any logback mount in the unit |
 | TestGeneratePodmanCarriesLogbackOnlyWithSyslog | syslog | the plan carries the rendered logback-spring.xml as `<name>-logback-spring.xml` and the unit mounts it from the secret store at the image's logback path |
-| TestGeneratePodmanNeverReadsTheStores | - | with a truststore and keystore set, generate never calls ReadFile: the plan names each store by its tls.*.file, the unit mounts `<name>-tls-truststore` / `<name>-tls-keystore` at /app/external/classpath/truststores/<file>, and neither is a Volume= |
+| TestGeneratePodmanNeverReadsTheStores | - | with a truststore and keystore set, generate never calls ReadFile: the plan names each store by its tls.*.file, the unit mounts `<name>-tls-truststore` / `<name>-tls-keystore` at /app/external/classpath/truststores/truststore and .../keystore, and neither is a Volume= |
+| TestStoresSharingAFileNameMountApart | shared file name | ./trust/store.p12 and ./key/store.p12 generate on docker (two bind targets), podman (two Secret= targets) and kubernetes (keys truststore and keystore, mapped by items) with no error |
+| TestStoresSharingAFileNameMountApart | one file as both | the same file as both stores generates on all three, each store at its own path or key |
 | TestGeneratePodmanIgnoresBaseDir | - | a base-dir, even a spaced one holding an unset variable, changes neither the unit nor the plan and adds no error or warning outside validate |
 | TestGenerateMissingTargetSection | kubernetes | error contains kubernetes target requires a 'kubernetes:' section in env.yaml |
 | TestGenerateMissingTargetSection | docker | error contains docker target requires a 'docker:' section in env.yaml |
@@ -940,7 +957,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestGeneratorPageKnownKeysInSync | SOLACE_KEYS / MQ_KEYS / SOLACE_MANAGED / MQ_MANAGED / SOLACE_CREDS / MQ_CREDS | the page's hand-copied key lists equal spec.KnownKeys, ToolManagedKeys and CredentialKeys per system, so the validate port cannot drift from the CLI when a key is added |
 | TestGeneratorPageSelfTestNormalizesEmptyFindings | - | the page's Self-test normalizes its own findings output the way it normalizes the golden block (trailing newlines trimmed, exactly one added), pinned by matching the normalization pattern in the page source, so the check needs no JS engine -- without the normalization the zero-findings case diffs a bare newline against an empty string and Self-test fails on the page's own fixture |
 | TestGoldenConfig | - | generated config output matches testdata/golden/application.yml byte-for-byte, one instance |
-| TestGoldenKubernetesCreate | - | generated kubernetes manifests (namespace, configmap incl. status script, secret, stores, pv, pvc, deployment with secrets-volume/stores/syslog/libs mounts and le-mode/role labels, service) match golden fixture byte-for-byte |
+| TestGoldenKubernetesCreate | - | generated kubernetes manifests (namespace, configmap incl. status script, secret, stores keyed truststore/keystore and mapped by items, pv, pvc, deployment with secrets-volume/stores/syslog/libs mounts and le-mode/role labels, service) match golden fixture byte-for-byte |
 | TestGoldenKubernetesNoSecrets | - | generated manifests without secrets/syslog/libs (namespace, configmap incl. status script, deployment, service) match golden fixture byte-for-byte |
 | TestDockerConfigJSON | private registry / docker hub fallback | the payload is an auths map keyed by registry carrying the account plus the base64 user:password the engines send |
 | TestDockerConfigJSONEscapesAwkwardValues | - | a password carrying quotes, a backslash or JSON of its own round-trips as data rather than reshaping the document -- which is why it is marshalled, not concatenated |

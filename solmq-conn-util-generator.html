@@ -332,7 +332,7 @@ details[open]>summary::before{content:"- "}
         <option value="existing">existing</option>
       </select></div>
       <div class="opt-fields" id="k8s-stores-c"><div class="h">The Secret is named &lt;deployment name&gt;-stores.</div></div>
-      <div class="opt-fields" id="k8s-stores-e"><div class="f"><label>Existing Secret</label><input id="i-k8s-stores-existing" placeholder="my-tls"><div class="h">Its keys must be the base filenames of the truststore/keystore above (truststore.jks, keystore.jks) -- that is what the rendered config points at.</div></div></div>
+      <div class="opt-fields" id="k8s-stores-e"><div class="f"><label>Existing Secret</label><input id="i-k8s-stores-existing" placeholder="my-tls"><div class="h">Its keys must be the base filenames of the truststore/keystore above (truststore.jks, keystore.jks); the pod mounts them as truststore and keystore, which is what the rendered config points at.</div></div></div>
       <div class="f"><label>Image Pull Secret</label><select id="i-k8s-ipull" onchange="syncK8s()">
         <option value="">(none)</option>
         <option value="reference">reference an existing Secret</option>
@@ -361,7 +361,7 @@ details[open]>summary::before{content:"- "}
       <div class="sub-h">Credentials</div>
       <div class="h">Derived automatically from the connection fields above and mounted at /app/external/var/secrets; nothing to configure here.</div>
       <div class="sub-h">Mounts</div>
-      <div class="h">The TLS stores are bind-mounted at /app/external/classpath/truststores whenever tls.*.file is set; nothing to configure here.</div>
+      <div class="h">The TLS stores are bind-mounted at /app/external/classpath/truststores/truststore and .../keystore whenever tls.*.file is set, whatever the files are called; nothing to configure here.</div>
       <div class="tgl"><input type="checkbox" id="i-dk-libs-on" onchange="togOpt('i-dk-libs-on','dk-libs-f')"><label for="i-dk-libs-on">Bind-mount an IBM MQ jar directory</label></div>
       <div class="opt-fields" id="dk-libs-f"><div class="f"><label>Host Directory</label><input id="i-dk-libs-dir" placeholder="./libs"></div></div>
     </div>
@@ -386,7 +386,7 @@ details[open]>summary::before{content:"- "}
       <div class="sub-h">Credentials</div>
       <div class="h">Derived automatically from the connection fields above and mounted at /app/external/var/secrets; nothing to configure here.</div>
       <div class="sub-h">Mounts</div>
-      <div class="h">The TLS stores are loaded into podman's secret store and mounted at /app/external/classpath/truststores whenever tls.*.file is set; nothing to configure here. The jar directory below is the one host path the unit mounts.</div>
+      <div class="h">The TLS stores are loaded into podman's secret store and mounted at /app/external/classpath/truststores/truststore and .../keystore whenever tls.*.file is set, whatever the files are called; nothing to configure here. The jar directory below is the one host path the unit mounts.</div>
       <div class="tgl"><input type="checkbox" id="i-pd-libs-on" onchange="togOpt('i-pd-libs-on','pd-libs-f')"><label for="i-pd-libs-on">Bind-mount an IBM MQ jar directory</label></div>
       <div class="opt-fields" id="pd-libs-f"><div class="f"><label>Host Directory</label><input id="i-pd-libs-dir" placeholder="./libs"></div></div>
     </div>
@@ -1203,7 +1203,6 @@ function readCtr(p, section){
 
 // ===== env.yaml =====
 const SECRETS_MOUNT = '/app/external/var/secrets';   // mirrors spec.SecretsMountPath
-const STORES_MOUNT = '/app/external/classpath/truststores';   // mirrors spec.DefaultStoresMountPath
 
 function sideBody(s, ind, withDest){
   let o = '';
@@ -2136,6 +2135,7 @@ function checkKube(add, warn, m){
     }
     if(k.stores.existing){
       checkSecretName(add, 'kubernetes.secrets.stores.existing', k.stores.existing);
+      checkStoresSecretKeys(add, k.stores.existing, m.tls);
     }
   }
 
@@ -2308,33 +2308,32 @@ function checkContainerTarget(add, warn, m, c){
   }
   checkExpansion(warn, ENV_FILE, `${c.section}.libs.dir`, c.libsDir);
 }
-// checkContainerStores mirrors validate.checkContainerStores: the tls.*.file
-// paths are always mounted, so they are always gated, by what each platform
-// does with them. Docker bind-mounts the path itself. Podman reads the file
-// into its secret store at deploy, so only the file name reaches the unit, as
-// the end of a Secret= target: it is held to a narrow set, and the two stores'
-// names must differ. Kubernetes embeds the content in a Secret and never
-// reaches this function.
-const PODMAN_STORE_NAME_RE = /^[A-Za-z0-9._-]+$/;
+// checkContainerStores mirrors validate.checkContainerStores: docker
+// bind-mounts each tls.*.file path into the compose file, so the path is gated.
+// Podman reads the file into its secret store at deploy and, like every
+// platform, mounts each store at its role's fixed name, so neither the path nor
+// the file name reaches the unit. Kubernetes never reaches this function; see
+// checkStoresSecretKeys.
 function checkContainerStores(add, section, tls){
-  let seen = '';
+  if(section === 'podman') return;
   [['tls.truststore.file', tls.truststore], ['tls.keystore.file', tls.keystore]].forEach(([field, store]) => {
     if(!store || !store.file) return;
-    if(section !== 'podman'){
-      if(!safeHostPath(store.file)){
-        add(ENV_FILE, `${section} bind-mounts ${field} "${store.file}", which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
-      }
-      return;
+    if(!safeHostPath(store.file)){
+      add(ENV_FILE, `${section} bind-mounts ${field} "${store.file}", which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
     }
-    const base = specBaseName(store.file);
-    if(!PODMAN_STORE_NAME_RE.test(base)){
-      add(ENV_FILE, `podman mounts ${field} ${goQuote(store.file)} from podman's secret store at ${STORES_MOUNT}/${base}, so its file name may hold only letters, digits, '.', '_' and '-'; rename the file`);
-      return;
+  });
+}
+// checkStoresSecretKeys mirrors validate.checkStoresSecretKeys: an existing
+// stores Secret is read by the tls.*.file base names, which the pod's stores
+// volume writes as Secret keys, so each is held to a Secret key's grammar.
+const KUBE_SECRET_KEY_RE = /^[-._a-zA-Z0-9]+$/;
+function checkStoresSecretKeys(add, existing, tls){
+  [['tls.truststore.file', tls.truststore], ['tls.keystore.file', tls.keystore]].forEach(([field, store]) => {
+    if(!store || !store.file) return;
+    const key = specBaseName(store.file);
+    if(key.length > 253 || !KUBE_SECRET_KEY_RE.test(key) || key === '.' || key.startsWith('..')){
+      add(ENV_FILE, `kubernetes.secrets.stores.existing ${goQuote(existing)} is mounted by key, and the key for ${field} is its file name ${goQuote(key)}, which is not a valid Secret key (letters, digits, '-', '_' and '.', at most 253 characters, not '.' and not starting '..'); rename the file to the key the Secret holds`);
     }
-    if(base === seen){
-      add(ENV_FILE, `tls.truststore.file and tls.keystore.file share the file name ${goQuote(base)}, so podman would mount both at ${STORES_MOUNT}/${base}; rename one of them`);
-    }
-    seen = base;
   });
 }
 // specBaseName mirrors spec.BaseName: the last element of a path written with

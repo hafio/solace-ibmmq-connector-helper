@@ -111,7 +111,7 @@ func TestApplicationRich(t *testing.T) {
 	out := Application(buildRich(t))
 	for _, w := range []string{
 		"spring:", "ssl:", "bundle:", "jks:", "-bundle:", "truststore:",
-		"location: /app/external/classpath/truststores/truststore.jks", "keystore:", "key:", "alias: mc",
+		"location: /app/external/classpath/truststores/truststore", "keystore:", "key:", "alias: mc",
 		"binders:", "type: jms", "queue-manager: QM1", "ssl-bundle:", "additional-properties:",
 		"WMQ_SSL_CIPHER_SUITE: TLS_X", `WMQ_SSL_PEER_NAME: "CN=x"`,
 		"type: solace", "host: tcps://b:55443", "connect-retries: -1", "api-properties:",
@@ -141,11 +141,11 @@ const richApplicationWant = `spring:
       jks:
         mq-conn-1-bundle:
           truststore:
-            location: /app/external/classpath/truststores/truststore.jks
+            location: /app/external/classpath/truststores/truststore
             password: ${_GEN_TRUSTSTORE_PASSWORD}
             type: JKS
           keystore:
-            location: /app/external/classpath/truststores/keystore.jks
+            location: /app/external/classpath/truststores/keystore
             password: ${_GEN_KEYSTORE_PASSWORD}
             type: JKS
           key:
@@ -179,10 +179,10 @@ const richApplicationWant = `spring:
                 connect-retries: -1
                 api-properties:
                   SSL_VALIDATE_CERTIFICATE: true
-                  SSL_TRUST_STORE: /app/external/classpath/truststores/truststore.jks
+                  SSL_TRUST_STORE: /app/external/classpath/truststores/truststore
                   SSL_TRUST_STORE_PASSWORD: ${_GEN_TRUSTSTORE_PASSWORD}
                   SSL_TRUST_STORE_FORMAT: JKS
-                  SSL_KEY_STORE: /app/external/classpath/truststores/keystore.jks
+                  SSL_KEY_STORE: /app/external/classpath/truststores/keystore
                   SSL_KEY_STORE_PASSWORD: ${_GEN_KEYSTORE_PASSWORD}
                   SSL_KEY_STORE_FORMAT: JKS
                   SSL_PRIVATE_KEY_ALIAS: sc
@@ -505,10 +505,10 @@ func TestApplicationLeaderElection(t *testing.T) {
 		"        connect-retries: -1\n" +
 		"        api-properties:\n" +
 		"          SSL_VALIDATE_CERTIFICATE: true\n" +
-		"          SSL_TRUST_STORE: /app/external/classpath/truststores/truststore.jks\n" +
+		"          SSL_TRUST_STORE: /app/external/classpath/truststores/truststore\n" +
 		"          SSL_TRUST_STORE_PASSWORD: ${_GEN_TRUSTSTORE_PASSWORD}\n" +
 		"          SSL_TRUST_STORE_FORMAT: JKS\n" +
-		"          SSL_KEY_STORE: /app/external/classpath/truststores/keystore.jks\n" +
+		"          SSL_KEY_STORE: /app/external/classpath/truststores/keystore\n" +
 		"          SSL_KEY_STORE_PASSWORD: ${_GEN_KEYSTORE_PASSWORD}\n" +
 		"          SSL_KEY_STORE_FORMAT: JKS\n" +
 		"          SSL_PRIVATE_KEY_ALIAS: sc\n" +

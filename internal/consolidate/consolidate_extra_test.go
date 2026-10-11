@@ -400,8 +400,11 @@ func TestBuildStorePathsRawVsMount(t *testing.T) {
 		t.Fatalf("config (mount=false) truststore loc = %q, want ./certs/t.jks", raw.Bundles[0].TruststoreLoc)
 	}
 	mnt, _ := Build(wfs, d, Opts{MountStores: true}) // deploy: rewrite to the container mount path
-	if mnt.Bundles[0].TruststoreLoc != "/app/external/classpath/truststores/t.jks" {
+	if mnt.Bundles[0].TruststoreLoc != "/app/external/classpath/truststores/truststore" {
 		t.Fatalf("deploy (mount=true) truststore loc = %q", mnt.Bundles[0].TruststoreLoc)
+	}
+	if mnt.Bundles[0].KeystoreLoc != "/app/external/classpath/truststores/keystore" {
+		t.Fatalf("deploy (mount=true) keystore loc = %q", mnt.Bundles[0].KeystoreLoc)
 	}
 }
 
@@ -474,8 +477,8 @@ func TestBuildLeaderElection(t *testing.T) {
 		got[p.Key] = p.Val
 	}
 	want := map[string]string{
-		"SSL_TRUST_STORE":       "/app/external/classpath/truststores/truststore.jks",
-		"SSL_KEY_STORE":         "/app/external/classpath/truststores/keystore.jks",
+		"SSL_TRUST_STORE":       "/app/external/classpath/truststores/truststore",
+		"SSL_KEY_STORE":         "/app/external/classpath/truststores/keystore",
 		"SSL_PRIVATE_KEY_ALIAS": "sc",
 	}
 	for k, w := range want {
@@ -554,7 +557,7 @@ func TestBuildLeaderElection(t *testing.T) {
 	if rawTS := trustStoreVal(raw); rawTS != "./certs/truststore.jks" {
 		t.Errorf("config (mount=false) truststore = %q, want ./certs/truststore.jks", rawTS)
 	}
-	if mntTS := trustStoreVal(mnt); mntTS != "/app/external/classpath/truststores/truststore.jks" {
+	if mntTS := trustStoreVal(mnt); mntTS != "/app/external/classpath/truststores/truststore" {
 		t.Errorf("deploy (mount=true) truststore = %q", mntTS)
 	}
 

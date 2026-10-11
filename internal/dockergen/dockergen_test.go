@@ -53,7 +53,7 @@ func TestRenderFull_WithEverything(t *testing.T) {
 		},
 		Secrets: []string{"SOLACE_CLIENT_USERNAME", "SOLACE_CLIENT_PASSWORD", "TRUSTSTORE_PASSWORD"},
 		Stores: []Mount{
-			{Source: "/abs/certs/truststore.jks", Target: "/app/external/classpath/truststores/truststore.jks"},
+			{Source: "/abs/certs/truststore.jks", Target: "/app/external/classpath/truststores/truststore"},
 		},
 		Libs: &Mount{Source: "/abs/libs", Target: "/app/external/libs"},
 	}
@@ -98,7 +98,7 @@ services:
       retries: 3
       start_period: 60s
     volumes:
-      - /abs/certs/truststore.jks:/app/external/classpath/truststores/truststore.jks:ro
+      - /abs/certs/truststore.jks:/app/external/classpath/truststores/truststore:ro
       - /abs/libs:/app/external/libs:ro
 configs:
   solmq-connector-app:

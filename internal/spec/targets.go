@@ -92,9 +92,10 @@ const (
 
 // BaseName returns the final element of a path, splitting on both '/' and '\'
 // so a config authored on Windows resolves to the same name when the CLI runs on
-// Linux. It is the single definition: the store-mount path, the Kubernetes
-// stores-Secret data key, and the libs download filename must all agree, and
-// separate copies previously disagreed about backslashes.
+// Linux. It is the single definition: the key an existing Kubernetes stores
+// Secret is read by (validate's check and the pod's volume items) and the libs
+// download filename must all agree, and separate copies previously disagreed
+// about backslashes.
 func BaseName(p string) string {
 	p = strings.ReplaceAll(p, "\\", "/")
 	if i := strings.LastIndexByte(p, '/'); i >= 0 {

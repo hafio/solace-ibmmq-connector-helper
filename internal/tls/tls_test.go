@@ -12,41 +12,39 @@ import (
 // caring whether the caller supplied a literal or an -env reference.
 func placeholderSecretRef(n string, c spec.Cred) string { return "${" + n + "}" }
 
-// MountPath must strip both '/' and '\' independent of host OS, so a Windows-
-// authored env.yaml path (which may use backslashes) resolves to the same
-// mounted base name even when the CLI runs on Linux/Mac — the base name the
-// stores Secret mounts, not left unsplit.
-func TestMountPathSeparatorAgnostic(t *testing.T) {
-	cases := map[string]string{
-		"truststore.jks":              MountDir + "/truststore.jks",
-		"./certs/truststore.jks":      MountDir + "/truststore.jks",
-		`.\certs\truststore.jks`:      MountDir + "/truststore.jks",
-		`C:\app\certs\keystore.jks`:   MountDir + "/keystore.jks",
-		"/abs/unix/path/keystore.jks": MountDir + "/keystore.jks",
-		`mixed/dir\store.jks`:         MountDir + "/store.jks",
-	}
-	for in, want := range cases {
-		if got := MountPath(in); got != want {
-			t.Errorf("MountPath(%q) = %q, want %q", in, got, want)
+// Inside the container a store is named by its role alone, so the two stores
+// never share a path -- not when their files share a name, nor when one file
+// serves as both.
+func TestMountPathIsFixedPerRole(t *testing.T) {
+	for _, c := range []struct {
+		role Role
+		want string
+	}{
+		{Truststore, MountDir + "/truststore"},
+		{Keystore, MountDir + "/keystore"},
+	} {
+		if got := MountPath(c.role); got != c.want {
+			t.Errorf("MountPath(%q) = %q, want %q", c.role, got, c.want)
 		}
 	}
 }
 
-// The store locations wired into Solace api-properties must be the mounted base
-// name, not the raw (possibly backslash) path from env.yaml — otherwise the
-// bundle/location references a file the volume never mounts.
-func TestSolacePropsUseMountedBaseName(t *testing.T) {
+// The store locations wired into Solace api-properties must be the fixed
+// mounted names, whatever the files in env.yaml are called and however their
+// paths are written -- here both stores share one file name, written with
+// backslashes.
+func TestSolacePropsUseFixedMountPaths(t *testing.T) {
 	d := &spec.Defaults{TLS: spec.TLSConfig{
-		Truststore: &spec.Store{File: `.\certs\truststore.jks`, PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"},
-		Keystore:   &spec.Store{File: `.\certs\keystore.jks`, PasswordEnv: "KEYSTORE_PASSWORD_ENV", Type: "JKS"},
+		Truststore: &spec.Store{File: `.\trust\store.p12`, PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "PKCS12"},
+		Keystore:   &spec.Store{File: `.\key\store.p12`, PasswordEnv: "KEYSTORE_PASSWORD_ENV", Type: "PKCS12"},
 	}}
 	got := map[string]string{}
 	for _, kv := range SolaceProps(d, "solace-client", true, placeholderSecretRef) {
 		got[kv.Key] = kv.Val
 	}
 	want := map[string]string{
-		"SSL_TRUST_STORE": MountDir + "/truststore.jks",
-		"SSL_KEY_STORE":   MountDir + "/keystore.jks",
+		"SSL_TRUST_STORE": MountDir + "/truststore",
+		"SSL_KEY_STORE":   MountDir + "/keystore",
 	}
 	for k, w := range want {
 		if got[k] != w {
@@ -56,11 +54,20 @@ func TestSolacePropsUseMountedBaseName(t *testing.T) {
 }
 
 func TestStorePathConfigVsDeploy(t *testing.T) {
-	if StorePath("./certs/t.jks", false) != "./certs/t.jks" {
-		t.Error("mount=false must return the raw defaults path (config)")
-	}
-	if got := StorePath(`.\certs\t.jks`, true); got != MountDir+"/t.jks" {
-		t.Errorf("mount=true must return the mount path base name, got %q", got)
+	for _, c := range []struct {
+		role  Role
+		file  string
+		mount bool
+		want  string
+	}{
+		{Truststore, "./certs/t.jks", false, "./certs/t.jks"},
+		{Keystore, `.\certs\k.p12`, false, `.\certs\k.p12`},
+		{Truststore, `.\certs\t.jks`, true, MountDir + "/truststore"},
+		{Keystore, "./certs/t.jks", true, MountDir + "/keystore"},
+	} {
+		if got := StorePath(c.role, c.file, c.mount); got != c.want {
+			t.Errorf("StorePath(%q, %q, %v) = %q, want %q", c.role, c.file, c.mount, got, c.want)
+		}
 	}
 }
 
