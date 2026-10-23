@@ -6,9 +6,9 @@
     "semantic_hash": ""
   },
   "go.mod": {
-    "mtime": 1791524917.1145666,
-    "seen": 1791524988.3377607,
-    "ast_hash": "576af74dee280f36e8ae40d654321aba",
+    "mtime": 1792740468.1134799,
+    "seen": 1792740520.8254619,
+    "ast_hash": "69fbbde579b48b25ec59112ee600e414",
     "semantic_hash": ""
   },
   "internal/consolidate/consolidate.go": {
