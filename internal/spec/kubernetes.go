@@ -109,7 +109,7 @@ func (c *CredentialsSecret) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// StoreCreate embeds the .jks files from env.yaml tls.*.file into a Secret
+// StoreCreate embeds the files of the tls.stores connections select into a Secret
 // named <deployment.name>-stores (Kubernetes.StoresSecretName). It is written
 // create: true; the older create: {name: ...} still means "create".
 type StoreCreate struct {
@@ -118,11 +118,10 @@ type StoreCreate struct {
 	Name string `yaml:"name"`
 }
 
-// StoresSecret is the truststore/keystore Secret (volume mount). Create XOR
-// Existing, enforced by validate. A created Secret is keyed truststore and
-// keystore; an Existing Secret's keys are the base filenames of
-// tls.truststore.file / tls.keystore.file. Either way the pod mounts each at
-// its role's fixed name, which is what the rendered config points at.
+// StoresSecret is the Secret carrying the tls.stores files connections select
+// (volume mount). Create XOR Existing, enforced by validate. Either way the
+// Secret is keyed by store name, and the pod mounts each key under that name,
+// which is what the rendered config points at.
 type StoresSecret struct {
 	Create   *StoreCreate `yaml:"create"`
 	Existing string       `yaml:"existing"`

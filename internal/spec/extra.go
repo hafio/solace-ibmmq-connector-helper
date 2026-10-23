@@ -68,7 +68,8 @@ func KnownKeys(system string) []string {
 // ToolManagedKeys lists the keys the tool writes itself under a binder's
 // solace.java.* or ibm.mq.* (render.go), so a passed-through key may not set
 // them: the connector would receive the property twice. ssl-bundle is the one
-// that is not also a schema key -- it is derived from tls: and tls.truststore.
+// that is not also a schema key -- it is derived from tls: and the connection's
+// truststore:/keystore: selection.
 func ToolManagedKeys(system string) []string {
 	switch system {
 	case SystemSolace:

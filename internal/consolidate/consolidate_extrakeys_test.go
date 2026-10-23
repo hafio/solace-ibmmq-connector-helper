@@ -185,8 +185,10 @@ func TestBuildNestedExtraKeyThroughSharedConnRefIsQuiet(t *testing.T) {
 // validate's refusal: another spelling of a key the tool writes itself is
 // dropped with the passthrough warning, and the tool's value stays.
 func TestBuildDropsExtraKeysTheToolManages(t *testing.T) {
-	d := &spec.Defaults{TLS: spec.TLSConfig{Truststore: &spec.Store{File: "./certs/truststore.jks", PasswordEnv: "TS", Type: "JKS"}}}
-	src := withExtra(t, mqSide("QM", "IN", spec.DestQueue, true), "ssl-bundle: theirs\nqueueManager: OTHER\n")
+	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"mq-ca": {File: "./certs/truststore.jks", PasswordEnv: "TS", Type: "JKS"}}}}
+	mqs := mqSide("QM", "IN", spec.DestQueue, true)
+	mqs.Truststore = "mq-ca"
+	src := withExtra(t, mqs, "ssl-bundle: theirs\nqueueManager: OTHER\n")
 	tgt := withExtra(t, solaceSide("v", "OUT", spec.DestQueue, ""), "msgVpn: other\n")
 	m, warns := Build([]spec.Workflow{extraWF("0.yaml", src, tgt)}, d, Opts{MountStores: true})
 	mq := binderOfKind(t, m, spec.SystemMQ).MQ

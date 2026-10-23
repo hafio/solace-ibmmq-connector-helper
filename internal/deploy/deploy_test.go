@@ -37,7 +37,7 @@ func fullFixtureInput() Input {
 	return Input{
 		Kube: k, Defaults: &spec.Defaults{},
 		CredKVs:  []KV{{Key: "A", Val: `sec"ret`}},
-		Stores:   []StoreFile{{Name: "truststore", Base64: "QUJD"}},
+		Stores:   []StoreFile{{Name: "mq-ca", Base64: "QUJD"}},
 		Instance: one(k.Deployment.Name, "spring:\n  x: 1\n\n  y: 2\n", &consolidate.Model{MQTLS: true}),
 	}
 }
@@ -48,7 +48,7 @@ func TestRenderFull(t *testing.T) {
 		"kind: ConfigMap", "name: solmq-config", "application.yml: |", "    spring:",
 		"status: |", "    #!/bin/sh", "    echo status",
 		"kind: Secret", "name: solmq-credentials", "stringData:", `A: "sec\"ret"`,
-		"name: solmq-stores", "truststore: QUJD",
+		"name: solmq-stores", "mq-ca: QUJD",
 		"kind: Deployment", "automountServiceAccountToken: false", "name: JAVA_TOOL_OPTIONS", "useIBMCipherMappings=false",
 		"solace-connector/le-mode: standalone", "solace-connector/role: active",
 		"- name: secrets", "mountPath: " + SecretsMountPath, "defaultMode: 0400",
@@ -115,7 +115,7 @@ metadata:
   namespace: ns
 type: Opaque
 data:
-  truststore: QUJD
+  mq-ca: QUJD
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -386,7 +386,7 @@ func TestCreatedSecretsTakeDerivedNames(t *testing.T) {
 	out := Render(Input{
 		Kube: k, Defaults: &spec.Defaults{},
 		CredKVs:  []KV{{Key: "A", Val: "x"}},
-		Stores:   []StoreFile{{Name: "truststore", Base64: "QUJD"}},
+		Stores:   []StoreFile{{Name: "mq-ca", Base64: "QUJD"}},
 		Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{}),
 	})
 	for _, want := range []string{
@@ -506,37 +506,32 @@ func TestRenderExistingSecrets(t *testing.T) {
 	}
 }
 
-// The stores volume mounts each store under its role's fixed name, whatever
-// the file is called: a created Secret is keyed by the role, an existing one by
-// the tls.*.file base name operators already key it by (one key may feed both
-// paths), and with no store file set nothing is listed, so every key projects.
-func TestStoresVolumeMapsKeysToFixedNames(t *testing.T) {
+// The stores volume mounts each store a connection selects (Model.Stores)
+// under its tls.stores name, whatever the file is called: created or existing,
+// the Secret is keyed by store name. With no store selected nothing is listed,
+// so every key projects.
+func TestStoresVolumeMapsKeysToStoreNames(t *testing.T) {
 	created := &spec.StoresSecret{Create: &spec.StoreCreate{}}
 	existing := &spec.StoresSecret{Existing: "my-tls"}
-	store := func(f string) *spec.Store { return &spec.Store{File: f} }
-	item := func(key, path string) string {
-		return "              - key: \"" + key + "\"\n                path: " + path + "\n"
+	item := func(key string) string {
+		return "              - key: \"" + key + "\"\n                path: " + key + "\n"
 	}
+	two := []consolidate.StoreUse{{Name: "mq-ca", File: "./certs/store.p12"}, {Name: "solace-client", File: "./other/store.p12", Private: true}}
 	for _, c := range []struct {
 		name   string
 		stores *spec.StoresSecret
-		tls    spec.TLSConfig
+		uses   []consolidate.StoreUse
 		items  string // the items: block under the stores volume; "" for none
 	}{
-		{"created, both stores", created, spec.TLSConfig{Truststore: store("./certs/store.p12"), Keystore: store("./other/store.p12")},
-			item("truststore", "truststore") + item("keystore", "keystore")},
-		{"created, truststore only", created, spec.TLSConfig{Truststore: store("./certs/t.jks")},
-			item("truststore", "truststore")},
-		{"existing, keyed by base name", existing, spec.TLSConfig{Truststore: store("./certs/truststore.jks"), Keystore: store(`C:\certs\keystore.p12`)},
-			item("truststore.jks", "truststore") + item("keystore.p12", "keystore")},
-		{"existing, one file as both", existing, spec.TLSConfig{Truststore: store("./certs/combined.jks"), Keystore: store("./certs/combined.jks")},
-			item("combined.jks", "truststore") + item("combined.jks", "keystore")},
-		{"existing, no store file", existing, spec.TLSConfig{}, ""},
+		{"created, two stores", created, two, item("mq-ca") + item("solace-client")},
+		{"existing, two stores", existing, two, item("mq-ca") + item("solace-client")},
+		{"created, one file under two names", created, []consolidate.StoreUse{{Name: "a", File: "./c.jks"}, {Name: "b", File: "./c.jks"}}, item("a") + item("b")},
+		{"existing, no store selected", existing, nil, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			k := baseKube()
 			k.Secrets = spec.Secrets{Stores: c.stores}
-			out := Render(Input{Kube: k, Defaults: &spec.Defaults{TLS: c.tls}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+			out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{Stores: c.uses})})
 			name, _ := k.StoresSecretName()
 			head := "        - name: stores\n          secret:\n            secretName: " + name + "\n"
 			if c.items == "" {
@@ -553,11 +548,11 @@ func TestStoresVolumeMapsKeysToFixedNames(t *testing.T) {
 			}
 		})
 	}
-	// With no defaults at all there is no store file to list.
+	// With no model at all there is no store to list.
 	k := baseKube()
 	k.Secrets = spec.Secrets{Stores: existing}
 	if got := storeItems(Input{Kube: k}); got != nil {
-		t.Errorf("storeItems with nil Defaults = %v, want nil", got)
+		t.Errorf("storeItems with no model = %v, want nil", got)
 	}
 }
 

@@ -2,6 +2,7 @@ package spec
 
 import (
 	"fmt"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 )
@@ -32,11 +33,39 @@ func (s *Store) Secret() Cred {
 	return Cred{s.Password, s.PasswordEnv}
 }
 
-// TLSConfig is the single shared truststore (+ optional keystore) used by both
-// Solace and MQ TLS connections.
+// HasFile reports whether the store is configured: a block that names a file.
+// It is the one definition every reader shares -- the Solace api-properties,
+// the MQ SSL bundle, validate and every platform's mount -- so a block without
+// a file (which validate refuses) can never be wired by one and skipped by
+// another. Nil-safe, like Secret: a store name nothing defines has no file.
+func (s *Store) HasFile() bool { return s != nil && s.File != "" }
+
+// TLSConfig is the tls: block of env.yaml: any number of named stores. A store
+// has no role of its own -- it is a truststore, a keystore or both according to
+// how connections select it (truststore: <name> / keystore: <name>), so Solace
+// and MQ connections, and the leader-election session, each trust and present
+// what they choose.
 type TLSConfig struct {
-	Truststore *Store
-	Keystore   *Store
+	Stores map[string]*Store
+}
+
+// Store returns the store named name, or nil when name is empty or undefined.
+func (c TLSConfig) Store(name string) *Store {
+	if name == "" {
+		return nil
+	}
+	return c.Stores[name]
+}
+
+// StoreNames lists the defined store names in sorted order, so every reader
+// walks them the same way.
+func (c TLSConfig) StoreNames() []string {
+	out := make([]string, 0, len(c.Stores))
+	for name := range c.Stores {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // User is a management-endpoint basic-auth user. Name is an identity, not a
@@ -197,8 +226,60 @@ type rawDefaults struct {
 }
 
 type rawTLS struct {
-	Truststore *Store `yaml:"truststore"`
-	Keystore   *Store `yaml:"keystore"`
+	Stores map[string]*Store
+}
+
+// storeKeys are the keys one tls.stores.<name> block takes.
+var storeKeys = map[string]bool{"file": true, "password": true, "password-env": true, "type": true}
+
+// UnmarshalYAML accepts only tls.stores, a mapping of store names to store
+// blocks, and only the four store keys inside each. ParseEnv decodes without
+// KnownFields, so without this the retired single tls.truststore/tls.keystore,
+// or a misspelled store key (passwrd-env), would be dropped in silence and the
+// connection would trust the JVM default store, or present no certificate,
+// while env.yaml says otherwise.
+func (r *rawTLS) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("tls must be a mapping holding stores:, got a %s", YAMLKind(node))
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		k, v := node.Content[i], node.Content[i+1]
+		switch k.Value {
+		case "stores":
+		case "truststore", "keystore":
+			return fmt.Errorf("tls.%s is no longer read: define each store under tls.stores.<name> and select it on the connection with truststore: <name> or keystore: <name>", k.Value)
+		default:
+			return fmt.Errorf("tls.%s is not a key: tls takes only stores:, a mapping of store names to {file, password | password-env, type}", k.Value)
+		}
+		if v.Kind == yaml.AliasNode && v.Alias != nil {
+			v = v.Alias
+		}
+		if v.Kind == yaml.ScalarNode && v.ShortTag() == "!!null" {
+			continue
+		}
+		if v.Kind != yaml.MappingNode {
+			return fmt.Errorf("tls.stores must be a mapping of store names to store blocks, got a %s", YAMLKind(v))
+		}
+		for j := 0; j+1 < len(v.Content); j += 2 {
+			name, block := v.Content[j].Value, v.Content[j+1]
+			if block.Kind == yaml.AliasNode && block.Alias != nil {
+				block = block.Alias
+			}
+			if block.Kind == yaml.MappingNode {
+				for n := 0; n+1 < len(block.Content); n += 2 {
+					if key := block.Content[n].Value; !storeKeys[key] {
+						return fmt.Errorf("tls.stores.%s.%s is not a store key: a store takes file, password or password-env, and type", name, key)
+					}
+				}
+			}
+		}
+		var stores map[string]*Store
+		if err := v.Decode(&stores); err != nil {
+			return err
+		}
+		r.Stores = stores
+	}
+	return nil
 }
 
 type rawLogging struct {
@@ -258,8 +339,7 @@ func envTransforms(data []byte) []string {
 func defaultsFromRaw(raw rawDefaults) *Defaults {
 	d := &Defaults{}
 	if raw.TLS != nil {
-		d.TLS.Truststore = raw.TLS.Truststore
-		d.TLS.Keystore = raw.TLS.Keystore
+		d.TLS.Stores = raw.TLS.Stores
 	}
 	if raw.Logging != nil {
 		d.LoggingLevel = nodePtr(raw.Logging.Level)

@@ -43,7 +43,9 @@ so splitting them across connectors stays your decision.
 - Implements **[leader-election](docs/userguide.md#7-connector-defaults-envyaml-top-level)**
   (`standalone` / `active_active` / `active_standby`).
 - Wires **[TLS + mTLS](docs/userguide.md#7-connector-defaults-envyaml-top-level)**
-  for both Solace and MQ from one shared truststore/keystore.
+  for both Solace and MQ from named truststores and keystores that each
+  connection selects, and leaves certificate-validation policy to the libraries'
+  defaults and your own `api-properties`.
 - **[One secrets model](docs/userguide.md#9-secrets-model) everywhere**: each
   credential is declared as a literal or an `-env` variable name and mounted
   as a file under `/app/external/var/secrets/` -- a Kubernetes Secret volume,

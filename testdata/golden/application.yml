@@ -48,7 +48,6 @@ spring:
                 connect-retries: -1
                 reconnect-retries: -1
                 api-properties:
-                  SSL_VALIDATE_CERTIFICATE: true
                   SSL_TRUST_STORE: ./certs/truststore.jks
                   SSL_TRUST_STORE_PASSWORD: ${TRUSTSTORE_PASSWORD}
                   SSL_TRUST_STORE_FORMAT: JKS
@@ -156,7 +155,6 @@ solace:
         connect-retries: -1
         reconnect-retries: -1
         api-properties:
-          SSL_VALIDATE_CERTIFICATE: true
           SSL_TRUST_STORE: ./certs/truststore.jks
           SSL_TRUST_STORE_PASSWORD: ${TRUSTSTORE_PASSWORD}
           SSL_TRUST_STORE_FORMAT: JKS

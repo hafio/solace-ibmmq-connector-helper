@@ -32,9 +32,11 @@ type acc struct {
 	conn, qm, ch   string
 	mqUser, mqPass spec.Cred
 
-	tls      bool   // TLS on this binder (Solace: tcps:// host; MQ: tls:true)
-	keyAlias string // mTLS client key alias ("" = none)
-	cipher   string // MQ JCE cipher ("" = none)
+	tls        bool   // TLS on this binder (Solace: tcps:// host; MQ: tls:true)
+	truststore string // selected tls.stores name to validate against ("" = JVM default trust)
+	keystore   string // selected tls.stores name holding the client certificate ("" = none)
+	keyAlias   string // mTLS client key alias within keystore ("" = none)
+	cipher     string // MQ JCE cipher ("" = none)
 
 	connName string // contributing connection name (first by appearance); "" = purely inline
 
@@ -155,9 +157,16 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 		if a.connName == "" && s.ConnRef != "" {
 			a.connName = s.ConnRef
 		}
-		// Merge cross-side attributes (validate guarantees key-alias is consistent).
+		// Merge cross-side attributes. validate refuses sides of one binder that
+		// select different stores or key-aliases, so first non-empty is the value.
 		if a.keyAlias == "" {
 			a.keyAlias = s.KeyAlias
+		}
+		if a.truststore == "" {
+			a.truststore = s.Truststore
+		}
+		if a.keystore == "" {
+			a.keystore = s.Keystore
 		}
 		if s.System == spec.SystemMQ {
 			a.tls = a.tls || s.TLS
@@ -193,6 +202,28 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 	assignBinderNames(accs)
 
 	// ---- finalize binder + bundle objects -------------------------------------
+	// useStores records the stores a rendered connection selects, in first-use
+	// order, so every platform mounts exactly those; a store used as a keystore
+	// anywhere holds a private key and is mounted as one.
+	storeAt := map[string]int{}
+	useStores := func(sel tls.Selection) {
+		for _, u := range []struct {
+			name    string
+			private bool
+		}{{sel.Truststore, false}, {sel.Keystore, true}} {
+			st := d.TLS.Store(u.name)
+			if !st.HasFile() {
+				continue
+			}
+			if i, ok := storeAt[u.name]; ok {
+				m.Stores[i].Private = m.Stores[i].Private || u.private
+				continue
+			}
+			storeAt[u.name] = len(m.Stores)
+			m.Stores = append(m.Stores, StoreUse{Name: u.name, File: st.File, Type: st.Type, Private: u.private})
+		}
+	}
+
 	// The defaults blocks are read once: a managed key in mq-defaults is reported
 	// once, not per binder (solace-defaults is left as written, as it always was).
 	mqDefaults := dropManaged(nodeToProps(d.MQDefaults), spec.SystemMQ, &warns, "mq-defaults")
@@ -208,7 +239,9 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 			sb.Extras = overlayExtras(nodeToProps(d.SolaceDefaults), dropManaged(a.extra, spec.SystemSolace, &warns, binderOwner(a.name)))
 			var props []Prop
 			if a.tls {
-				for _, kv := range tls.SolaceProps(d, a.keyAlias, mountStores, storeSecret(secretRef)) {
+				sel := tls.Selection{Truststore: a.truststore, Keystore: a.keystore, KeyAlias: a.keyAlias}
+				useStores(sel)
+				for _, kv := range tls.SolaceProps(d, sel, mountStores, storeSecret(secretRef)) {
 					props = append(props, Prop{Key: kv.Key, Val: kv.Val})
 				}
 			}
@@ -225,14 +258,13 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 			}
 			if a.tls {
 				m.MQTLS = true
-				// No truststore configured means no bundle to reference: the
-				// connection still negotiates TLS, it just trusts the JVM's
-				// default store. Referencing an empty bundle would break it.
+				// A binder that selects no store has no bundle to reference: it
+				// still negotiates TLS, trusting the JVM's default store -- a
+				// legitimate choice, so nothing is reported.
 				if b := buildBundle(a, d, mountStores, secretRef); b != nil {
+					useStores(tls.Selection{Truststore: a.truststore, Keystore: a.keystore})
 					mb.SSLBundle = b.Name
 					m.Bundles = append(m.Bundles, b)
-				} else {
-					warn("binder %q: tls is enabled but tls.truststore is not configured; no SSL bundle is emitted and the connection falls back to the JVM default truststore", a.name)
 				}
 			}
 			mb.Extras = overlayExtras(mqDefaults, dropManaged(a.extra, spec.SystemMQ, &warns, binderOwner(a.name)))
@@ -283,6 +315,11 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 
 	// leader-election block (active_active / active_standby); standalone/absent ⇒ nil.
 	m.LeaderElection = buildLeaderElection(d, mountStores, secretRef, leaderNames, &warns)
+	if m.LeaderElection != nil {
+		if sess := leaderSession(d); sess != nil && isTCPS(sess.Host) {
+			useStores(tls.Selection{Truststore: sess.Truststore, Keystore: sess.Keystore})
+		}
+	}
 
 	// The status script needs actuator access in every deployment, so the
 	// exposure list and the reserved status account are forced onto the model
@@ -370,28 +407,30 @@ func sanitize(s string) string {
 	return b.String()
 }
 
-// buildBundle assembles the JKS SSL bundle for one TLS-enabled MQ binder, or nil
-// when there is no truststore to point it at. A bundle exists to name a
-// truststore: emitting one without would put empty location/password/type values
-// into application.yml, which the connector reads as a configured-but-broken
-// trust store rather than as "not configured".
+// buildBundle assembles the JKS SSL bundle for one TLS-enabled MQ binder from
+// the stores it selects -- a truststore section, a keystore section (with
+// key.alias when an alias picks one key), or both -- or nil when it selects
+// neither. A bundle without a truststore is valid: Spring then trusts the JVM's
+// default store, the same trust a binder with no bundle gets.
 func buildBundle(a *acc, d *spec.Defaults, mount bool, secretRef secretFn) *Bundle {
-	ts := d.TLS.Truststore
-	if ts == nil || ts.File == "" {
+	ts, ks := d.TLS.Store(a.truststore), d.TLS.Store(a.keystore)
+	if !ts.HasFile() && !ks.HasFile() {
 		return nil
 	}
+	ref := storeSecret(secretRef)
 	b := &Bundle{Name: a.name + "-bundle"}
-	b.TruststoreLoc = tls.StorePath(tls.Truststore, ts.File, mount)
-	b.TruststorePwd = secretRef(TruststorePasswordName, storeOrigin(TruststorePasswordName), ts.Secret())
-	b.TruststoreTyp = ts.Type
-	if a.keyAlias != "" {
-		if ks := d.TLS.Keystore; ks != nil {
-			b.HasKeystore = true
-			b.KeystoreLoc = tls.StorePath(tls.Keystore, ks.File, mount)
-			b.KeystorePwd = secretRef(KeystorePasswordName, storeOrigin(KeystorePasswordName), ks.Secret())
-			b.KeystoreTyp = ks.Type
-			b.KeyAlias = a.keyAlias
-		}
+	if ts.HasFile() {
+		b.HasTruststore = true
+		b.TruststoreLoc = tls.StorePath(a.truststore, ts.File, mount)
+		b.TruststorePwd = ref(a.truststore, ts.Secret())
+		b.TruststoreTyp = ts.Type
+	}
+	if ks.HasFile() {
+		b.HasKeystore = true
+		b.KeystoreLoc = tls.StorePath(a.keystore, ks.File, mount)
+		b.KeystorePwd = ref(a.keystore, ks.Secret())
+		b.KeystoreTyp = ks.Type
+		b.KeyAlias = a.keyAlias
 	}
 	return b
 }
@@ -401,22 +440,14 @@ func buildBundle(a *acc, d *spec.Defaults, mount bool, secretRef secretFn) *Bund
 // same key set as a Solace binder -- the connector documents session.* as the
 // same interface as solace.java.* -- so solace-defaults, the connection's own
 // other keys and its verbatim api-properties land here too, on top of the
-// shared truststore/keystore wiring (config vs deploy path via mount).
+// wiring of the stores the session selects (config vs deploy path via mount).
 func buildLeaderElection(d *spec.Defaults, mount bool, secretRef secretFn, names leaderNameFn, warns *[]string) *LeaderElectionModel {
 	le := d.LeaderElection
 	if !le.Present || le.Mode == "" || le.Mode == spec.LeaderStandalone {
 		return nil
 	}
 	m := &LeaderElectionModel{Mode: le.Mode, Queue: le.Queue, FailOver: le.FailOver}
-	var sess *spec.Side
-	if le.ConnRef != "" {
-		if c, ok := d.Connections[le.ConnRef]; ok {
-			sess = &c
-		}
-	} else if le.Session != nil {
-		sess = le.Session
-	}
-	if sess != nil {
+	if sess := leaderSession(d); sess != nil {
 		userName, passName := names(*sess)
 		s := &Session{
 			Host:       sess.Host,
@@ -427,7 +458,8 @@ func buildLeaderElection(d *spec.Defaults, mount bool, secretRef secretFn, names
 		}
 		var props []Prop
 		if isTCPS(sess.Host) {
-			for _, kv := range tls.SolaceProps(d, sess.KeyAlias, mount, storeSecret(secretRef)) {
+			sel := tls.Selection{Truststore: sess.Truststore, Keystore: sess.Keystore, KeyAlias: sess.KeyAlias}
+			for _, kv := range tls.SolaceProps(d, sel, mount, storeSecret(secretRef)) {
 				props = append(props, Prop{Key: kv.Key, Val: kv.Val})
 			}
 		}
@@ -438,6 +470,20 @@ func buildLeaderElection(d *spec.Defaults, mount bool, secretRef secretFn, names
 		m.Session = s
 	}
 	return m
+}
+
+// leaderSession is the Solace connection the leader-election management session
+// uses: the conn-ref'd connection when one is named (conn-ref wins), else the
+// inline session, else nil. A dangling conn-ref is nil; validate reports it.
+func leaderSession(d *spec.Defaults) *spec.Side {
+	le := d.LeaderElection
+	if le.ConnRef != "" {
+		if c, ok := d.Connections[le.ConnRef]; ok {
+			return &c
+		}
+		return nil
+	}
+	return le.Session
 }
 
 // managementExposure is the actuator exposure list every render carries. It is

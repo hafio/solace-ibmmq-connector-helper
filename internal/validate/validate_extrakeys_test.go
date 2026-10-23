@@ -8,7 +8,7 @@ import (
 )
 
 // extraMQ is a clean MQ side carrying y as its block's other keys; tls selects
-// the TLS checks (with a truststore, see extraDefaults).
+// the TLS checks (with the ts store selected where a test needs a bundle).
 func extraMQ(t *testing.T, y string, tls bool) spec.Side {
 	t.Helper()
 	s := vMQ("M", spec.DestQueue, tls)
@@ -84,7 +84,7 @@ func TestExtraKeysQuietForLegitimateProperties(t *testing.T) {
 // twice.
 func TestExtraKeysManagedByTheToolIsAnError(t *testing.T) {
 	for _, c := range []struct{ name, y, want string }{
-		{"ssl-bundle", "ssl-bundle: theirs\n", `source mq: "ssl-bundle" is written by the tool itself (from tls: true and tls.truststore), so it cannot be set here; remove it and enable TLS with tls: true and a tls.truststore in env.yaml instead`},
+		{"ssl-bundle", "ssl-bundle: theirs\n", `source mq: "ssl-bundle" is written by the tool itself (from tls: true and the connection's truststore:/keystore:), so it cannot be set here; remove it and select the stores with truststore: <store> / keystore: <store> instead`},
 		{"sslBundle", "sslBundle: theirs\n", `source mq: "sslBundle" is written by the tool itself`},
 		{"queueManager", "queueManager: OTHER\n", `source mq: "queueManager" is another spelling of queue-manager, which the tool reads only in that form; write queue-manager`},
 		{"additionalProperties", "additionalProperties: {}\n", `source mq: "additionalProperties" is another spelling of additional-properties`},
@@ -250,10 +250,12 @@ func TestExtraKeysNearMissWarns(t *testing.T) {
 // an active_* deployment would share.
 func TestExtraKeysTLSInterplayWarns(t *testing.T) {
 	d := defsWithStores()
-	_, warns := runExtra(t, extraMQ(t, "use-ibm-cipher-mappings: true\njks:\n  trust-store: /x\n", true), vSolace("Q", spec.DestQueue, ""), d)
+	src := extraMQ(t, "use-ibm-cipher-mappings: true\njks:\n  trust-store: /x\n", true)
+	src.Truststore = "ts"
+	_, warns := runExtra(t, src, vSolace("Q", spec.DestQueue, ""), d)
 	for _, want := range []string{
 		`source mq: "use-ibm-cipher-mappings" overrides the -Dcom.ibm.mq.cfg.useIBMCipherMappings=false the tool sets for a TLS connection, so the JCE cipher names in cipher: may no longer apply`,
-		`source mq: jks.* is ignored by the connector while ssl-bundle is set; the stores in effect are env.yaml tls.truststore/keystore`,
+		`source mq: jks.* is ignored by the connector while ssl-bundle is set; the stores in effect are the ones this connection selects with truststore:/keystore:`,
 	} {
 		if !issueWith(warns, want) {
 			t.Errorf("want a warning containing %q, got %v", want, warns)

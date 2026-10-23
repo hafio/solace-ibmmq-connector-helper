@@ -42,6 +42,10 @@ target:
     queue: OUT
 `
 
+// tlsWF is validWF with its MQ source on TLS, validating the queue manager
+// against the store named ts -- so the spec mounts that store.
+var tlsWF = strings.Replace(validWF, "    queue: Q.IN\n", "    tls: true\n    cipher: TLS_RSA_WITH_AES_256_CBC_SHA256\n    truststore: ts\n    queue: Q.IN\n", 1)
+
 // envCredWF mixes a literal MQ credential with a -env Solace credential, so the
 // docker child-env test exercises both resolution paths through the real
 // resolver (os.LookupEnv), not just literal passthrough.
@@ -1539,7 +1543,7 @@ func TestExamplesWriteSkipForceThenGenerate(t *testing.T) {
 	// nothing here: its password is generated when the override is unset.
 	for _, v := range []string{
 		"SOL_PASSWORD", "MQ_ARCHIVE_PASSWORD", "MQ_CORE_PASSWORD", "EDGE_SOL_PASSWORD",
-		"TRUSTSTORE_PASSWORD", "KEYSTORE_PASSWORD",
+		"SOLACE_TRUSTSTORE_PASSWORD", "SOLACE_KEYSTORE_PASSWORD", "MQ_TRUSTSTORE_PASSWORD", "MQ_KEYSTORE_PASSWORD",
 	} {
 		t.Setenv(v, "x")
 	}
@@ -2321,18 +2325,19 @@ func TestGeneratePodmanQuadletStdout(t *testing.T) {
 // over the jars instead of failing, and the connector dies looking for classes
 // that were never mounted. The relative spelling has to be impossible to emit,
 // which is why this asserts on the rendered unit rather than on absPath. The
-// truststore, set in the same spec, must not be a Volume= at all: it comes from
+// store, selected in the same spec, must not be a Volume= at all: it comes from
 // podman's secret store.
 func TestGeneratePodmanOnlyLibsIsAHostPath(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+`
 tls:
-  truststore:
-    file: ./certs/truststore.jks
-    password: ts
-    type: JKS
+  stores:
+    ts:
+      file: ./certs/truststore.jks
+      password: ts
+      type: JKS
 `+podmanEnv()+"  libs:\n    dir: ./libs\n")
-	write(t, dir, "10.yaml", validWF)
+	write(t, dir, "10.yaml", tlsWF)
 	t.Chdir(dir)
 
 	var code int
@@ -2351,7 +2356,7 @@ tls:
 	if want := "Volume=" + filepath.Join(dir, "libs") + ":/app/external/libs:ro"; len(volumes) != 1 || volumes[0] != want {
 		t.Errorf("Volume= lines = %q, want only %q", volumes, want)
 	}
-	if want := "Secret=solmq-conn-tls-truststore,type=mount,target=/app/external/classpath/truststores/truststore\n"; !strings.Contains(stdout, want) {
+	if want := "Secret=solmq-conn-tls-ts,type=mount,target=/app/external/classpath/truststores/ts\n"; !strings.Contains(stdout, want) {
 		t.Errorf("missing %q in:\n%s", want, stdout)
 	}
 }
@@ -2370,13 +2375,14 @@ func TestDeployPodmanUnresolvedInputFailsBeforeAnyWrite(t *testing.T) {
 	for _, c := range []struct {
 		name, env, wf, want string
 	}{
-		{"unreadable truststore", sharedEnv + `
+		{"unreadable store", sharedEnv + `
 tls:
-  truststore:
-    file: ./certs/missing.jks
-    password: ts
-    type: JKS
-` + podmanEnv(), validWF, `tls.truststore.file "./certs/missing.jks"`},
+  stores:
+    ts:
+      file: ./certs/missing.jks
+      password: ts
+      type: JKS
+` + podmanEnv(), tlsWF, `tls.stores.ts.file "./certs/missing.jks"`},
 		{"unset credential variable", sharedEnv + podmanEnv(),
 			strings.Replace(validWF, "    password: pw\n", "    password-env: "+unsetVar+"\n", 1),
 			"environment variable " + unsetVar + " is not set"},
@@ -2608,12 +2614,13 @@ func TestDeployDockerWarnsAboutMountsTheConnectorCannotRead(t *testing.T) {
 	t.Setenv("SOLMQ_TEST_LIBS", libs)
 	write(t, dir, "env.yaml", sharedEnv+`
 tls:
-  truststore:
-    file: ${SOLMQ_TEST_CERTS}/truststore.jks
-    password: ts
-    type: JKS
+  stores:
+    ts:
+      file: ${SOLMQ_TEST_CERTS}/truststore.jks
+      password: ts
+      type: JKS
 `+dockerEnv+"  libs:\n    dir: ${SOLMQ_TEST_LIBS}\n  run-as: \""+runAs+"\"\n")
-	write(t, dir, "10.yaml", validWF)
+	write(t, dir, "10.yaml", tlsWF)
 
 	var code int
 	stderr := captureStderr(t, func() {
@@ -2623,7 +2630,7 @@ tls:
 		t.Fatalf("exit=%d, want the deploy to go ahead:\n%s", code, stderr)
 	}
 	for _, want := range []string{
-		"warning: docker mounts tls.truststore.file " + truststore + " (mode 0600) is not readable by the connector, which runs as " + runAs,
+		"warning: docker mounts tls.stores.ts.file " + truststore + " (mode 0600) is not readable by the connector, which runs as " + runAs,
 		"warning: docker mounts libs.dir jar " + jar + " (mode 0600) is not readable by the connector, which runs as " + runAs,
 	} {
 		if !strings.Contains(stderr, want) {
@@ -2675,12 +2682,23 @@ func TestDeployPodmanSeamWritesUnitsAndStarts(t *testing.T) {
 	write(t, filepath.Join(dir, "certs"), "truststore.jks", truststore)
 	write(t, dir, "env.yaml", sharedEnv+`
 tls:
-  truststore:
-    file: ./certs/truststore.jks
-    password: ts
-    type: JKS
+  stores:
+    ts:
+      file: ./certs/truststore.jks
+      password: ts
+      type: JKS
 `+podmanEnv()+"  base-dir: "+filepath.ToSlash(legacyDir)+"\n")
-	write(t, dir, "10.yaml", validWF)
+	write(t, dir, "10.yaml", tlsWF)
+	// The unit an earlier deploy left, mounting a store this spec no longer
+	// selects: deploy reads it before replacing it and deletes that secret.
+	if err := os.MkdirAll(quadletDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// It is 0644 as deploy writes it: os.WriteFile keeps an existing file's mode.
+	write(t, quadletDir, "solmq-conn.container", "[Container]\nSecret=solmq-conn-tls-old-ca,type=mount,target=/app/external/classpath/truststores/old-ca\n")
+	if err := os.Chmod(filepath.Join(quadletDir, "solmq-conn.container"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
@@ -2702,13 +2720,13 @@ tls:
 	if _, err := os.Stat(legacyDir); !os.IsNotExist(err) {
 		t.Errorf("deploy must not write to podman.base-dir any more: %v", err)
 	}
-	// validWF's four credentials (mq user/password, solace
-	// client-username/client-password), then application.yml, the truststore
-	// and the status script, must each be stored (secret rm --ignore, then
-	// secret create) BEFORE daemon-reload/start: the unit being started
-	// references these secrets by name, so they must already exist. The file
-	// secrets this spec does not mount (no keystore, no syslog) are deleted in
-	// one call. The fake answers every call, is-active included, so the unit
+	// tlsWF's five credentials (mq user/password, the ts store's literal
+	// password, solace client-username/client-password), then
+	// application.yml, the ts store and the status script, must each be stored
+	// (secret rm --ignore, then secret create) BEFORE daemon-reload/start: the
+	// unit being started references these secrets by name, so they must
+	// already exist. The file secrets this spec does not mount (no syslog, and
+	// the old-ca store the previous unit mounted) are deleted in one call. The fake answers every call, is-active included, so the unit
 	// counts as running and is restarted. Call 0 is the read-only preflight
 	// probe, which runs before any of that.
 	wantCalls := [][]string{
@@ -2717,17 +2735,19 @@ tls:
 		{"podman", "secret", "create", "solmq-conn-_GEN_MQ_CONN_1_USER", "-"},
 		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_MQ_CONN_1_PASSWORD"},
 		{"podman", "secret", "create", "solmq-conn-_GEN_MQ_CONN_1_PASSWORD", "-"},
+		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_TLS_TS_PASSWORD"},
+		{"podman", "secret", "create", "solmq-conn-_GEN_TLS_TS_PASSWORD", "-"},
 		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_USERNAME"},
 		{"podman", "secret", "create", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_USERNAME", "-"},
 		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_PASSWORD"},
 		{"podman", "secret", "create", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_PASSWORD", "-"},
 		{"podman", "secret", "rm", "--ignore", "solmq-conn-application.yml"},
 		{"podman", "secret", "create", "solmq-conn-application.yml", "-"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-tls-truststore"},
-		{"podman", "secret", "create", "solmq-conn-tls-truststore", "-"},
+		{"podman", "secret", "rm", "--ignore", "solmq-conn-tls-ts"},
+		{"podman", "secret", "create", "solmq-conn-tls-ts", "-"},
 		{"podman", "secret", "rm", "--ignore", "solmq-conn-status-script"},
 		{"podman", "secret", "create", "solmq-conn-status-script", "-"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-tls-keystore", "solmq-conn-logback-spring.xml"},
+		{"podman", "secret", "rm", "--ignore", "solmq-conn-logback-spring.xml", "solmq-conn-tls-old-ca"},
 		{"systemctl", "--user", "daemon-reload"},
 		{"systemctl", "--user", "is-active", "--quiet", "solmq-conn.service"},
 		{"systemctl", "--user", "restart", "solmq-conn.service"},
@@ -2742,10 +2762,10 @@ tls:
 	}
 	// The values travel on stdin, never argv: the rendered application.yml, and
 	// the truststore byte for byte.
-	if app := f.calls[10].stdin; !strings.Contains(app, "solace:") || !strings.Contains(app, "conn-name: mqhost(1414)") {
+	if app := f.calls[12].stdin; !strings.Contains(app, "solace:") || !strings.Contains(app, "conn-name: mqhost(1414)") {
 		t.Errorf("application.yml secret should carry the rendered document, got %q", app)
 	}
-	if got := f.calls[12].stdin; got != truststore {
+	if got := f.calls[14].stdin; got != truststore {
 		t.Errorf("truststore secret = %q, want the file's bytes %q", got, truststore)
 	}
 }
@@ -2800,7 +2820,7 @@ func TestRemovePodmanSeamStopsRemovesReloads(t *testing.T) {
 	if err := os.MkdirAll(quadletDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	write(t, quadletDir, "solmq-conn.container", "[Container]\n")
+	write(t, quadletDir, "solmq-conn.container", "[Container]\nSecret=solmq-conn-tls-old-ca,type=mount,target=/app/external/classpath/truststores/old-ca\n")
 	write(t, legacyDir, "solmq-conn-application.yml", "x\n")
 	write(t, legacyDir, "solmq-conn-status", "#!/bin/sh\n")
 
@@ -2811,7 +2831,8 @@ func TestRemovePodmanSeamStopsRemovesReloads(t *testing.T) {
 	// the generator reloaded, mirroring deploy's create-before-start ordering in
 	// reverse: a failure removing them still surfaces (see main.go's
 	// podmanRemove), but the units referencing them are gone first. Every file
-	// secret the instance can own goes too, mounted by this spec or not. Call 0
+	// secret the instance can own goes too, mounted by this spec or not -- the
+	// stores read from the deployed unit's Secret= lines. Call 0
 	// is the read-only preflight probe, which runs before any of that.
 	wantCalls := [][]string{
 		{"podman", "info"},
@@ -2820,8 +2841,8 @@ func TestRemovePodmanSeamStopsRemovesReloads(t *testing.T) {
 		{"podman", "secret", "rm", "--ignore",
 			"solmq-conn-_GEN_MQ_CONN_1_USER", "solmq-conn-_GEN_MQ_CONN_1_PASSWORD",
 			"solmq-conn-_GEN_SOL_CONN_1_CLIENT_USERNAME", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_PASSWORD",
-			"solmq-conn-application.yml", "solmq-conn-tls-truststore", "solmq-conn-tls-keystore",
-			"solmq-conn-status-script", "solmq-conn-logback-spring.xml"},
+			"solmq-conn-application.yml", "solmq-conn-status-script", "solmq-conn-logback-spring.xml",
+			"solmq-conn-tls-old-ca"},
 	}
 	if len(f.calls) != len(wantCalls) {
 		t.Fatalf("want %d runner calls, got %+v", len(wantCalls), f.calls)

@@ -17,5 +17,7 @@ target:
     password-env: MQ_CORE_PASSWORD
     tls: true
     cipher: TLS_RSA_WITH_AES_256_CBC_SHA256
+    truststore: mq-ca
+    keystore: mq-client
     key-alias: mq-client
     queue: EVENTS.IN                      # produce to this MQ queue

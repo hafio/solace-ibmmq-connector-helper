@@ -28,7 +28,7 @@ type KV struct{ Key, Val string }
 
 // StoreFile is one resolved store entry for the stores Secret.
 type StoreFile struct {
-	Name   string // the store's role (tls.Truststore, tls.Keystore), its key in the Secret
+	Name   string // the store's tls.stores name, its key in the Secret
 	Base64 string // base64 of the file bytes
 }
 
@@ -36,34 +36,20 @@ type StoreFile struct {
 // it under.
 type storeItem struct{ key, path string }
 
-// storeItems is what the stores volume projects: each store env.yaml sets,
-// mounted under its role's fixed name (tls.MountPath), which is where
-// application.yml points. A Secret the tool creates is keyed by the role
-// itself; an existing one keeps the key operators have always been told to
-// use, the tls.*.file base name, so a Secret holding truststore.jks
-// (cert-manager's keystores name) works as it is. One key may feed both paths,
-// when one file serves as both stores. Listing the keys also makes a key the
-// Secret lacks fail the pod at start rather than the connector at its first
-// TLS handshake. Nil when no store file is set, which projects every key, as
-// before.
+// storeItems is what the stores volume projects: each store a rendered
+// connection selects (Model.Stores), keyed in the Secret by its tls.stores name
+// and mounted under that same name (tls.MountPath), which is where
+// application.yml points. One rule serves a Secret the tool creates and an
+// existing one: its keys are the store names. Listing the keys also makes a key
+// the Secret lacks fail the pod at start rather than the connector at its first
+// TLS handshake. Nil when no store is selected, which projects every key.
 func storeItems(in Input) []storeItem {
-	if in.Defaults == nil {
+	if in.Instance.Model == nil {
 		return nil
 	}
-	_, created := in.Kube.StoresSecretName()
 	var out []storeItem
-	for _, st := range []struct {
-		role  tls.Role
-		store *spec.Store
-	}{{tls.Truststore, in.Defaults.TLS.Truststore}, {tls.Keystore, in.Defaults.TLS.Keystore}} {
-		if st.store == nil || st.store.File == "" {
-			continue
-		}
-		key := string(st.role)
-		if !created {
-			key = spec.BaseName(st.store.File)
-		}
-		out = append(out, storeItem{key: key, path: string(st.role)})
+	for _, st := range in.Instance.Model.Stores {
+		out = append(out, storeItem{key: st.Name, path: st.Name})
 	}
 	return out
 }

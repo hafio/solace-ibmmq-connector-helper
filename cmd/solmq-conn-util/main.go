@@ -671,6 +671,8 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	if ferr != nil {
 		return errExit(ferr)
 	}
+	// Read before the new unit replaces it: the stores the last deploy mounted.
+	previous := previousStoreSecrets(sc, plan, p)
 	for _, kv := range kvs {
 		out, err := runner.PodmanSecretCreate(r, p.Command, gen.PodmanSecretStoreName(p.Name, kv.Key), kv.Val, extraAllowed)
 		if err != nil {
@@ -691,10 +693,11 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 			return report(runner.ActionDeploy, tgtPodman, out, err)
 		}
 	}
-	// A file secret this spec no longer mounts -- syslog or a keystore dropped
-	// since the last deploy -- is deleted, so the store holds what the unit uses.
+	// A file secret this spec no longer mounts -- syslog dropped, or a store no
+	// connection selects any more -- is deleted, so the store holds what the
+	// unit uses.
 	var stale []string
-	for _, n := range gen.PodmanFileSecretNames(p.Name) {
+	for _, n := range append(gen.PodmanFileSecretNames(p.Name), previous...) {
 		if !mounted[n] {
 			stale = append(stale, n)
 		}
@@ -710,6 +713,14 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 }
 
 func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r runner.Runner, extraAllowed []string) int {
+	// The stores the deployed unit mounts, read before the unit is deleted, and
+	// the ones this spec mounts, in case the unit is already gone.
+	stores := previousStoreSecrets(sc, plan, p)
+	for _, f := range plan.Files {
+		if f.Source != "" && !contains(stores, f.StoreName) {
+			stores = append(stores, f.StoreName)
+		}
+	}
 	out, rerr := runner.PodmanRemove(r, sc, []string{plan.Service}, []string{plan.Unit.Filename})
 	// The secrets go last, after the unit that mounted them is gone: the
 	// credentials, and every file secret the instance can own, whether or not
@@ -721,12 +732,25 @@ func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 		names = append(names, gen.PodmanSecretStoreName(p.Name, s.Stable))
 	}
 	names = append(names, gen.PodmanFileSecretNames(p.Name)...)
+	names = append(names, stores...)
 	so, serr := runner.PodmanSecretRemove(r, p.Command, names, extraAllowed)
 	out += so
 	if rerr == nil {
 		rerr = serr
 	}
 	return report(runner.ActionRemove, tgtPodman, out, rerr)
+}
+
+// previousStoreSecrets reads the store secrets the unit this instance last
+// deployed mounts, from its Secret= lines. Store secrets are named after
+// tls.stores entries the spec may since have dropped, so only the unit knows
+// them; no unit yet (a first deploy) means none to clean up.
+func previousStoreSecrets(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman) []string {
+	b, err := os.ReadFile(filepath.Join(sc.Dir, plan.Unit.Filename))
+	if err != nil {
+		return nil
+	}
+	return gen.PodmanUnitStoreSecrets(string(b), p.Name)
 }
 
 // ---- platform resolution (shared by generate/deploy/remove/status) ----------
@@ -1363,7 +1387,7 @@ func loadEnv(envPath string) (gen.Request, *spec.Env, string, error) {
 	// resolve -- it runs the unit with no useful cwd -- and which podman reads as a
 	// NAMED VOLUME when the source has no ./ or / prefix, silently mounting an
 	// empty volume over the libs directory instead of failing. It is also where
-	// deploy reads the tls.*.file stores from (Resolver.ReadFile).
+	// deploy reads the tls.stores files from (Resolver.ReadFile).
 	//
 	// Abs only fails when the process has no working directory, which is also when
 	// the relative form would be meaningless; keep the raw dir in that case rather

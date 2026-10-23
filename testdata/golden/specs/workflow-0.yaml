@@ -35,7 +35,9 @@ source:
     password-env: MQ_CORE_PASSWORD
     tls: true                             # MQ has no URL scheme; opt into TLS explicitly
     cipher: TLS_RSA_WITH_AES_256_CBC_SHA256
-    key-alias: mq-client                  # presence => mTLS (needs the keystore in env.yaml)
+    truststore: mq-ca                     # validate the queue manager against tls.stores.mq-ca in env.yaml
+    keystore: mq-client                   # present a client certificate from tls.stores.mq-client => mTLS
+    key-alias: mq-client                  # ...the key with this alias in that keystore
     queue: CORE.ORDERS.OUT                # consume from this MQ queue
 target:
   solace:

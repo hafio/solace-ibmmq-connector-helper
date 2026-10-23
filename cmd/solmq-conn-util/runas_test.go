@@ -74,17 +74,17 @@ func TestHostReaderFollowsTheKernelsRule(t *testing.T) {
 
 // TestMountChecksLabelEachPathByItsKey pins how a plan's host mounts become
 // deploy's checks: labelled "<section> mounts <env.yaml key>", at the plan's
-// path unchanged, with the keystore judged as a private key, libs.dir as a
-// directory and the truststore as a file anyone may read.
+// path unchanged, with a store used as a keystore judged as a private key,
+// libs.dir as a directory and any other store as a file anyone may read.
 func TestMountChecksLabelEachPathByItsKey(t *testing.T) {
 	got := mountChecks("docker", []gen.HostMount{
-		{Field: gen.MountTruststore, Path: "/certs/t.jks"},
-		{Field: gen.MountKeystore, Path: "/certs/k.jks"},
+		{Field: gen.StoreField("mq-ca"), Path: "/certs/t.jks"},
+		{Field: gen.StoreField("mq-client"), Path: "/certs/k.jks", Private: true},
 		{Field: gen.MountLibs, Path: "/srv/jars"},
 	})
 	want := []mountCheck{
-		{label: "docker mounts tls.truststore.file", path: "/certs/t.jks", kind: mountPublic},
-		{label: "docker mounts tls.keystore.file", path: "/certs/k.jks", kind: mountPrivate},
+		{label: "docker mounts tls.stores.mq-ca.file", path: "/certs/t.jks", kind: mountPublic},
+		{label: "docker mounts tls.stores.mq-client.file", path: "/certs/k.jks", kind: mountPrivate},
 		{label: "docker mounts libs.dir", path: "/srv/jars", kind: mountDir},
 	}
 	if !slices.Equal(got, want) {
@@ -126,18 +126,18 @@ func TestUnreadableMountsNamesWhatTheConnectorCannotRead(t *testing.T) {
 	ra := spec.RunAsID{UID: os.Getuid() + 1, GID: os.Getgid() + 1}
 	g := strconv.Itoa(ra.GID)
 	got := sharedIDs(ra).unreadable("docker", []mountCheck{
-		{label: "docker mounts tls.truststore.file", path: open, kind: mountPublic},
-		{label: "docker mounts tls.truststore.file", path: trust, kind: mountPublic},
-		{label: "docker mounts tls.keystore.file", path: key, kind: mountPrivate},
+		{label: "docker mounts tls.stores.ca.file", path: open, kind: mountPublic},
+		{label: "docker mounts tls.stores.ca.file", path: trust, kind: mountPublic},
+		{label: "docker mounts tls.stores.client.file", path: key, kind: mountPrivate},
 		{label: "docker mounts libs.dir", path: libs, kind: mountDir},
 		{label: "docker mounts libs.dir", path: shutDir, kind: mountDir},
-		{label: "docker mounts tls.truststore.file", path: filepath.Join(dir, "missing.jks"), kind: mountPublic},
+		{label: "docker mounts tls.stores.ca.file", path: filepath.Join(dir, "missing.jks"), kind: mountPublic},
 	})
 	const because = " is not readable by the connector, which runs as "
 	want := []struct{ prefix, suffix string }{
-		{"docker mounts tls.truststore.file " + trust + " (mode 0600)" + because + ra.String(),
+		{"docker mounts tls.stores.ca.file " + trust + " (mode 0600)" + because + ra.String(),
 			"Make it readable: chmod o+r, or give it to group " + g + " with g+r -- or change docker.run-as"},
-		{"docker mounts tls.keystore.file " + key + " (mode 0600)" + because + ra.String(),
+		{"docker mounts tls.stores.client.file " + key + " (mode 0600)" + because + ra.String(),
 			"Give it to group " + g + " and chmod g+r rather than opening a private key to everyone, or set docker.run-as to its owner's uid"},
 		{"docker mounts libs.dir jar " + filepath.Join(libs, "shut.jar") + " (mode 0600)",
 			"Make it readable: chmod o+r, or give it to group " + g + " with g+r -- or change docker.run-as"},
@@ -169,8 +169,8 @@ func TestUnreadableMountsJudgesRootByTheModeBits(t *testing.T) {
 	writeMode(t, shut, 0o600)
 	writeMode(t, open, 0o644)
 	checks := []mountCheck{
-		{label: "docker mounts tls.keystore.file", path: shut, kind: mountPrivate},
-		{label: "docker mounts tls.truststore.file", path: open, kind: mountPublic},
+		{label: "docker mounts tls.stores.client.file", path: shut, kind: mountPrivate},
+		{label: "docker mounts tls.stores.ca.file", path: open, kind: mountPublic},
 	}
 	for _, c := range []struct {
 		ra  spec.RunAsID

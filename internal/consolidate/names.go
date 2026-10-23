@@ -5,21 +5,26 @@ import (
 	"strings"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/tls"
 )
 
-// Stable secret names for the credential positions that belong to env.yaml as a
-// whole rather than to one binder. The two store passwords are re-exported from
-// internal/tls, which names them for the api-properties path, so the SSL bundle
-// and api-properties can never disagree about one password's name. The two
-// leader-election names are the fallback for a management session no workflow
-// shares -- see leaderNames in Build.
+// Stable secret names for the leader-election session's credentials: the
+// fallback for a management session no workflow shares -- see leaderNames in
+// Build.
 const (
-	TruststorePasswordName = tls.TruststorePasswordName
-	KeystorePasswordName   = tls.KeystorePasswordName
-	LeaderUsernameName     = spec.GeneratedNamePrefix + "LEADER_ELECTION_CLIENT_USERNAME"
-	LeaderPasswordName     = spec.GeneratedNamePrefix + "LEADER_ELECTION_CLIENT_PASSWORD"
+	LeaderUsernameName = spec.GeneratedNamePrefix + "LEADER_ELECTION_CLIENT_USERNAME"
+	LeaderPasswordName = spec.GeneratedNamePrefix + "LEADER_ELECTION_CLIENT_PASSWORD"
 )
+
+// StorePasswordName is the mount name of a store's password when it is a
+// literal: one per store, keyed by the store's name, so the SSL bundle and the
+// Solace api-properties referencing one store can never disagree about its
+// password's name. An -env password is mounted under its own variable instead.
+// validate holds store names to lowercase letters and digits joined by single
+// hyphens, so upper-casing and turning each '-' into '_' maps two names to two
+// mount names -- unlike stableToken, which folds runs and prefixes a digit.
+func StorePasswordName(store string) string {
+	return spec.GeneratedNamePrefix + "TLS_" + strings.ToUpper(strings.ReplaceAll(store, "-", "_")) + "_PASSWORD"
+}
 
 // secretFn records a credential under a mount name and returns the placeholder
 // the rendered config carries ("" for an unset credential). origin is the spec
@@ -34,24 +39,14 @@ type secretFn func(stable, origin string, c spec.Cred) string
 // deciding for itself.
 type leaderNameFn func(sess spec.Side) (user, pass string)
 
-// storeSecret adapts a secretFn to the narrower callback internal/tls needs, so
-// a store password mounted for the SSL bundle and the same password referenced
-// from the Solace api-properties resolve to one name and one mounted file. The
-// origin is recovered from the name here rather than widening tls's callback:
-// the two store passwords are the only credentials that reach it, and each has
-// exactly one spec position.
+// storeSecret adapts a secretFn to the narrower callback internal/tls and
+// buildBundle use, which name the store rather than the credential: a store
+// password mounted for an SSL bundle and the same password referenced from the
+// Solace api-properties resolve to one name and one mounted file.
 func storeSecret(secretRef secretFn) func(string, spec.Cred) string {
-	return func(stable string, c spec.Cred) string {
-		return secretRef(stable, storeOrigin(stable), c)
+	return func(store string, c spec.Cred) string {
+		return secretRef(StorePasswordName(store), "tls.stores."+store+".password", c)
 	}
-}
-
-// storeOrigin is the spec position behind a store password's fixed mount name.
-func storeOrigin(stable string) string {
-	if stable == KeystorePasswordName {
-		return "tls.keystore.password"
-	}
-	return "tls.truststore.password"
 }
 
 // stableName is the in-container mount name for a binder-scoped credential that

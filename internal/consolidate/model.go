@@ -45,9 +45,11 @@ type Binder struct {
 	MQ     *MQBinder
 }
 
-// Bundle is one entry under spring.ssl.bundle.jks (MQ TLS only).
+// Bundle is one entry under spring.ssl.bundle.jks (MQ TLS only), built from the
+// stores its binder selects: a truststore, a keystore, or both.
 type Bundle struct {
 	Name          string // "<binder>-bundle"
+	HasTruststore bool
 	TruststoreLoc string
 	TruststorePwd string
 	TruststoreTyp string
@@ -55,7 +57,18 @@ type Bundle struct {
 	KeystoreLoc   string
 	KeystorePwd   string
 	KeystoreTyp   string
-	KeyAlias      string // "" when not mTLS
+	KeyAlias      string // "" when no alias picks one key from the keystore
+}
+
+// StoreUse is one tls.stores entry a rendered connection selects, which every
+// platform mounts at tls.MountPath(Name). Private marks a store some connection
+// uses as a keystore: it holds a private key, so deploy checks it is not
+// readable by everyone.
+type StoreUse struct {
+	Name    string
+	File    string // as written in env.yaml
+	Type    string
+	Private bool
 }
 
 // Binding is one entry under spring.cloud.stream.bindings.
@@ -154,7 +167,7 @@ type SecretRef struct {
 // SecretConflict is one mount name two different credentials claimed. First is
 // the position that got the name, Second the one that collided with it; both are
 // spec positions an operator can find and rename ("binder \"mq-conn-1\"
-// password-env", "tls.truststore.password"). Naming both is the whole point --
+// password-env", "tls.stores.mq-ca.password"). Naming both is the whole point --
 // the contested key alone does not say which field to change, and one of the two
 // is a derived name the operator never wrote.
 type SecretConflict struct {
@@ -194,4 +207,9 @@ type Model struct {
 
 	// MQTLS is true when any MQ binder uses TLS (drives JAVA_TOOL_OPTIONS in deploy).
 	MQTLS bool
+
+	// Stores is every tls.stores entry a rendered binder or the leader-election
+	// session selects, in first-use order: exactly the stores deploy mounts. A
+	// store nothing selects is not mounted (validate warns about it).
+	Stores []StoreUse
 }

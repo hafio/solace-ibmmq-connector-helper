@@ -44,6 +44,8 @@ source:
     password: ${MQ}
     tls: true
     cipher: TLS_X
+    truststore: ca
+    keystore: client
     key-alias: mc
     topic: T/EVENTS
     additional-properties:
@@ -64,6 +66,8 @@ target:
     msg-vpn: prod
     client-username: connector
     client-password: ${SOL}
+    truststore: ca
+    keystore: client
     key-alias: sc
     queue: Q.OUT
     api-properties:
@@ -72,14 +76,15 @@ target:
 
 const richDefsYAML = `
 tls:
-  truststore:
-    file: ./certs/truststore.jks
-    password: ${T}
-    type: JKS
-  keystore:
-    file: ./certs/keystore.jks
-    password: ${K}
-    type: JKS
+  stores:
+    ca:
+      file: ./certs/truststore.jks
+      password: ${T}
+      type: JKS
+    client:
+      file: ./certs/keystore.jks
+      password: ${K}
+      type: JKS
 logging:
   level:
     root: INFO
@@ -111,7 +116,7 @@ func TestApplicationRich(t *testing.T) {
 	out := Application(buildRich(t))
 	for _, w := range []string{
 		"spring:", "ssl:", "bundle:", "jks:", "-bundle:", "truststore:",
-		"location: /app/external/classpath/truststores/truststore", "keystore:", "key:", "alias: mc",
+		"location: /app/external/classpath/truststores/ca", "keystore:", "key:", "alias: mc",
 		"binders:", "type: jms", "queue-manager: QM1", "ssl-bundle:", "additional-properties:",
 		"WMQ_SSL_CIPHER_SUITE: TLS_X", `WMQ_SSL_PEER_NAME: "CN=x"`,
 		"type: solace", "host: tcps://b:55443", "connect-retries: -1", "api-properties:",
@@ -141,12 +146,12 @@ const richApplicationWant = `spring:
       jks:
         mq-conn-1-bundle:
           truststore:
-            location: /app/external/classpath/truststores/truststore
-            password: ${_GEN_TRUSTSTORE_PASSWORD}
+            location: /app/external/classpath/truststores/ca
+            password: ${_GEN_TLS_CA_PASSWORD}
             type: JKS
           keystore:
-            location: /app/external/classpath/truststores/keystore
-            password: ${_GEN_KEYSTORE_PASSWORD}
+            location: /app/external/classpath/truststores/client
+            password: ${_GEN_TLS_CLIENT_PASSWORD}
             type: JKS
           key:
             alias: mc
@@ -178,12 +183,11 @@ const richApplicationWant = `spring:
                 client-password: ${_GEN_SOL_CONN_1_CLIENT_PASSWORD}
                 connect-retries: -1
                 api-properties:
-                  SSL_VALIDATE_CERTIFICATE: true
-                  SSL_TRUST_STORE: /app/external/classpath/truststores/truststore
-                  SSL_TRUST_STORE_PASSWORD: ${_GEN_TRUSTSTORE_PASSWORD}
+                  SSL_TRUST_STORE: /app/external/classpath/truststores/ca
+                  SSL_TRUST_STORE_PASSWORD: ${_GEN_TLS_CA_PASSWORD}
                   SSL_TRUST_STORE_FORMAT: JKS
-                  SSL_KEY_STORE: /app/external/classpath/truststores/keystore
-                  SSL_KEY_STORE_PASSWORD: ${_GEN_KEYSTORE_PASSWORD}
+                  SSL_KEY_STORE: /app/external/classpath/truststores/client
+                  SSL_KEY_STORE_PASSWORD: ${_GEN_TLS_CLIENT_PASSWORD}
                   SSL_KEY_STORE_FORMAT: JKS
                   SSL_PRIVATE_KEY_ALIAS: sc
                   REAPPLY_SUBSCRIPTIONS: true
@@ -440,6 +444,8 @@ connections:
       msg-vpn: prod
       client-username: u
       client-password: ${SOL}
+      truststore: ca
+      keystore: client
       key-alias: sc
       api-properties:
         REAPPLY_SUBSCRIPTIONS: true
@@ -451,14 +457,15 @@ connections:
       user: u
       password: ${MQ}
 tls:
-  truststore:
-    file: ./certs/truststore.jks
-    password: ${T}
-    type: JKS
-  keystore:
-    file: ./certs/keystore.jks
-    password: ${K}
-    type: JKS
+  stores:
+    ca:
+      file: ./certs/truststore.jks
+      password: ${T}
+      type: JKS
+    client:
+      file: ./certs/keystore.jks
+      password: ${K}
+      type: JKS
 leader-election:
   mode: active_standby
   queue: mgmt-q
@@ -504,12 +511,11 @@ func TestApplicationLeaderElection(t *testing.T) {
 		"        client-password: ${_GEN_EDGE_CLIENT_PASSWORD}\n" +
 		"        connect-retries: -1\n" +
 		"        api-properties:\n" +
-		"          SSL_VALIDATE_CERTIFICATE: true\n" +
-		"          SSL_TRUST_STORE: /app/external/classpath/truststores/truststore\n" +
-		"          SSL_TRUST_STORE_PASSWORD: ${_GEN_TRUSTSTORE_PASSWORD}\n" +
+		"          SSL_TRUST_STORE: /app/external/classpath/truststores/ca\n" +
+		"          SSL_TRUST_STORE_PASSWORD: ${_GEN_TLS_CA_PASSWORD}\n" +
 		"          SSL_TRUST_STORE_FORMAT: JKS\n" +
-		"          SSL_KEY_STORE: /app/external/classpath/truststores/keystore\n" +
-		"          SSL_KEY_STORE_PASSWORD: ${_GEN_KEYSTORE_PASSWORD}\n" +
+		"          SSL_KEY_STORE: /app/external/classpath/truststores/client\n" +
+		"          SSL_KEY_STORE_PASSWORD: ${_GEN_TLS_CLIENT_PASSWORD}\n" +
 		"          SSL_KEY_STORE_FORMAT: JKS\n" +
 		"          SSL_PRIVATE_KEY_ALIAS: sc\n" +
 		"          REAPPLY_SUBSCRIPTIONS: true\n"
@@ -732,10 +738,10 @@ target:
 	}
 }
 
-func TestApplicationSkipsBundleWithoutTruststore(t *testing.T) {
-	// MQ tls: true with no tls.truststore has no store to point a bundle at.
-	// Emitting one anyway wrote empty location/password/type lines, which the
-	// connector reads as a configured-but-broken store.
+func TestApplicationSkipsBundleWithoutStores(t *testing.T) {
+	// MQ tls: true selecting no store has nothing to put in a bundle: the
+	// connection negotiates TLS trusting the JVM's default store, a legitimate
+	// choice, so no bundle, no ssl-bundle reference and no warning.
 	src := `
 source:
   mq:
@@ -754,20 +760,47 @@ target:
 	out := Application(m)
 	for _, no := range []string{"ssl:", "bundle:", "ssl-bundle:", "location: ", "truststore:"} {
 		if strings.Contains(out, no) {
-			t.Errorf("no truststore configured, so %q should not be emitted\n---\n%s", no, out)
+			t.Errorf("no store selected, so %q should not be emitted\n---\n%s", no, out)
 		}
 	}
 	if !m.MQTLS {
 		t.Error("the connection still uses TLS, so MQTLS must stay set")
 	}
-	var found bool
-	for _, w := range warns {
-		if strings.Contains(w, "tls.truststore is not configured") {
-			found = true
-		}
+	if len(warns) != 0 {
+		t.Errorf("JVM default trust is a legitimate choice; want no warning, got %v", warns)
 	}
-	if !found {
-		t.Errorf("want a warning that no bundle was emitted, got %v", warns)
+}
+
+// TestApplicationKeystoreOnlyBundle pins a bundle built from a keystore alone:
+// no truststore section (Spring then trusts the JVM's default store), the
+// keystore, and key.alias only because an alias is set.
+func TestApplicationKeystoreOnlyBundle(t *testing.T) {
+	src := `
+source:
+  mq:
+    conn-name: h(1414)
+    queue-manager: QM1
+    channel: CH
+    tls: true
+    cipher: TLS_X
+    keystore: client
+    key-alias: app
+    queue: IN
+target:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: v
+    topic: OUT
+`
+	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"client": {File: "certs/k.jks", PasswordEnv: "KS_PW", Type: "JKS"}}}}
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{})
+	out := Application(m)
+	want := "        mq-conn-1-bundle:\n          keystore:\n            location: certs/k.jks\n            password: ${KS_PW}\n            type: JKS\n          key:\n            alias: app\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("want the keystore-only bundle\n%s\n---\n%s", want, out)
+	}
+	if strings.Contains(out, "truststore:") {
+		t.Errorf("no truststore selected, so no truststore section\n---\n%s", out)
 	}
 }
 
@@ -852,15 +885,16 @@ target:
 	}
 }
 
-// truststoreDefs is an env.yaml holding only a truststore, so the MQ binder
-// carries ssl-bundle; extraDefs adds both defaults blocks to it, for the
-// extra-key render tests.
+// truststoreDefs is an env.yaml holding one store, ca, so an MQ binder that
+// selects it (truststore: ca) carries ssl-bundle; extraDefs adds both defaults
+// blocks to it, for the extra-key render tests.
 const truststoreDefs = `
 tls:
-  truststore:
-    file: ./certs/truststore.jks
-    password-env: TS
-    type: JKS
+  stores:
+    ca:
+      file: ./certs/truststore.jks
+      password-env: TS
+      type: JKS
 `
 
 const extraDefs = truststoreDefs + `solace-defaults:
@@ -892,6 +926,7 @@ source:
     password-env: MQP
     tls: true
     cipher: TLS_X
+    truststore: ca
     queue: IN
     user-authentication-mqcsp: false
     pool:
@@ -1006,6 +1041,7 @@ source:
     password-env: MQP
     tls: true
     cipher: TLS_X
+    truststore: ca
     queue: IN
 target:
   solace:
@@ -1013,6 +1049,7 @@ target:
     msg-vpn: v
     client-username: u
     client-password-env: SOLP
+    truststore: ca
     queue: OUT
 `
 	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{MountStores: true})
@@ -1031,5 +1068,50 @@ target:
 	}
 	if got, want := topLevel(blockKeys(t, out, "              java:")), spec.ToolManagedKeys(spec.SystemSolace); !slices.Equal(got, want) {
 		t.Errorf("solace.java block keys = %q, want ToolManagedKeys %q", got, want)
+	}
+}
+
+// TestApplicationOmitsEmptyStoreType pins that a store with no type renders no
+// type line in the MQ bundle and no FORMAT key in the Solace api-properties:
+// Spring and the Solace API apply their own default type, where an empty one
+// rendered as type: "" or a bare null key.
+func TestApplicationOmitsEmptyStoreType(t *testing.T) {
+	src := `
+source:
+  mq:
+    conn-name: h(1414)
+    queue-manager: QM1
+    channel: CH
+    tls: true
+    cipher: TLS_RSA_WITH_AES_256_CBC_SHA256
+    truststore: ca
+    keystore: client
+    key-alias: mq-client
+    queue: IN
+target:
+  solace:
+    host: tcps://b:55443
+    msg-vpn: v
+    truststore: ca
+    keystore: client
+    key-alias: sol-client
+    topic: OUT
+`
+	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
+		"ca":     {File: "certs/t.jks", PasswordEnv: "TS_PW"},
+		"client": {File: "certs/k.jks", PasswordEnv: "KS_PW"},
+	}}}
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{})
+	out := Application(m)
+	// The bundle's store keys sit at indent 12; binder "type: jms" lines at 10.
+	for _, no := range []string{"\n            type:", "SSL_TRUST_STORE_FORMAT", "SSL_KEY_STORE_FORMAT"} {
+		if strings.Contains(out, no) {
+			t.Errorf("no store type configured, so %q should not be emitted\n---\n%s", no, out)
+		}
+	}
+	for _, yes := range []string{"location: certs/t.jks", "location: certs/k.jks", "alias: mq-client", "SSL_TRUST_STORE: certs/t.jks", "SSL_PRIVATE_KEY_ALIAS: sol-client"} {
+		if !strings.Contains(out, yes) {
+			t.Errorf("want %q in the output\n---\n%s", yes, out)
+		}
 	}
 }

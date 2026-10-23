@@ -98,7 +98,7 @@ func checkExtraKeys(add, warn func(string, string, ...any), at extraSite, d *spe
 		}
 		ck := spec.CanonicalKey(k)
 		if at.system == spec.SystemMQ && ck == "sslbundle" {
-			add(at.file, "%s: %q is written by the tool itself (from tls: true and tls.truststore), so it cannot be set here; remove it and enable TLS with tls: true and a tls.truststore in env.yaml instead", where, k)
+			add(at.file, "%s: %q is written by the tool itself (from tls: true and the connection's truststore:/keystore:), so it cannot be set here; remove it and select the stores with truststore: <store> / keystore: <store> instead", where, k)
 			continue
 		}
 		if cred := canonicalMatch(ck, creds); cred != "" {
@@ -124,8 +124,8 @@ func checkExtraKeys(add, warn func(string, string, ...any), at extraSite, d *spe
 		if at.system == spec.SystemMQ && ck == "useibmciphermappings" && at.side.TLS && !isFalse(kv.value) {
 			warn(at.file, "%s: %q overrides the -Dcom.ibm.mq.cfg.useIBMCipherMappings=false the tool sets for a TLS connection, so the JCE cipher names in cipher: may no longer apply", where, k)
 		}
-		if at.system == spec.SystemMQ && ck == "jks" && at.side.TLS && d.TLS.Truststore != nil && d.TLS.Truststore.File != "" {
-			warn(at.file, "%s: jks.* is ignored by the connector while ssl-bundle is set; the stores in effect are env.yaml tls.truststore/keystore", where)
+		if at.system == spec.SystemMQ && ck == "jks" && at.side.TLS && (d.TLS.Store(at.side.Truststore).HasFile() || d.TLS.Store(at.side.Keystore).HasFile()) {
+			warn(at.file, "%s: jks.* is ignored by the connector while ssl-bundle is set; the stores in effect are the ones this connection selects with truststore:/keystore:", where)
 		}
 		if at.system == spec.SystemSolace && ck == "clientname" && (leaderMode == spec.LeaderActiveActive || leaderMode == spec.LeaderActiveStby) && isLiteral(kv.value) {
 			warn(at.file, "%s: %q is fixed, but every replica shares this file and a client name must be unique per connection; use a per-instance value such as ${HOSTNAME}, or leave it for the connector to generate", where, k)

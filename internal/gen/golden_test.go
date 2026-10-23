@@ -139,6 +139,20 @@ func TestGoldenConfig(t *testing.T) {
 	}
 }
 
+// goldenMounted turns the golden application.yml into what kubernetes renders:
+// every store is mounted under its tls.stores name, so the path `config` keeps
+// as written in env.yaml becomes MountDir/<store>. The golden spec points two
+// stores at each fixture file -- MQ's in the SSL bundles (location:), Solace's
+// in the api-properties -- so the replacement keys on the property as well.
+func goldenMounted(appYAML string) string {
+	return strings.NewReplacer(
+		"location: ./certs/truststore.jks", "location: /app/external/classpath/truststores/mq-ca",
+		"location: ./certs/keystore.jks", "location: /app/external/classpath/truststores/mq-client",
+		"SSL_TRUST_STORE: ./certs/truststore.jks", "SSL_TRUST_STORE: /app/external/classpath/truststores/solace-ca",
+		"SSL_KEY_STORE: ./certs/keystore.jks", "SSL_KEY_STORE: /app/external/classpath/truststores/solace-client",
+	).Replace(appYAML)
+}
+
 func TestGoldenKubernetesCreate(t *testing.T) {
 	// source: env -- provide the six -env credential values (the literal
 	// positions -- usernames -- need no environment at all).
@@ -150,12 +164,7 @@ func TestGoldenKubernetesCreate(t *testing.T) {
 	}
 
 	appYAML := norm(string(mustRead(t, "../../testdata/golden/application.yml")))
-	// kubernetes mounts the stores at MountDir, so the embedded application.yml uses
-	// the mount path where `config` keeps the raw env.yaml path.
-	appMounted := strings.NewReplacer(
-		"./certs/truststore.jks", "/app/external/classpath/truststores/truststore",
-		"./certs/keystore.jks", "/app/external/classpath/truststores/keystore",
-	).Replace(appYAML)
+	appMounted := goldenMounted(appYAML)
 	want := norm(strings.Join([]string{
 		namespaceDoc, // deploy always emits the Namespace first
 		configMapDoc(appMounted, true),
@@ -181,12 +190,7 @@ func TestGoldenKubernetesNoSecrets(t *testing.T) {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	appYAML := norm(string(mustRead(t, "../../testdata/golden/application.yml")))
-	// kubernetes mounts the stores at MountDir, so the embedded application.yml uses
-	// the mount path where `config` keeps the raw env.yaml path.
-	appMounted := strings.NewReplacer(
-		"./certs/truststore.jks", "/app/external/classpath/truststores/truststore",
-		"./certs/keystore.jks", "/app/external/classpath/truststores/keystore",
-	).Replace(appYAML)
+	appMounted := goldenMounted(appYAML)
 	want := norm(strings.Join([]string{
 		namespaceDoc,
 		configMapDoc(appMounted, false),
@@ -287,8 +291,10 @@ metadata:
   namespace: solace-connectors
 type: Opaque
 data:
-  truststore: VFJVU1RTVE9SRQo=
-  keystore: S0VZU1RPUkUK
+  mq-ca: VFJVU1RTVE9SRQo=
+  mq-client: S0VZU1RPUkUK
+  solace-ca: VFJVU1RTVE9SRQo=
+  solace-client: S0VZU1RPUkUK
 `
 
 const pvDoc = `apiVersion: v1
@@ -454,8 +460,10 @@ spec:
 	}
 	if stores {
 		b.WriteString("        - name: stores\n          secret:\n            secretName: solmq-connector-stores\n" +
-			"            items:\n              - key: \"truststore\"\n                path: truststore\n" +
-			"              - key: \"keystore\"\n                path: keystore\n")
+			"            items:\n              - key: \"mq-ca\"\n                path: mq-ca\n" +
+			"              - key: \"mq-client\"\n                path: mq-client\n" +
+			"              - key: \"solace-ca\"\n                path: solace-ca\n" +
+			"              - key: \"solace-client\"\n                path: solace-client\n")
 	}
 	if libs {
 		b.WriteString(`        - name: libs

@@ -283,6 +283,12 @@ func TestSideSetsConnFieldsCountsExtraKeys(t *testing.T) {
 	if !(Side{System: SystemMQ, ConnRef: "qm", Extra: extra}).SetsConnFields() {
 		t.Error("an extra key beside conn-ref must count as a connection field")
 	}
+	for _, sel := range []Side{{Truststore: "mq-ca"}, {Keystore: "mq-client"}} {
+		sel.System, sel.ConnRef = SystemMQ, "qm"
+		if !sel.SetsConnFields() {
+			t.Errorf("a store selection beside conn-ref is a connection field: %+v", sel)
+		}
+	}
 	if (Side{System: SystemMQ, ConnRef: "qm", DestKind: DestQueue, Dest: "Q"}).SetsConnFields() {
 		t.Error("a bare conn-ref side sets no connection field")
 	}

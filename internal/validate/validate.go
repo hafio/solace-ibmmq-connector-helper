@@ -123,7 +123,7 @@ func Run(ctx Context) (errs, warns []Issue) {
 		ctx.Defaults = &spec.Defaults{}
 	}
 	d := ctx.Defaults
-	haveKeystore := d.TLS.Keystore != nil && d.TLS.Keystore.File != ""
+	stores := d.TLS
 
 	// Resolve conn-ref sides once for cross-workflow checks that key on the tuple.
 	resolved := make([]spec.Workflow, len(ctx.Workflows))
@@ -142,11 +142,13 @@ func Run(ctx Context) (errs, warns []Issue) {
 	checkWorkflowCount(add, len(ctx.Workflows))
 
 	// Reusable connection definitions + per-workflow structural checks.
-	checkConnections(add, warn, ctx.Env, d, haveKeystore)
-	checkWorkflowSides(add, warn, ctx.Env, ctx.Workflows, haveKeystore, d.Connections)
+	checkConnections(add, warn, ctx.Env, d, stores)
+	checkWorkflowSides(add, warn, ctx.Env, ctx.Workflows, stores, d.Connections)
 	// Every run: a block's other keys are passed through verbatim, so another
 	// spelling of a key the tool handles, or a typo, is not harmless to ignore.
 	checkAllExtraKeys(add, warn, ctx.Workflows, d)
+	checkStoreFiles(add, d)
+	checkUnusedStores(warn, ctx.Workflows, d)
 	checkDefaultsCredentials(add, warn, ctx, d)
 	// Every run, not just validate's: a transform in the wrong place is not
 	// harmless to ignore -- the connector would start without it. Only the
@@ -154,12 +156,15 @@ func Run(ctx Context) (errs, warns []Issue) {
 	checkTransforms(add, warn, ctx.Workflows, d, ctx.Lint)
 
 	// Cross-workflow (on resolved tuples): binder-level conflicts and duplicate sources.
-	checkKeyAliasConflicts(add, resolved)
+	checkStoreSelectionConflicts(add, resolved)
 	checkPasswordConflicts(add, resolved)
+	// Every run: the tool writes no certificate-validation policy, so it
+	// reports the posture each tcps:// Solace connection sets for itself.
+	checkValidatePosture(add, warn, ctx.Workflows, resolved, d)
 	checkDuplicateSources(warn, resolved)
 
 	// Leader-election (standalone | active_active | active_standby).
-	checkLeaderElection(add, d, haveKeystore)
+	checkLeaderElection(add, d, stores)
 	checkLeaderSessionPassword(add, d, resolved)
 
 	// Reserved status-account name, and its password override charset.
@@ -212,7 +217,7 @@ func checkRemovedDefaultsKeys(add func(string, string, ...any), d *spec.Defaults
 
 // checkWorkflowSides runs the per-workflow structural + semantic checks on the
 // raw sides (so conn-ref rules apply before resolution).
-func checkWorkflowSides(add, warn func(string, string, ...any), env func(string) (string, bool), wfs []spec.Workflow, haveKeystore bool, conns map[string]spec.Side) {
+func checkWorkflowSides(add, warn func(string, string, ...any), env func(string) (string, bool), wfs []spec.Workflow, stores spec.TLSConfig, conns map[string]spec.Side) {
 	for _, wf := range wfs {
 		if !wf.SourceSet {
 			add(wf.File, "missing 'source'")
@@ -221,10 +226,10 @@ func checkWorkflowSides(add, warn func(string, string, ...any), env func(string)
 			add(wf.File, "missing 'target'")
 		}
 		if wf.SourceSet {
-			checkSide(add, warn, env, wf.File, "source", wf.Source, true, haveKeystore, conns)
+			checkSide(add, warn, env, wf.File, "source", wf.Source, true, stores, conns)
 		}
 		if wf.TargetSet {
-			checkSide(add, warn, env, wf.File, "target", wf.Target, false, haveKeystore, conns)
+			checkSide(add, warn, env, wf.File, "target", wf.Target, false, stores, conns)
 		}
 	}
 }
@@ -245,14 +250,14 @@ func checkTargets(add, warn func(string, string, ...any), ctx Context, resolved 
 		if usesCredentials(resolved, ctx.Defaults) && !credentialsWired(ctx.Kube) {
 			warn(fileEnv, "credentials are referenced but kubernetes.secrets.credentials is omitted; they will not be mounted at "+secretsMountPath+" and every ${...} in the generated config will stay unresolved at runtime")
 		}
-		// Warn: TLS/mTLS in use but the stores Secret is not wired.
-		if usesTLS(resolved) && !storesWired(ctx.Kube) {
-			warn(fileEnv, "a TLS/mTLS connection exists but secrets.stores is omitted; the store files will be missing at runtime")
+		// Warn: a connection selects stores but the stores Secret is not wired.
+		if selectsStores(resolved, ctx.Defaults) && !storesWired(ctx.Kube) {
+			warn(fileEnv, "a connection selects tls.stores but kubernetes.secrets.stores is omitted; the store files will be missing at runtime")
 		}
 	}
-	// docker and podman carry no stores warning: the tls.*.file paths are always
-	// mounted now (bind mounts on docker, podman's secret store on podman), so
-	// "TLS configured but nothing mounted" cannot arise. The
+	// docker and podman carry no stores warning: every store a connection
+	// selects is mounted (bind mounts on docker, podman's secret store on
+	// podman), so "TLS configured but nothing mounted" cannot arise. The
 	// kubernetes one above stays -- it embeds store content in a Secret, which is
 	// still something the operator has to wire up.
 	if ctx.CheckDocker && ctx.Docker != nil {
@@ -322,7 +327,7 @@ func checkRootlessRange(warn func(string, string, ...any), raw string) {
 // checkSide validates one workflow side. A conn-ref side is strict (only the
 // destination); an inline side is checked as a full connection tuple. Both reject a
 // Solace topic source and emit the EDA advisory for a Solace queue destination.
-func checkSide(add, warn func(string, string, ...any), env func(string) (string, bool), file, which string, s spec.Side, isSource, haveKeystore bool, conns map[string]spec.Side) {
+func checkSide(add, warn func(string, string, ...any), env func(string) (string, bool), file, which string, s spec.Side, isSource bool, stores spec.TLSConfig, conns map[string]spec.Side) {
 	if !s.HasSystem() {
 		add(file, "%s must specify exactly one of 'solace:' or 'mq:'", which)
 		return
@@ -353,7 +358,7 @@ func checkSide(add, warn func(string, string, ...any), env func(string) (string,
 		edaAdvisory(warn, file, s, isSource)
 		return
 	}
-	checkTuple(add, file, which, s, haveKeystore)
+	checkTuple(add, file, which, s, stores)
 	edaAdvisory(warn, file, s, isSource)
 }
 
@@ -408,12 +413,65 @@ func checkSideCredentials(add, warn func(string, string, ...any), env func(strin
 	checkCred(add, warn, env, file, label+" "+passKey, s.Secret())
 }
 
+// storeNameRE is what a tls.stores name may look like. The name is the mounted
+// file's name, the stores Secret's key and part of the podman secret's name, and
+// its upper-cased form names a literal store password's mount; lowercase letters
+// and digits joined by single hyphens are valid in every one of those and keep
+// that password name unique to the store (consolidate.StorePasswordName).
+var storeNameRE = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// checkStoreFiles checks each tls.stores entry: its name, and that it names a
+// file. Every reader wires a store only when it has one (spec.Store.HasFile),
+// so a store without one would otherwise be silently skipped -- the connection
+// trusting the JVM default store, or presenting no client certificate, while
+// env.yaml says otherwise.
+func checkStoreFiles(add func(string, string, ...any), d *spec.Defaults) {
+	for _, name := range d.TLS.StoreNames() {
+		if len(name) > 63 || !storeNameRE.MatchString(name) {
+			add(fileEnv, "tls.stores %q: a store name must be lowercase letters and digits joined by single hyphens, at most 63 characters, because it names the mounted file, the Kubernetes Secret key and the podman secret; rename it", name)
+		}
+		if !d.TLS.Stores[name].HasFile() {
+			add(fileEnv, "tls.stores.%s has no file: a store names the file to load; add file, or remove the store and every truststore:/keystore: that selects it", name)
+		}
+	}
+}
+
+// checkUnusedStores warns about a tls.stores entry no connection, workflow side
+// or leader-election session selects: nothing references it, so no platform
+// mounts it -- usually a typo in a selector, or a store left behind.
+func checkUnusedStores(warn func(string, string, ...any), wfs []spec.Workflow, d *spec.Defaults) {
+	if len(d.TLS.Stores) == 0 {
+		return
+	}
+	used := map[string]bool{}
+	mark := func(s spec.Side) {
+		used[s.Truststore] = true
+		used[s.Keystore] = true
+	}
+	for _, c := range d.Connections {
+		mark(c)
+	}
+	for _, wf := range wfs {
+		mark(wf.Source)
+		mark(wf.Target)
+	}
+	if s := d.LeaderElection.Session; s != nil {
+		mark(*s)
+	}
+	for _, name := range d.TLS.StoreNames() {
+		if !used[name] {
+			warn(fileEnv, "tls.stores %q is not selected by any connection, so it is not mounted; remove it, or select it with truststore: or keystore:", name)
+		}
+	}
+}
+
 // checkDefaultsCredentials covers the credential positions that live in env.yaml
-// itself rather than on a workflow side: the two store passwords, the management
+// itself rather than on a workflow side: each store's password, the management
 // users, and the leader-election session.
 func checkDefaultsCredentials(add, warn func(string, string, ...any), ctx Context, d *spec.Defaults) {
-	checkCred(add, warn, ctx.Env, fileEnv, "tls.truststore.password", d.TLS.Truststore.Secret())
-	checkCred(add, warn, ctx.Env, fileEnv, "tls.keystore.password", d.TLS.Keystore.Secret())
+	for _, name := range d.TLS.StoreNames() {
+		checkCred(add, warn, ctx.Env, fileEnv, "tls.stores."+name+".password", d.TLS.Stores[name].Secret())
+	}
 	for i, u := range d.Security.Users {
 		label := fmt.Sprintf("security.users[%d].password", i)
 		checkCred(add, warn, ctx.Env, fileEnv, label, u.Secret())
@@ -425,7 +483,7 @@ func checkDefaultsCredentials(add, warn func(string, string, ...any), ctx Contex
 
 // checkTuple validates the connection fields of a side (no destination), shared
 // by inline workflow sides, connection definitions, and the leader-election session.
-func checkTuple(add func(string, string, ...any), file, label string, s spec.Side, haveKeystore bool) {
+func checkTuple(add func(string, string, ...any), file, label string, s spec.Side, stores spec.TLSConfig) {
 	switch s.System {
 	case spec.SystemSolace:
 		if s.Host == "" {
@@ -443,14 +501,15 @@ func checkTuple(add func(string, string, ...any), file, label string, s spec.Sid
 		// if s.ClientPass == "" {
 		// 	add(file, "%s solace: missing 'client-password'", label)
 		// }
-		if s.KeyAlias != "" {
-			if !strings.HasPrefix(s.Host, "tcps://") {
+		if !strings.HasPrefix(s.Host, "tcps://") {
+			if s.KeyAlias != "" {
 				add(file, "%s solace: key-alias (mTLS) requires a tcps:// host", label)
 			}
-			if !haveKeystore {
-				add(file, "%s solace: key-alias set but no keystore defined", label)
+			if s.Truststore != "" || s.Keystore != "" {
+				add(file, "%s solace: truststore/keystore select TLS stores, which need a tcps:// host", label)
 			}
 		}
+		checkStoreSelection(add, file, label+" solace", s, stores)
 	case spec.SystemMQ:
 		if s.ConnName == "" {
 			add(file, "%s mq: missing 'conn-name'", label)
@@ -473,9 +532,31 @@ func checkTuple(add func(string, string, ...any), file, label string, s spec.Sid
 		if (s.Cipher != "" || s.KeyAlias != "") && !s.TLS {
 			add(file, "%s mq: cipher/key-alias require 'tls: true'", label)
 		}
-		if s.KeyAlias != "" && !haveKeystore {
-			add(file, "%s mq: key-alias set but no keystore defined", label)
+		if (s.Truststore != "" || s.Keystore != "") && !s.TLS {
+			add(file, "%s mq: truststore/keystore require 'tls: true'", label)
 		}
+		checkStoreSelection(add, file, label+" mq", s, stores)
+	}
+}
+
+// checkStoreSelection checks the stores a connection selects: each must be
+// defined under tls.stores, and a key-alias picks a key from the keystore it
+// selects, so it needs one.
+func checkStoreSelection(add func(string, string, ...any), file, where string, s spec.Side, stores spec.TLSConfig) {
+	for _, sel := range []struct{ key, name string }{{"truststore", s.Truststore}, {"keystore", s.Keystore}} {
+		if sel.name == "" {
+			continue
+		}
+		if _, ok := stores.Stores[sel.name]; !ok {
+			defined := "none"
+			if names := stores.StoreNames(); len(names) > 0 {
+				defined = strings.Join(names, ", ")
+			}
+			add(file, "%s: %s %q is not defined under tls.stores (defined: %s); add it or fix the name", where, sel.key, sel.name, defined)
+		}
+	}
+	if s.KeyAlias != "" && s.Keystore == "" {
+		add(file, "%s: key-alias %q selects a key from a keystore, but no keystore is selected; add keystore: <store>", where, s.KeyAlias)
 	}
 }
 
@@ -493,7 +574,7 @@ func edaAdvisory(warn func(string, string, ...any), file string, s spec.Side, is
 
 // checkConnections validates each reusable connection definition (no destination,
 // no nested conn-ref, complete tuple), in sorted order for stable messages.
-func checkConnections(add, warn func(string, string, ...any), env func(string) (string, bool), d *spec.Defaults, haveKeystore bool) {
+func checkConnections(add, warn func(string, string, ...any), env func(string) (string, bool), d *spec.Defaults, stores spec.TLSConfig) {
 	names := make([]string, 0, len(d.Connections))
 	for name := range d.Connections {
 		names = append(names, name)
@@ -512,14 +593,14 @@ func checkConnections(add, warn func(string, string, ...any), env func(string) (
 		if c.DestKind != "" {
 			add(fileEnv, "%s must not define queue/topic (a connection carries only connection details)", label)
 		}
-		checkTuple(add, fileEnv, label, c, haveKeystore)
+		checkTuple(add, fileEnv, label, c, stores)
 		checkSideCredentials(add, warn, env, fileEnv, label, c)
 	}
 }
 
 // checkLeaderElection validates leader-election mode + (for active_*) queue and
 // a Solace management session (conn-ref to a solace connection, or inline session).
-func checkLeaderElection(add func(string, string, ...any), d *spec.Defaults, haveKeystore bool) {
+func checkLeaderElection(add func(string, string, ...any), d *spec.Defaults, stores spec.TLSConfig) {
 	le := d.LeaderElection
 	if !le.Present || le.Mode == "" || le.Mode == spec.LeaderStandalone {
 		return
@@ -548,7 +629,7 @@ func checkLeaderElection(add func(string, string, ...any), d *spec.Defaults, hav
 		if le.Session.System != spec.SystemSolace {
 			add(fileEnv, "leader-election session must be a solace connection")
 		} else {
-			checkTuple(add, fileEnv, "leader-election session", *le.Session, haveKeystore)
+			checkTuple(add, fileEnv, "leader-election session", *le.Session, stores)
 		}
 	default:
 		add(fileEnv, "leader-election mode %q requires a solace session (conn-ref or inline session:)", le.Mode)
@@ -656,30 +737,42 @@ func checkSecurityUserRoles(add func(string, string, ...any), d *spec.Defaults) 
 	}
 }
 
-// checkKeyAliasConflicts flags binders (same dedup tuple) whose sides declare
-// different key-alias values — one binder cannot present two client certificates.
-func checkKeyAliasConflicts(add func(string, string, ...any), wfs []spec.Workflow) {
+// checkStoreSelectionConflicts flags binders (same dedup tuple) whose sides
+// select different stores or key-aliases: one connection trusts one store and
+// presents one certificate. It is strict -- a side that selects nothing
+// conflicts with one that selects a store -- because the merged binder would
+// otherwise trust, or present, something a side never asked for.
+func checkStoreSelectionConflicts(add func(string, string, ...any), wfs []spec.Workflow) {
 	type seen struct {
-		alias string
-		file  string
+		sel  [3]string
+		file string
+	}
+	keys := [3]string{"truststore", "keystore", "key-alias"}
+	show := func(v string) string {
+		if v == "" {
+			return "none"
+		}
+		return fmt.Sprintf("%q", v)
 	}
 	byKey := map[string]seen{}
-	visit := func(file string, s spec.Side) {
-		if !s.HasSystem() || s.KeyAlias == "" {
-			return
-		}
-		key := s.DedupKey()
-		if prev, ok := byKey[key]; ok {
-			if prev.alias != s.KeyAlias {
-				add(file, "conflicting key-alias %q vs %q for the same binder (also in %s)", s.KeyAlias, prev.alias, prev.file)
-			}
-			return
-		}
-		byKey[key] = seen{s.KeyAlias, file}
-	}
 	for _, wf := range wfs {
-		visit(wf.File, wf.Source)
-		visit(wf.File, wf.Target)
+		for _, s := range []spec.Side{wf.Source, wf.Target} {
+			if !s.HasSystem() {
+				continue
+			}
+			sel := [3]string{s.Truststore, s.Keystore, s.KeyAlias}
+			key := s.DedupKey()
+			prev, ok := byKey[key]
+			if !ok {
+				byKey[key] = seen{sel, wf.File}
+				continue
+			}
+			for i := range keys {
+				if prev.sel[i] != sel[i] {
+					add(wf.File, "conflicting %s %s vs %s for the same binder (also in %s): one connection trusts one store and presents one certificate -- give every side the same value, or define the connection once under connections: and use conn-ref", keys[i], show(sel[i]), show(prev.sel[i]), prev.file)
+				}
+			}
+		}
 	}
 }
 
@@ -806,14 +899,13 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 		if (s.Create != nil) == (s.Existing != "") {
 			add(fileEnv, "kubernetes.secrets.stores must set exactly one of 'create' or 'existing'")
 		}
-		if s.Create != nil {
-			if ctx.Defaults.TLS.Truststore == nil {
-				add(fileEnv, "kubernetes.secrets.stores.create requires tls.truststore")
-			}
+		if s.Create != nil && !selectsStores(resolveWorkflows(ctx.Workflows, ctx.Defaults), ctx.Defaults) {
+			add(fileEnv, "kubernetes.secrets.stores.create has nothing to carry: no TLS connection selects a store; select one with truststore: or keystore:, or remove secrets.stores")
 		}
 		if s.Existing != "" {
+			// Its keys are the store names, which checkStoreFiles already holds
+			// to a grammar every Secret key accepts.
 			checkSecretName(add, "kubernetes.secrets.stores.existing", s.Existing)
-			checkStoresSecretKeys(add, s.Existing, ctx.Defaults.TLS)
 		}
 	}
 	checkImagePull(add, warn, ctx)
@@ -975,15 +1067,37 @@ func safeHostPath(s string) bool {
 	return !strings.ContainsAny(s, pathShellMeta)
 }
 
-func usesTLS(wfs []spec.Workflow) bool {
-	for _, wf := range wfs {
-		for _, s := range []spec.Side{wf.Source, wf.Target} {
-			if s.System == spec.SystemSolace && strings.HasPrefix(s.Host, "tcps://") {
-				return true
-			}
-			if s.System == spec.SystemMQ && s.TLS {
-				return true
-			}
+// resolveWorkflows materialises every conn-ref side, as Run does once for the
+// cross-workflow checks.
+func resolveWorkflows(wfs []spec.Workflow, d *spec.Defaults) []spec.Workflow {
+	out := make([]spec.Workflow, len(wfs))
+	for i, wf := range wfs {
+		out[i] = wf
+		out[i].Source = d.Resolve(wf.Source)
+		out[i].Target = d.Resolve(wf.Target)
+	}
+	return out
+}
+
+// selectsStores reports whether anything consolidate renders mounts a store:
+// a TLS side (tcps:// Solace, tls: true MQ) of a resolved workflow, or the
+// rendered leader-election session, selecting a truststore or keystore.
+func selectsStores(resolved []spec.Workflow, d *spec.Defaults) bool {
+	selects := func(s spec.Side) bool {
+		tls := (s.System == spec.SystemSolace && strings.HasPrefix(s.Host, "tcps://")) || (s.System == spec.SystemMQ && s.TLS)
+		return tls && (s.Truststore != "" || s.Keystore != "")
+	}
+	for _, wf := range resolved {
+		if selects(wf.Source) || selects(wf.Target) {
+			return true
+		}
+	}
+	if sess := inlineSession(d); sess != nil && selects(*sess) {
+		return true
+	}
+	if name := leaderConnRef(d); name != "" {
+		if c, ok := d.Connections[name]; ok && selects(c) {
+			return true
 		}
 	}
 	return false
@@ -1012,7 +1126,7 @@ func credentialsWired(k *spec.Kubernetes) bool {
 // than a choice.
 //
 // It walks the same positions consolidate collects from -- both sides of every
-// workflow, the management session, the management accounts, and the two store
+// workflow, the management session, the management accounts, and the store
 // passwords -- because a name that reaches the config as ${...} has to be
 // readable from the mount, wherever in the spec it was written.
 func usesCredentials(wfs []spec.Workflow, d *spec.Defaults) bool {
@@ -1036,7 +1150,12 @@ func usesCredentials(wfs []spec.Workflow, d *spec.Defaults) bool {
 			return true
 		}
 	}
-	return !d.TLS.Truststore.Secret().Empty() || !d.TLS.Keystore.Secret().Empty()
+	for _, st := range d.TLS.Stores {
+		if !st.Secret().Empty() {
+			return true
+		}
+	}
+	return false
 }
 
 func isDNS1123(s string) bool { return len(s) <= 63 && dns1123RE.MatchString(s) }
@@ -1369,15 +1488,15 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 		add(fileEnv, "%s.secrets is no longer configured: credentials come from the connection fields themselves (client-password / client-password-env, password / password-env, ...) and are mounted at %s. Remove the %s.secrets section", section, secretsMountPath, section)
 	}
 	// Gone for the same reason: its one field could only ever hold the fixed
-	// in-container path, and the host side always came from tls.*.file, so the
-	// block decided nothing. The mount is now derived from those paths: a bind
+	// in-container path, and the host side always came from the store files, so
+	// the block decided nothing. The mount is now derived from those files: a bind
 	// mount on docker, a secret-store mount on podman.
 	if t.Stores != nil {
 		how := "bind-mounted"
 		if t.Platform == PlatformPodman {
 			how = "loaded into podman's secret store and mounted"
 		}
-		add(fileEnv, "%s.stores is no longer configured: the tls.truststore.file / tls.keystore.file store files are %s at %s whenever they are set. Remove the %s.stores section", section, how, spec.DefaultStoresMountPath, section)
+		add(fileEnv, "%s.stores is no longer configured: the files of the tls.stores a connection selects are %s under %s. Remove the %s.stores section", section, how, spec.DefaultStoresMountPath, section)
 	}
 	if !isDNS1123(t.Name) {
 		add(fileEnv, "%s.name %q is not a valid DNS-1123 label", section, t.Name)
@@ -1413,50 +1532,25 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 	}
 }
 
-// checkContainerStores gates the tls.*.file paths docker bind-mounts: the path
+// checkContainerStores gates the store file paths docker bind-mounts: the path
 // itself lands on a compose YAML line, so an unsafe character would add content
-// the spec never declared. They are always mounted, so this runs whenever a
-// store is set. Podman never names the path -- deploy reads the file into
-// podman's secret store -- and every platform mounts a store at its role's
-// fixed name (tls.MountPath), so on podman neither the path nor the file name
-// reaches the unit, and two stores may share a file name or be one file.
-// Kubernetes does not reach checkContainerTarget; see checkStoresSecretKeys.
+// the spec never declared. Podman never names the path -- deploy reads the file
+// into podman's secret store -- and every platform mounts a store under its
+// tls.stores name (tls.MountPath), so on podman neither the path nor the file
+// name reaches the unit, and two stores may share a file name or be one file.
+// Kubernetes does not reach checkContainerTarget: the stores travel in a
+// Secret keyed by store name.
 func checkContainerStores(add func(string, string, ...any), section, platform string, stores spec.TLSConfig) {
 	if platform == PlatformPodman {
 		return
 	}
-	for _, st := range []struct {
-		field string
-		store *spec.Store
-	}{{"tls.truststore.file", stores.Truststore}, {"tls.keystore.file", stores.Keystore}} {
-		if st.store == nil || st.store.File == "" {
+	for _, name := range stores.StoreNames() {
+		st := stores.Stores[name]
+		if !st.HasFile() {
 			continue
 		}
-		if !safeHostPath(st.store.File) {
-			add(fileEnv, "%s bind-mounts %s %q, which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", section, st.field, st.store.File)
-		}
-	}
-}
-
-// kubeSecretKeyRE is the character set of a Kubernetes Secret key.
-var kubeSecretKeyRE = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
-
-// checkStoresSecretKeys holds the keys an existing stores Secret is read by to
-// Kubernetes' grammar for a Secret key: each set store's file name is written
-// into the pod's stores volume as the key it maps to the store's fixed path
-// (a created Secret is keyed by role, so it needs no check). A name the API
-// server would refuse is reported here, at load, rather than by kubectl.
-func checkStoresSecretKeys(add func(string, string, ...any), existing string, stores spec.TLSConfig) {
-	for _, st := range []struct {
-		field string
-		store *spec.Store
-	}{{"tls.truststore.file", stores.Truststore}, {"tls.keystore.file", stores.Keystore}} {
-		if st.store == nil || st.store.File == "" {
-			continue
-		}
-		key := spec.BaseName(st.store.File)
-		if len(key) > 253 || !kubeSecretKeyRE.MatchString(key) || key == "." || strings.HasPrefix(key, "..") {
-			add(fileEnv, "kubernetes.secrets.stores.existing %q is mounted by key, and the key for %s is its file name %q, which is not a valid Secret key (letters, digits, '-', '_' and '.', at most 253 characters, not '.' and not starting '..'); rename the file to the key the Secret holds", existing, st.field, key)
+		if !safeHostPath(st.File) {
+			add(fileEnv, "%s bind-mounts tls.stores.%s.file %q, which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", section, name, st.File)
 		}
 	}
 }

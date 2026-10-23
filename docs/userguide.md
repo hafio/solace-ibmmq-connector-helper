@@ -13,8 +13,9 @@ into one consolidated `application.yml` for the **Solace PubSub+ Connector for I
 MQ**, generates the Kubernetes, Docker Compose, or Podman artifacts that run it, and
 can apply or tear those down for you. You describe each message flow as its own small
 file; the tool deduplicates connections into shared **binders**, numbers the
-workflows, derives each binding's destination-type, wires **TLS/mTLS** from one
-shared truststore/keystore, and turns every credential you declare into a file
+workflows, derives each binding's destination-type, wires **TLS/mTLS** from named
+truststores and keystores each connection selects, and turns every credential you
+declare into a file
 mounted at `/app/external/var/secrets/`, so no such value ever reaches a generated file
 ([section 9](#9-secrets-model)) -- the one exception is the tool's own reserved
 status account, whose password is rendered as a literal by design
@@ -414,7 +415,7 @@ Writes a ready-to-edit starter set into `<dir>` (default: the current directory)
 
 | File | Contents |
 |------|----------|
-| `env.yaml` | the single config file: `workflows` discovery, `connections` (prod-solace, mq-archive), shared TLS stores, logging and management, `active_standby` leader-election, and the `kubernetes:` / `docker:` / `podman:` deploy sections |
+| `env.yaml` | the single config file: `workflows` discovery, `connections` (prod-solace, mq-archive), named TLS stores (separate ones for Solace and MQ), logging and management, `active_standby` leader-election, and the `kubernetes:` / `docker:` / `podman:` deploy sections |
 | `workflow-0.yaml` | IBM MQ -> Solace -- inline `mq-core` / `conn-ref: prod-solace` |
 | `workflow-1.yaml` | Solace -> IBM MQ -- `conn-ref: prod-solace` / inline `mq-core` (same block as wf-0) |
 | `workflow-2.yaml` | IBM MQ -> Solace -- `conn-ref: mq-archive` / `conn-ref: prod-solace` |
@@ -463,7 +464,7 @@ workflows:
 - `file_pattern` supports **only the `*` wildcard** (leading, middle, and/or
   trailing), e.g. `workflow-*.yaml` or `*edge*.yml`. `?`, `[`, `]` are rejected with
   an actionable error.
-- Relative paths in `env.yaml` (`workflows.dir`, `tls.*.file`, `libs.dir`, ...)
+- Relative paths in `env.yaml` (`workflows.dir`, `tls.stores.<name>.file`, `libs.dir`, ...)
   resolve **relative to the env file's directory**, so a config
   folder is portable regardless of your current directory. `workflows.dir: "."`
   therefore means "alongside `env.yaml`".
@@ -511,7 +512,8 @@ instead.
 ### 5.1 Variable expansion (`${VAR}`)
 
 Any non-credential string field -- hosts, `msg-vpn`, `conn-name`, `queue-manager`,
-`channel`, `cipher`, `key-alias`, destinations, names, namespaces, images, dirs,
+`channel`, `cipher`, `truststore`, `keystore`, `key-alias`, destinations, names,
+namespaces, images, dirs,
 mount paths, the syslog host, URLs, ... -- may reference the tool's own environment
 at generate time:
 
@@ -569,6 +571,8 @@ source:                # exactly one of solace:/mq:, pointing at exactly one que
     password-env: MQ_PASSWORD
     tls: true
     cipher: TLS_RSA_WITH_AES_256_CBC_SHA256
+    truststore: mq-ca          # a tls.stores name in env.yaml
+    keystore: mq-client        # -> mTLS
     key-alias: mq-client
     queue: ORDERS.OUT
 target:
@@ -577,6 +581,8 @@ target:
     msg-vpn: prod
     client-username: connector
     client-password-env: SOL_PASSWORD
+    truststore: solace-ca
+    keystore: solace-client
     key-alias: solace-client
     queue: Q.FROM-MQ.ORDERS
 ```
@@ -607,10 +613,12 @@ Solace pattern is allowed but emits an advisory **warning** (see
 | `msg-vpn` | yes | Solace message VPN |
 | `client-username` | no | needed by most brokers; omit only for cert-only/OAuth auth |
 | `client-password` | no | prefer the `client-password-env` twin ([section 9.1](#91-declaring-a-credential)); omit for cert-only/OAuth auth |
-| `key-alias` | no | selects a client key from the shared keystore -> **mTLS**; requires a `tcps://` host and a keystore in `env.yaml` |
+| `truststore` | no | the `tls.stores` entry the broker certificate is validated against; requires a `tcps://` host. Unset: the Solace API validates against the JVM's default CA bundle |
+| `keystore` | no | the `tls.stores` entry holding the client certificate this connection presents -> **mTLS**; requires a `tcps://` host. If the broker authenticates the client by its certificate, also set `AUTHENTICATION_SCHEME: AUTHENTICATION_SCHEME_CLIENT_CERTIFICATE` in `api-properties` -- the tool does not write it |
+| `key-alias` | no | picks one key in that keystore (needed when it holds several); requires `keystore` |
 | `queue` | one of | consume from / produce to a Solace queue |
 | `topic` | one of | Solace topic to **produce** to; **not valid on a `source`** -- a Solace source must be a `queue` ([section 6.5](#65-event-driven-guidance-errors-and-warnings)) |
-| `api-properties` | no | verbatim map -> `solace.java.api-properties`, and -> the leader-election `session.api-properties` when this connection is the management session |
+| `api-properties` | no | verbatim map -> `solace.java.api-properties`, and -> the leader-election `session.api-properties` when this connection is the management session. On a `tcps://` host the tool writes only the store wiring here (`SSL_TRUST_STORE*`, `SSL_KEY_STORE*`, `SSL_PRIVATE_KEY_ALIAS`); validation policy is yours: `SSL_VALIDATE_CERTIFICATE` (the Solace API's default is `true`), and the narrower `SSL_VALIDATE_CERTIFICATE_HOST` / `SSL_VALIDATE_CERTIFICATE_DATE` -- see [section 6.4](#64-destinations-durable-names-passthrough) |
 | `consumer` / `producer` | no | verbatim per-binding tuning |
 | _any other key_ | no | copied through verbatim as `solace.java.<key>` -- the connector's own session properties, e.g. `client-name`, `connect-retries-per-host`, `reconnect-retry-wait-in-millis` ([section 6.4](#64-destinations-durable-names-passthrough)). Another spelling of a key above (`msgVpn`, `clientPassword`) is an error |
 
@@ -625,7 +633,9 @@ Solace pattern is allowed but emits an advisory **warning** (see
 | `password` | no | prefer the `password-env` twin ([section 9.1](#91-declaring-a-credential)); omit when not using password auth |
 | `tls` | no | `true` opts the connection into TLS (MQ has no URL scheme) |
 | `cipher` | no | JCE cipher -> `WMQ_SSL_CIPHER_SUITE`; requires `tls: true` |
-| `key-alias` | no | client key from the shared keystore -> **mTLS**; requires `tls: true` and a keystore |
+| `truststore` | no | the `tls.stores` entry the queue manager certificate is validated against; requires `tls: true`. Unset: the JVM's default CA bundle |
+| `keystore` | no | the `tls.stores` entry holding the client certificate this connection presents -> **mTLS**; requires `tls: true` |
+| `key-alias` | no | picks one key in that keystore; requires `keystore` (and so `tls: true`) |
 | `queue` | one of | consume from / produce to an MQ queue |
 | `topic` | one of | MQ topic; a `topic:` **source** is always a durable subscription (auto-named) |
 | `additional-properties` | no | verbatim map -> `ibm.mq.additional-properties`: JMS connection-factory properties by their `WMQ_*` constant name or raw `XMSC_*` name (the starter resolves only `WMQ_*` names, so `USER_AUTHENTICATION_MQCSP` must be written `XMSC_USER_AUTHENTICATION_MQCSP`); a value that reads as a number or `true`/`false` is typed as such |
@@ -663,7 +673,7 @@ Solace pattern is allowed but emits an advisory **warning** (see
   `queue-manager`, `queueManager` and `QUEUE_MANAGER` to one property, so the
   connector would receive it twice -- or, for a credential, its value would land in
   `application.yml` as a literal. `ssl-bundle` is derived from `tls:` and the
-  truststore and cannot be set. A key must be a plain property name (letters,
+  stores the connection selects and cannot be set. A key must be a plain property name (letters,
   digits and `. _ - [ ]`), since it is written unquoted into `application.yml`, and
   `ssl-cipher-suite` beside `cipher:` on one side sets the cipher suite twice; both
   are **errors** too. A key within a typo of one the tool reads **warns** ("did you
@@ -677,6 +687,36 @@ Solace pattern is allowed but emits an advisory **warning** (see
   `client-name` under `active_*` (every replica shares the file, and a client name
   must be unique; use `${HOSTNAME}`). A `${...}` inside any of these reaches Spring
   as typed ([section 5.1](#51-variable-expansion-var)).
+- **Stores are selected per connection.** `truststore:` and `keystore:` name entries
+  of `tls.stores` in `env.yaml` ([section 7](#7-connector-defaults-envyaml-top-level)),
+  so each connection -- Solace or MQ, workflow side, connection or management
+  session -- trusts its own CAs and presents its own client certificate. Naming a
+  store that is not defined is an **error**, as is a `key-alias` with no `keystore`,
+  a selection on a `tcp://` Solace host, or on an MQ side without `tls: true`. Two
+  sides that collapse onto one binder must select the same `truststore`, `keystore`
+  and `key-alias` -- a side that selects nothing conflicts with one that selects a
+  store -- or it is an **error**: one connection trusts one store and presents one
+  certificate. Define the connection once under `connections:` and `conn-ref` it.
+- **Certificate validation on a Solace connection is the connection's own
+  setting.** The tool writes no `SSL_VALIDATE_CERTIFICATE`: the Solace API validates
+  the broker certificate by default (host name and expiry included), and a
+  `tcps://` connection that writes `SSL_VALIDATE_CERTIFICATE: false` in its
+  `api-properties` gets exactly that -- even when it selects a truststore. What the
+  tool does is report it, on every command (validate, generate,
+  deploy and the generator page), once per place it is written: a connection,
+  an inline side, or an inline leader-election session. `false` **warns**, naming
+  the host and how far it reaches (every workflow side on that connection, and the
+  management session when it uses the connection); a value other than the literal
+  `true` or `false` (`no`, `0`, `${VAR}`) **warns** that the posture cannot be
+  reported; another spelling (`ssl_validate_certificate`) **warns** that the Solace
+  API likely ignores it. Two sides that collapse onto one binder and state
+  different values are an **error** (they share one `api-properties` block); an
+  inline management session whose posture differs from the workflow sides on the
+  same broker **warns**, since it is configured separately (use `conn-ref` to make
+  it follow the connection). Turning validation off means anything on the network
+  path can impersonate the broker; prefer trusting the broker's CA, and reach for
+  `SSL_VALIDATE_CERTIFICATE_HOST: false` or `SSL_VALIDATE_CERTIFICATE_DATE: false`
+  when only the host name or the expiry is the problem.
 
 ### 6.5 Event-driven guidance (errors and warnings)
 
@@ -733,7 +773,7 @@ target:
 ```
 
 - A `conn-ref` side is **strict** about *connection* fields: host, creds, tls, cipher,
-  key-alias, api/additional-properties and any other key alongside `conn-ref` are an
+  truststore, keystore, key-alias, api/additional-properties and any other key alongside `conn-ref` are an
   **error** -- they belong on the connection itself. `queue:`/`topic:` and the per-binding
   `consumer:`/`producer:` blocks are the side's own and stay allowed.
 - The referenced connection must exist and its system must match the side's
@@ -927,6 +967,8 @@ connections:                     # reusable connections, referenced by conn-ref 
       msg-vpn: prod
       client-username: connector
       client-password-env: SOL_PASSWORD
+      truststore: solace-ca        # validate the broker against this store
+      keystore: solace-client      # present a client certificate from this one -> mTLS
       key-alias: solace-client
       api-properties:              # optional; verbatim -> solace.java.api-properties
         REAPPLY_SUBSCRIPTIONS: true
@@ -937,17 +979,23 @@ connections:                     # reusable connections, referenced by conn-ref 
       channel: DSU.SVRCONN
       user: appuser
       password-env: MQ_ARCHIVE_PASSWORD
-      tls: true                    # TLS without key-alias -> server-auth only (no mTLS)
+      tls: true                    # a truststore and no keystore -> server-auth only (no mTLS)
       cipher: TLS_RSA_WITH_AES_256_CBC_SHA256
+      truststore: mq-ca            # its own CA, separate from Solace's
 tls:
-  truststore:                    # one shared truststore for ALL Solace + MQ TLS connections
-    file: ./certs/truststore.jks
-    password-env: TRUSTSTORE_PASSWORD
-    type: JKS
-  keystore:                      # one shared keystore; only needed when a side sets key-alias (mTLS)
-    file: ./certs/keystore.jks
-    password-env: KEYSTORE_PASSWORD
-    type: JKS
+  stores:                        # named stores; each connection selects its own by name
+    solace-ca:
+      file: ./certs/solace-ca.p12
+      password-env: SOLACE_TRUSTSTORE_PASSWORD
+      type: PKCS12
+    solace-client:
+      file: ./certs/solace-client.p12
+      password-env: SOLACE_KEYSTORE_PASSWORD
+      type: PKCS12
+    mq-ca:
+      file: ./certs/mq-ca.jks
+      password-env: MQ_TRUSTSTORE_PASSWORD
+      type: JKS
 logging:
   level:
     root: INFO
@@ -984,8 +1032,7 @@ mq-defaults:                     # optional; merged into every MQ binder's ibm.m
 | Section | Option | Notes |
 |---------|--------|-------|
 | `connections.<name>` | `solace:`/`mq:` block | a reusable connection tuple (no destination); referenced by `conn-ref` ([section 6.6](#66-reusable-connections-conn-ref)) |
-| `tls.truststore` | `file`, `password`, `type` | the single shared truststore; `type` is `JKS` or `PKCS12` |
-| `tls.keystore` | `file`, `password`, `type` | the single shared keystore; required only for mTLS (`key-alias`) |
+| `tls.stores.<name>` | `file`, `password` (or `password-env`), `type` | a named JKS/PKCS12 store; any number. A connection selects one as its `truststore:` and/or `keystore:` ([section 6.4](#64-destinations-durable-names-passthrough)); one store may serve several connections, and both roles. The name is lowercase letters and digits joined by single hyphens, at most 63 characters (it names the mounted file, the Kubernetes Secret key and the podman secret). `file` is required; `type` (`JKS` or `PKCS12`) is optional -- unset, no type is written and the libraries apply the JVM's default keystore type, which loads either. Any other key under `tls:` or a store is an error, the retired `tls.truststore` / `tls.keystore` included. A store no connection selects is not mounted, and warns |
 | `logging.level` | `<logger>: <level>` | verbatim, order preserved -> `logging.level` |
 | `logging.syslog` | `host`, `port`, `protocol` | optional; ships log lines to syslog **on every platform**, in addition to the console. Emits a `logback-spring.xml` (a ConfigMap key on kubernetes, an inlined compose config on docker, a podman secret on podman) plus `LOGGING_SYSLOG_*` env vars, appname = the instance name. `protocol` is `udp` (default) or `tcp` -- **tcp requires the `logstash-logback-encoder` jar on the connector classpath** (provide it via `libs`; fetch it with `solmq-conn-util download jar syslog`, [section 10](#10-download-jar)) |
 | `management` | `port` | -> `management.server.port`; always emitted, default `8090`. The docker/podman published port and the kubernetes `service.port` ([section 8](#8-platform-sections-kubernetes-docker-podman)) default to it |
@@ -1005,17 +1052,28 @@ nothing. `standalone` requires `replicas: 1`; `active_*` allow more.
 
 The session is a full Solace connection block, not a stripped one -- the connector
 documents `session.*` as the same interface as `solace.java.*`. TLS is wired from the
-shared stores, `solace-defaults` is merged into it exactly as into a binder, and its own
+stores it selects (`truststore:` / `keystore:` on the session, or on the connection it
+`conn-ref`s), `solace-defaults` is merged into it exactly as into a binder, and its own
 `api-properties` follow the tool-managed TLS keys. When its broker tuple is one the
 workflows already bind, it shares that binder's credential secrets rather than mounting a
 second copy ([section 9.2](#92-mount-names)). Adding or changing a `solace-defaults`
 block on this session therefore changes the rendered config too: the next `generate`
 produces a different `application.yml`, and the next `deploy` rolls the pods.
 
-**TLS is shared:** there is exactly one truststore and one keystore, referenced by
-every TLS connection (Solace via api-properties, MQ via an ssl-bundle). Different
-connections can present different client certificates by using a different
-`key-alias` **within** that one shared keystore.
+**Stores are named and selected per connection.** `tls.stores` holds any number of
+stores, and each TLS connection picks its own: a Solace connection gets
+`SSL_TRUST_STORE*` from its `truststore:` and `SSL_KEY_STORE*` (plus
+`SSL_PRIVATE_KEY_ALIAS` when `key-alias` is set) from its `keystore:`; an MQ binder
+gets `spring.ssl.bundle.jks.<binder>-bundle` holding a truststore section, a
+keystore section with `key.alias`, or both -- whatever it selects -- and
+references it as `ibm.mq.ssl-bundle`. A connection that selects no truststore
+validates against the JVM's default CA bundle (no bundle at all for an MQ binder
+that selects nothing); one that selects no keystore presents no client
+certificate. So Solace and MQ can trust different CAs and present different
+certificates, and several queue managers or brokers can each have their own. The
+tool wires the stores and nothing else: it writes no certificate-validation
+policy, so a Solace connection validates the broker certificate unless its own
+`api-properties` say otherwise ([section 6.4](#64-destinations-durable-names-passthrough)).
 
 ### 7.1 The reserved status account (`solmq-status`)
 
@@ -1177,7 +1235,7 @@ them first.
 
 Credentials need no schema in any platform section: they come from the connection
 fields themselves. The stores are configured only under `kubernetes:`, which has to
-build a Secret; docker bind-mounts them from the `tls.*.file` paths directly, and
+build a Secret; docker bind-mounts the selected stores' files directly, and
 podman's `deploy` loads them into podman's secret store. See
 [section 9](#9-secrets-model).
 
@@ -1283,7 +1341,10 @@ When an MQ binder uses TLS the tool already sets
 appended **after** that flag rather than replacing it, so the connector keeps
 the cipher mapping it needs, and an option of yours that sets the same property
 deliberately wins -- the JVM applies these left to right. `jdk` never carries
-the flag. A variable with nothing in it is not set at all.
+the flag. A variable with nothing in it is not set at all. The flag matters only
+to an IBM MQ client before 9.3.3 given a JCE cipher name (`TLS_RSA_WITH_...`,
+what `cipher:` takes); IBM MQ 9.3.3 CD and 9.4.0 removed the property and accept
+either name, so with the client `download jar mq` fetches by default it is inert.
 
 The values are checked for what the three platforms would read differently: a
 quote, a backslash, a backtick, a `$` left over after expansion (that is, an
@@ -1365,9 +1426,9 @@ kubernetes:
                                  # it names (SOL_PASSWORD, ...)
       # existing: my-credentials # ...or mount a Secret that already exists, left
                                  # untouched -- it must already carry those same keys
-    stores:                      # truststore/keystore Secret (volume-mounted)
-      create: true               # <name>-stores: base64-embeds the .jks files from env.yaml tls.*.file, keyed truststore/keystore
-      # existing: my-tls         # ...its keys are the tls.*.file base names (truststore.jks)
+    stores:                      # the selected tls.stores in one Secret (volume-mounted)
+      create: true               # <name>-stores: base64-embeds each selected store's file, keyed by its store name
+      # existing: my-tls         # ...or a Secret you manage, keyed by the same store names (mq-ca, ...)
 ```
 
 | Section | Option | Notes |
@@ -1383,8 +1444,8 @@ kubernetes:
 | `libs.download` | `urls`, `image`, `pvc` | an initContainer `wget`s each URL into `/libs` at pod start; the shared volume is an `emptyDir` unless `pvc` names an existing PVC |
 | `secrets.credentials.create` | `true` | the tool builds `<name>-credentials`: one key per credential the config references, each holding the resolved value -- read from the host variable for an `-env` credential, taken from the spec for a literal |
 | `secrets.credentials.existing` | `<name>` | reference a pre-existing Secret instead of creating one; exactly one of `create` / `existing` is required once the block is present, and the Secret's keys must be the ones [section 9.2](#92-mount-names) derives -- your `-env` variable names, plus a derived name per literal |
-| `secrets.stores.create` | `true` | the tool builds `<name>-stores`, base64-embedding the `env.yaml` `tls.*.file` stores under the keys `truststore` and `keystore`; requires a `tls.truststore` |
-| `secrets.stores.existing` | `<name>` | reference a pre-existing stores Secret (`create` XOR `existing`, as above); its keys must be the base filenames of `tls.truststore.file` / `tls.keystore.file`, which the pod's volume lists by name and mounts as `truststore` and `keystore` -- so a key the Secret lacks keeps the pod from starting (a "couldn't find key" event) rather than failing the first TLS handshake, and a cert-manager Certificate with `keystores` enabled works as it is when `tls.*.file` are named `truststore.jks` / `keystore.jks` (or `.p12`). A file name that is not a valid Secret key (letters, digits, `-`, `_` and `.`, at most 253 characters, not `.` and not starting `..`) is an error at load |
+| `secrets.stores.create` | `true` | the tool builds `<name>-stores`, base64-embedding the file of every `tls.stores` entry a connection selects, each under its store name; a set over the 1 MiB a Secret holds is an error that names each store's size. Requires at least one TLS connection selecting a store |
+| `secrets.stores.existing` | `<name>` | reference a pre-existing stores Secret (`create` XOR `existing`, as above); its keys must be the names of the stores the connections select (`mq-ca`, `solace-client`, ...), which the pod's volume lists by name and mounts under those names -- so a key the Secret lacks keeps the pod from starting (a "couldn't find key" event) rather than failing the first TLS handshake. A Secret cert-manager writes (keys such as `truststore.jks`) has to be copied under the store names, or referenced by a store per Secret |
 
 **Everything the tool creates is named after `deployment.name`.** The ConfigMap is
 `<name>-config`, the Secrets `<name>-credentials`, `<name>-stores` and
@@ -1452,12 +1513,12 @@ uses compose's long syntax (`source: <name>` plus an absolute `target:`) rather
 than the short `- <name>` form, because the short form always lands at compose's
 own `/run/secrets/<name>` with no way to point elsewhere; the long form's `target:`
 is `/app/external/var/secrets/<name>`, the same directory every platform uses. The
-`tls.*.file` host paths are bind-mounted onto fixed in-container names,
-`/app/external/classpath/truststores/truststore` and `.../keystore`, whenever they
-are set, whatever the files are called -- the generated `application.yml` points
-there, so the mount follows the configuration rather than needing its own switch,
-and two stores may share a file name or be one file -- and `libs.dir` bind-mounts a
-host jar directory to `/app/external/libs`.
+file of every `tls.stores` entry a connection selects is bind-mounted at
+`/app/external/classpath/truststores/<store name>`, whatever the file is called --
+the generated `application.yml` points there, so the mount follows the
+configuration rather than needing its own switch, and two stores may share a file
+name or be one file -- and `libs.dir` bind-mounts a host jar directory to
+`/app/external/libs`.
 
 Every `$` inside those inlined `configs:` blocks is written **doubled** (`$$`).
 Docker Compose interpolates variables across the whole document, content blocks
@@ -1533,7 +1594,7 @@ docker:
     - 8090                       # bare: publish to the same host port (8090:8090)
     - "8081:8090"                # or "host:container" to map a distinct host port
   # No secrets: section -- credentials come from the connection fields themselves.
-  # No stores: section either -- the tls.*.file paths are bind-mounted for you.
+  # No stores: section either -- the selected tls.stores are bind-mounted for you.
   # libs:
   #   dir: ./libs                # the only key: the host dir, bind-mounted to the image's
                                  # fixed /app/external/libs. Populate it with
@@ -1547,7 +1608,7 @@ install and tear down that same unit through **systemctl**. A quadlet unit canno
 inline file content, so everything the connector reads from a file reaches it from
 **podman's secret store**: `deploy` loads each credential, the rendered
 `application.yml`, the status script, the logback config (when syslog is
-configured) and the TLS stores (when `tls.*.file` is set) into the store -- values
+configured) and every `tls.stores` entry a connection selects into the store -- values
 on stdin, never in argv -- and the unit mounts every one back in with a `Secret=`
 line. A podman deployment keeps **nothing on the host but the unit itself and your
 `libs.dir`**, the one `Volume=` the unit can carry. `generate` writes nothing, so
@@ -1558,7 +1619,7 @@ meant to be installed by hand.
 |---|---|
 | `<name>-<KEY>`, one per credential | `/app/external/var/secrets/<KEY>` |
 | `<name>-application.yml` | `/app/external/spring/config/application.yml` |
-| `<name>-tls-truststore`, `<name>-tls-keystore` | `/app/external/classpath/truststores/truststore`, `.../keystore` |
+| `<name>-tls-<store>`, one per selected store | `/app/external/classpath/truststores/<store>` |
 | `<name>-status-script` | `/app/external/.status-script` |
 | `<name>-logback-spring.xml` (syslog only) | `/app/external/classpath/logback-spring.xml` |
 
@@ -1616,18 +1677,21 @@ rejected outright: `validate` reports an error naming whichever key was set.
 > removes them any more.
 
 `deploy --platform podman` first resolves everything the unit mounts -- every
-credential, every document and both stores, which it reads from the `tls.*.file`
-paths -- so a missing variable or an unreadable or oversized store stops it before
+credential, every document and every selected store, which it reads from its
+`file` -- so a missing variable or an unreadable or oversized store stops it before
 anything is created. It then loads each into the secret store, deletes the file
-secrets this spec no longer mounts (a keystore or syslog dropped since the last
-deploy), writes the unit, and runs `systemctl [--user] daemon-reload`. Last it asks
+secrets this spec no longer mounts (syslog dropped, or a store no connection
+selects any more -- found from the `Secret=` lines of the unit the last deploy
+wrote, since a store's secret is named after a store the spec may no longer
+define), writes the unit, and runs `systemctl [--user] daemon-reload`. Last it asks
 systemd whether the service is running: a **new, stopped or failed** unit is
 `start`ed, and a **running** one is `restart`ed, because podman copies a secret
 into the container when it creates it, so only a new container sees the
 configuration this deploy loaded. `remove --platform podman` `stop`s, removes the
 unit and reloads, then removes the secrets last, once the unit that mounted them is
-gone: the credentials and every file secret the instance can own, whether or not
-the current spec mounts it.
+gone: the credentials, every document secret the instance can own, and every
+store secret the deployed unit (read before it is removed) or the current spec
+mounts.
 
 ```yaml
 podman:
@@ -1640,7 +1704,7 @@ podman:
     - 8090                       # bare: publish to the same host port (8090:8090)
     - "8081:8090"                # or "host:container" to map a distinct host port
   # No secrets: section -- credentials come from the connection fields themselves.
-  # No stores: section either -- deploy loads the tls.*.file stores into podman's
+  # No stores: section either -- deploy loads the selected tls.stores into podman's
   # secret store for you. No base-dir: nothing else is written to the host.
   # libs:
   #   dir: ./libs                # the only key: the host dir, bind-mounted to the image's
@@ -1662,9 +1726,8 @@ and `libs`, whose one key is `dir`.
 Every in-container path is fixed by the image, so no section configures one.
 `libs.dir` names the host directory to bind-mount and it lands at
 `/app/external/libs`, which the connector already launches with on its classpath;
-the truststore/keystore land in `/app/external/classpath/truststores` as
-`truststore` and `keystore` whenever `tls.*.file` is set (bind-mounted on docker,
-from the secret store on podman).
+each store a connection selects lands in `/app/external/classpath/truststores`
+under its store name (bind-mounted on docker, from the secret store on podman).
 Accordingly neither section takes a `secrets:`, a `stores:` or a `libs.mount-path` key -- setting any of them is a rejected key,
 since docker and podman fix those paths themselves and take no such option. `project-name`
 is **not** shared: it names a compose project, and podman has no equivalent
@@ -1717,13 +1780,14 @@ kubernetes, compose `configs:` and `secrets:` on docker, and every podman secret
   container, which runs as the same identity. An **NFS** volume ignores `fsGroup`:
   an NFS export behind `libs` (including `libs.pvc.create.nfs`) has to be
   readable -- and, for `libs.download`, writable -- by the run-as uid or gid.
-- **docker**: the `tls.*.file` stores and the `libs.dir` jars are bind-mounted
+- **docker**: the selected stores' files and the `libs.dir` jars are bind-mounted
   with their host modes, read as the run-as uid and gid with the host's own ids
   -- root included, since no capability lets it bypass the modes. A store kept
   0600 by another user cannot be read. `deploy` warns, on Linux, about each
   mounted path the identity cannot read, naming its mode and a fix: `chmod o+r`
-  for a truststore or a jar, `chmod o+rx` for the libs directory, and for the
-  keystore, which holds a private key, `chgrp` to the run-as gid with `chmod g+r`
+  for a truststore or a jar, `chmod o+rx` for the libs directory, and for a store
+  some connection uses as a keystore, which holds a private key, `chgrp` to the
+  run-as gid with `chmod g+r`
   rather than opening it to everyone -- or a `docker.run-as` naming the file's
   owner. The check assumes rootful docker; rootless docker maps ids the way
   rootless podman does, which it does not model.
@@ -1787,7 +1851,7 @@ environment variable that holds it. Never both:
 |---------|-----------------------|
 | `client-username` / `client-password` | `client-username-env` / `client-password-env` |
 | `user` / `password` (mq) | `user-env` / `password-env` |
-| `tls.truststore.password`, `tls.keystore.password` | `...password-env` |
+| `tls.stores.<name>.password` | `...password-env` |
 | `security.users[].password` | `...password-env` |
 
 ```yaml
@@ -1826,8 +1890,9 @@ the tool chose. Because the two kinds of name share one namespace -- both end up
 as files under `/app/external/var/secrets/` -- that prefix is what stops a derived name from
 landing on a variable you exported. The full set is `_GEN_<BINDER>_CLIENT_USERNAME`,
 `_GEN_<BINDER>_CLIENT_PASSWORD`, `_GEN_<BINDER>_USER`, `_GEN_<BINDER>_PASSWORD`,
-`_GEN_TRUSTSTORE_PASSWORD`, `_GEN_KEYSTORE_PASSWORD`,
-`_GEN_SECURITY_USER_<NAME>_PASSWORD`, and
+`_GEN_TLS_<STORE>_PASSWORD` (a literal store password; `<STORE>` is the store
+name upper-cased with each `-` turned into `_`, so `mq-ca` gives
+`_GEN_TLS_MQ_CA_PASSWORD`), `_GEN_SECURITY_USER_<NAME>_PASSWORD`, and
 `_GEN_LEADER_ELECTION_CLIENT_USERNAME` / `_CLIENT_PASSWORD`. `<BINDER>` and `<NAME>` are
 upper-cased with every run of non-alphanumeric characters folded to a single `_`
 (so binder `mq.core-1` gives `MQ_CORE_1_*`); a name starting with a digit is
@@ -1928,19 +1993,16 @@ names until deploying to a platform does.
   ([section 8.3](#83-podman) explains the absolute `target=` path).
 
 The stores wiring is separate and follows its own naming rule: inside the
-container the shared truststore/keystore are always
-`/app/external/classpath/truststores/truststore` and `.../keystore`, whatever the
-files are called -- base64-embedded into a Kubernetes Secret mounted there,
-bind-mounted there from the host for docker, or loaded into podman's secret store
-and mounted there for podman -- which needs no configuration, since setting
-`tls.*.file` is itself the request. Kubernetes does need telling, so its
-`kubernetes.secrets.stores` takes the same `create` XOR `existing` choice as
-`credentials`. A created Secret is keyed `truststore` and `keystore`; a
-`stores.existing` Secret's keys are the **base filenames** of
-`tls.truststore.file` / `tls.keystore.file` -- `truststore.jks` and
-`keystore.jks` for the example in
-[section 7](#7-connector-defaults-envyaml-top-level) -- and the pod's volume maps
-each to its fixed name, so one key may serve as both stores.
+container each `tls.stores` entry a connection selects is
+`/app/external/classpath/truststores/<store name>`, whatever its file is called --
+base64-embedded into a Kubernetes Secret mounted there, bind-mounted there from
+the host for docker, or loaded into podman's secret store and mounted there for
+podman -- which needs no configuration, since selecting the store is itself the
+request. Kubernetes does need telling, so its `kubernetes.secrets.stores` takes
+the same `create` XOR `existing` choice as `credentials`. Either way the Secret
+is keyed by store name -- `solace-ca`, `mq-ca`, ... for the example in
+[section 7](#7-connector-defaults-envyaml-top-level) -- and the pod's volume
+mounts each key under that name.
 
 There is **no `secrets:` section under `docker:` or `podman:`** -- credentials come
 from the connection fields, so there is nothing to configure. Setting one is an
@@ -2374,13 +2436,13 @@ than 20 workflows is rejected -- see [section 5](#5-the-config-file-and-workflow
 Point `-o` **outside** the workflow folder so the output is not re-scanned as a
 workflow on the next run.
 
-**Store paths differ by platform.** `generate config` writes each truststore/keystore
-`location` exactly as it appears in `env.yaml`, so you can run the connector wherever
-those files already live. The container platforms rewrite them to a mount path -- the
-`application.yml` that kubernetes/docker/podman ship points at
-`/app/external/classpath/truststores/truststore` and `.../keystore` because the
-stores are mounted there under those fixed names (a Secret volume for kubernetes, a
-bind mount for docker, a secret-store mount for podman).
+**Store paths differ by platform.** `generate config` writes each store's
+location exactly as its `file` appears in `env.yaml`, so you can run the connector
+wherever those files already live. The container platforms rewrite them to a mount
+path -- the `application.yml` that kubernetes/docker/podman ship points at
+`/app/external/classpath/truststores/<store name>` because each selected store is
+mounted there under its name (a Secret volume for kubernetes, a bind mount for
+docker, a secret-store mount for podman).
 
 **The status script and its labels ship on every platform.** All
 three platforms always carry the rendered status script
@@ -3181,7 +3243,7 @@ Useful places to look once you are inside:
 |------|---------------|
 | `/app/external/spring/config/application.yml` | the configuration the process actually loaded |
 | `/app/external/libs` | the jars `download jar` put there ([section 10](#10-download-jar)) |
-| `/app/external/classpath/truststores` | the truststore and keystore, as `truststore` and `keystore`: bind-mounted from `tls.*.file` on docker, mounted from podman's secret store on podman and Secret-mounted on kubernetes |
+| `/app/external/classpath/truststores` | each selected `tls.stores` entry, under its store name: bind-mounted from its file on docker, mounted from podman's secret store on podman and Secret-mounted on kubernetes |
 | `/app/external/var/secrets` | the credentials, on every platform |
 
 ### 14.3 The one-shot form, and when it is the only form
@@ -3263,12 +3325,27 @@ container is called something else, is not reachable with `cli` -- reach it with
   the connector; on one side it is an error.
 - **`generate` fails fast; `validate` reports everything.** Use `validate` while
   authoring, `generate`/`deploy`/`remove` to produce or apply output.
-- **One shared truststore + keystore** for all connections; per-connection client
-  certs are selected by `key-alias` within that one keystore.
-- **TLS without a truststore emits no SSL bundle.** `tls: true` (or a `tcps://`
-  host) with no `tls.truststore` still negotiates TLS, but falls back to the JVM's
-  default trust store and warns -- rather than writing a bundle with empty
-  `location`/`password`/`type`, which the connector reads as configured-but-broken.
+- **Stores are named and selected per connection.** `tls.stores` replaces the
+  single `tls.truststore` / `tls.keystore`, which are now an error naming the
+  replacement: define each store under a name and select it on the connection with
+  `truststore:` / `keystore:`. `key-alias` now needs a `keystore:` -- selecting
+  the keystore is what presents a client certificate; the alias only picks one key
+  in it. Every platform mounts exactly the selected stores, each under its name.
+- **The tool writes no certificate-validation policy.** Earlier releases wrote
+  `SSL_VALIDATE_CERTIFICATE: true` into every `tcps://` Solace connection whenever a
+  truststore was configured, and dropped a connection's own `false`. Now the Solace
+  API's default (validate) applies unless the connection's `api-properties` set
+  `SSL_VALIDATE_CERTIFICATE`, and every command warns when one turns it off
+  ([section 6.4](#64-destinations-durable-names-passthrough)).
+- **A store needs a file.** A `tls.stores` entry without `file` is an **error**:
+  it would otherwise be skipped by every reader in silence.
+  A store without `type` writes no type line or `SSL_*_STORE_FORMAT` key; the
+  libraries then use the JVM's default keystore type, which loads JKS and PKCS12.
+- **TLS without a store selection trusts the JVM's CAs.** `tls: true` (or a
+  `tcps://` host) that selects no truststore still negotiates TLS, validating
+  against the JVM's default CA bundle; an MQ binder that selects neither store gets
+  no SSL bundle at all. One that selects only a keystore gets a bundle carrying
+  just the client certificate.
 - **Two sides that share a connection tuple must share its password.** They collapse
   into one binder, so disagreeing passwords are an **error**, not a last-wins merge
   (a differing `cipher` still warns and takes the last value).
@@ -3281,14 +3358,13 @@ container is called something else, is not reachable with `cli` -- reach it with
   these values reaches a shell; quotes, backslash, backtick, `$`, control
   characters and a comment left inside a `>-` block are rejected ([section 8.0](#80-image-timezone-and-jvm-options-shared-by-every-platform)).
 - **The safe-charset gate covers more than `command:`.** `image`, `restart` and
-  the top-level `timezone`, the `tls.*.file` paths the docker section bind-mounts,
+  the top-level `timezone`, the store files the docker section bind-mounts,
   `libs.dir`, the referenced (`existing:`) kubernetes Secret names, and
   `libs.pvc.create.nfs.*` are all rejected when they carry whitespace, quotes,
   control characters, or shell metacharacters -- each one lands unquoted in a
   generated script, unit, or manifest. Podman names neither a store's path nor
-  its file name. An existing kubernetes stores Secret is read by the `tls.*.file`
-  file names, so each must be a valid Secret key -- letters, digits, `-`, `_` and
-  `.` ([section 8.1](#81-kubernetes)).
+  its file name, and the kubernetes stores Secret is keyed by store name, which
+  the store-name rule already keeps a valid Secret key ([section 8.1](#81-kubernetes)).
 - **The connector runs as `1000:0`, not root.** Every platform states a non-root
   identity unless its section sets `run-as: image`, and a mounted host file the
   identity cannot read -- a 0600 truststore on docker, a 0600 jar -- fails the
@@ -3302,13 +3378,10 @@ container is called something else, is not reachable with `cli` -- reach it with
   unit. What earlier releases wrote under `podman.base-dir` stays until you delete
   it -- `validate` names the files -- and a store of 512000 bytes or more now fails
   a podman deploy.
-- **The stores moved to fixed names inside the container.** The truststore and
-  keystore are now `/app/external/classpath/truststores/truststore` and
-  `.../keystore` on every platform, whatever the files are called, so the first
-  `deploy` with this release changes `application.yml` and restarts (docker,
-  podman) or rolls (kubernetes) the connector. A created kubernetes stores Secret
-  is re-keyed `truststore` / `keystore`; an existing one needs no change. Two
-  stores sharing a file name, or one file used as both, now work everywhere.
+- **Stores mount under their names inside the container.** Each selected store is
+  `/app/external/classpath/truststores/<store name>` on every platform, whatever
+  its file is called, so two stores sharing a file name, or one file defined under
+  two names, work everywhere.
 - **`name` and `docker.project-name` are held to DNS-1123, not to that gate.** Both
   are labels rather than argv tokens, so they must be lowercase alphanumerics and
   hyphens starting and ending alphanumeric. That is deliberately stricter than

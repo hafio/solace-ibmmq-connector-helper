@@ -26,23 +26,23 @@ const (
 
 // mountCheck is one host path a container bind-mounts and has to read.
 type mountCheck struct {
-	label string // what env.yaml calls it, e.g. "docker mounts tls.truststore.file"
+	label string // what env.yaml calls it, e.g. "docker mounts tls.stores.mq-ca.file"
 	path  string // the resolved host path
 	kind  mountKind
 }
 
 // mountChecks turns the host paths a plan bind-mounts into deploy's checks,
-// labelled as env.yaml names them ("docker mounts libs.dir"): the keystore
-// holds a private key, libs.dir is a directory of jars, and anything else is a
-// file anyone may read.
+// labelled as env.yaml names them ("docker mounts libs.dir"): a store some
+// connection uses as a keystore holds a private key, libs.dir is a directory
+// of jars, and anything else is a file anyone may read.
 func mountChecks(section string, ms []gen.HostMount) []mountCheck {
 	out := make([]mountCheck, 0, len(ms))
 	for _, m := range ms {
 		kind := mountPublic
-		switch m.Field {
-		case gen.MountKeystore:
+		switch {
+		case m.Private:
 			kind = mountPrivate
-		case gen.MountLibs:
+		case m.Field == gen.MountLibs:
 			kind = mountDir
 		}
 		out = append(out, mountCheck{label: section + " mounts " + m.Field, path: m.Path, kind: kind})

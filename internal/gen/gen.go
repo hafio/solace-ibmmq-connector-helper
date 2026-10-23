@@ -196,7 +196,7 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		in.CredKVs = kvs
 	}
 	if s := k.Secrets.Stores; s != nil && s.Create != nil {
-		files, err := resolveStores(&e.Defaults, res)
+		files, err := resolveStores(b.model.Stores, res)
 		if err != nil {
 			return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 		}
@@ -237,16 +237,16 @@ type DockerPlan struct {
 // artifact names it -- expanded and absolute -- so deploy checks the path the
 // container will read rather than the env.yaml spelling of it.
 type HostMount struct {
-	Field string // the env.yaml key it comes from: MountTruststore, MountKeystore or MountLibs
-	Path  string
+	Field   string // the env.yaml key it comes from: StoreField(<name>) or MountLibs
+	Path    string
+	Private bool // a store some connection uses as a keystore: it holds a private key
 }
 
-// The env.yaml keys a HostMount comes from.
-const (
-	MountTruststore = "tls.truststore.file"
-	MountKeystore   = "tls.keystore.file"
-	MountLibs       = "libs.dir"
-)
+// MountLibs is the env.yaml key of the libs directory mount.
+const MountLibs = "libs.dir"
+
+// StoreField is the env.yaml key a store's file comes from, for messages.
+func StoreField(store string) string { return "tls.stores." + store + ".file" }
 
 // GenerateDocker parses+validates and renders the docker-compose.yml (with
 // application.yml inlined under compose configs:). Store/libs host paths are
@@ -284,7 +284,7 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 	if rerrs != nil {
 		return DockerPlan{}, rerrs, warns
 	}
-	sm, lm := targetMounts(e.Defaults.TLS, d.Libs, res)
+	sm, lm := targetMounts(b.model.Stores, d.Libs, res)
 	in := dockergen.Input{
 		Docker:  d,
 		Syslog:  e.Defaults.Syslog,
@@ -381,10 +381,10 @@ func stableNames(refs []consolidate.SecretRef) []string {
 // TLS store, named by Source and read only when deploy loads it
 // (ResolvePodmanFiles) -- generate and remove never open a store.
 type PodmanFile struct {
-	StoreName string // the secret's name in podman's store: <name>-<role>
+	StoreName string // the secret's name in podman's store: <name>-<document>, or <name>-tls-<store>
 	Data      string // a rendered document; empty for a store
-	Source    string // a store's tls.*.file as written in env.yaml; empty for a document
-	Field     string // a store's env.yaml key, e.g. tls.truststore.file, for errors
+	Source    string // a store's file as written in env.yaml; empty for a document
+	Field     string // a store's env.yaml key, e.g. tls.stores.mq-ca.file, for errors
 }
 
 // PodmanPlan carries the rendered quadlet unit plus everything a deploy loads
@@ -402,28 +402,55 @@ type PodmanPlan struct {
 	Mounts  []HostMount             // the host paths the unit bind-mounts (libs.dir alone), for the same checks
 }
 
-// The secret-store names of the files a podman unit mounts, one per role, each
-// appended to the container name by PodmanSecretStoreName. Every suffix holds
-// a '-' or a '.', which no credential's stable name can (those match
-// [A-Za-z_][A-Za-z0-9_]*), so a file never takes a credential's name. The names
-// follow the role rather than the file, so a renamed store or a dropped syslog
-// block strands nothing: deploy deletes the ones it no longer mounts.
+// The secret-store names of the documents a podman unit mounts, each appended
+// to the container name by PodmanSecretStoreName. Every suffix holds a '-' or a
+// '.', which no credential's stable name can (those match
+// [A-Za-z_][A-Za-z0-9_]*), so a file never takes a credential's name. A store
+// is named podmanStorePrefix + its tls.stores name.
 const (
-	podmanAppYAMLSuffix    = "application.yml"
-	podmanTruststoreSuffix = "tls-truststore"
-	podmanKeystoreSuffix   = "tls-keystore"
-	podmanStatusSuffix     = "status-script"
-	podmanLogbackSuffix    = logback.FileName
+	podmanAppYAMLSuffix = "application.yml"
+	podmanStatusSuffix  = "status-script"
+	podmanLogbackSuffix = logback.FileName
+	podmanStorePrefix   = "tls-"
 )
 
-// PodmanFileSecretNames lists every file secret an instance can own, mounted by
-// its current spec or not: deploy deletes the ones it no longer mounts, and
-// remove deletes them all.
+// PodmanFileSecretNames lists every document secret an instance can own,
+// mounted by its current spec or not: deploy deletes the ones it no longer
+// mounts, and remove deletes them all. Store secrets are named after stores the
+// spec may no longer define, so they cannot be listed from it; deploy and remove
+// read them from the instance's own unit instead (PodmanUnitStoreSecrets).
 func PodmanFileSecretNames(container string) []string {
-	suffixes := []string{podmanAppYAMLSuffix, podmanTruststoreSuffix, podmanKeystoreSuffix, podmanStatusSuffix, podmanLogbackSuffix}
+	suffixes := []string{podmanAppYAMLSuffix, podmanStatusSuffix, podmanLogbackSuffix}
 	out := make([]string, 0, len(suffixes))
 	for _, s := range suffixes {
 		out = append(out, PodmanSecretStoreName(container, s))
+	}
+	return out
+}
+
+// PodmanStoreSecretName is the secret-store name of a tls.stores entry the
+// container's unit mounts.
+func PodmanStoreSecretName(container, store string) string {
+	return PodmanSecretStoreName(container, podmanStorePrefix+store)
+}
+
+// PodmanUnitStoreSecrets returns the store secrets a previously written unit
+// for container mounts: the names of its Secret= lines that carry the
+// container's store prefix. Reading the instance's own unit, rather than
+// scanning podman's store by prefix, is what keeps another instance whose name
+// happens to start the same way out of the result.
+func PodmanUnitStoreSecrets(unit, container string) []string {
+	prefix := PodmanStoreSecretName(container, "")
+	var out []string
+	for _, line := range strings.Split(unit, "\n") {
+		v, ok := strings.CutPrefix(strings.TrimSpace(line), "Secret=")
+		if !ok {
+			continue
+		}
+		name, _, _ := strings.Cut(v, ",")
+		if strings.HasPrefix(name, prefix) && len(name) > len(prefix) {
+			out = append(out, name)
+		}
 	}
 	return out
 }
@@ -434,7 +461,7 @@ const podmanSecretMax = 511999
 
 // ResolvePodmanFiles turns a plan's files into the name/value pairs deploy
 // loads into podman's secret store: a rendered document as it stands, a TLS
-// store read from its tls.*.file (resolved against env.yaml, as resolveStores
+// store read from its file (resolved against env.yaml, as resolveStores
 // reads it for kubernetes). Every value is held to podman's size limit here, so
 // a file podman would refuse stops the deploy before any secret is created.
 // The result is secret material -- callers hand it straight to the store.
@@ -512,17 +539,10 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 	appSecret := PodmanSecretStoreName(p.Name, podmanAppYAMLSuffix)
 	plan.Files = append(plan.Files, PodmanFile{StoreName: appSecret, Data: b.appYAML})
 	var stores []podmangen.FileSecret
-	for _, st := range []struct {
-		field, suffix string
-		role          tls.Role
-		store         *spec.Store
-	}{{"tls.truststore.file", podmanTruststoreSuffix, tls.Truststore, e.Defaults.TLS.Truststore}, {"tls.keystore.file", podmanKeystoreSuffix, tls.Keystore, e.Defaults.TLS.Keystore}} {
-		if st.store == nil || st.store.File == "" {
-			continue
-		}
-		name := PodmanSecretStoreName(p.Name, st.suffix)
-		plan.Files = append(plan.Files, PodmanFile{StoreName: name, Source: st.store.File, Field: st.field})
-		stores = append(stores, podmangen.FileSecret{StoreName: name, Target: tls.MountPath(st.role)})
+	for _, st := range b.model.Stores {
+		name := PodmanStoreSecretName(p.Name, st.Name)
+		plan.Files = append(plan.Files, PodmanFile{StoreName: name, Source: st.File, Field: StoreField(st.Name)})
+		stores = append(stores, podmangen.FileSecret{StoreName: name, Target: tls.MountPath(st.Name)})
 	}
 	statusSecret := PodmanSecretStoreName(p.Name, podmanStatusSuffix)
 	plan.Files = append(plan.Files, PodmanFile{StoreName: statusSecret, Data: statusscript.Render(e.Defaults.EffectiveManagementPort(), spec.StatusUserName)})
@@ -533,7 +553,7 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 	}
 	// Only the libs directory stays a host path, resolved against env.yaml like
 	// every other; the stores are left out of targetMounts on purpose.
-	_, lm := targetMounts(spec.TLSConfig{}, p.Libs, res)
+	_, lm := targetMounts(nil, p.Libs, res)
 	plan.Mounts = hostMounts(nil, lm)
 	plan.Service = PodmanServiceName(p.Name)
 	in := podmangen.Input{
@@ -691,31 +711,28 @@ func secretConflictError(cs []consolidate.SecretConflict) error {
 
 // mount is a resolved host->container bind mount, converted to the target
 // renderer's own Mount type at the call site. Field is the env.yaml key the
-// source comes from (MountTruststore, MountKeystore, MountLibs).
-type mount struct{ Field, Source, Target string }
+// source comes from (StoreField(<name>) or MountLibs); Private marks a store
+// holding a private key.
+type mount struct {
+	Field, Source, Target string
+	Private               bool
+}
 
-// targetMounts resolves the store files (each tls.*.file bind-mounted at its
-// role's fixed name in the in-container store dir, tls.MountPath, which is where
-// application.yml references it) and the libs directory into host->container
-// mounts. Both container-side paths are constants: the image fixes them, and the
-// spec only chooses the host source. Docker bind-mounts both; podman passes no
+// targetMounts resolves the stores the rendered connections select (each
+// bind-mounted under its tls.stores name in the in-container store dir,
+// tls.MountPath, which is where application.yml references it) and the libs
+// directory into host->container mounts. The container side is fixed: the
+// image fixes the directories, and the store's name the file in it; the spec
+// only chooses the host source. Docker bind-mounts both; podman passes no
 // stores (they come from its secret store) and takes only the libs mount.
 //
-// The stores are not gated on an opt-in: application.yml always references the
-// mounted path for docker (consolidate is called with MountStores true), so a
-// configured store that was not mounted left the config pointing at a file
-// nothing supplied. A store with no file set is skipped, so a spec without TLS
-// still yields no store mounts. libs stays opt-in -- it has a host dir to name.
-func targetMounts(stores spec.TLSConfig, libs *spec.LibsMount, res Resolver) (sm []mount, lm *mount) {
-	for _, st := range []struct {
-		field string
-		role  tls.Role
-		store *spec.Store
-	}{{MountTruststore, tls.Truststore, stores.Truststore}, {MountKeystore, tls.Keystore, stores.Keystore}} {
-		if st.store == nil || st.store.File == "" {
-			continue
-		}
-		sm = append(sm, mount{Field: st.field, Source: res.abs(st.store.File), Target: tls.MountPath(st.role)})
+// The stores are exactly consolidate's Model.Stores: application.yml references
+// the mounted path for every one of them (consolidate is called with
+// MountStores true), and a store no connection selects is neither referenced
+// nor mounted. libs stays opt-in -- it has a host dir to name.
+func targetMounts(stores []consolidate.StoreUse, libs *spec.LibsMount, res Resolver) (sm []mount, lm *mount) {
+	for _, st := range stores {
+		sm = append(sm, mount{Field: StoreField(st.Name), Source: res.abs(st.File), Target: tls.MountPath(st.Name), Private: st.Private})
 	}
 	if libs != nil && libs.Dir != "" {
 		lm = &mount{Field: MountLibs, Source: res.abs(libs.Dir), Target: spec.DefaultLibsMountPath}
@@ -727,7 +744,7 @@ func targetMounts(stores spec.TLSConfig, libs *spec.LibsMount, res Resolver) (sm
 func hostMounts(sm []mount, lm *mount) []HostMount {
 	var out []HostMount
 	for _, m := range sm {
-		out = append(out, HostMount{Field: m.Field, Path: m.Source})
+		out = append(out, HostMount{Field: m.Field, Path: m.Source, Private: m.Private})
 	}
 	if lm != nil {
 		out = append(out, HostMount{Field: lm.Field, Path: lm.Source})
@@ -821,31 +838,34 @@ func parse(r Request, res Resolver) (wfs []spec.Workflow, e *spec.Env, issues, w
 
 // ---- secret resolution -------------------------------------------------------
 
-// resolveStores reads the truststore/keystore files so the kubernetes stores
-// Secret can carry their bytes. Unlike credentials, these are files the cluster
-// must hold verbatim, so they are base64-embedded rather than named. Each is keyed
-// by its role, the name it is mounted under, whatever the file is called.
-func resolveStores(d *spec.Defaults, res Resolver) ([]deploy.StoreFile, error) {
+// kubeSecretMax is the most data one Kubernetes Secret holds (1 MiB).
+const kubeSecretMax = 1 << 20
+
+// resolveStores reads the files of the stores the rendered connections select
+// so the kubernetes stores Secret can carry their bytes. Unlike credentials,
+// these are files the cluster must hold verbatim, so they are base64-embedded
+// rather than named. Each is keyed by its tls.stores name, the name it is
+// mounted under, whatever the file is called. A set the API server would refuse
+// for size stops here, naming the stores, rather than at kubectl apply.
+func resolveStores(stores []consolidate.StoreUse, res Resolver) ([]deploy.StoreFile, error) {
 	if res.ReadFile == nil {
 		return nil, fmt.Errorf("cannot read store files (no file access)")
 	}
 	var out []deploy.StoreFile
-	add := func(r tls.Role, s *spec.Store) error {
-		if s == nil || s.File == "" {
-			return nil
-		}
-		b, err := res.ReadFile(s.File)
+	total := 0
+	var sizes []string
+	for _, st := range stores {
+		b, err := res.ReadFile(st.File)
 		if err != nil {
-			return fmt.Errorf("reading store %q: %v", s.File, err)
+			return nil, fmt.Errorf("reading %s %q: %v", StoreField(st.Name), st.File, err)
 		}
-		out = append(out, deploy.StoreFile{Name: string(r), Base64: b64(b)})
-		return nil
+		enc := b64(b)
+		total += len(enc)
+		sizes = append(sizes, fmt.Sprintf("%s %d bytes", st.Name, len(enc)))
+		out = append(out, deploy.StoreFile{Name: st.Name, Base64: enc})
 	}
-	if err := add(tls.Truststore, d.TLS.Truststore); err != nil {
-		return nil, err
-	}
-	if err := add(tls.Keystore, d.TLS.Keystore); err != nil {
-		return nil, err
+	if total > kubeSecretMax {
+		return nil, fmt.Errorf("the stores Secret would hold %d bytes once base64-encoded (%s), over the %d bytes a Kubernetes Secret holds; trim the stores to the certificates these connections need, or reference an existing Secret with kubernetes.secrets.stores.existing", total, strings.Join(sizes, ", "), kubeSecretMax)
 	}
 	return out, nil
 }

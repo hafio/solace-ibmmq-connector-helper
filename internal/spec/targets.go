@@ -105,9 +105,9 @@ func BaseName(p string) string {
 }
 
 // StoresMount was the docker/podman stores: block. The block is removed: the
-// tls.*.file store files are mounted whenever they are set (bind-mounted on
-// docker, from podman's secret store on podman), onto the fixed in-container
-// path DefaultStoresMountPath, so there was nothing left for it to decide -- its
+// stores connections select are always mounted (bind-mounted on docker, from
+// podman's secret store on podman), under the fixed in-container directory
+// DefaultStoresMountPath, so there was nothing left for it to decide -- its
 // one field could only ever hold that same fixed path.
 //
 // The type survives with no fields so an old env.yaml still decodes into a non-nil
@@ -181,7 +181,7 @@ func (p Port) String() string {
 // so an old env.yaml fails loudly instead of silently losing its credentials.
 // Image, Timezone and Stores are kept on the same terms: the first two moved to
 // their own top-level keys, and the store bind-mount is now derived from the
-// tls.*.file paths themselves.
+// files of the tls.stores connections select.
 //
 // ProjectName has no Podman counterpart: it names a compose project, and podman
 // has no equivalent grouping to attach one to.

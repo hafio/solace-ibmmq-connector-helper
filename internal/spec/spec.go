@@ -55,8 +55,13 @@ type Side struct {
 	TLS          bool
 	Cipher       string
 
-	// mTLS: presence selects a client key from the shared keystore.
-	KeyAlias string
+	// Store selection, each naming a tls.stores entry ("" = none). Truststore
+	// is what the connection validates its broker or queue manager against
+	// (none: the JVM default trust); Keystore holds the client certificate it
+	// presents (mTLS); KeyAlias picks one key within that keystore, and needs it.
+	Truststore string
+	Keystore   string
+	KeyAlias   string
 
 	// ConnRef names a reusable connection defined in env.yaml (connections.<name>).
 	// When set, this side carries only ConnRef + the destination; the connection supplies
@@ -121,6 +126,8 @@ type rawSolace struct {
 	ClientPass    string    `yaml:"client-password"`
 	ClientPassEnv string    `yaml:"client-password-env"`
 	KeyAlias      string    `yaml:"key-alias"`
+	Truststore    string    `yaml:"truststore"`
+	Keystore      string    `yaml:"keystore"`
 	Queue         *string   `yaml:"queue"`
 	Topic         *string   `yaml:"topic"`
 	APIProps      yaml.Node `yaml:"api-properties"`
@@ -143,6 +150,8 @@ type rawMQ struct {
 	TLS          bool      `yaml:"tls"`
 	Cipher       string    `yaml:"cipher"`
 	KeyAlias     string    `yaml:"key-alias"`
+	Truststore   string    `yaml:"truststore"`
+	Keystore     string    `yaml:"keystore"`
 	Queue        *string   `yaml:"queue"`
 	Topic        *string   `yaml:"topic"`
 	AddlProps    yaml.Node `yaml:"additional-properties"`
@@ -237,6 +246,8 @@ func (r *rawSide) toSide() Side {
 			ClientPass:    r.Solace.ClientPass,
 			ClientPassEnv: r.Solace.ClientPassEnv,
 			KeyAlias:      r.Solace.KeyAlias,
+			Truststore:    r.Solace.Truststore,
+			Keystore:      r.Solace.Keystore,
 			APIProps:      nodePtr(r.Solace.APIProps),
 			Consumer:      nodePtr(r.Solace.Consumer),
 			Producer:      nodePtr(r.Solace.Producer),
@@ -258,6 +269,8 @@ func (r *rawSide) toSide() Side {
 			TLS:          r.MQ.TLS,
 			Cipher:       r.MQ.Cipher,
 			KeyAlias:     r.MQ.KeyAlias,
+			Truststore:   r.MQ.Truststore,
+			Keystore:     r.MQ.Keystore,
 			AddlProps:    nodePtr(r.MQ.AddlProps),
 			Consumer:     nodePtr(r.MQ.Consumer),
 			Producer:     nodePtr(r.MQ.Producer),
@@ -300,6 +313,7 @@ func (s Side) HasSystem() bool { return s.System == SystemSolace || s.System == 
 func (s Side) SetsConnFields() bool {
 	return s.Host != "" || s.MsgVPN != "" || s.ConnName != "" || s.QueueManager != "" ||
 		s.Channel != "" || s.TLS || s.Cipher != "" || s.KeyAlias != "" ||
+		s.Truststore != "" || s.Keystore != "" ||
 		s.APIProps != nil || s.AddlProps != nil || s.Extra != nil ||
 		!s.Username().Empty() || !s.Secret().Empty()
 }

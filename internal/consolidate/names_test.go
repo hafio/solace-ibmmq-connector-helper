@@ -162,8 +162,10 @@ func TestSecretNameConflictIsRecorded(t *testing.T) {
 }
 
 // stableSecretName is every *derived* secret-name shape the connector emits:
-// stableName(binder, suffix), securityUserPasswordName(user), and the fixed
-// truststore/keystore/leader-election constants. All fold through stableToken,
+// stableName(binder, suffix), securityUserPasswordName(user),
+// StorePasswordName(store) and the fixed leader-election constants. All fold
+// config text into [A-Z0-9_] (a store name, held by validate to lowercase
+// letters, digits and single hyphens, by upper-casing alone),
 // so config-controlled text (a connection name, a security-user name) can only
 // ever land in the run of characters before the fixed suffix -- never replace
 // it -- but this pins the actual suffix vocabulary in use today (MQBinder.User
@@ -208,16 +210,16 @@ func TestGeneratedSecretNamesStayOutOfChildEnvDanger(t *testing.T) {
 			"path": {System: spec.SystemSolace, Host: "tcps://h", MsgVPN: "v",
 				ClientUserEnv: "SRC_USER_ENV", ClientPass: "src-literal-pass"},
 			"ld-preload": {System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM", Channel: "C",
-				User: "mq-literal-user", PasswordEnv: "MQ_PASS_ENV", TLS: true, KeyAlias: "alias1"},
+				User: "mq-literal-user", PasswordEnv: "MQ_PASS_ENV", TLS: true, Truststore: "ts", Keystore: "ks", KeyAlias: "alias1"},
 		},
 		Security: spec.Security{Users: []spec.User{
 			{Name: "LD", Password: "sekret"},
 			{Name: "../../etc/passwd", PasswordEnv: "WEIRD_ENV"},
 		}},
-		TLS: spec.TLSConfig{
-			Truststore: &spec.Store{File: "ts.jks", Password: "ts-literal-pass", Type: "JKS"},
-			Keystore:   &spec.Store{File: "ks.jks", PasswordEnv: "KS_PASS_ENV", Type: "JKS"},
-		},
+		TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
+			"ts": {File: "ts.jks", Password: "ts-literal-pass", Type: "JKS"},
+			"ks": {File: "ks.jks", PasswordEnv: "KS_PASS_ENV", Type: "JKS"},
+		}},
 		LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveActive, Queue: "leader-q",
 			Session: &spec.Side{System: spec.SystemSolace, Host: "tcps://lh", MsgVPN: "lv",
 				ClientUserEnv: "LEADER_USER_ENV", ClientPass: "leader-literal-pass"}},

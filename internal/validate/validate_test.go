@@ -21,11 +21,14 @@ func vMQ(dest, kind string, tls bool) spec.Side {
 func wf(file string, src, tgt spec.Side) spec.Workflow {
 	return spec.Workflow{File: file, Enabled: true, SourceSet: true, TargetSet: true, Source: src, Target: tgt}
 }
+
+// defsWithStores defines two stores, ts (a truststore) and ks (a keystore),
+// for sides to select with Truststore: "ts" / Keystore: "ks".
 func defsWithStores() *spec.Defaults {
-	return &spec.Defaults{TLS: spec.TLSConfig{
-		Truststore: &spec.Store{File: "t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD", Type: "JKS"},
-		Keystore:   &spec.Store{File: "k.jks", PasswordEnv: "KEYSTORE_PASSWORD", Type: "JKS"},
-	}}
+	return &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
+		"ts": {File: "t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD", Type: "JKS"},
+		"ks": {File: "k.jks", PasswordEnv: "KEYSTORE_PASSWORD", Type: "JKS"},
+	}}}
 }
 
 // imageOK is the top-level image: block every platform-checking context needs
@@ -46,10 +49,17 @@ func hasErr(errs []Issue, sub string) bool {
 }
 
 func TestValidGoldenLikeInputPasses(t *testing.T) {
-	wfs := []spec.Workflow{wf("10.yaml", vSolace("Q", spec.DestQueue, "sc"), vMQ("MQ", spec.DestQueue, true))}
-	errs, _ := Run(Context{Workflows: wfs, Defaults: defsWithStores()})
+	sol := vSolace("Q", spec.DestQueue, "sc")
+	sol.Truststore, sol.Keystore = "ts", "ks"
+	mq := vMQ("MQ", spec.DestQueue, true)
+	mq.Truststore = "ts"
+	wfs := []spec.Workflow{wf("10.yaml", sol, mq)}
+	errs, warns := Run(Context{Workflows: wfs, Defaults: defsWithStores()})
 	if len(errs) != 0 {
 		t.Fatalf("expected no errors, got %v", errs)
+	}
+	if hasErr(warns, "is not selected") {
+		t.Errorf("both stores are selected, so neither is unused: %v", warns)
 	}
 }
 
@@ -100,22 +110,48 @@ func TestConnNameFormat(t *testing.T) {
 }
 
 func TestKeyAliasNeedsKeystore(t *testing.T) {
-	errs, _ := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, "sc"), vMQ("MQ", spec.DestQueue, false))}, Defaults: &spec.Defaults{}})
-	if !hasErr(errs, "no keystore defined") {
+	errs, _ := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, "sc"), vMQ("MQ", spec.DestQueue, false))}, Defaults: defsWithStores()})
+	if !hasErr(errs, `source solace: key-alias "sc" selects a key from a keystore, but no keystore is selected; add keystore: <store>`) {
 		t.Fatalf("want keystore error, got %v", errs)
 	}
 }
 
-func TestKeyAliasConflict(t *testing.T) {
-	a := vSolace("Q1", spec.DestQueue, "alias-a")
-	b := vSolace("Q2", spec.DestQueue, "alias-b") // same solace tuple, different alias
-	wfs := []spec.Workflow{
-		wf("10.yaml", a, vMQ("M1", spec.DestQueue, false)),
-		wf("20.yaml", vMQ("M2", spec.DestQueue, false), b),
+// TestStoreSelectionConflicts pins checkStoreSelectionConflicts: sides on one
+// binder must select the same truststore, keystore and key-alias, strictly --
+// a side selecting nothing conflicts with one selecting a store.
+func TestStoreSelectionConflicts(t *testing.T) {
+	const tail = ": one connection trusts one store and presents one certificate -- give every side the same value, or define the connection once under connections: and use conn-ref"
+	with := func(dest, ts, ks, alias string) spec.Side {
+		s := vSolace(dest, spec.DestQueue, alias)
+		s.Truststore, s.Keystore = ts, ks
+		return s
 	}
-	errs, _ := Run(Context{Workflows: wfs, Defaults: defsWithStores()})
-	if !hasErr(errs, "conflicting key-alias") {
-		t.Fatalf("want key-alias conflict, got %v", errs)
+	for _, c := range []struct {
+		name string
+		a, b spec.Side
+		want string
+	}{
+		{"key-alias", with("Q1", "", "ks", "alias-a"), with("Q2", "", "ks", "alias-b"), `20.yaml: conflicting key-alias "alias-b" vs "alias-a" for the same binder (also in 10.yaml)` + tail},
+		{"truststore set vs none", with("Q1", "ts", "", ""), with("Q2", "", "", ""), `20.yaml: conflicting truststore none vs "ts" for the same binder (also in 10.yaml)` + tail},
+		{"keystore differs", with("Q1", "", "ks", ""), with("Q2", "", "ts", ""), `20.yaml: conflicting keystore "ts" vs "ks" for the same binder (also in 10.yaml)` + tail},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			wfs := []spec.Workflow{
+				wf("10.yaml", c.a, vMQ("M1", spec.DestQueue, false)),
+				wf("20.yaml", c.b, vMQ("M2", spec.DestQueue, false)),
+			}
+			errs, _ := Run(Context{Workflows: wfs, Defaults: defsWithStores()})
+			if !hasErr(errs, c.want) {
+				t.Errorf("want %q, got %v", c.want, errs)
+			}
+		})
+	}
+	same := []spec.Workflow{
+		wf("10.yaml", with("Q1", "ts", "ks", "a"), vMQ("M1", spec.DestQueue, false)),
+		wf("20.yaml", with("Q2", "ts", "ks", "a"), vMQ("M2", spec.DestQueue, false)),
+	}
+	if errs, _ := Run(Context{Workflows: same, Defaults: defsWithStores()}); hasErr(errs, "conflicting") {
+		t.Errorf("identical selections do not conflict: %v", errs)
 	}
 }
 
@@ -364,15 +400,15 @@ func TestDeployKubeChecks(t *testing.T) {
 // authoring a spec or generating a config must not require every production
 // credential to be exported. The deploy path resolves values and fails hard there.
 func TestCredentialsEnvChecks(t *testing.T) {
-	d := &spec.Defaults{TLS: spec.TLSConfig{
-		Truststore: &spec.Store{File: "t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD"},
-	}}
+	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
+		"ts": {File: "t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD"},
+	}}}
 	env := func(string) (string, bool) { return "", false } // nothing set
 	errs, warns := Run(Context{
 		Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("MQ", spec.DestQueue, false))},
 		Defaults:  d, Env: env,
 	})
-	if !hasErr(warns, `tls.truststore.password-env names TRUSTSTORE_PASSWORD, which is not set in this environment`) {
+	if !hasErr(warns, `tls.stores.ts.password-env names TRUSTSTORE_PASSWORD, which is not set in this environment`) {
 		t.Fatalf("want missing-env-var warning, got %v", warns)
 	}
 	if hasErr(errs, "TRUSTSTORE_PASSWORD") {
@@ -450,5 +486,44 @@ func TestCheckCredLiteralLooksLikeEnvRefWarns(t *testing.T) {
 	})
 	if !hasErr(warns, "target password looks like a variable reference; it is used as a literal value. Use target password-env: VAR") {
 		t.Fatalf("want literal-looks-like-env-ref warning, got %v", warns)
+	}
+}
+
+// TestStoreBlockWithoutFile pins checkStoreFiles: a store that names no file is
+// refused, since every reader wires a store only when it has one and would
+// otherwise skip it in silence.
+func TestStoreBlockWithoutFile(t *testing.T) {
+	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
+		"mq-ca": {PasswordEnv: "TRUSTSTORE_PASSWORD", Type: "JKS"},
+		"empty": nil,
+	}}}
+	wfs := []spec.Workflow{wf("10.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("MQ", spec.DestQueue, false))}
+	errs, _ := Run(Context{Workflows: wfs, Defaults: d})
+	for _, name := range []string{"mq-ca", "empty"} {
+		want := "env.yaml: tls.stores." + name + " has no file: a store names the file to load; add file, or remove the store and every truststore:/keystore: that selects it"
+		if !hasErr(errs, want) {
+			t.Errorf("want %q, got %v", want, errs)
+		}
+	}
+	// A store with its file is accepted.
+	if errs, _ := Run(Context{Workflows: wfs, Defaults: defsWithStores()}); hasErr(errs, "has no file") {
+		t.Errorf("stores with files refused: %v", errs)
+	}
+}
+
+// TestUnusedStoreWarns pins checkUnusedStores: a store nothing selects is not
+// mounted, so it is reported -- usually a selector typo -- while a store any
+// connection, side or session selects is not.
+func TestUnusedStoreWarns(t *testing.T) {
+	d := defsWithStores()
+	d.Connections = map[string]spec.Side{"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "v", Keystore: "ks"}}
+	wfs := []spec.Workflow{wf("10.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("MQ", spec.DestQueue, false))}
+	_, warns := Run(Context{Workflows: wfs, Defaults: d})
+	want := `env.yaml: tls.stores "ts" is not selected by any connection, so it is not mounted; remove it, or select it with truststore: or keystore:`
+	if !hasErr(warns, want) {
+		t.Errorf("want %q, got %v", want, warns)
+	}
+	if hasErr(warns, `tls.stores "ks" is not selected`) {
+		t.Errorf("ks is selected by connections.edge: %v", warns)
 	}
 }

@@ -14,7 +14,7 @@ func wfOK() []spec.Workflow {
 }
 
 // vSolacePlainTCP is vSolace but with a plain tcp:// host (no TLS) -- for
-// exercising the usesTLS negative path, where no side has a tcps:// Solace host.
+// exercising the selectsStores negative path, where no side has a tcps:// Solace host.
 func vSolacePlainTCP(dest, kind string) spec.Side {
 	return spec.Side{System: spec.SystemSolace, Host: "tcp://b:55443", MsgVPN: "prod",
 		ClientUser: "u", ClientPassEnv: "SOLACE_CLIENT_PASSWORD", DestKind: kind, Dest: dest}
@@ -58,20 +58,57 @@ func TestCheckSideSolaceMissingAndBadScheme(t *testing.T) {
 }
 
 func TestSolaceKeyAliasRequiresTCPSAndKeystore(t *testing.T) {
-	s := spec.Side{System: spec.SystemSolace, Host: "tcp://x", MsgVPN: "v", ClientUser: "u", ClientPass: "p", KeyAlias: "a", DestKind: spec.DestQueue, Dest: "Q"}
+	s := spec.Side{System: spec.SystemSolace, Host: "tcp://x", MsgVPN: "v", ClientUser: "u", ClientPass: "p", KeyAlias: "a", Truststore: "ts", Keystore: "ks", DestKind: spec.DestQueue, Dest: "Q"}
 	errs, _ := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", s, vMQ("M", spec.DestQueue, false))}, Defaults: defsWithStores()})
-	if !hasErr(errs, "requires a tcps:// host") {
-		t.Errorf("want tcps requirement, got %v", errs)
+	for _, want := range []string{
+		"source solace: key-alias (mTLS) requires a tcps:// host",
+		"source solace: truststore/keystore select TLS stores, which need a tcps:// host",
+	} {
+		if !hasErr(errs, want) {
+			t.Errorf("want %q, got %v", want, errs)
+		}
 	}
-	// key-alias-with-no-keystore is already pinned by TestKeyAliasNeedsKeystore (validate_test.go).
+	// key-alias without a keystore selection is pinned by TestKeyAliasNeedsKeystore (validate_test.go).
 }
 
 func TestMQKeyAliasRequiresKeystore(t *testing.T) {
 	m := vMQ("M", spec.DestQueue, true)
 	m.KeyAlias = "mc"
 	errs, _ := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), m)}, Defaults: &spec.Defaults{}})
-	if !hasErr(errs, "no keystore defined") {
+	if !hasErr(errs, `target mq: key-alias "mc" selects a key from a keystore, but no keystore is selected; add keystore: <store>`) {
 		t.Errorf("want keystore error, got %v", errs)
+	}
+}
+
+// TestMQStoreSelectionRequiresTLS pins that an MQ side selecting a store must
+// opt into TLS: without tls: true there is no bundle to put the store in.
+func TestMQStoreSelectionRequiresTLS(t *testing.T) {
+	m := vMQ("M", spec.DestQueue, false)
+	m.Truststore = "ts"
+	errs, _ := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), m)}, Defaults: defsWithStores()})
+	if !hasErr(errs, "target mq: truststore/keystore require 'tls: true'") {
+		t.Errorf("want tls requirement, got %v", errs)
+	}
+}
+
+// TestStoreSelectionMustBeDefined pins that a selector names a tls.stores
+// entry, and the message lists the defined ones.
+func TestStoreSelectionMustBeDefined(t *testing.T) {
+	m := vMQ("M", spec.DestQueue, true)
+	m.Truststore = "mq-ca"
+	s := vSolace("Q", spec.DestQueue, "")
+	s.Keystore = "nope"
+	errs, _ := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", s, m)}, Defaults: defsWithStores()})
+	for _, want := range []string{
+		`target mq: truststore "mq-ca" is not defined under tls.stores (defined: ks, ts); add it or fix the name`,
+		`source solace: keystore "nope" is not defined under tls.stores (defined: ks, ts); add it or fix the name`,
+	} {
+		if !hasErr(errs, want) {
+			t.Errorf("want %q, got %v", want, errs)
+		}
+	}
+	if errs, _ := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), m)}, Defaults: &spec.Defaults{}}); !hasErr(errs, "(defined: none)") {
+		t.Errorf("with no stores the message says none are defined, got %v", errs)
 	}
 }
 
@@ -145,24 +182,40 @@ func TestCheckKubeCredentialCreateRemovedKeys(t *testing.T) {
 	}
 }
 
-func TestCheckKubeStoresRequireTruststore(t *testing.T) {
+func TestCheckKubeStoresCreateNeedsASelectedStore(t *testing.T) {
 	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}, Secrets: spec.Secrets{Stores: &spec.StoresSecret{Create: &spec.StoreCreate{Name: "t"}}}}
-	if errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true}); !hasErr(errs, "requires tls.truststore") {
-		t.Errorf("want truststore requirement, got %v", errs)
+	want := "kubernetes.secrets.stores.create has nothing to carry: no TLS connection selects a store; select one with truststore: or keystore:, or remove secrets.stores"
+	if errs, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true}); !hasErr(errs, want) {
+		t.Errorf("want %q, got %v", want, errs)
 	}
+	if errs, _ := Run(Context{Workflows: tlsSelectingWF(), Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true}); hasErr(errs, "has nothing to carry") {
+		t.Errorf("a selected store is something to carry: %v", errs)
+	}
+}
+
+// tlsSelectingWF is wfOK with a tcps:// Solace source selecting the ts store.
+func tlsSelectingWF() []spec.Workflow {
+	s := vSolace("Q", spec.DestQueue, "")
+	s.Truststore = "ts"
+	return []spec.Workflow{wf("x.yaml", s, vMQ("M", spec.DestQueue, false))}
 }
 
 func TestStoresNotWiredWarning(t *testing.T) {
 	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}}
-	_, warns := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}, Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true})
-	if !hasErr(warns, "secrets.stores is omitted") {
+	_, warns := Run(Context{Workflows: tlsSelectingWF(), Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true})
+	if !hasErr(warns, "a connection selects tls.stores but kubernetes.secrets.stores is omitted; the store files will be missing at runtime") {
 		t.Errorf("want stores-omitted warning, got %v", warns)
+	}
+	// TLS that selects no store trusts the JVM default and mounts nothing.
+	_, warns = Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}, Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true})
+	if hasErr(warns, "secrets.stores is omitted") {
+		t.Errorf("no store selected, so nothing is missing: %v", warns)
 	}
 }
 
 func TestStoresWiredExistingNoWarning(t *testing.T) {
 	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}, Secrets: spec.Secrets{Stores: &spec.StoresSecret{Existing: "my-tls"}}}
-	_, warns := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}, Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true})
+	_, warns := Run(Context{Workflows: tlsSelectingWF(), Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true})
 	if hasErr(warns, "secrets.stores is omitted") {
 		t.Errorf("stores wired via existing should not warn: %v", warns)
 	}
@@ -584,7 +637,7 @@ func TestCheckLibsMountPathRemoved(t *testing.T) {
 func TestCheckPodmanStoresRemoved(t *testing.T) {
 	p := podmanOK()
 	p.Stores = &spec.StoresMount{}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true}); !hasErr(e, "podman.stores is no longer configured: the tls.truststore.file / tls.keystore.file store files are loaded into podman's secret store and mounted at "+spec.DefaultStoresMountPath) {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true}); !hasErr(e, "podman.stores is no longer configured: the files of the tls.stores a connection selects are loaded into podman's secret store and mounted under "+spec.DefaultStoresMountPath) {
 		t.Errorf("want stores-removed error naming podman's secret store, got %v", e)
 	}
 	// Nil stores -- the only shape left -- trips no such error.
@@ -705,12 +758,12 @@ func TestCheckContainerNameRejected(t *testing.T) {
 }
 
 // TestDockerPodmanTLSNeedsNoStoresOptIn replaces the old TLS-without-stores
-// warning. The store files are mounted whenever tls.*.file is set (bind mounts
-// on docker, podman's secret store on podman), so a TLS workflow with no
-// stores: block is now complete rather than half-wired, and neither section has
-// anything to warn about.
+// warning. Every store a connection selects is mounted (bind mounts on docker,
+// podman's secret store on podman), so a TLS workflow with no stores: block is
+// complete rather than half-wired, and neither section has anything to warn
+// about.
 func TestDockerPodmanTLSNeedsNoStoresOptIn(t *testing.T) {
-	tlsWF := []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}
+	tlsWF := tlsSelectingWF()
 
 	if _, w := Run(Context{Workflows: tlsWF, Defaults: defsWithStores(), Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); hasErr(w, "stores is omitted") {
 		t.Errorf("docker should not warn about an omitted stores:, got %v", w)
@@ -721,29 +774,29 @@ func TestDockerPodmanTLSNeedsNoStoresOptIn(t *testing.T) {
 }
 
 // TestContainerStorePathsGatedPerPlatform pins the store-path gate by what
-// each platform does with tls.*.file, with no stores: block to opt in. Docker
-// bind-mounts the path into a compose document, so the whole path takes the
-// host-path gate. Podman never names the path -- deploy reads the file into its
-// secret store -- and mounts each store at its role's fixed name, so no store
-// path or file name is refused there.
+// each platform does with a store's file, with no stores: block to opt in.
+// Docker bind-mounts the path into a compose document, so the whole path takes
+// the host-path gate. Podman never names the path -- deploy reads the file into
+// its secret store -- and mounts each store under its name, so no store path or
+// file name is refused there.
 func TestContainerStorePathsGatedPerPlatform(t *testing.T) {
 	defs := defsWithStores()
-	defs.TLS.Truststore.File = "./certs/$(evil).jks"
+	defs.TLS.Stores["ts"].File = "./certs/$(evil).jks"
 
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defs, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "docker bind-mounts tls.truststore.file") {
-		t.Errorf("docker should reject an unsafe tls.truststore.file with no stores: block, got %v", e)
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defs, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "docker bind-mounts tls.stores.ts.file") {
+		t.Errorf("docker should reject an unsafe tls.stores.ts.file with no stores: block, got %v", e)
 	}
 	spaced := defsWithStores()
-	spaced.TLS.Truststore.File = "/opt/my certs/truststore.jks"
+	spaced.TLS.Stores["ts"].File = "/opt/my certs/truststore.jks"
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: spaced, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "unsafe character") {
 		t.Errorf("docker bind-mounts the path, so a spaced directory is refused, got %v", e)
 	}
 	for _, file := range []string{"./certs/$(evil).jks", "/opt/my certs/truststore.jks", "./certs/trust,store.jks", "./certs/trust%n.jks", "./certs/trust store.jks"} {
 		d := defsWithStores()
-		d.TLS.Truststore.File = file
-		d.TLS.Keystore.File = file
-		if e, _ := Run(Context{Workflows: wfOK(), Defaults: d, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); hasErr(e, "tls.truststore.file") || hasErr(e, "tls.keystore.file") {
-			t.Errorf("podman reads the store itself and mounts it at a fixed name, so %q is fine, got %v", file, e)
+		d.TLS.Stores["ts"].File = file
+		d.TLS.Stores["ks"].File = file
+		if e, _ := Run(Context{Workflows: wfOK(), Defaults: d, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); hasErr(e, ".file") {
+			t.Errorf("podman reads the store itself and mounts it under its name, so %q is fine, got %v", file, e)
 		}
 	}
 	// Kubernetes stays exempt: it embeds the store content in a Secret rather
@@ -754,120 +807,101 @@ func TestContainerStorePathsGatedPerPlatform(t *testing.T) {
 	}
 }
 
-// TestStoresMayShareAFileName pins what the fixed in-container names buy: a
-// truststore and keystore sharing a file name, or one file serving as both,
-// mount at two paths on every container platform, so neither is a finding.
+// TestStoresMayShareAFileName pins what in-container names per store buy: two
+// stores sharing a file name, or one file defined under two names, mount at two
+// paths on every container platform, so neither is a finding.
 func TestStoresMayShareAFileName(t *testing.T) {
 	for _, c := range []struct{ trust, key string }{
 		{"./trust/store.p12", "./key/store.p12"},
 		{"./certs/combined.jks", "./certs/combined.jks"},
 	} {
 		d := defsWithStores()
-		d.TLS.Truststore.File = c.trust
-		d.TLS.Keystore.File = c.key
+		d.TLS.Stores["ts"].File = c.trust
+		d.TLS.Stores["ks"].File = c.key
 		for _, ctx := range []Context{
 			{Workflows: wfOK(), Defaults: d, Image: imageOK(), Docker: dockerOK(), CheckDocker: true},
 			{Workflows: wfOK(), Defaults: d, Image: imageOK(), Podman: podmanOK(), CheckPodman: true},
 		} {
-			if e, _ := Run(ctx); hasErr(e, "tls.truststore.file") || hasErr(e, "tls.keystore.file") {
+			if e, _ := Run(ctx); hasErr(e, ".file") {
 				t.Errorf("%s + %s: want no store finding, got %v", c.trust, c.key, e)
 			}
 		}
 	}
 }
 
-// TestKubernetesExistingStoresKeyIsASecretKey pins the grammar the keys of an
-// existing stores Secret are held to at load: each store's file name is
-// written into the pod's stores volume as a Secret key, so a name the API
-// server would refuse is an error naming the store and the key. A created
-// Secret is keyed by role, so its file names are free.
-func TestKubernetesExistingStoresKeyIsASecretKey(t *testing.T) {
-	long := strings.Repeat("a", 250) + ".jks" // 254 characters
+// TestStoreNamesHeldToGrammar pins checkStoreFiles's name rule: a store's name
+// is the mounted file, the stores Secret key and part of the podman secret
+// name, and its upper-cased form names a literal password's mount, so it is
+// held to lowercase letters and digits joined by single hyphens -- which every
+// one of those accepts and which keeps two names' password mounts apart.
+func TestStoreNamesHeldToGrammar(t *testing.T) {
 	for _, c := range []struct {
-		name     string
-		existing bool
-		file     string
-		keystore string // "" leaves the keystore unset
-		bad      bool
-	}{
-		{"plain name", true, "./certs/truststore.jks", "./certs/keystore.jks", false},
-		{"backslash path, plain name", true, `C:\certs\trust-store_1.p12`, "./certs/keystore.jks", false},
-		{"253 characters", true, "./" + strings.Repeat("a", 249) + ".jks", "./certs/keystore.jks", false},
-		{"keystore unset", true, "./certs/truststore.jks", "", false},
-		{"space", true, "./certs/trust store.jks", "./certs/keystore.jks", true},
-		{"comma", true, "./certs/trust,store.jks", "./certs/keystore.jks", true},
-		{"dot", true, "./certs/.", "./certs/keystore.jks", true},
-		{"leading dot dot", true, "./certs/..trust.jks", "./certs/keystore.jks", true},
-		{"254 characters", true, "./" + long, "./certs/keystore.jks", true},
-		{"created, odd name", false, "./certs/trust store.jks", "./certs/keystore.jks", false},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			d := defsWithStores()
-			d.TLS.Truststore.File = c.file
-			if c.keystore == "" {
-				d.TLS.Keystore = nil
-			} else {
-				d.TLS.Keystore.File = c.keystore
-			}
-			k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: spec.DefaultKubeCommand}
-			k.Secrets.Stores = &spec.StoresSecret{Create: &spec.StoreCreate{}}
-			if c.existing {
-				k.Secrets.Stores = &spec.StoresSecret{Existing: "my-tls"}
-			}
-			e, _ := Run(Context{Workflows: wfOK(), Defaults: d, Image: imageOK(), Kube: k, CheckKubernetes: true})
-			want := fmt.Sprintf(`kubernetes.secrets.stores.existing "my-tls" is mounted by key, and the key for tls.truststore.file is its file name %q, which is not a valid Secret key (letters, digits, '-', '_' and '.', at most 253 characters, not '.' and not starting '..'); rename the file to the key the Secret holds`, spec.BaseName(c.file))
-			if got := hasErr(e, want); got != c.bad {
-				t.Errorf("%q: error = %v, want %v; errors %v", c.file, got, c.bad, e)
-			}
-			if !c.bad && hasErr(e, "not a valid Secret key") {
-				t.Errorf("%q: unexpected key error %v", c.file, e)
-			}
-		})
-	}
-}
-
-func TestUsesTLS(t *testing.T) {
-	cases := []struct {
 		name string
-		wfs  []spec.Workflow
-		want bool
+		ok   bool
 	}{
-		{
-			// Solace side with a tcps:// host hits the Solace branch (validate.go:561-563).
-			name: "solace tcps host",
-			wfs:  []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, false))},
-			want: true,
-		},
-		{
-			// No Solace side at all (so no tcps:// anywhere): only the MQ TLS branch
-			// (validate.go:564-566) can return true here. Every other call site in
-			// this package pairs vSolace (always tcps://) with vMQ, which always
-			// short-circuits on the Solace branch first -- this row is the only one
-			// that actually exercises the MQ branch.
-			name: "mq tls true, no tcps anywhere",
-			wfs:  []spec.Workflow{wf("x.yaml", vMQ("Q1", spec.DestQueue, false), vMQ("M1", spec.DestQueue, true))},
-			want: true,
-		},
-		{
-			// Plain tcp:// Solace + MQ TLS false: neither branch matches, so the
-			// function falls through to the final "return false" (validate.go:569).
-			name: "plain tcp solace, mq tls false",
-			wfs:  []spec.Workflow{wf("x.yaml", vSolacePlainTCP("Q", spec.DestQueue), vMQ("M", spec.DestQueue, false))},
-			want: false,
-		},
-	}
-	for _, c := range cases {
-		if got := usesTLS(c.wfs); got != c.want {
-			t.Errorf("%s: usesTLS()=%v want %v", c.name, got, c.want)
+		{"mq-ca", true},
+		{"solace2", true},
+		{"a", true},
+		{strings.Repeat("a", 63), true},
+		{strings.Repeat("a", 64), false},
+		{"MQ-CA", false},
+		{"mq_ca", false},
+		{"mq--ca", false},
+		{"-mq", false},
+		{"mq-", false},
+		{"mq.ca", false},
+	} {
+		d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{c.name: {File: "t.jks"}}}}
+		errs, _ := Run(Context{Workflows: wfOK(), Defaults: d})
+		want := fmt.Sprintf("tls.stores %q: a store name must be lowercase letters and digits joined by single hyphens, at most 63 characters, because it names the mounted file, the Kubernetes Secret key and the podman secret; rename it", c.name)
+		if got := hasErr(errs, want); got == c.ok {
+			t.Errorf("%q: name error = %v, want %v (errs %v)", c.name, got, !c.ok, errs)
 		}
 	}
 }
 
-// The two docker/podman stores-omitted warning tests that stood here are gone
-// with the warning itself. What they were really guarding -- that usesTLS is
-// reachable through the MQ TLS branch and not only a tcps Solace side -- is
-// asserted directly by TestUsesTLS above, on the same workflow shape. usesTLS now
-// has exactly one caller, the kubernetes stores warning, which still needs telling.
+// TestSelectsStores pins the predicate behind the kubernetes stores rules:
+// something rendered mounts a store when a TLS side, or the rendered
+// leader-election session, selects one.
+func TestSelectsStores(t *testing.T) {
+	sel := func(s spec.Side, ts string) spec.Side { s.Truststore = ts; return s }
+	plainMQ := vMQ("M", spec.DestQueue, false)
+	cases := []struct {
+		name string
+		wfs  []spec.Workflow
+		d    *spec.Defaults
+		want bool
+	}{
+		{"solace tcps selecting", []spec.Workflow{wf("x.yaml", sel(vSolace("Q", spec.DestQueue, ""), "ts"), plainMQ)}, defsWithStores(), true},
+		{"solace tcps selecting nothing", []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), plainMQ)}, defsWithStores(), false},
+		{"mq tls selecting", []spec.Workflow{wf("x.yaml", vSolacePlainTCP("Q", spec.DestQueue), sel(vMQ("M", spec.DestQueue, true), "ts"))}, defsWithStores(), true},
+		{"mq without tls selecting (an error elsewhere)", []spec.Workflow{wf("x.yaml", vSolacePlainTCP("Q", spec.DestQueue), sel(plainMQ, "ts"))}, defsWithStores(), false},
+		{"plain tcp solace selecting (an error elsewhere)", []spec.Workflow{wf("x.yaml", sel(vSolacePlainTCP("Q", spec.DestQueue), "ts"), plainMQ)}, defsWithStores(), false},
+	}
+	inline := defsWithStores()
+	s := sel(vSolace("", "", ""), "ts")
+	inline.LeaderElection = spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby, Queue: "q", Session: &s}
+	cases = append(cases, struct {
+		name string
+		wfs  []spec.Workflow
+		d    *spec.Defaults
+		want bool
+	}{"inline leader session selecting", wfOK(), inline, true})
+	ref := defsWithStores()
+	ref.Connections = map[string]spec.Side{"edge": sel(vSolace("", "", ""), "ts")}
+	ref.LeaderElection = spec.LeaderElection{Present: true, Mode: spec.LeaderActiveActive, Queue: "q", ConnRef: "edge"}
+	cases = append(cases, struct {
+		name string
+		wfs  []spec.Workflow
+		d    *spec.Defaults
+		want bool
+	}{"conn-ref leader session selecting", wfOK(), ref, true})
+	for _, c := range cases {
+		if got := selectsStores(resolveWorkflows(c.wfs, c.d), c.d); got != c.want {
+			t.Errorf("%s: selectsStores()=%v want %v", c.name, got, c.want)
+		}
+	}
+}
 
 func TestBinderIdentityUsesTheCredentialPair(t *testing.T) {
 	// Regression: validate and consolidate each kept a private dedupKey, and the
@@ -924,13 +958,13 @@ func TestCheckContainerRestartUnsafe(t *testing.T) {
 }
 
 func TestCheckContainerHostPathsUnsafe(t *testing.T) {
-	// The tls.*.file paths are bind-mount sources for docker, and libs.dir is one
-	// on docker and podman: whitespace or a metacharacter would split or extend
-	// the mount argument, so both are gated. A Windows-style path keeps validating -- '\'
+	// Store files are bind-mount sources for docker, and libs.dir is one on
+	// docker and podman: whitespace or a metacharacter would split or extend the
+	// mount argument, so both are gated. A Windows-style path keeps validating -- '\'
 	// and ':' cannot escape any of the three sinks.
 	badStores := defsWithStores()
-	badStores.TLS.Truststore.File = "t.jks\nprivileged: true"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: badStores, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "tls.truststore.file") {
+	badStores.TLS.Stores["ts"].File = "t.jks\nprivileged: true"
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: badStores, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "tls.stores.ts.file") {
 		t.Errorf("want unsafe truststore path rejection, got %v", e)
 	}
 	p := podmanOK()
@@ -939,8 +973,8 @@ func TestCheckContainerHostPathsUnsafe(t *testing.T) {
 		t.Errorf("want unsafe libs.dir rejection, got %v", e)
 	}
 	winStores := defsWithStores()
-	winStores.TLS.Truststore.File = `C:\certs\truststore.jks`
-	winStores.TLS.Keystore.File = `C:\certs\keystore.jks`
+	winStores.TLS.Stores["ts"].File = `C:\certs\truststore.jks`
+	winStores.TLS.Stores["ks"].File = `C:\certs\keystore.jks`
 	dWin := dockerOK()
 	dWin.Libs = &spec.LibsMount{Dir: `C:\libs`}
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: winStores, Image: imageOK(), Docker: dWin, CheckDocker: true}); hasErr(e, "unsafe character") {
@@ -1435,7 +1469,7 @@ func TestCredentialsFoundOutsideAWorkflowSide(t *testing.T) {
 		defs *spec.Defaults
 	}{
 		{"a management account", &spec.Defaults{Security: spec.Security{Users: []spec.User{{Name: "ops", PasswordEnv: "OPS_PASSWORD"}}}}},
-		{"a truststore password", &spec.Defaults{TLS: spec.TLSConfig{Truststore: &spec.Store{File: "t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD", Type: "JKS"}}}},
+		{"a store password", &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"ts": {File: "t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD", Type: "JKS"}}}}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, warns := Run(Context{Workflows: wfs, Defaults: c.defs, Image: imageOK(), Kube: kubeNoSecrets(), CheckKubernetes: true})

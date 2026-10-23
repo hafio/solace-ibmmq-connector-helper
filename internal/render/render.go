@@ -92,17 +92,29 @@ func renderBundles(w *yw, bundles []*consolidate.Bundle) {
 	w.Line(6, "jks:")
 	for _, b := range bundles {
 		w.Line(8, b.Name+":")
-		w.Line(10, "truststore:")
-		w.Line(12, "location: "+q(b.TruststoreLoc))
-		w.Line(12, "password: "+q(b.TruststorePwd))
-		w.Line(12, "type: "+q(b.TruststoreTyp))
+		// A bundle without a truststore is valid: Spring then trusts the JVM's
+		// default store. An unset type is omitted rather than written as "":
+		// Spring resolves a missing type to KeyStore.getDefaultType(), which loads
+		// JKS and PKCS12.
+		if b.HasTruststore {
+			w.Line(10, "truststore:")
+			w.Line(12, "location: "+q(b.TruststoreLoc))
+			w.Line(12, "password: "+q(b.TruststorePwd))
+			if b.TruststoreTyp != "" {
+				w.Line(12, "type: "+q(b.TruststoreTyp))
+			}
+		}
 		if b.HasKeystore {
 			w.Line(10, "keystore:")
 			w.Line(12, "location: "+q(b.KeystoreLoc))
 			w.Line(12, "password: "+q(b.KeystorePwd))
-			w.Line(12, "type: "+q(b.KeystoreTyp))
-			w.Line(10, "key:")
-			w.Line(12, "alias: "+q(b.KeyAlias))
+			if b.KeystoreTyp != "" {
+				w.Line(12, "type: "+q(b.KeystoreTyp))
+			}
+			if b.KeyAlias != "" {
+				w.Line(10, "key:")
+				w.Line(12, "alias: "+q(b.KeyAlias))
+			}
 		}
 	}
 }

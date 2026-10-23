@@ -4,7 +4,7 @@
 # queue. An MQ topic: source is always turned into an auto-named durable
 # subscription (a stable UUIDv5) — this is the workflow that exercises that path.
 # target: edge-solace — a MANUAL (inline), SINGLE-USE, PLAINTEXT connection to a
-# different broker: a tcp:// host and no key-alias, so no TLS is wired for this
+# different broker: a tcp:// host and no stores, so no TLS is wired for this
 # binder (auto-named sol-conn-1). Being inline and used once, it needs no entry
 # in env.yaml.
 source:
@@ -16,6 +16,8 @@ source:
     password-env: MQ_CORE_PASSWORD
     tls: true
     cipher: TLS_RSA_WITH_AES_256_CBC_SHA256
+    truststore: mq-ca
+    keystore: mq-client
     key-alias: mq-client
     topic: CORE.EVENTS.BROADCAST          # MQ topic: source => auto durable subscription
 target:

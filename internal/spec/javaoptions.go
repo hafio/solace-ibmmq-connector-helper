@@ -7,10 +7,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// MQTLSJavaToolOption is the JAVA_TOOL_OPTIONS flag the connector needs whenever
-// an MQ binder uses TLS: it selects the IBM cipher-suite mappings the IBM MQ
-// client expects instead of the Oracle names. It is named once, here, because
-// every platform's renderer merges it with the operator's own java-options.tool.
+// MQTLSJavaToolOption is the JAVA_TOOL_OPTIONS flag set whenever an MQ binder
+// uses TLS. false makes an IBM MQ client before 9.3.3 map the Oracle/JCE
+// cipher-suite names cipher: takes (TLS_RSA_WITH_...) onto CipherSpecs,
+// instead of the IBM JRE names (SSL_RSA_WITH_...) it expects by default; IBM
+// MQ 9.3.3 CD and 9.4.0 removed the property and accept either name, so with
+// those clients it is inert. It is named once, here, because every platform's
+// renderer merges it with the operator's own java-options.tool.
 const MQTLSJavaToolOption = "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"
 
 // JavaOptions is the top-level java-options: block of env.yaml -- extra JVM

@@ -16,6 +16,8 @@ source:
     msg-vpn: prod
     client-username-env: EDGE_SOLACE_USER
     client-password-env: EDGE_SOLACE_PASS
+    truststore: solace-ca
+    keystore: solace-client
     key-alias: sc
     queue: Q.IN
     api-properties:
@@ -29,6 +31,8 @@ target:
     password-env: EDGE_MQ_PASS
     tls: true
     cipher: TLS_X
+    truststore: mq-ca
+    keystore: mq-client
     key-alias: mc
     topic: T/1
     additional-properties:
@@ -45,14 +49,16 @@ target:
 		t.Fatal("source/target flags")
 	}
 	s := wf.Source
-	if s.System != SystemSolace || s.DestKind != DestQueue || s.Dest != "Q.IN" || s.KeyAlias != "sc" || s.APIProps == nil {
+	if s.System != SystemSolace || s.DestKind != DestQueue || s.Dest != "Q.IN" || s.KeyAlias != "sc" || s.APIProps == nil ||
+		s.Truststore != "solace-ca" || s.Keystore != "solace-client" {
 		t.Fatalf("source: %+v (apiprops nil=%v)", s, s.APIProps == nil)
 	}
 	if s.Username().EnvVar != "EDGE_SOLACE_USER" || s.Secret().EnvVar != "EDGE_SOLACE_PASS" {
 		t.Fatalf("source solace -env fields not parsed: %+v", s)
 	}
 	m := wf.Target
-	if m.System != SystemMQ || m.DestKind != DestTopic || m.Dest != "T/1" || !m.TLS || m.Cipher != "TLS_X" || m.AddlProps == nil {
+	if m.System != SystemMQ || m.DestKind != DestTopic || m.Dest != "T/1" || !m.TLS || m.Cipher != "TLS_X" || m.AddlProps == nil ||
+		m.Truststore != "mq-ca" || m.Keystore != "mq-client" || m.KeyAlias != "mc" {
 		t.Fatalf("target: %+v", m)
 	}
 	if m.Username().EnvVar != "EDGE_MQ_USER" || m.Secret().EnvVar != "EDGE_MQ_PASS" {
@@ -337,14 +343,15 @@ security:
 func TestParseDefaultsFull(t *testing.T) {
 	d, err := ParseDefaults([]byte(`
 tls:
-  truststore:
-    file: ./t.jks
-    password-env: TRUSTSTORE_PASS
-    type: JKS
-  keystore:
-    file: ./k.jks
-    password: keystore-literal-pw
-    type: JKS
+  stores:
+    mq-ca:
+      file: ./t.jks
+      password-env: TRUSTSTORE_PASS
+      type: JKS
+    mq-client:
+      file: ./k.jks
+      password: keystore-literal-pw
+      type: JKS
 logging:
   level: {root: INFO}
 management:
@@ -364,14 +371,14 @@ solace-defaults:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.TLS.Truststore == nil || d.TLS.Keystore == nil {
-		t.Fatal("stores not parsed")
+	if got := d.TLS.StoreNames(); len(got) != 2 || got[0] != "mq-ca" || got[1] != "mq-client" {
+		t.Fatalf("stores = %v, want [mq-ca mq-client]", got)
 	}
-	if d.TLS.Truststore.Secret().EnvVar != "TRUSTSTORE_PASS" {
-		t.Errorf("truststore secret = %+v", d.TLS.Truststore.Secret())
+	if d.TLS.Store("mq-ca").Secret().EnvVar != "TRUSTSTORE_PASS" || d.TLS.Store("mq-ca").File != "./t.jks" {
+		t.Errorf("mq-ca = %+v", d.TLS.Store("mq-ca"))
 	}
-	if d.TLS.Keystore.Secret().Literal != "keystore-literal-pw" {
-		t.Errorf("keystore secret = %+v", d.TLS.Keystore.Secret())
+	if d.TLS.Store("mq-client").Secret().Literal != "keystore-literal-pw" {
+		t.Errorf("mq-client secret = %+v", d.TLS.Store("mq-client").Secret())
 	}
 	if d.Management.Port != 8090 || d.Management.Exposure == nil || *d.Management.Exposure != "health" {
 		t.Errorf("management: %+v", d.Management)
@@ -408,7 +415,7 @@ func TestParseDefaultsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Management != (Management{}) || d.Security.Enabled != nil || len(d.Security.Users) != 0 || d.TLS.Truststore != nil {
+	if d.Management != (Management{}) || d.Security.Enabled != nil || len(d.Security.Users) != 0 || d.TLS.Stores != nil {
 		t.Errorf("empty defaults should be zero-valued: %+v", d)
 	}
 }
