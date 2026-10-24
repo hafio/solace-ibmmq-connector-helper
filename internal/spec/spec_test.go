@@ -345,13 +345,13 @@ func TestParseDefaultsFull(t *testing.T) {
 tls:
   stores:
     mq-ca:
-      file: ./t.jks
       password-env: TRUSTSTORE_PASS
-      type: JKS
+      existing:
+        pkcs12: ./t.p12
     mq-client:
-      file: ./k.jks
       password: keystore-literal-pw
-      type: JKS
+      existing:
+        pkcs12: ./k.p12
 logging:
   level: {root: INFO}
 management:
@@ -374,7 +374,7 @@ solace-defaults:
 	if got := d.TLS.StoreNames(); len(got) != 2 || got[0] != "mq-ca" || got[1] != "mq-client" {
 		t.Fatalf("stores = %v, want [mq-ca mq-client]", got)
 	}
-	if d.TLS.Store("mq-ca").Secret().EnvVar != "TRUSTSTORE_PASS" || d.TLS.Store("mq-ca").File != "./t.jks" {
+	if d.TLS.Store("mq-ca").Secret().EnvVar != "TRUSTSTORE_PASS" || d.TLS.Store("mq-ca").Path() != "./t.p12" {
 		t.Errorf("mq-ca = %+v", d.TLS.Store("mq-ca"))
 	}
 	if d.TLS.Store("mq-client").Secret().Literal != "keystore-literal-pw" {

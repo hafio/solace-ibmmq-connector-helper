@@ -146,10 +146,10 @@ func TestGoldenConfig(t *testing.T) {
 // in the api-properties -- so the replacement keys on the property as well.
 func goldenMounted(appYAML string) string {
 	return strings.NewReplacer(
-		"location: ./certs/truststore.jks", "location: /app/external/classpath/truststores/mq-ca",
-		"location: ./certs/keystore.jks", "location: /app/external/classpath/truststores/mq-client",
-		"SSL_TRUST_STORE: ./certs/truststore.jks", "SSL_TRUST_STORE: /app/external/classpath/truststores/solace-ca",
-		"SSL_KEY_STORE: ./certs/keystore.jks", "SSL_KEY_STORE: /app/external/classpath/truststores/solace-client",
+		"location: ./certs/truststore.p12", "location: /app/external/classpath/truststores/mq-ca",
+		"location: ./certs/keystore.p12", "location: /app/external/classpath/truststores/mq-client",
+		"SSL_TRUST_STORE: ./certs/truststore.p12", "SSL_TRUST_STORE: /app/external/classpath/truststores/solace-ca",
+		"SSL_KEY_STORE: ./certs/keystore.p12", "SSL_KEY_STORE: /app/external/classpath/truststores/solace-client",
 	).Replace(appYAML)
 }
 

@@ -203,8 +203,10 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 
 	// ---- finalize binder + bundle objects -------------------------------------
 	// useStores records the stores a rendered connection selects, in first-use
-	// order, so every platform mounts exactly those; a store used as a keystore
-	// anywhere holds a private key and is mounted as one.
+	// order, so every platform mounts exactly those, with the roles they are
+	// selected in: a store used as a keystore anywhere holds a private key and
+	// is mounted as one, and a created store is checked against both roles once
+	// it is built.
 	storeAt := map[string]int{}
 	useStores := func(sel tls.Selection) {
 		for _, u := range []struct {
@@ -212,15 +214,20 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 			private bool
 		}{{sel.Truststore, false}, {sel.Keystore, true}} {
 			st := d.TLS.Store(u.name)
-			if !st.HasFile() {
+			if !st.Configured() {
 				continue
 			}
-			if i, ok := storeAt[u.name]; ok {
-				m.Stores[i].Private = m.Stores[i].Private || u.private
-				continue
+			i, ok := storeAt[u.name]
+			if !ok {
+				i = len(m.Stores)
+				storeAt[u.name] = i
+				m.Stores = append(m.Stores, StoreUse{Name: u.name, File: st.Path(), Created: st.Created()})
 			}
-			storeAt[u.name] = len(m.Stores)
-			m.Stores = append(m.Stores, StoreUse{Name: u.name, File: st.File, Type: st.Type, Private: u.private})
+			if u.private {
+				m.Stores[i].Private = true
+			} else {
+				m.Stores[i].Trusted = true
+			}
 		}
 	}
 
@@ -414,22 +421,22 @@ func sanitize(s string) string {
 // default store, the same trust a binder with no bundle gets.
 func buildBundle(a *acc, d *spec.Defaults, mount bool, secretRef secretFn) *Bundle {
 	ts, ks := d.TLS.Store(a.truststore), d.TLS.Store(a.keystore)
-	if !ts.HasFile() && !ks.HasFile() {
+	if !ts.Configured() && !ks.Configured() {
 		return nil
 	}
 	ref := storeSecret(secretRef)
 	b := &Bundle{Name: a.name + "-bundle"}
-	if ts.HasFile() {
+	if ts.Configured() {
 		b.HasTruststore = true
-		b.TruststoreLoc = tls.StorePath(a.truststore, ts.File, mount)
+		b.TruststoreLoc = tls.StorePath(a.truststore, ts.Path(), mount)
 		b.TruststorePwd = ref(a.truststore, ts.Secret())
-		b.TruststoreTyp = ts.Type
+		b.TruststoreTyp = spec.StoreFormat
 	}
-	if ks.HasFile() {
+	if ks.Configured() {
 		b.HasKeystore = true
-		b.KeystoreLoc = tls.StorePath(a.keystore, ks.File, mount)
+		b.KeystoreLoc = tls.StorePath(a.keystore, ks.Path(), mount)
 		b.KeystorePwd = ref(a.keystore, ks.Secret())
-		b.KeystoreTyp = ks.Type
+		b.KeystoreTyp = spec.StoreFormat
 		b.KeyAlias = a.keyAlias
 	}
 	return b

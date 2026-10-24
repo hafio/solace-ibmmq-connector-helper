@@ -161,7 +161,7 @@ details[open]>summary::before{content:"- "}
 
   <!-- TLS stores -->
   <div class="sec" id="s-tls"><h3>TLS Stores</h3>
-    <div class="h" style="margin-bottom:.5rem;font-size:.7rem;color:var(--tm);font-style:italic">Named stores (tls.stores). Each connection selects its own truststore and keystore by name, so Solace and MQ can trust different CAs and present different client certificates. Name: lowercase letters and digits joined by single hyphens. Type is optional.</div>
+    <div class="h" style="margin-bottom:.5rem;font-size:.7rem;color:var(--tm);font-style:italic">Named stores (tls.stores). Each connection selects its own truststore and keystore by name, so Solace and MQ can trust different CAs and present different client certificates. Name: lowercase letters and digits joined by single hyphens. Every store is PKCS12: existing names one you provide; create has deploy build one into the platform's secret from certificate files or a JKS -- certs make a truststore, one key entry a keystore.</div>
     <div id="stores-list"></div>
     <datalist id="store-names"></datalist>
     <button type="button" class="add" onclick="addStore();gen()">+ Add store</button>
@@ -323,8 +323,8 @@ details[open]>summary::before{content:"- "}
         <option value="create">create</option>
         <option value="existing">existing</option>
       </select></div>
-      <div class="opt-fields" id="k8s-stores-c"><div class="h">The Secret is named &lt;deployment name&gt;-stores.</div></div>
-      <div class="opt-fields" id="k8s-stores-e"><div class="f"><label>Existing Secret</label><input id="i-k8s-stores-existing" placeholder="my-tls"><div class="h">Its keys must be the names of the stores the connections select (mq-ca, ...); the pod mounts each under that name, which is what the rendered config points at.</div></div></div>
+      <div class="opt-fields" id="k8s-stores-c"><div class="h">The Secret is named &lt;deployment name&gt;-stores. It carries every selected store: an existing one's PKCS12, a created one built at deploy.</div></div>
+      <div class="opt-fields" id="k8s-stores-e"><div class="f"><label>Existing Secret</label><input id="i-k8s-stores-existing" placeholder="my-tls"><div class="h">Its keys must be the names of the stores the connections select (mq-ca, ...); the pod mounts each under that name, which is what the rendered config points at. The tool writes no Secret here, so a created store is not built: this Secret must already hold it.</div></div></div>
       <div class="f"><label>Image Pull Secret</label><select id="i-k8s-ipull" onchange="syncK8s()">
         <option value="">(none)</option>
         <option value="reference">reference an existing Secret</option>
@@ -353,7 +353,7 @@ details[open]>summary::before{content:"- "}
       <div class="sub-h">Credentials</div>
       <div class="h">Derived automatically from the connection fields above and mounted at /app/external/var/secrets; nothing to configure here.</div>
       <div class="sub-h">Mounts</div>
-      <div class="h">Every store a connection selects is bind-mounted at /app/external/classpath/truststores/&lt;store name&gt;, whatever its file is called; nothing to configure here.</div>
+      <div class="h">Every existing store a connection selects is bind-mounted at /app/external/classpath/truststores/&lt;store name&gt;, whatever its file is called; a created store travels base64-encoded in deploy's environment as a compose secret, decoded there by a startup script on every start. Nothing to configure here.</div>
       <div class="tgl"><input type="checkbox" id="i-dk-libs-on" onchange="togOpt('i-dk-libs-on','dk-libs-f')"><label for="i-dk-libs-on">Bind-mount an IBM MQ jar directory</label></div>
       <div class="opt-fields" id="dk-libs-f"><div class="f"><label>Host Directory</label><input id="i-dk-libs-dir" placeholder="./libs"></div></div>
     </div>
@@ -378,7 +378,7 @@ details[open]>summary::before{content:"- "}
       <div class="sub-h">Credentials</div>
       <div class="h">Derived automatically from the connection fields above and mounted at /app/external/var/secrets; nothing to configure here.</div>
       <div class="sub-h">Mounts</div>
-      <div class="h">Every store a connection selects is loaded into podman's secret store and mounted at /app/external/classpath/truststores/&lt;store name&gt;, whatever its file is called; nothing to configure here. The jar directory below is the one host path the unit mounts.</div>
+      <div class="h">Every store a connection selects -- an existing one's PKCS12, a created one built at deploy -- is loaded into podman's secret store and mounted at /app/external/classpath/truststores/&lt;store name&gt;; nothing to configure here. The jar directory below is the one host path the unit mounts.</div>
       <div class="tgl"><input type="checkbox" id="i-pd-libs-on" onchange="togOpt('i-pd-libs-on','pd-libs-f')"><label for="i-pd-libs-on">Bind-mount an IBM MQ jar directory</label></div>
       <div class="opt-fields" id="pd-libs-f"><div class="f"><label>Host Directory</label><input id="i-pd-libs-dir" placeholder="./libs"></div></div>
     </div>
@@ -417,20 +417,20 @@ details[open]>summary::before{content:"- "}
       jks:
         mq-conn-1-bundle:
           truststore:
-            location: ./certs/truststore.jks
+            location: ./certs/truststore.p12
             password: ${TRUSTSTORE_PASSWORD}
-            type: JKS
+            type: PKCS12
           keystore:
-            location: ./certs/keystore.jks
+            location: ./certs/keystore.p12
             password: ${KEYSTORE_PASSWORD}
-            type: JKS
+            type: PKCS12
           key:
             alias: mq-client
         mq-archive-bundle:
           truststore:
-            location: ./certs/truststore.jks
+            location: ./certs/truststore.p12
             password: ${TRUSTSTORE_PASSWORD}
-            type: JKS
+            type: PKCS12
   cloud:
     stream:
       binders:
@@ -459,12 +459,12 @@ details[open]>summary::before{content:"- "}
                 connect-retries: -1
                 reconnect-retries: -1
                 api-properties:
-                  SSL_TRUST_STORE: ./certs/truststore.jks
+                  SSL_TRUST_STORE: ./certs/truststore.p12
                   SSL_TRUST_STORE_PASSWORD: ${TRUSTSTORE_PASSWORD}
-                  SSL_TRUST_STORE_FORMAT: JKS
-                  SSL_KEY_STORE: ./certs/keystore.jks
+                  SSL_TRUST_STORE_FORMAT: PKCS12
+                  SSL_KEY_STORE: ./certs/keystore.p12
                   SSL_KEY_STORE_PASSWORD: ${KEYSTORE_PASSWORD}
-                  SSL_KEY_STORE_FORMAT: JKS
+                  SSL_KEY_STORE_FORMAT: PKCS12
                   SSL_PRIVATE_KEY_ALIAS: solace-client
                   REAPPLY_SUBSCRIPTIONS: true
         mq-archive:
@@ -566,12 +566,12 @@ solace:
         connect-retries: -1
         reconnect-retries: -1
         api-properties:
-          SSL_TRUST_STORE: ./certs/truststore.jks
+          SSL_TRUST_STORE: ./certs/truststore.p12
           SSL_TRUST_STORE_PASSWORD: ${TRUSTSTORE_PASSWORD}
-          SSL_TRUST_STORE_FORMAT: JKS
-          SSL_KEY_STORE: ./certs/keystore.jks
+          SSL_TRUST_STORE_FORMAT: PKCS12
+          SSL_KEY_STORE: ./certs/keystore.p12
           SSL_KEY_STORE_PASSWORD: ${KEYSTORE_PASSWORD}
-          SSL_KEY_STORE_FORMAT: JKS
+          SSL_KEY_STORE_FORMAT: PKCS12
           SSL_PRIVATE_KEY_ALIAS: solace-client
           REAPPLY_SUBSCRIPTIONS: true
 management:
@@ -598,7 +598,8 @@ logging:
      file. The golden spec validates clean today, so this block is empty.
      Refresh via:
        go test ./internal/gen -run TestGeneratorPageFindingsGoldenInSync -update-html-golden -->
-<script type="text/plain" id="golden-findings"></script>
+<script type="text/plain" id="golden-findings">WARN env.yaml: tls.stores "other-ca-list" is not selected by any connection, so it is not mounted; remove it, or select it with truststore: or keystore:
+WARN env.yaml: tls.stores "other-ca-named" is not selected by any connection, so it is not mounted; remove it, or select it with truststore: or keystore:</script>
 
 <script>
 // ===== DOM helpers =====
@@ -671,6 +672,26 @@ function kcred(key, cred, ind){
   return cred.env ? kv(key + '-env', cred.env, ind) : kv(key, cred.literal, ind);
 }
 function blk(name, body, ind){ return body ? `${ind}${name}:\n${body}` : ''; }
+// emitCreate writes a store's create: block at ind: certs as a list, or as a
+// map when named; the key entry as one list item; jks. A create: with nothing
+// in it is written as an empty mapping, which env.yaml reads as a create:
+// block naming no source -- exactly what the page holds.
+function emitCreate(c, ind){
+  let b = '';
+  if(c.certs.items.length){
+    b += `${ind}  certs:\n`;
+    c.certs.items.forEach(i => { b += c.certs.named ? `${ind}    ${yq(i.name)}: ${yq(i.file)}\n` : `${ind}    - ${yq(i.file)}\n`; });
+  }
+  if(c.keys.length){
+    b += `${ind}  keys:\n`;
+    c.keys.forEach(k => {
+      const e = kv('cert', k.cert, ind + '      ') + klist('chain', k.chain, ind + '      ') + kv('key', k.key, ind + '      ');
+      b += e ? ind + '    - ' + e.slice(ind.length + 6) : `${ind}    - {}\n`;
+    });
+  }
+  b += kv('jks', c.jks, ind + '  ');
+  return b ? `${ind}create:\n${b}` : `${ind}create: {}\n`;
+}
 
 // ===== Ordered passthrough blocks =====
 // Textareas holding api-properties / additional-properties / consumer / producer /
@@ -863,21 +884,86 @@ function addWf(w){
 }
 
 // addStore appends one tls.stores row: a name connections select it by, its
-// file, its password (an env var name or a literal) and an optional type.
+// password (an env var name or a literal), and where the store comes from --
+// existing, a PKCS12 you provide; or create, built at deploy from certs (one
+// file per line, or alias: file per line when named), one key entry (cert,
+// chain, key) and a JKS opened with the store's password.
 function addStore(st){
   const r = document.createElement('div');
   r.className = 'pr';
-  r.innerHTML = `<input class="st-name" style="flex:0 0 9rem" placeholder="mq-ca" oninput="refreshStoreNames()"><input class="st-file grow" placeholder="./certs/mq-ca.jks"><input class="st-pass grow" placeholder="MQ_TRUSTSTORE_PASSWORD"><label style="display:flex;align-items:center;gap:.3rem;font-size:.68rem;color:var(--tm);cursor:pointer;white-space:nowrap"><input type="checkbox" class="st-pass-env" checked>env var</label><input class="st-type" style="flex:0 0 5rem" placeholder="JKS"><button type="button" class="rm" title="Remove" onclick="this.parentElement.remove();refreshStoreNames();gen()">x</button>`;
+  r.style.flexWrap = 'wrap';
+  r.innerHTML = `<input class="st-name" style="flex:0 0 9rem" placeholder="mq-ca" oninput="refreshStoreNames()">`
+    + `<input class="st-pass grow" placeholder="MQ_CA_PASSWORD"><label style="display:flex;align-items:center;gap:.3rem;font-size:.68rem;color:var(--tm);cursor:pointer;white-space:nowrap"><input type="checkbox" class="st-pass-env" checked>env var</label>`
+    + `<select class="st-mode" style="flex:0 0 6.5rem" onchange="syncStoreRow(this.closest('.pr'))"><option value="existing">existing</option><option value="create">create</option></select>`
+    + `<input class="st-pkcs12 grow" placeholder="./certs/mq-ca.p12">`
+    + `<button type="button" class="rm" title="Remove" onclick="this.parentElement.remove();refreshStoreNames();gen()">x</button>`
+    + `<div class="st-create f" style="flex:1 0 100%;display:none">`
+    + `<label style="display:flex;align-items:center;gap:.3rem">certs<input type="checkbox" class="st-certs-named" style="width:auto">named (alias: file per line)</label>`
+    + `<textarea class="st-certs" rows="2" placeholder="./pem/root.pem"></textarea>`
+    + `<label>keys: one entry -- cert, chain (one file per line), key</label>`
+    + `<input class="st-kcert" placeholder="./pem/client.pem">`
+    + `<textarea class="st-kchain" rows="1" placeholder="./pem/issuing.pem"></textarea>`
+    + `<input class="st-kkey" placeholder="./pem/client.key">`
+    + `<label>jks (opened with this store's password)</label>`
+    + `<input class="st-jks" placeholder="./legacy/truststore.jks">`
+    + `<div class="h">Built at deploy straight into the platform's secret, never written to disk. Certs, and a JKS's trusted entries, make a truststore; one key entry, or a JKS holding one key, makes a keystore -- its key needs no key-alias.</div>`
+    + `</div>`;
   $('stores-list').appendChild(r);
   if(st){
     r.querySelector('.st-name').value = st.name || '';
-    r.querySelector('.st-file').value = st.file || '';
     const p = st.password || emptyCred();
     r.querySelector('.st-pass-env').checked = !p.literal;
     r.querySelector('.st-pass').value = p.literal || p.env || '';
-    r.querySelector('.st-type').value = st.type || '';
+    r.querySelector('.st-mode').value = st.create ? 'create' : 'existing';
+    r.querySelector('.st-pkcs12').value = st.pkcs12 || '';
+    if(st.create){
+      const c = st.create, k = c.keys[0];
+      r.querySelector('.st-certs-named').checked = !!c.certs.named;
+      r.querySelector('.st-certs').value = c.certs.items.map(i => c.certs.named ? `${i.name}: ${i.file}` : i.file).join('\n');
+      if(k){
+        r.querySelector('.st-kcert').value = k.cert || '';
+        r.querySelector('.st-kchain').value = (k.chain || []).join('\n');
+        r.querySelector('.st-kkey').value = k.key || '';
+      }
+      r.querySelector('.st-jks').value = c.jks || '';
+    }
   }
+  syncStoreRow(r);
   refreshStoreNames();
+}
+
+// syncStoreRow shows the fields of the row's source: the PKCS12 path for
+// existing, the create panel for create.
+function syncStoreRow(r){
+  const create = r.querySelector('.st-mode').value === 'create';
+  r.querySelector('.st-pkcs12').style.display = create ? 'none' : '';
+  r.querySelector('.st-create').style.display = create ? '' : 'none';
+}
+
+// readStore reads one tls.stores row into the shape emitEnv and validateModel
+// share: create holds certs ({named, items: [{name, file}]}), keys (the one
+// entry the row edits, when any part is set) and jks; an existing store holds
+// pkcs12. A row in existing mode with no path is neither, as env.yaml would be.
+function readStore(r){
+  const st = { name: r.querySelector('.st-name').value.trim(), password: readCredPair(r, 'st-pass'), pkcs12: '', create: null };
+  if(r.querySelector('.st-mode').value !== 'create'){
+    st.pkcs12 = r.querySelector('.st-pkcs12').value.trim();
+    return st;
+  }
+  const named = r.querySelector('.st-certs-named').checked;
+  const items = LT(r.querySelector('.st-certs').value).map(l => {
+    if(!named) return { name: '', file: l };
+    const at = l.indexOf(': ');
+    return at < 0 ? { name: l.replace(/:$/, ''), file: '' } : { name: l.slice(0, at).trim(), file: l.slice(at + 2).trim() };
+  });
+  const cert = r.querySelector('.st-kcert').value.trim(), key = r.querySelector('.st-kkey').value.trim();
+  const chain = LT(r.querySelector('.st-kchain').value);
+  st.create = {
+    certs: { named: named, items: items },
+    keys: (cert || key || chain.length) ? [{ cert: cert, chain: chain, key: key }] : [],
+    jks: r.querySelector('.st-jks').value.trim()
+  };
+  return st;
 }
 
 // refreshStoreNames offers the defined store names to every truststore/keystore
@@ -1134,12 +1220,7 @@ function readModel(){
   }).sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0);
 
   m.tls = {
-    stores: Array.from(document.querySelectorAll('#stores-list .pr')).map(r => ({
-      name: r.querySelector('.st-name').value.trim(),
-      file: r.querySelector('.st-file').value.trim(),
-      password: readCredPair(r, 'st-pass'),
-      type: r.querySelector('.st-type').value.trim()
-    })).filter(st => st.name || st.file)
+    stores: Array.from(document.querySelectorAll('#stores-list > .pr')).map(readStore).filter(st => st.name || st.pkcs12 || st.create)
   };
   m.loggingLevel = parseProps(V('i-log'));
   m.syslog = C('i-sl-on') ? { host: V('i-sl-host'), port: parseInt(V('i-sl-port') || '0', 10), protocol: V('i-sl-proto') } : null;
@@ -1294,7 +1375,11 @@ function emitEnv(m){
   const named = m.tls.stores.filter(st => st.name);
   if(named.length){
     y += '\ntls:\n  stores:\n';
-    named.forEach(st => { y += `    ${st.name}:\n` + kv('file', st.file, '      ') + kcred('password', st.password, '      ') + kv('type', st.type, '      '); });
+    named.forEach(st => {
+      y += `    ${st.name}:\n` + kcred('password', st.password, '      ');
+      if(st.create) y += emitCreate(st.create, '      ');
+      else if(st.pkcs12) y += '      existing:\n' + kv('pkcs12', st.pkcs12, '        ');
+    });
   }
 
   if(m.loggingLevel.length || m.syslog){
@@ -1792,7 +1877,24 @@ function checkStoreSelection(add, file, where, s, m){
     }
   });
   if(s.keyAlias && !s.keystore) add(file, `${where}: key-alias ${goQuote(s.keyAlias)} selects a key from a keystore, but no keystore is selected; add keystore: <store>`);
+  checkCreatedSelection(add, file, where, s, m);
 }
+// createdRole mirrors Go's createdRole: certificates make a truststore, a key
+// entry a keystore; a JKS on its own is known only at deploy.
+function createdRole(st){
+  if(!st || !st.create) return { truststore: false, keystore: false };
+  return { truststore: st.create.certs.items.length > 0, keystore: st.create.keys.length > 0 };
+}
+// checkCreatedSelection mirrors Go's checkCreatedSelection: a created store
+// must be what a connection selects it as, and its one key takes no key-alias.
+function checkCreatedSelection(add, file, where, s, m){
+  if(createdRole(storeByName(m, s.truststore)).keystore) add(file, `${where}: truststore ${goQuote(s.truststore)} is created from a key, so it holds no trusted certificates; create a second store from the CA certificates and select that`);
+  if(createdRole(storeByName(m, s.keystore)).truststore) add(file, `${where}: keystore ${goQuote(s.keystore)} is created from certificates only, so it holds no private key; give it one keys entry`);
+  const ks = storeByName(m, s.keystore);
+  if(s.keyAlias && ks && ks.create) add(file, `${where}: remove key-alias ${goQuote(s.keyAlias)}: tls.stores.${s.keystore} is created with exactly one key, which needs no alias (Java names it "1")`);
+}
+// storeConfigured mirrors spec.Store.Configured: created, or naming its PKCS12.
+function storeConfigured(st){ return !!(st && (st.create || st.pkcs12)); }
 
 // checkCred ports Go's validate.checkCred: the literal and -env forms of one
 // credential position are mutually exclusive, an -env value must be a bare
@@ -1839,8 +1941,8 @@ function checkSideCredentials(add, warn, file, label, s){
 }
 
 // checkStoreFiles mirrors Go's checkStoreFiles: each store's name grammar, and
-// that it names a file. The page alone can also hold two rows with one name, or
-// a row with no name, which env.yaml cannot express.
+// its definition (checkStoreDefinition). The page alone can also hold two rows
+// with one name, or a row with no name, which env.yaml cannot express.
 const RE_STORE_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 function checkStoreFiles(add, m){
   const seen = {};
@@ -1851,7 +1953,38 @@ function checkStoreFiles(add, m){
   });
   storeNames(m).forEach(name => {
     if(name.length > 63 || !RE_STORE_NAME.test(name)) add(ENV_FILE, `tls.stores ${goQuote(name)}: a store name must be lowercase letters and digits joined by single hyphens, at most 63 characters, because it names the mounted file, the Kubernetes Secret key and the podman secret; rename it`);
-    if(!storeByName(m, name).file) add(ENV_FILE, `tls.stores.${name} has no file: a store names the file to load; add file, or remove the store and every truststore:/keystore: that selects it`);
+    checkStoreDefinition(add, name, storeByName(m, name));
+  });
+}
+// checkStoreDefinition mirrors Go's checkStoreDefinition: create: or
+// existing:, and create: sources the PKCS12 writer can build one store from.
+// A row is in one mode at a time and edits one key entry, so neither "both"
+// nor a second keys entry can arise here.
+function checkStoreDefinition(add, name, st){
+  if(!st.create && !st.pkcs12){
+    add(ENV_FILE, `tls.stores.${name} needs create: (the tool builds it) or existing: (a PKCS12 you provide)`);
+    return;
+  }
+  if(!st.create) return;
+  const c = st.create;
+  if(!st.password.literal && !st.password.env) add(ENV_FILE, `tls.stores.${name} is created and encrypted with its own password, but sets none; add password-env`);
+  const certs = c.certs.items.length > 0, keys = c.keys.length > 0;
+  if(!certs && !keys && !c.jks) add(ENV_FILE, `tls.stores.${name}.create names no source: list certs, give one keys entry, or name a jks`);
+  else if(keys && (certs || c.jks)) add(ENV_FILE, `tls.stores.${name}.create mixes trusted certificates and a key: a store is a truststore or a keystore -- define a second store for the other`);
+  c.keys.forEach((k, i) => {
+    if(!k.cert || !k.key) add(ENV_FILE, `tls.stores.${name}.create.keys[${i}] needs cert and key: the certificate and the private key it belongs to`);
+  });
+  const seen = {};
+  c.certs.items.forEach((cs, i) => {
+    let where = `tls.stores.${name}.create.certs[${i}]`;
+    if(c.certs.named){
+      where = `tls.stores.${name}.create.certs.${cs.name}`;
+      const alias = cs.name.toLowerCase();
+      if(alias === '') add(ENV_FILE, `tls.stores.${name}.create.certs has an empty alias: name every certificate`);
+      else if(seen[alias]) add(ENV_FILE, `tls.stores.${name}.create.certs: alias ${goQuote(cs.name)} appears twice (aliases ignore case)`);
+      seen[alias] = true;
+    }
+    if(!cs.file) add(ENV_FILE, `${where} is empty: name a certificate file`);
   });
 }
 
@@ -1973,8 +2106,16 @@ function checkDefaultsCredentials(add, warn, m){
 
 function checkStore(add, warn, label, st){
   checkCred(add, warn, ENV_FILE, `${label}.password`, st.password);
-  checkExpansion(warn, ENV_FILE, `${label}.file`, st.file);
-  checkExpansion(warn, ENV_FILE, `${label}.type`, st.type);
+  checkExpansion(warn, ENV_FILE, `${label}.existing.pkcs12`, st.pkcs12);
+  if(!st.create) return;
+  const c = st.create;
+  c.certs.items.forEach((cs, i) => checkExpansion(warn, ENV_FILE, c.certs.named ? `${label}.create.certs.${cs.name}` : `${label}.create.certs[${i}]`, cs.file));
+  c.keys.forEach((k, i) => {
+    checkExpansion(warn, ENV_FILE, `${label}.create.keys[${i}].cert`, k.cert);
+    k.chain.forEach((ch, j) => checkExpansion(warn, ENV_FILE, `${label}.create.keys[${i}].chain[${j}]`, ch));
+    checkExpansion(warn, ENV_FILE, `${label}.create.keys[${i}].key`, k.key);
+  });
+  checkExpansion(warn, ENV_FILE, `${label}.create.jks`, c.jks);
 }
 
 // checkExpansion flags a generate-time ${VAR} / ${VAR:default} placeholder in
@@ -2125,7 +2266,7 @@ function checkExtraKeys(add, warn, file, label, s, m, defaults){
     }
     if(sys === 'mq' && ck === 'sslciphersuite' && s.cipher){ add(file, `${where}: ${goQuote(k)} and cipher: both set the cipher suite (the tool writes cipher: as additional-properties.WMQ_SSL_CIPHER_SUITE); keep one of the two`); return; }
     if(sys === 'mq' && ck === 'useibmciphermappings' && s.tls && !isFalseVal(p.val)) warn(file, `${where}: ${goQuote(k)} overrides the -Dcom.ibm.mq.cfg.useIBMCipherMappings=false the tool sets for a TLS connection, so the JCE cipher names in cipher: may no longer apply`);
-    if(sys === 'mq' && ck === 'jks' && s.tls && ((storeByName(m, s.truststore) || {}).file || (storeByName(m, s.keystore) || {}).file)) warn(file, `${where}: jks.* is ignored by the connector while ssl-bundle is set; the stores in effect are the ones this connection selects with truststore:/keystore:`);
+    if(sys === 'mq' && ck === 'jks' && s.tls && (storeConfigured(storeByName(m, s.truststore)) || storeConfigured(storeByName(m, s.keystore)))) warn(file, `${where}: jks.* is ignored by the connector while ssl-bundle is set; the stores in effect are the ones this connection selects with truststore:/keystore:`);
     if(sys === 'solace' && ck === 'clientname' && (mode === 'active_active' || mode === 'active_standby') && isLiteralVal(p.val)) warn(file, where + ': ' + goQuote(k) + ' is fixed, but every replica shares this file and a client name must be unique per connection; use a per-instance value such as ${HOSTNAME}, or leave it for the connector to generate');
     const lk = k.toLowerCase();
     if(lk.endsWith('-env') || lk.endsWith('_env')) warn(file, `${where}: ${goQuote(k)} is not a credential the tool resolves, so it is passed through as ${prop}.${k} unchanged and the connector reads it as a plain property; the credential keys are ${creds[0]} and ${creds[1]}, each with an -env twin`);
@@ -2503,7 +2644,8 @@ function checkContainerTarget(add, warn, m, c){
   checkExpansion(warn, ENV_FILE, `${c.section}.libs.dir`, c.libsDir);
 }
 // checkContainerStores mirrors validate.checkContainerStores: docker
-// bind-mounts each store's file into the compose file, so the path is gated.
+// bind-mounts each existing store's PKCS12 into the compose file, so the path
+// is gated; a created store has no path to mount.
 // Podman reads the file into its secret store at deploy and, like every
 // platform, mounts each store under its name, so neither the path nor the file
 // name reaches the unit. Kubernetes never reaches this function: its stores
@@ -2511,10 +2653,10 @@ function checkContainerTarget(add, warn, m, c){
 function checkContainerStores(add, section, m){
   if(section === 'podman') return;
   storeNames(m).forEach(name => {
-    const st = storeByName(m, name);
-    if(!st || !st.file) return;
-    if(!safeHostPath(st.file)){
-      add(ENV_FILE, `${section} bind-mounts tls.stores.${name}.file "${st.file}", which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
+    const path = (storeByName(m, name) || {}).pkcs12;
+    if(!path) return;
+    if(!safeHostPath(path)){
+      add(ENV_FILE, `${section} bind-mounts tls.stores.${name}.existing.pkcs12 ${goQuote(path)}, which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
     }
   });
 }
@@ -2678,6 +2820,8 @@ function appendPassthrough(tool, pass, warns, owner){
 // storePath mirrors tls.StorePath: config output keeps the path exactly as written
 // in env.yaml (the deploy path rewrites it to the mounted location instead).
 function storePath(file){ return file; }
+// STORE_FORMAT mirrors spec.StoreFormat: every store is PKCS12.
+const STORE_FORMAT = 'PKCS12';
 
 // ===== Credential accessors (spec.Side.Username()/Secret(), Store/User.Secret()) =====
 // Credentials already arrive as {literal, env} pairs (see emptyCred/readCredPair);
@@ -2788,21 +2932,21 @@ function securityUserPasswordName(user){ return GEN_PREFIX + 'SECURITY_USER_' + 
 // else -- no validation policy (SSL_VALIDATE_CERTIFICATE is the Solace API's
 // default, or the connection's own api-properties). No truststore writes no
 // trust keys (the JVM default CAs); a keystore adds the client certificate, and
-// SSL_PRIVATE_KEY_ALIAS only when an alias picks one key. A store without a file
-// is skipped (validate refuses one) and one without a type omits its FORMAT key.
+// SSL_PRIVATE_KEY_ALIAS only when an alias picks one key. A store that is not
+// configured is skipped (validate refuses one), and every store is PKCS12.
 // Mirrors internal/tls.SolaceProps.
 function solaceProps(m, sel, secretRef){
   const out = [];
   const ts = storeByName(m, sel.truststore), ks = storeByName(m, sel.keystore);
-  if(ts && ts.file){
-    out.push({ key: 'SSL_TRUST_STORE', val: storePath(ts.file) });
+  if(storeConfigured(ts)){
+    out.push({ key: 'SSL_TRUST_STORE', val: storePath(ts.pkcs12) });
     out.push({ key: 'SSL_TRUST_STORE_PASSWORD', val: storeSecret(secretRef, m, sel.truststore) });
-    if(ts.type) out.push({ key: 'SSL_TRUST_STORE_FORMAT', val: ts.type });
+    out.push({ key: 'SSL_TRUST_STORE_FORMAT', val: STORE_FORMAT });
   }
-  if(ks && ks.file){
-    out.push({ key: 'SSL_KEY_STORE', val: storePath(ks.file) });
+  if(storeConfigured(ks)){
+    out.push({ key: 'SSL_KEY_STORE', val: storePath(ks.pkcs12) });
     out.push({ key: 'SSL_KEY_STORE_PASSWORD', val: storeSecret(secretRef, m, sel.keystore) });
-    if(ks.type) out.push({ key: 'SSL_KEY_STORE_FORMAT', val: ks.type });
+    out.push({ key: 'SSL_KEY_STORE_FORMAT', val: STORE_FORMAT });
     if(sel.keyAlias) out.push({ key: 'SSL_PRIVATE_KEY_ALIAS', val: sel.keyAlias });
   }
   return out;
@@ -2814,21 +2958,21 @@ function solaceProps(m, sel, secretRef){
 // consolidate.go's buildBundle.
 function buildBundle(a, m, secretRef){
   const ts = storeByName(m, a.truststore), ks = storeByName(m, a.keystore);
-  const hasTs = !!(ts && ts.file), hasKs = !!(ks && ks.file);
+  const hasTs = storeConfigured(ts), hasKs = storeConfigured(ks);
   if(!hasTs && !hasKs) return null;
   const b = { name: a.name + '-bundle', hasTruststore: false, tsLoc: '', tsPwd: '', tsTyp: '',
               hasKeystore: false, ksLoc: '', ksPwd: '', ksTyp: '', keyAlias: '' };
   if(hasTs){
     b.hasTruststore = true;
-    b.tsLoc = storePath(ts.file);
+    b.tsLoc = storePath(ts.pkcs12);
     b.tsPwd = storeSecret(secretRef, m, a.truststore);
-    b.tsTyp = ts.type;
+    b.tsTyp = STORE_FORMAT;
   }
   if(hasKs){
     b.hasKeystore = true;
-    b.ksLoc = storePath(ks.file);
+    b.ksLoc = storePath(ks.pkcs12);
     b.ksPwd = storeSecret(secretRef, m, a.keystore);
-    b.ksTyp = ks.type;
+    b.ksTyp = STORE_FORMAT;
     b.keyAlias = a.keyAlias;
   }
   return b;
@@ -2856,9 +3000,20 @@ function consolidateBuild(wfs, m, statusPassword){
     management: { port: effectiveManagementPort(m),
                   healthShowDetails: (m.management.present && m.management.healthShowDetails) || DEFAULT_HEALTH_SHOW_DETAILS },
     loggingLevel: m.loggingLevel,
-    leader: null, mqTLS: false, secrets: [], secretConflicts: [], configImport: CONFIG_IMPORT
+    leader: null, mqTLS: false, secrets: [], secretConflicts: [], configImport: CONFIG_IMPORT,
+    stores: []
   };
   const warns = [];
+  // useStores mirrors consolidate.Build's useStores: the configured stores a
+  // rendered connection selects, in first-use order, and whether each is
+  // created -- which generate config cannot reference.
+  const useStores = sel => {
+    [sel.truststore, sel.keystore].forEach(name => {
+      const st = storeByName(m, name);
+      if(!storeConfigured(st) || model.stores.some(u => u.name === name)) return;
+      model.stores.push({ name: name, created: !!st.create });
+    });
+  };
 
   // Mirrors consolidate.Build's secretRef. A credential that names a host
   // variable is mounted under that very name, so an `existing:` Secret's keys
@@ -2955,7 +3110,10 @@ function consolidateBuild(wfs, m, statusPassword){
                    clientPass: secretRef(stableName(a.name, 'CLIENT_PASSWORD'), binderOwner(a.name) + ' client-password', a.pass),
                    extras: overlayExtras((m.solaceDefaults || []).slice(), dropManaged(a.extra, 'solace', warns, binderOwner(a.name))), apiProps: [] };
       let props = [];
-      if(a.tls) props = solaceProps(m, { truststore: a.truststore, keystore: a.keystore, keyAlias: a.keyAlias }, secretRef);
+      if(a.tls){
+        useStores({ truststore: a.truststore, keystore: a.keystore });
+        props = solaceProps(m, { truststore: a.truststore, keystore: a.keystore, keyAlias: a.keyAlias }, secretRef);
+      }
       sb.apiProps = appendPassthrough(props, a.pass2, warns, binderOwner(a.name));
       a.binder = { name: a.name, kind: 'solace', solace: sb };
     } else {
@@ -2970,6 +3128,7 @@ function consolidateBuild(wfs, m, statusPassword){
         // choice, so nothing is reported.
         const b = buildBundle(a, m, secretRef);
         if(b){
+          useStores({ truststore: a.truststore, keystore: a.keystore });
           mb.sslBundle = b.name;
           model.bundles.push(b);
         }
@@ -3009,6 +3168,12 @@ function consolidateBuild(wfs, m, statusPassword){
     return [LEADER_USERNAME_NAME, LEADER_PASSWORD_NAME];
   };
   model.leader = buildLeaderElection(m, secretRef, leaderNames, warns);
+  if(model.leader){
+    const le = m.leader;
+    const c = le.connRef ? m.connections.find(x => x.name === le.connRef) : null;
+    const sess = le.connRef ? (c ? c.side : null) : le.session;
+    if(sess && isTCPS(sess.host)) useStores({ truststore: sess.truststore || '', keystore: sess.keystore || '' });
+  }
 
   // The status script needs actuator access in every deployment, so the
   // exposure list and the reserved read-only status account are forced onto
@@ -3064,9 +3229,13 @@ function buildConfig(m){
     // is left is two derived names folding together -- stableToken maps runs of
     // punctuation to one '_', so "ops.1" and "ops-1" reach the same name.
     const parts = r.model.secretConflicts.map(c => `${c.name} (claimed by ${c.first} and ${c.second})`);
-    return { out: '', warns: r.warns, err: `two different credentials are mounted under one name: ${parts.join('; ')}. One mounted file holds one value, so rename one of them; names differing only in punctuation ("ops.1" vs "ops-1") fold to the same mount name` };
+    return { out: '', warns: r.warns, errs: [`two different credentials are mounted under one name: ${parts.join('; ')}. One mounted file holds one value, so rename one of them; names differing only in punctuation ("ops.1" vs "ops-1") fold to the same mount name`] };
   }
-  return { out: renderApplication(r.model), warns: r.warns, err: '' };
+  // A created store exists only inside a deployment, so the config this page
+  // previews has no file to name for it -- gen.Config's createdStoreErrors.
+  const created = r.model.stores.filter(u => u.created).map(u => `tls.stores.${u.name} is created at deploy and has no file for generate config to reference; use existing: {pkcs12: <file>} for a connector you run yourself`);
+  if(created.length) return { out: '', warns: r.warns, errs: created };
+  return { out: renderApplication(r.model), warns: r.warns, errs: [] };
 }
 
 function emitBindingOptions(model, name, s, isInput, file){
@@ -3548,8 +3717,8 @@ function runGen(){
   } else {
     const cfg = buildConfig(m);
     warns = warns.concat(cfg.warns.map(w => ({ file: ENV_FILE, msg: w })));
-    if(cfg.err){
-      v.errs.push({ file: ENV_FILE, msg: cfg.err });
+    if(cfg.errs.length){
+      cfg.errs.forEach(e => v.errs.push({ file: ENV_FILE, msg: e }));
       syncPanels('app-panels', [{
         name: 'application.yml',
         label: 'application.yml (blocked)',
@@ -3706,13 +3875,20 @@ function sampleModel(){
         target: mkSide({ system: 'solace', host: 'tcp://edge-broker.internal:55555', msgVpn: 'edge',
           clientUser: litCred('bridge'), clientPass: envCred('EDGE_SOL_PASSWORD'), destKind: 'topic', dest: 'events/from-mq' }) }
     ],
-    // The golden spec folder's four stores (testdata/golden/specs), which point
-    // two stores at each fixture file -- so Self-test renders the golden.
+    // The golden spec folder's stores (testdata/golden/specs): four existing
+    // ones pointing two stores at each fixture file -- so Self-test renders the
+    // golden -- and two created truststores no connection selects, one with a
+    // certs list and one with a named certs map, whose "not selected" warnings
+    // are the golden findings.
     tls: { stores: [
-      { name: 'solace-ca', file: './certs/truststore.jks', password: envCred('TRUSTSTORE_PASSWORD'), type: 'JKS' },
-      { name: 'solace-client', file: './certs/keystore.jks', password: envCred('KEYSTORE_PASSWORD'), type: 'JKS' },
-      { name: 'mq-ca', file: './certs/truststore.jks', password: envCred('TRUSTSTORE_PASSWORD'), type: 'JKS' },
-      { name: 'mq-client', file: './certs/keystore.jks', password: envCred('KEYSTORE_PASSWORD'), type: 'JKS' }
+      { name: 'solace-ca', password: envCred('TRUSTSTORE_PASSWORD'), pkcs12: './certs/truststore.p12', create: null },
+      { name: 'solace-client', password: envCred('KEYSTORE_PASSWORD'), pkcs12: './certs/keystore.p12', create: null },
+      { name: 'mq-ca', password: envCred('TRUSTSTORE_PASSWORD'), pkcs12: './certs/truststore.p12', create: null },
+      { name: 'mq-client', password: envCred('KEYSTORE_PASSWORD'), pkcs12: './certs/keystore.p12', create: null },
+      { name: 'other-ca-list', password: envCred('TRUSTSTORE_PASSWORD'), pkcs12: '', create: {
+        certs: { named: false, items: [{ name: '', file: './pem/root.pem' }, { name: '', file: './pem/issuing.pem' }] }, keys: [], jks: '' } },
+      { name: 'other-ca-named', password: envCred('TRUSTSTORE_PASSWORD'), pkcs12: '', create: {
+        certs: { named: true, items: [{ name: 'root', file: './pem/root.pem' }, { name: 'issuing', file: './pem/issuing.pem' }] }, keys: [], jks: '' } }
     ] },
     loggingLevel: parseProps('root: INFO\ncom.solace.connector: INFO'),
     syslog: { host: 'syslog.corp.example', port: 514, protocol: 'udp' },

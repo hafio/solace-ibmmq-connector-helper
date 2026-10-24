@@ -78,13 +78,13 @@ const richDefsYAML = `
 tls:
   stores:
     ca:
-      file: ./certs/truststore.jks
+      existing:
+        pkcs12: ./certs/truststore.jks
       password: ${T}
-      type: JKS
     client:
-      file: ./certs/keystore.jks
+      existing:
+        pkcs12: ./certs/keystore.jks
       password: ${K}
-      type: JKS
 logging:
   level:
     root: INFO
@@ -148,11 +148,11 @@ const richApplicationWant = `spring:
           truststore:
             location: /app/external/classpath/truststores/ca
             password: ${_GEN_TLS_CA_PASSWORD}
-            type: JKS
+            type: PKCS12
           keystore:
             location: /app/external/classpath/truststores/client
             password: ${_GEN_TLS_CLIENT_PASSWORD}
-            type: JKS
+            type: PKCS12
           key:
             alias: mc
   cloud:
@@ -185,10 +185,10 @@ const richApplicationWant = `spring:
                 api-properties:
                   SSL_TRUST_STORE: /app/external/classpath/truststores/ca
                   SSL_TRUST_STORE_PASSWORD: ${_GEN_TLS_CA_PASSWORD}
-                  SSL_TRUST_STORE_FORMAT: JKS
+                  SSL_TRUST_STORE_FORMAT: PKCS12
                   SSL_KEY_STORE: /app/external/classpath/truststores/client
                   SSL_KEY_STORE_PASSWORD: ${_GEN_TLS_CLIENT_PASSWORD}
-                  SSL_KEY_STORE_FORMAT: JKS
+                  SSL_KEY_STORE_FORMAT: PKCS12
                   SSL_PRIVATE_KEY_ALIAS: sc
                   REAPPLY_SUBSCRIPTIONS: true
         undefined:
@@ -459,13 +459,13 @@ connections:
 tls:
   stores:
     ca:
-      file: ./certs/truststore.jks
+      existing:
+        pkcs12: ./certs/truststore.jks
       password: ${T}
-      type: JKS
     client:
-      file: ./certs/keystore.jks
+      existing:
+        pkcs12: ./certs/keystore.jks
       password: ${K}
-      type: JKS
 leader-election:
   mode: active_standby
   queue: mgmt-q
@@ -513,10 +513,10 @@ func TestApplicationLeaderElection(t *testing.T) {
 		"        api-properties:\n" +
 		"          SSL_TRUST_STORE: /app/external/classpath/truststores/ca\n" +
 		"          SSL_TRUST_STORE_PASSWORD: ${_GEN_TLS_CA_PASSWORD}\n" +
-		"          SSL_TRUST_STORE_FORMAT: JKS\n" +
+		"          SSL_TRUST_STORE_FORMAT: PKCS12\n" +
 		"          SSL_KEY_STORE: /app/external/classpath/truststores/client\n" +
 		"          SSL_KEY_STORE_PASSWORD: ${_GEN_TLS_CLIENT_PASSWORD}\n" +
-		"          SSL_KEY_STORE_FORMAT: JKS\n" +
+		"          SSL_KEY_STORE_FORMAT: PKCS12\n" +
 		"          SSL_PRIVATE_KEY_ALIAS: sc\n" +
 		"          REAPPLY_SUBSCRIPTIONS: true\n"
 	if !strings.Contains(out, want) {
@@ -792,10 +792,10 @@ target:
     msg-vpn: v
     topic: OUT
 `
-	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"client": {File: "certs/k.jks", PasswordEnv: "KS_PW", Type: "JKS"}}}}
+	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"client": {Existing: &spec.StoreExisting{PKCS12: "certs/k.jks"}, PasswordEnv: "KS_PW"}}}}
 	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{})
 	out := Application(m)
-	want := "        mq-conn-1-bundle:\n          keystore:\n            location: certs/k.jks\n            password: ${KS_PW}\n            type: JKS\n          key:\n            alias: app\n"
+	want := "        mq-conn-1-bundle:\n          keystore:\n            location: certs/k.jks\n            password: ${KS_PW}\n            type: PKCS12\n          key:\n            alias: app\n"
 	if !strings.Contains(out, want) {
 		t.Errorf("want the keystore-only bundle\n%s\n---\n%s", want, out)
 	}
@@ -892,9 +892,9 @@ const truststoreDefs = `
 tls:
   stores:
     ca:
-      file: ./certs/truststore.jks
+      existing:
+        pkcs12: ./certs/truststore.jks
       password-env: TS
-      type: JKS
 `
 
 const extraDefs = truststoreDefs + `solace-defaults:
@@ -1071,11 +1071,11 @@ target:
 	}
 }
 
-// TestApplicationOmitsEmptyStoreType pins that a store with no type renders no
-// type line in the MQ bundle and no FORMAT key in the Solace api-properties:
-// Spring and the Solace API apply their own default type, where an empty one
-// rendered as type: "" or a bare null key.
-func TestApplicationOmitsEmptyStoreType(t *testing.T) {
+// TestApplicationWritesPKCS12Everywhere pins that every store is typed
+// PKCS12 -- in the MQ bundle and in the Solace api-properties alike -- since a
+// created store is built as one and an existing one must be one, and JCSMP's
+// own documentation disagrees with itself about its default.
+func TestApplicationWritesPKCS12Everywhere(t *testing.T) {
 	src := `
 source:
   mq:
@@ -1098,18 +1098,16 @@ target:
     topic: OUT
 `
 	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
-		"ca":     {File: "certs/t.jks", PasswordEnv: "TS_PW"},
-		"client": {File: "certs/k.jks", PasswordEnv: "KS_PW"},
+		"ca":     {Existing: &spec.StoreExisting{PKCS12: "certs/t.jks"}, PasswordEnv: "TS_PW"},
+		"client": {Existing: &spec.StoreExisting{PKCS12: "certs/k.jks"}, PasswordEnv: "KS_PW"},
 	}}}
 	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{})
 	out := Application(m)
 	// The bundle's store keys sit at indent 12; binder "type: jms" lines at 10.
-	for _, no := range []string{"\n            type:", "SSL_TRUST_STORE_FORMAT", "SSL_KEY_STORE_FORMAT"} {
-		if strings.Contains(out, no) {
-			t.Errorf("no store type configured, so %q should not be emitted\n---\n%s", no, out)
-		}
+	if n := strings.Count(out, "\n            type: PKCS12\n"); n != 2 {
+		t.Errorf("the bundle's truststore and keystore must both be typed PKCS12, got %d\n---\n%s", n, out)
 	}
-	for _, yes := range []string{"location: certs/t.jks", "location: certs/k.jks", "alias: mq-client", "SSL_TRUST_STORE: certs/t.jks", "SSL_PRIVATE_KEY_ALIAS: sol-client"} {
+	for _, yes := range []string{"SSL_TRUST_STORE_FORMAT: PKCS12", "SSL_KEY_STORE_FORMAT: PKCS12", "location: certs/t.jks", "location: certs/k.jks", "alias: mq-client", "SSL_TRUST_STORE: certs/t.jks", "SSL_PRIVATE_KEY_ALIAS: sol-client"} {
 		if !strings.Contains(out, yes) {
 			t.Errorf("want %q in the output\n---\n%s", yes, out)
 		}

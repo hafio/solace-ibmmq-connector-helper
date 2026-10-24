@@ -88,6 +88,13 @@ const (
 	// keeping docker and podman on the same path costs one flag each and leaves
 	// one path to know rather than two.
 	SecretsMountPath = "/app/external/var/secrets"
+
+	// EncodedStoresMountPath is where docker mounts each created store
+	// base64-encoded, as compose delivers it (a secret read from the
+	// environment carries text only), for the container's startup script to
+	// decode into DefaultStoresMountPath. It sits beside SecretsMountPath, not
+	// in it: the configtree import would read every file there as a property.
+	EncodedStoresMountPath = "/app/external/var/stores"
 )
 
 // BaseName returns the final element of a path, splitting on both '/' and '\'

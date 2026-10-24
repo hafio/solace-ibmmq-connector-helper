@@ -26,8 +26,8 @@ func wf(file string, src, tgt spec.Side) spec.Workflow {
 // for sides to select with Truststore: "ts" / Keystore: "ks".
 func defsWithStores() *spec.Defaults {
 	return &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
-		"ts": {File: "t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD", Type: "JKS"},
-		"ks": {File: "k.jks", PasswordEnv: "KEYSTORE_PASSWORD", Type: "JKS"},
+		"ts": {Existing: &spec.StoreExisting{PKCS12: "t.jks"}, PasswordEnv: "TRUSTSTORE_PASSWORD"},
+		"ks": {Existing: &spec.StoreExisting{PKCS12: "k.jks"}, PasswordEnv: "KEYSTORE_PASSWORD"},
 	}}}
 }
 
@@ -401,7 +401,7 @@ func TestDeployKubeChecks(t *testing.T) {
 // credential to be exported. The deploy path resolves values and fails hard there.
 func TestCredentialsEnvChecks(t *testing.T) {
 	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
-		"ts": {File: "t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD"},
+		"ts": {Existing: &spec.StoreExisting{PKCS12: "t.jks"}, PasswordEnv: "TRUSTSTORE_PASSWORD"},
 	}}}
 	env := func(string) (string, bool) { return "", false } // nothing set
 	errs, warns := Run(Context{
@@ -489,25 +489,103 @@ func TestCheckCredLiteralLooksLikeEnvRefWarns(t *testing.T) {
 	}
 }
 
-// TestStoreBlockWithoutFile pins checkStoreFiles: a store that names no file is
-// refused, since every reader wires a store only when it has one and would
-// otherwise skip it in silence.
-func TestStoreBlockWithoutFile(t *testing.T) {
-	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
-		"mq-ca": {PasswordEnv: "TRUSTSTORE_PASSWORD", Type: "JKS"},
-		"empty": nil,
-	}}}
-	wfs := []spec.Workflow{wf("10.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("MQ", spec.DestQueue, false))}
-	errs, _ := Run(Context{Workflows: wfs, Defaults: d})
-	for _, name := range []string{"mq-ca", "empty"} {
-		want := "env.yaml: tls.stores." + name + " has no file: a store names the file to load; add file, or remove the store and every truststore:/keystore: that selects it"
-		if !hasErr(errs, want) {
-			t.Errorf("want %q, got %v", want, errs)
-		}
+// certsOf is a create: block listing the given certificate files.
+func certsOf(files ...string) *spec.StoreSources {
+	c := &spec.StoreSources{}
+	for _, f := range files {
+		c.Certs.Items = append(c.Certs.Items, spec.CertSource{File: f})
 	}
-	// A store with its file is accepted.
-	if errs, _ := Run(Context{Workflows: wfs, Defaults: defsWithStores()}); hasErr(errs, "has no file") {
-		t.Errorf("stores with files refused: %v", errs)
+	return c
+}
+
+// TestStoreDefinitions pins checkStoreDefinition: a store is created or
+// existing, exactly one; an existing one names its PKCS12; a created one has
+// its own password and sources the PKCS12 writer can build one store from --
+// trusted certificates or one key entry, never both -- with every path and
+// alias filled in. Every reader wires a store only when it is configured, so a
+// store refused here would otherwise be skipped in silence.
+func TestStoreDefinitions(t *testing.T) {
+	key := spec.KeySource{Cert: "./c.pem", Key: "./c.key"}
+	for _, c := range []struct {
+		name string
+		st   *spec.Store
+		want string
+	}{
+		{"no block", nil, "env.yaml: tls.stores.s needs create: (the tool builds it) or existing: (a PKCS12 you provide)"},
+		{"no source", &spec.Store{PasswordEnv: "PW"}, "tls.stores.s needs create: (the tool builds it) or existing: (a PKCS12 you provide)"},
+		{"both", &spec.Store{PasswordEnv: "PW", Create: certsOf("./a.pem"), Existing: &spec.StoreExisting{PKCS12: "./t.p12"}}, "tls.stores.s takes create: or existing:, not both"},
+		{"existing without a path", &spec.Store{PasswordEnv: "PW", Existing: &spec.StoreExisting{}}, "tls.stores.s.existing.pkcs12 is empty: name the PKCS12 file"},
+		{"created without a password", &spec.Store{Create: certsOf("./a.pem")}, "tls.stores.s is created and encrypted with its own password, but sets none; add password-env"},
+		{"created from nothing", &spec.Store{PasswordEnv: "PW", Create: &spec.StoreSources{}}, "tls.stores.s.create names no source: list certs, give one keys entry, or name a jks"},
+		{"certs and a key", &spec.Store{PasswordEnv: "PW", Create: &spec.StoreSources{Certs: certsOf("./a.pem").Certs, Keys: []spec.KeySource{key}}}, "tls.stores.s.create mixes trusted certificates and a key: a store is a truststore or a keystore -- define a second store for the other"},
+		{"a jks and a key", &spec.Store{PasswordEnv: "PW", Create: &spec.StoreSources{JKS: "./old.jks", Keys: []spec.KeySource{key}}}, "tls.stores.s.create mixes trusted certificates and a key"},
+		{"two keys", &spec.Store{PasswordEnv: "PW", Create: &spec.StoreSources{Keys: []spec.KeySource{key, key}}}, "tls.stores.s.create.keys has 2 entries: a created keystore holds exactly one key; define one store per identity"},
+		{"a key entry without its key", &spec.Store{PasswordEnv: "PW", Create: &spec.StoreSources{Keys: []spec.KeySource{{Cert: "./c.pem"}}}}, "tls.stores.s.create.keys[0] needs cert and key: the certificate and the private key it belongs to"},
+		{"an empty chain file", &spec.Store{PasswordEnv: "PW", Create: &spec.StoreSources{Keys: []spec.KeySource{{Cert: "./c.pem", Chain: []string{""}, Key: "./c.key"}}}}, "tls.stores.s.create.keys[0].chain[0] is empty: name a certificate file"},
+		{"an empty certs entry", &spec.Store{PasswordEnv: "PW", Create: certsOf("")}, "tls.stores.s.create.certs[0] is empty: name a certificate file"},
+		{"an empty named entry", &spec.Store{PasswordEnv: "PW", Create: &spec.StoreSources{Certs: spec.CertSources{Named: true, Items: []spec.CertSource{{Name: "root"}}}}}, "tls.stores.s.create.certs.root is empty: name a certificate file"},
+		{"an empty alias", &spec.Store{PasswordEnv: "PW", Create: &spec.StoreSources{Certs: spec.CertSources{Named: true, Items: []spec.CertSource{{File: "./a.pem"}}}}}, "tls.stores.s.create.certs has an empty alias: name every certificate"},
+		{"an alias twice", &spec.Store{PasswordEnv: "PW", Create: &spec.StoreSources{Certs: spec.CertSources{Named: true, Items: []spec.CertSource{{Name: "Root", File: "./a.pem"}, {Name: "root", File: "./b.pem"}}}}}, `tls.stores.s.create.certs: alias "root" appears twice (aliases ignore case)`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"s": c.st}}}
+			errs, _ := Run(Context{Workflows: []spec.Workflow{wf("10.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("MQ", spec.DestQueue, false))}, Defaults: d})
+			if !hasErr(errs, c.want) {
+				t.Errorf("want %q, got %v", c.want, errs)
+			}
+		})
+	}
+	// Every well-formed shape is accepted: existing, a certs list, a named map,
+	// one key entry with its chain, a jks alone, certs with a jks.
+	ok := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
+		"have":  {PasswordEnv: "PW", Existing: &spec.StoreExisting{PKCS12: "./t.p12"}},
+		"list":  {PasswordEnv: "PW", Create: certsOf("./a.pem", "./b.pem")},
+		"named": {PasswordEnv: "PW", Create: &spec.StoreSources{Certs: spec.CertSources{Named: true, Items: []spec.CertSource{{Name: "root", File: "./a.pem"}}}}},
+		"key":   {Password: "pw", Create: &spec.StoreSources{Keys: []spec.KeySource{{Cert: "./c.pem", Chain: []string{"./i.pem"}, Key: "./c.key"}}}},
+		"jks":   {PasswordEnv: "PW", Create: &spec.StoreSources{JKS: "./old.jks"}},
+		"both":  {PasswordEnv: "PW", Create: &spec.StoreSources{Certs: certsOf("./a.pem").Certs, JKS: "./old.jks"}},
+	}}}
+	if errs, _ := Run(Context{Workflows: []spec.Workflow{wf("10.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("MQ", spec.DestQueue, false))}, Defaults: ok}); hasErr(errs, "tls.stores.") {
+		t.Errorf("well-formed stores refused: %v", errs)
+	}
+}
+
+// TestCreatedStoreSelections pins checkCreatedSelection: a store created from
+// a key holds no trusted certificates, one created from certificates holds no
+// key, and a created keystore's one key takes no key-alias -- on every
+// selection site, here an inline workflow side.
+func TestCreatedStoreSelections(t *testing.T) {
+	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
+		"made-ca":  {PasswordEnv: "PW", Create: certsOf("./a.pem")},
+		"made-key": {PasswordEnv: "PW", Create: &spec.StoreSources{Keys: []spec.KeySource{{Cert: "./c.pem", Key: "./c.key"}}}},
+		"made-jks": {PasswordEnv: "PW", Create: &spec.StoreSources{JKS: "./old.jks"}},
+	}}}
+	sel := func(ts, ks, alias string) spec.Side {
+		s := vSolace("Q", spec.DestQueue, alias)
+		s.Truststore, s.Keystore = ts, ks
+		return s
+	}
+	for _, c := range []struct {
+		name string
+		side spec.Side
+		want string
+	}{
+		{"a key store as truststore", sel("made-key", "", ""), `source solace: truststore "made-key" is created from a key, so it holds no trusted certificates; create a second store from the CA certificates and select that`},
+		{"a certificate store as keystore", sel("", "made-ca", ""), `source solace: keystore "made-ca" is created from certificates only, so it holds no private key; give it one keys entry`},
+		{"a key-alias on a created keystore", sel("", "made-key", "client"), `source solace: remove key-alias "client": tls.stores.made-key is created with exactly one key, which needs no alias (Java names it "1")`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			errs, _ := Run(Context{Workflows: []spec.Workflow{wf("10.yaml", c.side, vMQ("MQ", spec.DestQueue, false))}, Defaults: d})
+			if !hasErr(errs, c.want) {
+				t.Errorf("want %q, got %v", c.want, errs)
+			}
+		})
+	}
+	// Roles that fit pass, and a jks-only store's role is left to deploy.
+	for _, side := range []spec.Side{sel("made-ca", "made-key", ""), sel("made-jks", "made-jks", "")} {
+		if errs, _ := Run(Context{Workflows: []spec.Workflow{wf("10.yaml", side, vMQ("MQ", spec.DestQueue, false))}, Defaults: d}); hasErr(errs, "is created") {
+			t.Errorf("%s/%s refused: %v", side.Truststore, side.Keystore, errs)
+		}
 	}
 }
 

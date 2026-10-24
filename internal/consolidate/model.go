@@ -61,14 +61,16 @@ type Bundle struct {
 }
 
 // StoreUse is one tls.stores entry a rendered connection selects, which every
-// platform mounts at tls.MountPath(Name). Private marks a store some connection
-// uses as a keystore: it holds a private key, so deploy checks it is not
-// readable by everyone.
+// platform mounts at tls.MountPath(Name). Trusted marks a store some
+// connection uses as a truststore; Private one used as a keystore: it holds a
+// private key, so deploy checks it is not readable by everyone. Created marks a
+// store the tool builds at deploy (create:), which has no File.
 type StoreUse struct {
 	Name    string
-	File    string // as written in env.yaml
-	Type    string
+	File    string // existing.pkcs12 as written in env.yaml; "" for a created store
+	Trusted bool
 	Private bool
+	Created bool
 }
 
 // Binding is one entry under spring.cloud.stream.bindings.

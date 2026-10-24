@@ -17,6 +17,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -437,6 +438,29 @@ func Docker(r Runner, command, action, composeFile string, env []string, extraAl
 		return "", fmt.Errorf("unknown action %q (want %q or %q)", action, ActionDeploy, ActionRemove)
 	}
 	return r.Run(Cmd{Argv: argv, Env: env})
+}
+
+// DockerImageCommand reads an image's ENTRYPOINT and CMD from the local engine
+// (`<command> image inspect`), for a deploy that overrides the entrypoint to
+// check that it hands over to the command the image really runs. found is
+// false when the engine cannot answer -- above all when it does not have the
+// image yet, which `compose up` then pulls -- so there is nothing to compare;
+// only a command the engine reports can fail the check.
+func DockerImageCommand(r Runner, command, image string, extraAllowed []string) (entrypoint, cmd []string, found bool, err error) {
+	argv, err := ParseCommand(validate.PlatformDocker, command, extraAllowed)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	argv = append(argv, "image", "inspect", "--format", "{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}", image)
+	out, rerr := r.Run(Cmd{Argv: argv})
+	if rerr != nil {
+		return nil, nil, false, nil
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 || json.Unmarshal([]byte(lines[0]), &entrypoint) != nil || json.Unmarshal([]byte(lines[1]), &cmd) != nil {
+		return nil, nil, false, nil
+	}
+	return entrypoint, cmd, true, nil
 }
 
 // Preflight runs a cheap, read-only probe before any generated file is written

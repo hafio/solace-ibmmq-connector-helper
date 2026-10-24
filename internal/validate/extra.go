@@ -124,7 +124,7 @@ func checkExtraKeys(add, warn func(string, string, ...any), at extraSite, d *spe
 		if at.system == spec.SystemMQ && ck == "useibmciphermappings" && at.side.TLS && !isFalse(kv.value) {
 			warn(at.file, "%s: %q overrides the -Dcom.ibm.mq.cfg.useIBMCipherMappings=false the tool sets for a TLS connection, so the JCE cipher names in cipher: may no longer apply", where, k)
 		}
-		if at.system == spec.SystemMQ && ck == "jks" && at.side.TLS && (d.TLS.Store(at.side.Truststore).HasFile() || d.TLS.Store(at.side.Keystore).HasFile()) {
+		if at.system == spec.SystemMQ && ck == "jks" && at.side.TLS && (d.TLS.Store(at.side.Truststore).Configured() || d.TLS.Store(at.side.Keystore).Configured()) {
 			warn(at.file, "%s: jks.* is ignored by the connector while ssl-bundle is set; the stores in effect are the ones this connection selects with truststore:/keystore:", where)
 		}
 		if at.system == spec.SystemSolace && ck == "clientname" && (leaderMode == spec.LeaderActiveActive || leaderMode == spec.LeaderActiveStby) && isLiteral(kv.value) {

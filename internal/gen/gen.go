@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
@@ -55,6 +56,16 @@ type Resolver struct {
 	// inject a deterministic or failing implementation; nil means
 	// crypto/rand.Read.
 	Rand func(b []byte) error
+	// Now is the time a created store's certificates are judged against for
+	// expiry. Tests pin it; nil means time.Now.
+	Now func() time.Time
+}
+
+func (res Resolver) now() time.Time {
+	if res.Now == nil {
+		return time.Now()
+	}
+	return res.Now()
 }
 
 func (res Resolver) abs(p string) string {
@@ -89,6 +100,9 @@ func Config(r Request, res Resolver) (out string, errs, warns []Issue) {
 	warns = append(warns, toIssues(cw)...)
 	if err != nil {
 		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+	}
+	if errs := createdStoreErrors(b.model.Stores, "tls.stores.%s is created at deploy and has no file for generate config to reference; use existing: {pkcs12: <file>} for a connector you run yourself"); errs != nil {
+		return "", errs, warns
 	}
 	return b.appYAML, nil, warns
 }
@@ -196,7 +210,8 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		in.CredKVs = kvs
 	}
 	if s := k.Secrets.Stores; s != nil && s.Create != nil {
-		files, err := resolveStores(b.model.Stores, res)
+		files, sw, err := resolveStores(b.model.Stores, e.Defaults.TLS, res)
+		warns = append(warns, sw...)
 		if err != nil {
 			return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 		}
@@ -231,6 +246,12 @@ type DockerPlan struct {
 	Secrets []consolidate.SecretRef
 	RunAs   spec.RunAsID // the identity the compose service runs as, for deploy's mount checks
 	Mounts  []HostMount  // the host paths the compose file bind-mounts, for the same checks
+	// Stores are the created stores the compose file carries as secrets read
+	// from the environment, built and encoded at deploy (ResolveDockerStores).
+	Stores []DockerStore
+	// Image is the reference the service runs, which deploy inspects before
+	// overriding its entrypoint for the stores.
+	Image string
 }
 
 // HostMount is one host path a compose file or podman unit bind-mounts, as the
@@ -245,8 +266,9 @@ type HostMount struct {
 // MountLibs is the env.yaml key of the libs directory mount.
 const MountLibs = "libs.dir"
 
-// StoreField is the env.yaml key a store's file comes from, for messages.
-func StoreField(store string) string { return "tls.stores." + store + ".file" }
+// StoreField is the env.yaml key an existing store's PKCS12 comes from, for
+// messages.
+func StoreField(store string) string { return "tls.stores." + store + ".existing.pkcs12" }
 
 // GenerateDocker parses+validates and renders the docker-compose.yml (with
 // application.yml inlined under compose configs:). Store/libs host paths are
@@ -285,12 +307,14 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 		return DockerPlan{}, rerrs, warns
 	}
 	sm, lm := targetMounts(b.model.Stores, d.Libs, res)
+	stores := dockerStores(b.model.Stores, e.Defaults.TLS)
 	in := dockergen.Input{
 		Docker:  d,
 		Syslog:  e.Defaults.Syslog,
 		Secrets: stableNames(b.model.Secrets),
 		Stores:  toDockerMounts(sm),
 		Libs:    toDockerMount(lm),
+		Created: dockerCreated(stores),
 		Instance: dockergen.Instance{
 			Name:         d.Name,
 			Image:        e.Image.Ref(),
@@ -303,7 +327,7 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 			RunAs:        runAs,
 		},
 	}
-	return DockerPlan{Compose: dockergen.Render(in), Secrets: b.model.Secrets, RunAs: runAs, Mounts: hostMounts(sm, lm)}, nil, warns
+	return DockerPlan{Compose: dockergen.Render(in), Secrets: b.model.Secrets, RunAs: runAs, Mounts: hostMounts(sm, lm), Stores: stores, Image: e.Image.Ref()}, nil, warns
 }
 
 // resolvePullSecret turns the image-pull block into the wiring deploy renders.
@@ -378,13 +402,15 @@ func stableNames(refs []consolidate.SecretRef) []string {
 
 // PodmanFile is one file the quadlet unit mounts out of podman's secret store
 // rather than from the host: a rendered document, carried whole in Data, or a
-// TLS store, named by Source and read only when deploy loads it
-// (ResolvePodmanFiles) -- generate and remove never open a store.
+// TLS store -- an existing one named by Source, a created one by Build -- read
+// or built only when deploy loads it (ResolvePodmanFiles); generate and remove
+// never open a store.
 type PodmanFile struct {
-	StoreName string // the secret's name in podman's store: <name>-<document>, or <name>-tls-<store>
-	Data      string // a rendered document; empty for a store
-	Source    string // a store's file as written in env.yaml; empty for a document
-	Field     string // a store's env.yaml key, e.g. tls.stores.mq-ca.file, for errors
+	StoreName string      // the secret's name in podman's store: <name>-<document>, or <name>-tls-<store>
+	Data      string      // a rendered document; empty for a store
+	Source    string      // an existing store's PKCS12 as written in env.yaml; empty otherwise
+	Field     string      // a store's env.yaml key, e.g. tls.stores.mq-ca.existing.pkcs12, for errors
+	Build     *StoreBuild // a created store, built when deploy loads it; nil otherwise
 }
 
 // PodmanPlan carries the rendered quadlet unit plus everything a deploy loads
@@ -460,37 +486,49 @@ func PodmanUnitStoreSecrets(unit, container string) []string {
 const podmanSecretMax = 511999
 
 // ResolvePodmanFiles turns a plan's files into the name/value pairs deploy
-// loads into podman's secret store: a rendered document as it stands, a TLS
-// store read from its file (resolved against env.yaml, as resolveStores
-// reads it for kubernetes). Every value is held to podman's size limit here, so
-// a file podman would refuse stops the deploy before any secret is created.
-// The result is secret material -- callers hand it straight to the store.
+// loads into podman's secret store: a rendered document as it stands, an
+// existing TLS store read from its file (resolved against env.yaml, as
+// resolveStores reads it for kubernetes), a created one built (BuildStore),
+// whose findings come back as warnings. Every value is held to podman's size
+// limit here, so a file podman would refuse stops the deploy before any secret
+// is created. The result is secret material -- callers hand it straight to the
+// store.
 //
 // Errors name the file or secret and its size, never its content.
-func ResolvePodmanFiles(files []PodmanFile, res Resolver) ([]KV, error) {
+func ResolvePodmanFiles(files []PodmanFile, res Resolver) ([]KV, []Issue, error) {
 	out := make([]KV, 0, len(files))
+	var warns []Issue
 	for _, f := range files {
 		data, what := f.Data, f.StoreName
-		if f.Source != "" {
+		switch {
+		case f.Build != nil:
+			what = f.Field
+			b, w, err := BuildStore(*f.Build, res)
+			if err != nil {
+				return nil, nil, err
+			}
+			warns = append(warns, w...)
+			data = string(b)
+		case f.Source != "":
 			what = fmt.Sprintf("%s %q", f.Field, f.Source)
 			if res.ReadFile == nil {
-				return nil, fmt.Errorf("cannot read %s for podman's secret store (no file access)", what)
+				return nil, nil, fmt.Errorf("cannot read %s for podman's secret store (no file access)", what)
 			}
 			b, err := res.ReadFile(f.Source)
 			if err != nil {
-				return nil, fmt.Errorf("reading %s for podman's secret store: %w", what, err)
+				return nil, nil, fmt.Errorf("reading %s for podman's secret store: %w", what, err)
 			}
 			data = string(b)
 		}
 		switch {
 		case len(data) == 0:
-			return nil, fmt.Errorf("%s is empty, and podman's secret store cannot hold an empty secret; point it at the real file", what)
+			return nil, nil, fmt.Errorf("%s is empty, and podman's secret store cannot hold an empty secret; point it at the real file", what)
 		case len(data) > podmanSecretMax:
-			return nil, fmt.Errorf("%s is %d bytes, over the %d bytes podman's secret store holds per secret; trim it to what this connector needs (for a truststore, the CA certificates of the brokers and queue managers it connects to)", what, len(data), podmanSecretMax)
+			return nil, nil, fmt.Errorf("%s is %d bytes, over the %d bytes podman's secret store holds per secret; trim it to what this connector needs (for a truststore, the CA certificates of the brokers and queue managers it connects to)", what, len(data), podmanSecretMax)
 		}
 		out = append(out, KV{Key: f.StoreName, Val: data})
 	}
-	return out, nil
+	return out, warns, nil
 }
 
 // GeneratePodman parses+validates and renders the .container quadlet unit. The
@@ -541,7 +579,7 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 	var stores []podmangen.FileSecret
 	for _, st := range b.model.Stores {
 		name := PodmanStoreSecretName(p.Name, st.Name)
-		plan.Files = append(plan.Files, PodmanFile{StoreName: name, Source: st.File, Field: StoreField(st.Name)})
+		plan.Files = append(plan.Files, PodmanFile{StoreName: name, Source: st.File, Field: storeField(st), Build: storeBuild(st, e.Defaults.TLS)})
 		stores = append(stores, podmangen.FileSecret{StoreName: name, Target: tls.MountPath(st.Name)})
 	}
 	statusSecret := PodmanSecretStoreName(p.Name, podmanStatusSuffix)
@@ -732,6 +770,9 @@ type mount struct {
 // nor mounted. libs stays opt-in -- it has a host dir to name.
 func targetMounts(stores []consolidate.StoreUse, libs *spec.LibsMount, res Resolver) (sm []mount, lm *mount) {
 	for _, st := range stores {
+		if st.Created {
+			continue // no host file: a created store travels as a secret
+		}
 		sm = append(sm, mount{Field: StoreField(st.Name), Source: res.abs(st.File), Target: tls.MountPath(st.Name), Private: st.Private})
 	}
 	if libs != nil && libs.Dir != "" {
@@ -841,23 +882,36 @@ func parse(r Request, res Resolver) (wfs []spec.Workflow, e *spec.Env, issues, w
 // kubeSecretMax is the most data one Kubernetes Secret holds (1 MiB).
 const kubeSecretMax = 1 << 20
 
-// resolveStores reads the files of the stores the rendered connections select
-// so the kubernetes stores Secret can carry their bytes. Unlike credentials,
-// these are files the cluster must hold verbatim, so they are base64-embedded
-// rather than named. Each is keyed by its tls.stores name, the name it is
-// mounted under, whatever the file is called. A set the API server would refuse
-// for size stops here, naming the stores, rather than at kubectl apply.
-func resolveStores(stores []consolidate.StoreUse, res Resolver) ([]deploy.StoreFile, error) {
+// resolveStores reads the files of the existing stores the rendered
+// connections select, and builds the created ones (BuildStore), so the
+// kubernetes stores Secret can carry their bytes. Unlike credentials, these
+// are files the cluster must hold verbatim, so they are base64-embedded rather
+// than named. Each is keyed by its tls.stores name, the name it is mounted
+// under, whatever the file is called. A set the API server would refuse for
+// size stops here, naming the stores, rather than at kubectl apply.
+func resolveStores(stores []consolidate.StoreUse, defs spec.TLSConfig, res Resolver) ([]deploy.StoreFile, []Issue, error) {
 	if res.ReadFile == nil {
-		return nil, fmt.Errorf("cannot read store files (no file access)")
+		return nil, nil, fmt.Errorf("cannot read store files (no file access)")
 	}
 	var out []deploy.StoreFile
+	var warns []Issue
 	total := 0
 	var sizes []string
 	for _, st := range stores {
-		b, err := res.ReadFile(st.File)
-		if err != nil {
-			return nil, fmt.Errorf("reading %s %q: %v", StoreField(st.Name), st.File, err)
+		var b []byte
+		if sb := storeBuild(st, defs); sb != nil {
+			built, w, err := BuildStore(*sb, res)
+			if err != nil {
+				return nil, nil, err
+			}
+			warns = append(warns, w...)
+			b = built
+		} else {
+			read, err := res.ReadFile(st.File)
+			if err != nil {
+				return nil, nil, fmt.Errorf("reading %s %q: %v", StoreField(st.Name), st.File, err)
+			}
+			b = read
 		}
 		enc := b64(b)
 		total += len(enc)
@@ -865,9 +919,9 @@ func resolveStores(stores []consolidate.StoreUse, res Resolver) ([]deploy.StoreF
 		out = append(out, deploy.StoreFile{Name: st.Name, Base64: enc})
 	}
 	if total > kubeSecretMax {
-		return nil, fmt.Errorf("the stores Secret would hold %d bytes once base64-encoded (%s), over the %d bytes a Kubernetes Secret holds; trim the stores to the certificates these connections need, or reference an existing Secret with kubernetes.secrets.stores.existing", total, strings.Join(sizes, ", "), kubeSecretMax)
+		return nil, nil, fmt.Errorf("the stores Secret would hold %d bytes once base64-encoded (%s), over the %d bytes a Kubernetes Secret holds; trim the stores to the certificates these connections need, or reference an existing Secret with kubernetes.secrets.stores.existing", total, strings.Join(sizes, ", "), kubeSecretMax)
 	}
-	return out, nil
+	return out, warns, nil
 }
 
 func toIssues(ss []string) []Issue {

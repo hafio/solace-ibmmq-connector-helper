@@ -185,7 +185,7 @@ func TestBuildNestedExtraKeyThroughSharedConnRefIsQuiet(t *testing.T) {
 // validate's refusal: another spelling of a key the tool writes itself is
 // dropped with the passthrough warning, and the tool's value stays.
 func TestBuildDropsExtraKeysTheToolManages(t *testing.T) {
-	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"mq-ca": {File: "./certs/truststore.jks", PasswordEnv: "TS", Type: "JKS"}}}}
+	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"mq-ca": {Existing: &spec.StoreExisting{PKCS12: "./certs/truststore.jks"}, PasswordEnv: "TS"}}}}
 	mqs := mqSide("QM", "IN", spec.DestQueue, true)
 	mqs.Truststore = "mq-ca"
 	src := withExtra(t, mqs, "ssl-bundle: theirs\nqueueManager: OTHER\n")

@@ -14,15 +14,88 @@ const (
 	LeaderActiveStby   = "active_standby"
 )
 
-// Store is one JKS/PKCS12 truststore or keystore definition. The tags are
-// explicit because `password-env` cannot be reached by yaml.v3's default
-// lowercase-the-field-name mapping; the other three keep the names they always
-// had.
+// StoreFormat is the keystore type of every store: create builds a PKCS12, and
+// existing names one, so the tool always writes this type -- JCSMP's own
+// documentation disagrees with itself about the default, so it is never left
+// to one.
+const StoreFormat = "PKCS12"
+
+// Store is one named truststore or keystore: built by the tool from
+// certificate files or a JKS (Create), or a PKCS12 file the operator provides
+// (Existing) -- exactly one, which validate enforces. The password encrypts a
+// created store and opens an existing one, and the connection is wired with it
+// either way. The tags are explicit because `password-env` cannot be reached by
+// yaml.v3's default lowercase-the-field-name mapping.
 type Store struct {
-	File        string `yaml:"file"`
-	Password    string `yaml:"password" expand:"no"`     // credential: out of scope (rule 5)
-	PasswordEnv string `yaml:"password-env" expand:"no"` // names a host var; expanding it would defeat the -env indirection
-	Type        string `yaml:"type"`
+	Password    string         `yaml:"password" expand:"no"`     // credential: out of scope (rule 5)
+	PasswordEnv string         `yaml:"password-env" expand:"no"` // names a host var; expanding it would defeat the -env indirection
+	Create      *StoreSources  `yaml:"create"`
+	Existing    *StoreExisting `yaml:"existing"`
+}
+
+// StoreSources is what a created store is built from. Trusted certificates --
+// Certs, plus the trusted entries of JKS -- make a truststore; one key entry --
+// Keys, or a JKS holding exactly one key -- makes a keystore. A store is never
+// both: the PKCS12 writer puts either trusted certificates or one unnamed key
+// in a file.
+type StoreSources struct {
+	Certs CertSources `yaml:"certs"`
+	Keys  []KeySource `yaml:"keys"`
+	JKS   string      `yaml:"jks"`
+}
+
+// CertSources is create.certs: a list of certificate files, aliased
+// <store>-<n> in order, or a mapping of alias to file, aliased by name. Items
+// keeps the order either was written in.
+type CertSources struct {
+	Items []CertSource
+	Named bool
+}
+
+// CertSource is one create.certs entry. Name is the alias a mapping gives it,
+// empty in a list.
+type CertSource struct {
+	Name string `expand:"no"` // an alias, not a path
+	File string
+}
+
+// UnmarshalYAML reads a list of files or a mapping of alias: file.
+// rawTLS.UnmarshalYAML has already checked the shape, naming the store.
+func (c *CertSources) UnmarshalYAML(node *yaml.Node) error {
+	node = deref(node)
+	switch node.Kind {
+	case yaml.SequenceNode:
+		for _, item := range node.Content {
+			var f string
+			if err := item.Decode(&f); err != nil {
+				return err
+			}
+			c.Items = append(c.Items, CertSource{File: f})
+		}
+	case yaml.MappingNode:
+		c.Named = true
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			var f string
+			if err := node.Content[i+1].Decode(&f); err != nil {
+				return err
+			}
+			c.Items = append(c.Items, CertSource{Name: node.Content[i].Value, File: f})
+		}
+	}
+	return nil
+}
+
+// KeySource is one create.keys entry: the certificate the key belongs to (its
+// file may also hold the chain), further chain files, and the private key.
+type KeySource struct {
+	Cert  string   `yaml:"cert"`
+	Chain []string `yaml:"chain"`
+	Key   string   `yaml:"key"`
+}
+
+// StoreExisting is a PKCS12 file the operator provides.
+type StoreExisting struct {
+	PKCS12 string `yaml:"pkcs12"`
 }
 
 // Secret is the store's password credential.
@@ -33,12 +106,25 @@ func (s *Store) Secret() Cred {
 	return Cred{s.Password, s.PasswordEnv}
 }
 
-// HasFile reports whether the store is configured: a block that names a file.
-// It is the one definition every reader shares -- the Solace api-properties,
-// the MQ SSL bundle, validate and every platform's mount -- so a block without
-// a file (which validate refuses) can never be wired by one and skipped by
-// another. Nil-safe, like Secret: a store name nothing defines has no file.
-func (s *Store) HasFile() bool { return s != nil && s.File != "" }
+// Created reports whether the tool builds the store (create:). Nil-safe.
+func (s *Store) Created() bool { return s != nil && s.Create != nil }
+
+// Path is the PKCS12 file an existing store names, or "" -- always for a
+// created store, which has no file: deploy builds it straight into the
+// platform's secret.
+func (s *Store) Path() string {
+	if s == nil || s.Existing == nil {
+		return ""
+	}
+	return s.Existing.PKCS12
+}
+
+// Configured reports whether the store can be wired: created, or naming its
+// PKCS12. It is the one definition every reader shares -- the Solace
+// api-properties, the MQ SSL bundle, validate and every platform's mount -- so
+// a store validate refuses can never be wired by one and skipped by another.
+// Nil-safe: a store name nothing defines is not configured.
+func (s *Store) Configured() bool { return s.Created() || s.Path() != "" }
 
 // TLSConfig is the tls: block of env.yaml: any number of named stores. A store
 // has no role of its own -- it is a truststore, a keystore or both according to
@@ -133,6 +219,12 @@ const (
 	LabelRoleKey    = "solace-connector/role"
 	LabelRoleActive = "active"
 )
+
+// LabelStoresDigestKey labels a docker service that carries created stores
+// with the sha256 of their bytes, so compose recreates the container exactly
+// when a store changes: the stores themselves travel in the environment, which
+// compose's own change detection never sees.
+const LabelStoresDigestKey = "solace-connector/stores-sha256"
 
 // Security mirrors solace.connector.security. Management security is always
 // on now (see StatusUserName), so there is no enabled/disabled toggle to
@@ -229,47 +321,66 @@ type rawTLS struct {
 	Stores map[string]*Store
 }
 
-// storeKeys are the keys one tls.stores.<name> block takes.
-var storeKeys = map[string]bool{"file": true, "password": true, "password-env": true, "type": true}
+// The keys of one tls.stores.<name> block, its create: and existing: blocks,
+// and one create.keys entry.
+var (
+	storeKeys    = map[string]bool{"password": true, "password-env": true, "create": true, "existing": true}
+	createKeys   = map[string]bool{"certs": true, "keys": true, "jks": true}
+	keyEntryKeys = map[string]bool{"cert": true, "chain": true, "key": true}
+	existingKeys = map[string]bool{"pkcs12": true}
+)
+
+// StoreKeys lists the keys of a tls.stores.<name> block, sorted -- like the
+// three below, for the generator page's copy to be checked against.
+func StoreKeys() []string { return sortedKeys(storeKeys) }
+
+// StoreCreateKeys lists the keys of a create: block, sorted.
+func StoreCreateKeys() []string { return sortedKeys(createKeys) }
+
+// StoreKeyEntryKeys lists the keys of a create.keys entry, sorted.
+func StoreKeyEntryKeys() []string { return sortedKeys(keyEntryKeys) }
+
+// StoreExistingKeys lists the keys of an existing: block, sorted.
+func StoreExistingKeys() []string { return sortedKeys(existingKeys) }
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // UnmarshalYAML accepts only tls.stores, a mapping of store names to store
-// blocks, and only the four store keys inside each. ParseEnv decodes without
-// KnownFields, so without this the retired single tls.truststore/tls.keystore,
-// or a misspelled store key (passwrd-env), would be dropped in silence and the
-// connection would trust the JVM default store, or present no certificate,
-// while env.yaml says otherwise.
+// blocks, and only the known keys at every level below it. ParseEnv decodes
+// without KnownFields, so without this the retired tls.truststore or a store's
+// retired file:, or a misspelled key (passwrd-env, cert:), would be dropped in
+// silence and the connection would trust the JVM default store, or present no
+// certificate, while env.yaml says otherwise.
 func (r *rawTLS) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.MappingNode {
 		return fmt.Errorf("tls must be a mapping holding stores:, got a %s", YAMLKind(node))
 	}
 	for i := 0; i+1 < len(node.Content); i += 2 {
-		k, v := node.Content[i], node.Content[i+1]
+		k, v := node.Content[i], deref(node.Content[i+1])
 		switch k.Value {
 		case "stores":
 		case "truststore", "keystore":
 			return fmt.Errorf("tls.%s is no longer read: define each store under tls.stores.<name> and select it on the connection with truststore: <name> or keystore: <name>", k.Value)
 		default:
-			return fmt.Errorf("tls.%s is not a key: tls takes only stores:, a mapping of store names to {file, password | password-env, type}", k.Value)
+			return fmt.Errorf("tls.%s is not a key: tls takes only stores:, a mapping of store names to {password | password-env, create | existing}", k.Value)
 		}
-		if v.Kind == yaml.AliasNode && v.Alias != nil {
-			v = v.Alias
-		}
-		if v.Kind == yaml.ScalarNode && v.ShortTag() == "!!null" {
+		if isNull(v) {
 			continue
 		}
 		if v.Kind != yaml.MappingNode {
 			return fmt.Errorf("tls.stores must be a mapping of store names to store blocks, got a %s", YAMLKind(v))
 		}
 		for j := 0; j+1 < len(v.Content); j += 2 {
-			name, block := v.Content[j].Value, v.Content[j+1]
-			if block.Kind == yaml.AliasNode && block.Alias != nil {
-				block = block.Alias
-			}
-			if block.Kind == yaml.MappingNode {
-				for n := 0; n+1 < len(block.Content); n += 2 {
-					if key := block.Content[n].Value; !storeKeys[key] {
-						return fmt.Errorf("tls.stores.%s.%s is not a store key: a store takes file, password or password-env, and type", name, key)
-					}
+			if block := deref(v.Content[j+1]); block.Kind == yaml.MappingNode {
+				if err := checkStoreBlock(v.Content[j].Value, block); err != nil {
+					return err
 				}
 			}
 		}
@@ -280,6 +391,89 @@ func (r *rawTLS) UnmarshalYAML(node *yaml.Node) error {
 		r.Stores = stores
 	}
 	return nil
+}
+
+// checkStoreBlock holds one tls.stores.<name> block to its keys, and its
+// create: and existing: blocks to theirs.
+func checkStoreBlock(name string, block *yaml.Node) error {
+	for n := 0; n+1 < len(block.Content); n += 2 {
+		key, val := block.Content[n].Value, deref(block.Content[n+1])
+		switch {
+		case key == "file" || key == "type":
+			return fmt.Errorf("tls.stores.%s.%s is no longer read: name a PKCS12 you provide with existing: {pkcs12: <file>}, or have the tool build one with create:", name, key)
+		case !storeKeys[key]:
+			return fmt.Errorf("tls.stores.%s.%s is not a store key: a store takes password or password-env, and create: or existing:", name, key)
+		case isNull(val):
+		case key == "create":
+			if err := checkCreateBlock(name, val); err != nil {
+				return err
+			}
+		case key == "existing":
+			if val.Kind != yaml.MappingNode {
+				return fmt.Errorf("tls.stores.%s.existing must be a mapping holding pkcs12: <file>, got a %s", name, YAMLKind(val))
+			}
+			for e := 0; e+1 < len(val.Content); e += 2 {
+				if k := val.Content[e].Value; !existingKeys[k] {
+					return fmt.Errorf("tls.stores.%s.existing.%s is not an existing key: existing takes only pkcs12, the PKCS12 file you provide", name, k)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// checkCreateBlock holds a create: block to its keys and their shapes.
+func checkCreateBlock(name string, block *yaml.Node) error {
+	if block.Kind != yaml.MappingNode {
+		return fmt.Errorf("tls.stores.%s.create must be a mapping holding certs, keys or jks, got a %s", name, YAMLKind(block))
+	}
+	for c := 0; c+1 < len(block.Content); c += 2 {
+		key, val := block.Content[c].Value, deref(block.Content[c+1])
+		if !createKeys[key] {
+			return fmt.Errorf("tls.stores.%s.create.%s is not a create key: create takes certs, keys and jks", name, key)
+		}
+		if isNull(val) {
+			continue
+		}
+		switch key {
+		case "certs":
+			if val.Kind != yaml.SequenceNode && val.Kind != yaml.MappingNode {
+				return fmt.Errorf("tls.stores.%s.create.certs must be a list of files or a mapping of alias: file, got a %s", name, YAMLKind(val))
+			}
+		case "keys":
+			if val.Kind != yaml.SequenceNode {
+				return fmt.Errorf("tls.stores.%s.create.keys must be a list of {cert, chain, key} entries, got a %s", name, YAMLKind(val))
+			}
+			for i, entry := range val.Content {
+				if err := checkKeyEntry(name, i, deref(entry)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// checkKeyEntry holds one create.keys entry to cert, chain and key.
+func checkKeyEntry(name string, i int, entry *yaml.Node) error {
+	if entry.Kind != yaml.MappingNode {
+		return fmt.Errorf("tls.stores.%s.create.keys[%d] must be a mapping of cert, chain and key, got a %s", name, i, YAMLKind(entry))
+	}
+	for e := 0; e+1 < len(entry.Content); e += 2 {
+		key, val := entry.Content[e].Value, deref(entry.Content[e+1])
+		if !keyEntryKeys[key] {
+			return fmt.Errorf("tls.stores.%s.create.keys[%d].%s is not a key-entry key: an entry takes cert, chain and key", name, i, key)
+		}
+		if key == "chain" && !isNull(val) && val.Kind != yaml.SequenceNode {
+			return fmt.Errorf("tls.stores.%s.create.keys[%d].chain must be a list of files, got a %s", name, i, YAMLKind(val))
+		}
+	}
+	return nil
+}
+
+// isNull reports whether n is an explicit or implied null (key: with nothing).
+func isNull(n *yaml.Node) bool {
+	return n.Kind == yaml.ScalarNode && n.ShortTag() == "!!null"
 }
 
 type rawLogging struct {

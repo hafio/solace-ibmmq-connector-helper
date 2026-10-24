@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,9 @@ import (
 	"testing"
 	"time"
 
+	pkcs12 "software.sslmate.com/src/go-pkcs12"
+
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/certfixture"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/libs"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -2333,9 +2337,9 @@ func TestGeneratePodmanOnlyLibsIsAHostPath(t *testing.T) {
 tls:
   stores:
     ts:
-      file: ./certs/truststore.jks
+      existing:
+        pkcs12: ./certs/truststore.jks
       password: ts
-      type: JKS
 `+podmanEnv()+"  libs:\n    dir: ./libs\n")
 	write(t, dir, "10.yaml", tlsWF)
 	t.Chdir(dir)
@@ -2379,10 +2383,10 @@ func TestDeployPodmanUnresolvedInputFailsBeforeAnyWrite(t *testing.T) {
 tls:
   stores:
     ts:
-      file: ./certs/missing.jks
+      existing:
+        pkcs12: ./certs/missing.jks
       password: ts
-      type: JKS
-` + podmanEnv(), tlsWF, `tls.stores.ts.file "./certs/missing.jks"`},
+` + podmanEnv(), tlsWF, `tls.stores.ts.existing.pkcs12 "./certs/missing.jks"`},
 		{"unset credential variable", sharedEnv + podmanEnv(),
 			strings.Replace(validWF, "    password: pw\n", "    password-env: "+unsetVar+"\n", 1),
 			"environment variable " + unsetVar + " is not set"},
@@ -2616,9 +2620,9 @@ func TestDeployDockerWarnsAboutMountsTheConnectorCannotRead(t *testing.T) {
 tls:
   stores:
     ts:
-      file: ${SOLMQ_TEST_CERTS}/truststore.jks
+      existing:
+        pkcs12: ${SOLMQ_TEST_CERTS}/truststore.jks
       password: ts
-      type: JKS
 `+dockerEnv+"  libs:\n    dir: ${SOLMQ_TEST_LIBS}\n  run-as: \""+runAs+"\"\n")
 	write(t, dir, "10.yaml", tlsWF)
 
@@ -2630,7 +2634,7 @@ tls:
 		t.Fatalf("exit=%d, want the deploy to go ahead:\n%s", code, stderr)
 	}
 	for _, want := range []string{
-		"warning: docker mounts tls.stores.ts.file " + truststore + " (mode 0600) is not readable by the connector, which runs as " + runAs,
+		"warning: docker mounts tls.stores.ts.existing.pkcs12 " + truststore + " (mode 0600) is not readable by the connector, which runs as " + runAs,
 		"warning: docker mounts libs.dir jar " + jar + " (mode 0600) is not readable by the connector, which runs as " + runAs,
 	} {
 		if !strings.Contains(stderr, want) {
@@ -2684,9 +2688,9 @@ func TestDeployPodmanSeamWritesUnitsAndStarts(t *testing.T) {
 tls:
   stores:
     ts:
-      file: ./certs/truststore.jks
+      existing:
+        pkcs12: ./certs/truststore.jks
       password: ts
-      type: JKS
 `+podmanEnv()+"  base-dir: "+filepath.ToSlash(legacyDir)+"\n")
 	write(t, dir, "10.yaml", tlsWF)
 	// The unit an earlier deploy left, mounting a store this spec no longer
@@ -6492,5 +6496,155 @@ func TestCliPreflightFailureOpensNothing(t *testing.T) {
 	}
 	if q.attachN != 0 {
 		t.Errorf("no session may be opened, got %d attaches", q.attachN)
+	}
+}
+
+// ---- docker: created stores ---------------------------------------------------
+
+// createdStoreDockerSpec writes env.yaml with a docker section and one created
+// truststore, ts, built from ca.pem beside it with its password in
+// SOLMQ_TEST_TS_PW, and tlsWF selecting it.
+func createdStoreDockerSpec(t *testing.T, dir string) {
+	t.Helper()
+	write(t, dir, "ca.pem", string(certfixture.PEM(certfixture.CA(t, "Root"))))
+	write(t, dir, "env.yaml", sharedEnv+`
+tls:
+  stores:
+    ts:
+      password-env: SOLMQ_TEST_TS_PW
+      create:
+        certs:
+          - ./ca.pem
+`+dockerEnv)
+	write(t, dir, "10.yaml", tlsWF)
+}
+
+// envValue is the value of key in a child environment, as KEY=VALUE pairs.
+func envValue(env []string, key string) (string, bool) {
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// A docker deploy carrying a created store builds it and hands it to compose
+// in the child environment -- base64-encoded under its secret's name, with the
+// digest the stores label is filled from -- never in argv. The image is
+// inspected first; the fake engine's answer does not parse, which is an image
+// it does not have yet, so there is nothing to compare.
+func TestDeployDockerCarriesCreatedStores(t *testing.T) {
+	f := useFakeRunner(t)
+	dir := t.TempDir()
+	createdStoreDockerSpec(t, dir)
+	t.Setenv("SOLMQ_TEST_TS_PW", "store-pass-123")
+	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	if len(f.calls) != 3 || f.calls[0].argv[1] != "info" || !reflect.DeepEqual(f.calls[1].argv[:3], []string{"docker", "image", "inspect"}) || f.calls[2].argv[len(f.calls[2].argv)-2] != "up" {
+		t.Fatalf("calls = %+v, want info, image inspect, compose up", f.calls)
+	}
+	up := f.calls[2]
+	enc, ok := envValue(up.env, "_GEN_TLS_TS_STORE")
+	if !ok {
+		t.Fatalf("compose up env carries no _GEN_TLS_TS_STORE: %v", up.env)
+	}
+	raw, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if certs, err := pkcs12.DecodeTrustStore(raw, "store-pass-123"); err != nil || len(certs) != 1 {
+		t.Errorf("the environment does not carry the built truststore: %d certificates, err %v", len(certs), err)
+	}
+	if digest, ok := envValue(up.env, "_GEN_TLS_STORES_SHA256"); !ok || len(digest) != 64 {
+		t.Errorf("stores digest = %q, want 64 hex characters", digest)
+	}
+	for _, a := range up.argv {
+		if strings.Contains(a, enc[:16]) {
+			t.Errorf("store bytes reached argv: %q", a)
+		}
+	}
+}
+
+// An image the engine reports starting any other way than the command the
+// storescript hands over to fails the deploy before a compose file is written
+// or anything is started.
+func TestDeployDockerRefusesAnImageStartingOtherwise(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{{out: "ok"}, {out: "[\"java\",\"-jar\",\"/app.jar\"]\n[]"}}}
+	dir := t.TempDir()
+	createdStoreDockerSpec(t, dir)
+	t.Setenv("SOLMQ_TEST_TS_PW", "store-pass-123")
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, q)
+	})
+	if code == 0 || !strings.Contains(stderr, `the image img:1 starts with entrypoint ["java" "-jar" "/app.jar"] and command []`) {
+		t.Fatalf("exit=%d, stderr:\n%s", code, stderr)
+	}
+	if len(q.calls) != 2 {
+		t.Errorf("calls = %+v, want only info and image inspect", q.calls)
+	}
+	if _, err := os.Stat(filepath.Join(dir, composeFile)); !os.IsNotExist(err) {
+		t.Errorf("no compose file may be written: %v", err)
+	}
+}
+
+// remove tears down with placeholders for the created stores' secrets: their
+// sources may be gone, since down never reads them. The store's password is a
+// credential the compose file declares like any other, so it is resolved as
+// every credential is.
+func TestRemoveDockerNeedsNoCreatedStoreSources(t *testing.T) {
+	f := useFakeRunner(t)
+	withPromptAnswer(t, "y")
+	dir := t.TempDir()
+	createdStoreDockerSpec(t, dir)
+	t.Setenv("SOLMQ_TEST_TS_PW", "store-pass-123")
+	if err := os.Remove(filepath.Join(dir, "ca.pem")); err != nil {
+		t.Fatal(err)
+	}
+	if code := dispatch([]string{"remove", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	down := f.calls[len(f.calls)-1]
+	if v, _ := envValue(down.env, "_GEN_TLS_TS_STORE"); v != "-" {
+		t.Errorf("_GEN_TLS_TS_STORE = %q, want the placeholder", v)
+	}
+	if v, _ := envValue(down.env, "_GEN_TLS_STORES_SHA256"); v != "-" {
+		t.Errorf("_GEN_TLS_STORES_SHA256 = %q, want the placeholder", v)
+	}
+}
+
+// One environment variable holds 32767 characters on Windows; 131072 bytes is
+// Linux's cap on one string, kept everywhere else.
+func TestEnvVarMax(t *testing.T) {
+	for goos, want := range map[string]int{"windows": 32767, "linux": 131072, "darwin": 131072} {
+		if got := envVarMax(goos); got != want {
+			t.Errorf("envVarMax(%s) = %d, want %d", goos, got, want)
+		}
+	}
+}
+
+// A docker deploy whose existing store is missing stops before anything runs
+// -- docker would otherwise create an empty directory in its place -- while
+// remove, which mounts nothing, still tears down.
+func TestDeployDockerRefusesAMissingStoreFile(t *testing.T) {
+	f := useFakeRunner(t)
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+"\ntls:\n  stores:\n    ts:\n      password: ts\n      existing:\n        pkcs12: ./certs/missing.p12\n"+dockerEnv)
+	write(t, dir, "10.yaml", tlsWF)
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f)
+	})
+	if code != 1 || !strings.Contains(stderr, "docker mounts tls.stores.ts.existing.pkcs12 "+filepath.Join(dir, "certs", "missing.p12")+", which does not exist") {
+		t.Fatalf("exit=%d, stderr:\n%s", code, stderr)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("nothing may run before the store is there, got %+v", f.calls)
+	}
+	withPromptAnswer(t, "y")
+	if code := dispatch([]string{"remove", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, useFakeRunner(t)); code != 0 {
+		t.Errorf("remove must not need the store: exit=%d", code)
 	}
 }

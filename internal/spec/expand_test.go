@@ -132,3 +132,29 @@ func TestExpandNilLookupDisablesEverything(t *testing.T) {
 		t.Errorf("nil Lookup must disable expansion entirely: got %q, want %q", got, want)
 	}
 }
+
+// A store's source paths expand like any other path -- the existing PKCS12,
+// every certs file, the key entry's files and the jks -- while its password
+// fields and a certs alias stay as written: a password names a credential, and
+// an alias is a name, not a path.
+func TestExpandStorePathsNotPasswordsOrAliases(t *testing.T) {
+	e := &Env{Defaults: Defaults{TLS: TLSConfig{Stores: map[string]*Store{
+		"have": {PasswordEnv: "${PW}", Existing: &StoreExisting{PKCS12: "${D}/t.p12"}},
+		"make": {Password: "${PW}", Create: &StoreSources{
+			Certs: CertSources{Named: true, Items: []CertSource{{Name: "${D}", File: "${D}/ca.pem"}}},
+			Keys:  []KeySource{{Cert: "${D}/c.pem", Chain: []string{"${D}/i.pem"}, Key: "${D}/c.key"}},
+			JKS:   "${D}/old.jks",
+		}},
+	}}}}
+	Expand(Expander{Lookup: lookupOf(map[string]string{"D": "/certs", "PW": "leaked"})}, e, nil)
+	have, made := e.Defaults.TLS.Stores["have"], e.Defaults.TLS.Stores["make"]
+	c := made.Create
+	for _, got := range []string{have.Path(), c.Certs.Items[0].File, c.Keys[0].Cert, c.Keys[0].Chain[0], c.Keys[0].Key, c.JKS} {
+		if !strings.HasPrefix(got, "/certs/") {
+			t.Errorf("path %q was not expanded", got)
+		}
+	}
+	if have.PasswordEnv != "${PW}" || made.Password != "${PW}" || c.Certs.Items[0].Name != "${D}" {
+		t.Errorf("password-env %q, password %q, alias %q must stay as written", have.PasswordEnv, made.Password, c.Certs.Items[0].Name)
+	}
+}

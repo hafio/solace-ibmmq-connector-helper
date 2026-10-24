@@ -217,8 +217,8 @@ func TestGeneratedSecretNamesStayOutOfChildEnvDanger(t *testing.T) {
 			{Name: "../../etc/passwd", PasswordEnv: "WEIRD_ENV"},
 		}},
 		TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
-			"ts": {File: "ts.jks", Password: "ts-literal-pass", Type: "JKS"},
-			"ks": {File: "ks.jks", PasswordEnv: "KS_PASS_ENV", Type: "JKS"},
+			"ts": {Existing: &spec.StoreExisting{PKCS12: "ts.jks"}, Password: "ts-literal-pass"},
+			"ks": {Existing: &spec.StoreExisting{PKCS12: "ks.jks"}, PasswordEnv: "KS_PASS_ENV"},
 		}},
 		LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveActive, Queue: "leader-q",
 			Session: &spec.Side{System: spec.SystemSolace, Host: "tcps://lh", MsgVPN: "lv",

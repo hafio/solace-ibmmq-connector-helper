@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -26,7 +27,7 @@ const (
 
 // mountCheck is one host path a container bind-mounts and has to read.
 type mountCheck struct {
-	label string // what env.yaml calls it, e.g. "docker mounts tls.stores.mq-ca.file"
+	label string // what env.yaml calls it, e.g. "docker mounts tls.stores.mq-ca.existing.pkcs12"
 	path  string // the resolved host path
 	kind  mountKind
 }
@@ -107,8 +108,33 @@ func unreadableMounts(h hostReader, section string, checks []mountCheck) []strin
 	return h.unreadable(section, checks)
 }
 
+// missingStoreFiles refuses a deploy whose bind-mounted store is not a file
+// there. Compose's short bind syntax creates a missing source as an empty
+// directory, so the connector would start without its store and fail when it
+// needs it, and the directory would be left where the PKCS12 belongs -- which
+// is also why a directory found there is refused: an earlier deploy may have
+// made it. libs.dir is a directory by design and is left to the engine. A path
+// that cannot be checked for another reason is left too: the engine may still
+// reach it.
+func missingStoreFiles(section string, ms []gen.HostMount) error {
+	for _, m := range ms {
+		if m.Field == gen.MountLibs {
+			continue
+		}
+		info, err := os.Stat(m.Path)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return fmt.Errorf("%s mounts %s %s, which does not exist: put the PKCS12 there, or fix the path -- docker would create an empty directory in its place", section, m.Field, m.Path)
+		case err == nil && info.IsDir():
+			return fmt.Errorf("%s mounts %s %s, which is a directory, not a PKCS12 file -- docker creates one at a missing bind source, so an earlier deploy may have left it: remove it and put the PKCS12 there", section, m.Field, m.Path)
+		}
+	}
+	return nil
+}
+
 // unreadable is unreadableMounts without the platform gate. A path that
-// cannot be stat'ed is skipped: whether it exists is the engine's to report
+// cannot be stat'ed is skipped: deploy has already refused a missing store
+// (missingStoreFiles), and a missing libs directory is the engine's to report
 // when it mounts it.
 func (h hostReader) unreadable(section string, checks []mountCheck) []string {
 	var out []string

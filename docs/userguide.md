@@ -48,6 +48,7 @@ documentation index; this guide is the complete reference.
    7. [Transforms (`transform`)](#67-transforms-transform)
 7. [Connector defaults (`env.yaml` top level)](#7-connector-defaults-envyaml-top-level)
    1. [The reserved status account (`solmq-status`)](#71-the-reserved-status-account-solmq-status)
+   2. [Created stores (`create:`)](#72-created-stores-create)
 8. [Platform sections (`kubernetes:`, `docker:`, `podman:`)](#8-platform-sections-kubernetes-docker-podman)
    0. [Image, timezone and JVM options (shared by every platform)](#80-image-timezone-and-jvm-options-shared-by-every-platform)
    1. [kubernetes](#81-kubernetes)
@@ -184,8 +185,9 @@ solmq-conn-util examples examples                     # write a ready-to-edit sa
 solmq-conn-util generate config -e examples/env.yaml  # print the application.yml those samples produce
 ```
 
-Then edit the files under `examples/` (start with `examples/env.yaml`), drop your
-`.jks` stores under `examples/certs/`, and re-run. See [section 4](#4-examples) for
+Then edit the files under `examples/` (start with `examples/env.yaml`), put your
+PKCS12 stores under `examples/certs/` -- or have `deploy` build them from your
+certificate files ([section 7.2](#72-created-stores-create)) -- and re-run. See [section 4](#4-examples) for
 the `examples` command.
 
 ### 2.1 The spec generator (no editor required)
@@ -368,7 +370,8 @@ it -- see [section 12.9](#129-what-the-exit-code-means-and-what-each-view-costs)
   error and writes nothing.
 - **`generate` with no `config`** (or `generate --platform <platform>`) renders the
   resolved platform's deploy artifacts from the matching `env.yaml` section,
-  resolving secret values / `.jks` bytes as needed (see [section 9](#9-secrets-model)).
+  resolving secret values and store bytes as needed -- building a created store
+  ([section 7.2](#72-created-stores-create)) -- see [section 9](#9-secrets-model).
   It also **fails fast**.
 - **`deploy`** generates for the resolved platform and then applies it by
   shelling out to the section's `command:` (`kubectl`/`oc`, `docker`, or
@@ -464,7 +467,7 @@ workflows:
 - `file_pattern` supports **only the `*` wildcard** (leading, middle, and/or
   trailing), e.g. `workflow-*.yaml` or `*edge*.yml`. `?`, `[`, `]` are rejected with
   an actionable error.
-- Relative paths in `env.yaml` (`workflows.dir`, `tls.stores.<name>.file`, `libs.dir`, ...)
+- Relative paths in `env.yaml` (`workflows.dir`, `tls.stores.<name>.existing.pkcs12`, a created store's sources, `libs.dir`, ...)
   resolve **relative to the env file's directory**, so a config
   folder is portable regardless of your current directory. `workflows.dir: "."`
   therefore means "alongside `env.yaml`".
@@ -984,18 +987,20 @@ connections:                     # reusable connections, referenced by conn-ref 
       truststore: mq-ca            # its own CA, separate from Solace's
 tls:
   stores:                        # named stores; each connection selects its own by name
-    solace-ca:
-      file: ./certs/solace-ca.p12
+    solace-ca:                   # a PKCS12 you provide
       password-env: SOLACE_TRUSTSTORE_PASSWORD
-      type: PKCS12
+      existing:
+        pkcs12: ./certs/solace-ca.p12
     solace-client:
-      file: ./certs/solace-client.p12
       password-env: SOLACE_KEYSTORE_PASSWORD
-      type: PKCS12
-    mq-ca:
-      file: ./certs/mq-ca.jks
+      existing:
+        pkcs12: ./certs/solace-client.p12
+    mq-ca:                       # built at deploy from CA certificates (section 7.2)
       password-env: MQ_TRUSTSTORE_PASSWORD
-      type: JKS
+      create:
+        certs:
+          root: ./pem/mq-root.pem
+          issuing: ./pem/mq-issuing.pem
 logging:
   level:
     root: INFO
@@ -1032,7 +1037,7 @@ mq-defaults:                     # optional; merged into every MQ binder's ibm.m
 | Section | Option | Notes |
 |---------|--------|-------|
 | `connections.<name>` | `solace:`/`mq:` block | a reusable connection tuple (no destination); referenced by `conn-ref` ([section 6.6](#66-reusable-connections-conn-ref)) |
-| `tls.stores.<name>` | `file`, `password` (or `password-env`), `type` | a named JKS/PKCS12 store; any number. A connection selects one as its `truststore:` and/or `keystore:` ([section 6.4](#64-destinations-durable-names-passthrough)); one store may serve several connections, and both roles. The name is lowercase letters and digits joined by single hyphens, at most 63 characters (it names the mounted file, the Kubernetes Secret key and the podman secret). `file` is required; `type` (`JKS` or `PKCS12`) is optional -- unset, no type is written and the libraries apply the JVM's default keystore type, which loads either. Any other key under `tls:` or a store is an error, the retired `tls.truststore` / `tls.keystore` included. A store no connection selects is not mounted, and warns |
+| `tls.stores.<name>` | `password` (or `password-env`), and `existing` or `create` | a named PKCS12 store; any number. A connection selects one as its `truststore:` and/or `keystore:` ([section 6.4](#64-destinations-durable-names-passthrough)); one store may serve several connections. `existing: {pkcs12: <file>}` names a PKCS12 you provide -- it may serve both roles; `create:` has `deploy` build one from certificate files or a JKS, straight into the platform's secret ([section 7.2](#72-created-stores-create)). Exactly one of the two. The password opens an existing store and encrypts a created one, and the connection is wired with it either way. Every store is PKCS12, so the tool always writes that type. The name is lowercase letters and digits joined by single hyphens, at most 63 characters (it names the mounted file, the Kubernetes Secret key and the podman secret). Any other key under `tls:` or a store is an error -- the retired `tls.truststore` / `tls.keystore` and a store's retired `file` / `type` included. A store no connection selects is neither mounted nor built, and warns |
 | `logging.level` | `<logger>: <level>` | verbatim, order preserved -> `logging.level` |
 | `logging.syslog` | `host`, `port`, `protocol` | optional; ships log lines to syslog **on every platform**, in addition to the console. Emits a `logback-spring.xml` (a ConfigMap key on kubernetes, an inlined compose config on docker, a podman secret on podman) plus `LOGGING_SYSLOG_*` env vars, appname = the instance name. `protocol` is `udp` (default) or `tcp` -- **tcp requires the `logstash-logback-encoder` jar on the connector classpath** (provide it via `libs`; fetch it with `solmq-conn-util download jar syslog`, [section 10](#10-download-jar)) |
 | `management` | `port` | -> `management.server.port`; always emitted, default `8090`. The docker/podman published port and the kubernetes `service.port` ([section 8](#8-platform-sections-kubernetes-docker-podman)) default to it |
@@ -1074,6 +1079,9 @@ certificates, and several queue managers or brokers can each have their own. The
 tool wires the stores and nothing else: it writes no certificate-validation
 policy, so a Solace connection validates the broker certificate unless its own
 `api-properties` say otherwise ([section 6.4](#64-destinations-durable-names-passthrough)).
+A store is either a PKCS12 you provide (`existing`) or one `deploy` builds from
+your certificate files (`create`, [section 7.2](#72-created-stores-create)); the
+connection cannot tell the difference.
 
 ### 7.1 The reserved status account (`solmq-status`)
 
@@ -1112,6 +1120,105 @@ block yourself, and in every leader-election mode.
   simply sit on a host's disk, so treat it as no more sensitive than that.
 
 ---
+
+### 7.2 Created stores (`create:`)
+
+A store under `create:` is built by `deploy` from certificate files you already
+have -- what a CA, cert-manager or Vault hands out -- instead of a PKCS12 you make
+yourself. It is built in memory and goes straight into the platform's secret, so
+it never lands on disk:
+
+```yaml
+tls:
+  stores:
+    broker-ca:                     # a truststore
+      password-env: BROKER_CA_PASSWORD
+      create:
+        certs:                     # a list: aliases broker-ca-1, broker-ca-2, ...
+          - ./pem/broker-root.pem
+          - ./pem/broker-issuing.pem
+    partner-ca:
+      password-env: PARTNER_CA_PASSWORD
+      create:
+        certs:                     # a map: each name is the alias
+          root: ./pem/partner-root.pem
+    client-id:                     # a keystore
+      password-env: CLIENT_ID_PASSWORD
+      create:
+        keys:                      # exactly one entry
+          - cert: ./pem/client.pem # the client certificate (may hold its chain)
+            chain:                 # optional further chain files
+              - ./pem/broker-issuing.pem
+            key: ./pem/client.key  # unencrypted PKCS#1, PKCS#8 or SEC1
+    legacy-ca:
+      password-env: LEGACY_CA_PASSWORD
+      create:
+        jks: ./legacy/truststore.jks
+```
+
+Use block style for the lists: `${VAR}` is not valid inside a `[flow]` list.
+
+| `create:` key | Takes | Makes |
+|---------------|-------|-------|
+| `certs` | a list of certificate files, or a map of alias to file; PEM `CERTIFICATE` blocks (several per file) or DER | a **truststore** of every certificate, each marked as a Java trust anchor. A list aliases them `<store>-1`, `<store>-2`, ... in order; a map by its names (`name`, `name-2`, ... for a file holding several). Aliases ignore case, so two that differ only in case are an error |
+| `keys` | exactly one entry: `cert` (the certificate the key belongs to; its file may also hold the chain), optional `chain` (more files), `key` (the private key) | a **keystore** holding that one key with its chain, ordered by issuer whatever order the files list it in |
+| `jks` | a JKS keystore, opened with this store's password (its key too) | a truststore of its trusted entries, keeping their aliases -- which may join `certs` -- or, if it holds exactly one private key and nothing else, a keystore of that key |
+
+A created store is a truststore or a keystore, never both: `certs` with `keys`,
+or `jks` with `keys`, is an error -- define a second store for the other role. A
+connection that selects a store created from a key as its `truststore:`, or one
+created from certificates as its `keystore:`, is an error too (for a `jks` alone
+the check runs when the store is built). A created keystore holds exactly one key,
+which the PKCS12 writer cannot name -- Java lists it as alias `1` -- so a connection
+selecting it sets no `key-alias`; one store per client identity replaces a
+multi-key keystore. A created store needs its own password: it is encrypted with
+it.
+
+What the build checks, and when:
+
+- **Every `deploy`** (and `generate --platform kubernetes`, which embeds the store)
+  reads the sources and the password, so both must be present there: the
+  `password-env` variable exported and non-empty, and every file readable.
+  `validate` and `generate config` never open them.
+- **Errors**: a file holding no certificate, an encrypted private key (decrypt it
+  to a file only you can read, for example `openssl pkey -in key.pem -out
+  plain.pem`, and name that), more than one key in a key file, no certificate
+  whose public key matches the key, an expired client certificate, a JKS the
+  store's password does not open, a JCEKS keystore (convert it with
+  `keytool -importkeystore -srcstoretype JCEKS -deststoretype PKCS12`), and a file
+  that is already PKCS12 (name it with `existing:` instead).
+- **Warnings**, printed by `deploy` and `generate`: a certificate that expired or
+  expires within 30 days, a certificate that is not a CA (trusted as-is, so only
+  that exact certificate is accepted), a certificate outside the key's chain (left
+  out), a repeated certificate (kept once).
+
+The store is PKCS12 with AES-256 encryption (PBES2, PBKDF2-HMAC-SHA-256, 10000
+iterations) and an HMAC-SHA-256 MAC, which Java 12 and later read -- the connector
+images ship Java 17 (2.x) and 25 (3.x). Its bytes are a deterministic function of
+the password and the sources, so an unchanged store builds to the same bytes on
+every deploy: the kubernetes Secret stays unchanged and generated manifests stay
+stable.
+
+Where it goes:
+
+| Platform | A created store |
+|----------|-----------------|
+| kubernetes | built into the stores Secret when `secrets.stores.create: true`. With `secrets.stores.existing` the tool writes no Secret, so `create:` is not built: that Secret must already hold the store under its name ([section 8.1](#81-kubernetes)) |
+| podman | built by `deploy` into its podman secret, `<name>-tls-<store>`, like an existing store's file ([section 8.3](#83-podman)) |
+| docker | carried as a compose secret read from deploy's environment, base64-encoded -- docker has no secret store for a binary file, and an environment variable cannot hold a PKCS12's bytes. The service starts through a small startup script that decodes every such store into an in-memory directory on each start, then runs the image's own command ([section 8.2](#82-docker)) |
+| `generate config` | an error: the `application.yml` it writes for a connector you run yourself needs a file to name, and a created store has none -- use `existing:` there |
+
+Rotating a certificate is a redeploy: replace the file and run `deploy`. The
+connector reads its stores only when it starts, so restart it to pick the new store
+up -- `kubectl rollout restart` on kubernetes; a podman `deploy` restarts the unit
+itself, and a docker `deploy` recreates the container whenever a created store
+changed.
+
+Why build instead of `openssl pkcs12 -export`: a truststore made with
+`openssl pkcs12 -export -nokeys` loads in Java as an **empty** store, because Java
+keeps only certificates carrying Oracle's trusted-certificate attribute, which
+OpenSSL writes only from 3.2, with `-jdktrust`. The connection then fails with
+"the trustAnchors parameter must be non-empty". A created store always carries it.
 
 ## 8. Platform sections (`kubernetes:`, `docker:`, `podman:`)
 
@@ -1444,8 +1551,8 @@ kubernetes:
 | `libs.download` | `urls`, `image`, `pvc` | an initContainer `wget`s each URL into `/libs` at pod start; the shared volume is an `emptyDir` unless `pvc` names an existing PVC |
 | `secrets.credentials.create` | `true` | the tool builds `<name>-credentials`: one key per credential the config references, each holding the resolved value -- read from the host variable for an `-env` credential, taken from the spec for a literal |
 | `secrets.credentials.existing` | `<name>` | reference a pre-existing Secret instead of creating one; exactly one of `create` / `existing` is required once the block is present, and the Secret's keys must be the ones [section 9.2](#92-mount-names) derives -- your `-env` variable names, plus a derived name per literal |
-| `secrets.stores.create` | `true` | the tool builds `<name>-stores`, base64-embedding the file of every `tls.stores` entry a connection selects, each under its store name; a set over the 1 MiB a Secret holds is an error that names each store's size. Requires at least one TLS connection selecting a store |
-| `secrets.stores.existing` | `<name>` | reference a pre-existing stores Secret (`create` XOR `existing`, as above); its keys must be the names of the stores the connections select (`mq-ca`, `solace-client`, ...), which the pod's volume lists by name and mounts under those names -- so a key the Secret lacks keeps the pod from starting (a "couldn't find key" event) rather than failing the first TLS handshake. A Secret cert-manager writes (keys such as `truststore.jks`) has to be copied under the store names, or referenced by a store per Secret |
+| `secrets.stores.create` | `true` | the tool builds `<name>-stores`, base64-embedding every `tls.stores` entry a connection selects -- an existing store's PKCS12, a created one built from its sources ([section 7.2](#72-created-stores-create)) -- each under its store name; a set over the 1 MiB a Secret holds is an error that names each store's size. Requires at least one TLS connection selecting a store |
+| `secrets.stores.existing` | `<name>` | reference a pre-existing stores Secret (`create` XOR `existing`, as above); the tool writes no Secret, so a created store is not built here and the Secret must hold it too. Its keys must be the names of the stores the connections select (`mq-ca`, `solace-client`, ...), which the pod's volume lists by name and mounts under those names -- so a key the Secret lacks keeps the pod from starting (a "couldn't find key" event) rather than failing the first TLS handshake. A Secret cert-manager writes (keys such as `truststore.jks`) has to be copied under the store names, or referenced by a store per Secret |
 
 **Everything the tool creates is named after `deployment.name`.** The ConfigMap is
 `<name>-config`, the Secrets `<name>-credentials`, `<name>-stores` and
@@ -1513,12 +1620,47 @@ uses compose's long syntax (`source: <name>` plus an absolute `target:`) rather
 than the short `- <name>` form, because the short form always lands at compose's
 own `/run/secrets/<name>` with no way to point elsewhere; the long form's `target:`
 is `/app/external/var/secrets/<name>`, the same directory every platform uses. The
-file of every `tls.stores` entry a connection selects is bind-mounted at
+PKCS12 of every `existing` store a connection selects is bind-mounted at
 `/app/external/classpath/truststores/<store name>`, whatever the file is called --
 the generated `application.yml` points there, so the mount follows the
 configuration rather than needing its own switch, and two stores may share a file
 name or be one file -- and `libs.dir` bind-mounts a host jar directory to
-`/app/external/libs`.
+`/app/external/libs`. `deploy` refuses an existing store whose file is missing, or
+is a directory, before it starts anything: compose creates a missing bind source as
+an empty directory, so the connector would start without its store, and that
+directory would sit where the PKCS12 belongs (which is why one found there is
+refused too).
+
+A **created store** ([section 7.2](#72-created-stores-create)) has no host file to
+bind-mount, and docker has no secret store for a binary file: a compose secret read
+from the environment carries text, and an environment variable cannot hold the NUL
+bytes of a PKCS12. So `deploy` builds each created store, base64-encodes it, and
+hands it to `docker compose` in the same child environment as the credentials,
+under a generated name (`_GEN_TLS_<STORE>_STORE`); the compose file declares it as
+a secret mounted at `/app/external/var/stores/<store name>`. When the service
+carries one, the compose file also:
+
+- starts it through `/app/external/.stores-init` (a `configs:` entry): the script
+  decodes every store there into `/app/external/classpath/truststores`, a `tmpfs`
+  owned by the run-as identity with mode `0700`, on **every start** -- a restarted
+  container decodes them again -- and then runs the image's own command. Setting
+  `entrypoint:` drops the image's command, so the compose file hands it over as
+  `command:`: the connector image starts the same way in every release checked
+  (2.13 to 3.2), and `deploy` compares it with the image the engine reports
+  before relying on it, refusing an image that starts any other way. An image the
+  engine does not have yet is not checked; compose pulls it.
+- labels the service `solace-connector/stores-sha256` with a digest of the stores,
+  filled from the environment, so `compose up` recreates the container exactly
+  when a store changed -- the stores are not in the compose file, so its own change
+  detection cannot see them.
+
+One environment variable holds 131072 bytes on Linux and 32767 characters on
+Windows, so a created store whose base64 form would not fit fails the deploy,
+naming the store and its sizes -- keep it to the certificates the connection needs,
+or deploy that store with podman or kubernetes. `remove` hands compose
+placeholders for these secrets, so it does not need the store's sources; its
+password is resolved like every other credential the compose file declares. An
+`existing` store is still bind-mounted, inside the same directory.
 
 Every `$` inside those inlined `configs:` blocks is written **doubled** (`$$`).
 Docker Compose interpolates variables across the whole document, content blocks
@@ -1608,7 +1750,9 @@ install and tear down that same unit through **systemctl**. A quadlet unit canno
 inline file content, so everything the connector reads from a file reaches it from
 **podman's secret store**: `deploy` loads each credential, the rendered
 `application.yml`, the status script, the logback config (when syslog is
-configured) and every `tls.stores` entry a connection selects into the store -- values
+configured) and every `tls.stores` entry a connection selects -- an existing
+store's PKCS12, or a created store built from its sources
+([section 7.2](#72-created-stores-create)) -- into the store, values
 on stdin, never in argv -- and the unit mounts every one back in with a `Secret=`
 line. A podman deployment keeps **nothing on the host but the unit itself and your
 `libs.dir`**, the one `Volume=` the unit can carry. `generate` writes nothing, so
@@ -1631,7 +1775,7 @@ generated `application.yml` imports credentials only from
 unit names each path outright and every file lands exactly where it is read.
 Inside the container each one is a read-only file, owned by root with mode `0444`,
 as compose gives its configs. Podman holds a secret of 1 to 511999 bytes, so
-`deploy` refuses an empty store file or one of 512000 bytes or more before it
+`deploy` refuses an empty store or one of 512000 bytes or more before it
 creates anything. Neither a store's path nor its file name reaches the unit, so
 both are free, and the truststore and keystore may share a file name or be one
 file. Requires
@@ -1997,7 +2141,8 @@ container each `tls.stores` entry a connection selects is
 `/app/external/classpath/truststores/<store name>`, whatever its file is called --
 base64-embedded into a Kubernetes Secret mounted there, bind-mounted there from
 the host for docker, or loaded into podman's secret store and mounted there for
-podman -- which needs no configuration, since selecting the store is itself the
+podman (a created store is built into the Secret or the podman secret, and on
+docker decoded there from a compose secret at every start, [section 8.2](#82-docker)) -- which needs no configuration, since selecting the store is itself the
 request. Kubernetes does need telling, so its `kubernetes.secrets.stores` takes
 the same `create` XOR `existing` choice as `credentials`. Either way the Secret
 is keyed by store name -- `solace-ca`, `mq-ca`, ... for the example in
@@ -3243,7 +3388,7 @@ Useful places to look once you are inside:
 |------|---------------|
 | `/app/external/spring/config/application.yml` | the configuration the process actually loaded |
 | `/app/external/libs` | the jars `download jar` put there ([section 10](#10-download-jar)) |
-| `/app/external/classpath/truststores` | each selected `tls.stores` entry, under its store name: bind-mounted from its file on docker, mounted from podman's secret store on podman and Secret-mounted on kubernetes |
+| `/app/external/classpath/truststores` | each selected `tls.stores` entry, under its store name: bind-mounted from its PKCS12 on docker, mounted from podman's secret store on podman and Secret-mounted on kubernetes; a created store is built into the secret |
 | `/app/external/var/secrets` | the credentials, on every platform |
 
 ### 14.3 The one-shot form, and when it is the only form
@@ -3337,10 +3482,19 @@ container is called something else, is not reachable with `cli` -- reach it with
   API's default (validate) applies unless the connection's `api-properties` set
   `SSL_VALIDATE_CERTIFICATE`, and every command warns when one turns it off
   ([section 6.4](#64-destinations-durable-names-passthrough)).
-- **A store needs a file.** A `tls.stores` entry without `file` is an **error**:
-  it would otherwise be skipped by every reader in silence.
-  A store without `type` writes no type line or `SSL_*_STORE_FORMAT` key; the
-  libraries then use the JVM's default keystore type, which loads JKS and PKCS12.
+- **A store is created or existing, and always PKCS12.** A `tls.stores` entry with
+  neither `create:` nor `existing:` is an **error**: it would otherwise be skipped
+  by every reader in silence. A store's `file:` and `type:` are retired and an
+  error naming the replacement: `existing: {pkcs12: <file>}` for a store you
+  provide -- convert a JKS with `create: {jks: <file>}` or `keytool
+  -importkeystore` -- and every store is written as `PKCS12`.
+- **An `openssl pkcs12 -nokeys` truststore loads in Java as empty.** Java keeps
+  only certificates marked as trust anchors, which OpenSSL writes only from 3.2,
+  with `-jdktrust anyExtendedKeyUsage`. Let the tool build the truststore instead
+  (`create: {certs: [...]}`, [section 7.2](#72-created-stores-create)).
+- **A created keystore takes no `key-alias`.** It holds exactly one key, which Java
+  names `1`; a `key-alias` on a connection selecting it is an error. Use one
+  created store per client identity.
 - **TLS without a store selection trusts the JVM's CAs.** `tls: true` (or a
   `tcps://` host) that selects no truststore still negotiates TLS, validating
   against the JVM's default CA bundle; an MQ binder that selects neither store gets

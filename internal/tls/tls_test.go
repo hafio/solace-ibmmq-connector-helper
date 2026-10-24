@@ -17,6 +17,11 @@ func defaults(stores map[string]*spec.Store) *spec.Defaults {
 	return &spec.Defaults{TLS: spec.TLSConfig{Stores: stores}}
 }
 
+// existing is a store naming the PKCS12 at path.
+func existing(path, passwordEnv string) *spec.Store {
+	return &spec.Store{PasswordEnv: passwordEnv, Existing: &spec.StoreExisting{PKCS12: path}}
+}
+
 // keys lists the api-property keys SolaceProps returned, in order.
 func keys(kvs []KV) string {
 	var out []string
@@ -46,8 +51,8 @@ func TestMountPathIsPerStore(t *testing.T) {
 // backslashes.
 func TestSolacePropsUseStoreMountPaths(t *testing.T) {
 	d := defaults(map[string]*spec.Store{
-		"solace-ca":     {File: `.\trust\store.p12`, PasswordEnv: "TS_PW", Type: "PKCS12"},
-		"solace-client": {File: `.\key\store.p12`, PasswordEnv: "KS_PW", Type: "PKCS12"},
+		"solace-ca":     existing(`.\trust\store.p12`, "TS_PW"),
+		"solace-client": existing(`.\key\store.p12`, "KS_PW"),
 	})
 	got := map[string]string{}
 	for _, kv := range SolaceProps(d, Selection{Truststore: "solace-ca", Keystore: "solace-client", KeyAlias: "c"}, true, placeholderSecretRef) {
@@ -64,6 +69,22 @@ func TestSolacePropsUseStoreMountPaths(t *testing.T) {
 	}
 }
 
+// A created store has no file of its own: deploy builds it into the platform's
+// secret, mounted under its name like any other, so that is the one path it
+// is wired at.
+func TestSolacePropsWireACreatedStoreAtItsMountPath(t *testing.T) {
+	d := defaults(map[string]*spec.Store{
+		"made": {PasswordEnv: "PW", Create: &spec.StoreSources{Certs: spec.CertSources{Items: []spec.CertSource{{File: "./ca.pem"}}}}},
+	})
+	got := map[string]string{}
+	for _, kv := range SolaceProps(d, Selection{Truststore: "made"}, true, placeholderSecretRef) {
+		got[kv.Key] = kv.Val
+	}
+	if got["SSL_TRUST_STORE"] != MountDir+"/made" || got["SSL_TRUST_STORE_FORMAT"] != "PKCS12" || got["SSL_TRUST_STORE_PASSWORD"] != "${made}" {
+		t.Errorf("SolaceProps = %v", got)
+	}
+}
+
 func TestStorePathConfigVsDeploy(t *testing.T) {
 	for _, c := range []struct {
 		store string
@@ -71,10 +92,10 @@ func TestStorePathConfigVsDeploy(t *testing.T) {
 		mount bool
 		want  string
 	}{
-		{"mq-ca", "./certs/t.jks", false, "./certs/t.jks"},
+		{"mq-ca", "./certs/t.p12", false, "./certs/t.p12"},
 		{"mq-client", `.\certs\k.p12`, false, `.\certs\k.p12`},
-		{"mq-ca", `.\certs\t.jks`, true, MountDir + "/mq-ca"},
-		{"mq-client", "./certs/t.jks", true, MountDir + "/mq-client"},
+		{"mq-ca", `.\certs\t.p12`, true, MountDir + "/mq-ca"},
+		{"mq-client", "./certs/t.p12", true, MountDir + "/mq-client"},
 	} {
 		if got := StorePath(c.store, c.file, c.mount); got != c.want {
 			t.Errorf("StorePath(%q, %q, %v) = %q, want %q", c.store, c.file, c.mount, got, c.want)
@@ -83,12 +104,12 @@ func TestStorePathConfigVsDeploy(t *testing.T) {
 }
 
 func TestSolacePropsRawPathWhenNotMounted(t *testing.T) {
-	d := defaults(map[string]*spec.Store{"solace-ca": {File: "./certs/truststore.jks", PasswordEnv: "TS_PW", Type: "JKS"}})
+	d := defaults(map[string]*spec.Store{"solace-ca": existing("./certs/truststore.p12", "TS_PW")})
 	got := map[string]string{}
 	for _, kv := range SolaceProps(d, Selection{Truststore: "solace-ca"}, false, placeholderSecretRef) {
 		got[kv.Key] = kv.Val
 	}
-	if got["SSL_TRUST_STORE"] != "./certs/truststore.jks" {
+	if got["SSL_TRUST_STORE"] != "./certs/truststore.p12" {
 		t.Errorf("mount=false should keep the raw store path, got %q", got["SSL_TRUST_STORE"])
 	}
 }
@@ -99,8 +120,8 @@ func TestSolacePropsRawPathWhenNotMounted(t *testing.T) {
 // credential, never the other's.
 func TestSolacePropsStorePasswordIsPlaceholderNeverLiteral(t *testing.T) {
 	d := defaults(map[string]*spec.Store{
-		"solace-ca":     {File: "./certs/truststore.jks", PasswordEnv: "TS_PW_ENV", Type: "JKS"},
-		"solace-client": {File: "./certs/keystore.jks", Password: "s3cr3t-literal", Type: "JKS"},
+		"solace-ca":     existing("./certs/truststore.p12", "TS_PW_ENV"),
+		"solace-client": {Password: "s3cr3t-literal", Existing: &spec.StoreExisting{PKCS12: "./certs/keystore.p12"}},
 	})
 	var stores []string
 	var creds []spec.Cred
@@ -132,7 +153,7 @@ func TestSolacePropsStorePasswordIsPlaceholderNeverLiteral(t *testing.T) {
 // Nothing selected -- or a name nothing defines -- writes nothing and records
 // no password: validate reports the undefined name.
 func TestSolacePropsSkipsSecretRefWhenNothingSelected(t *testing.T) {
-	d := defaults(map[string]*spec.Store{"solace-ca": {File: "./t.jks", PasswordEnv: "TS_PW"}})
+	d := defaults(map[string]*spec.Store{"solace-ca": existing("./t.p12", "TS_PW")})
 	calls := 0
 	rec := func(store string, c spec.Cred) string { calls++; return "${" + store + "}" }
 	for _, sel := range []Selection{{}, {Truststore: "nope", Keystore: "nope"}} {
@@ -152,8 +173,8 @@ func TestSolacePropsSkipsSecretRefWhenNothingSelected(t *testing.T) {
 // the alias is written only when one picks a key.
 func TestSolacePropsWritesNoValidationPolicy(t *testing.T) {
 	d := defaults(map[string]*spec.Store{
-		"ca":     {File: "./t.jks", PasswordEnv: "TS_PW", Type: "JKS"},
-		"client": {File: "./k.jks", PasswordEnv: "KS_PW", Type: "JKS"},
+		"ca":     existing("./t.p12", "TS_PW"),
+		"client": existing("./k.p12", "KS_PW"),
 	})
 	for _, c := range []struct {
 		name string
@@ -180,30 +201,34 @@ func TestSolacePropsWritesNoValidationPolicy(t *testing.T) {
 	}
 }
 
-// A store without a type omits its FORMAT key, leaving the Solace API's own
-// default, instead of rendering a bare null.
-func TestSolacePropsOmitsFormatWhenTypeEmpty(t *testing.T) {
+// Every store is PKCS12 -- created ones are built as one, existing ones must
+// be one -- so both FORMAT keys always say so, never left to JCSMP's default.
+func TestSolacePropsAlwaysWritePKCS12(t *testing.T) {
 	d := defaults(map[string]*spec.Store{
-		"ca":     {File: "./t.jks", PasswordEnv: "TS_PW"},
-		"client": {File: "./k.jks", PasswordEnv: "KS_PW"},
+		"ca":     existing("./t.p12", "TS_PW"),
+		"client": existing("./k.p12", "KS_PW"),
 	})
-	got := SolaceProps(d, Selection{Truststore: "ca", Keystore: "client", KeyAlias: "a"}, false, placeholderSecretRef)
-	if want := "SSL_TRUST_STORE,SSL_TRUST_STORE_PASSWORD,SSL_KEY_STORE,SSL_KEY_STORE_PASSWORD,SSL_PRIVATE_KEY_ALIAS"; keys(got) != want {
-		t.Errorf("keys = %s, want %s", keys(got), want)
+	got := map[string]string{}
+	for _, kv := range SolaceProps(d, Selection{Truststore: "ca", Keystore: "client"}, false, placeholderSecretRef) {
+		got[kv.Key] = kv.Val
+	}
+	if got["SSL_TRUST_STORE_FORMAT"] != "PKCS12" || got["SSL_KEY_STORE_FORMAT"] != "PKCS12" {
+		t.Errorf("formats = %q / %q, want PKCS12", got["SSL_TRUST_STORE_FORMAT"], got["SSL_KEY_STORE_FORMAT"])
 	}
 }
 
-// A selected store without a file is not wired (validate refuses it), and its
-// password position is never recorded.
-func TestSolacePropsSkipsStoreWithoutFile(t *testing.T) {
+// A selected store that is not configured -- no source, or an existing block
+// without a path -- is not wired (validate refuses it), and its password
+// position is never recorded.
+func TestSolacePropsSkipsUnconfiguredStore(t *testing.T) {
 	d := defaults(map[string]*spec.Store{
-		"ca":     {PasswordEnv: "TS_PW", Type: "JKS"},
-		"client": {PasswordEnv: "KS_PW", Type: "JKS"},
+		"ca":     {PasswordEnv: "TS_PW"},
+		"client": {PasswordEnv: "KS_PW", Existing: &spec.StoreExisting{}},
 	})
 	calls := 0
 	rec := func(store string, c spec.Cred) string { calls++; return "${" + store + "}" }
 	if got := SolaceProps(d, Selection{Truststore: "ca", Keystore: "client", KeyAlias: "a"}, true, rec); len(got) != 0 {
-		t.Errorf("SolaceProps with file-less stores = %v, want empty", got)
+		t.Errorf("SolaceProps with unconfigured stores = %v, want empty", got)
 	}
 	if calls != 0 {
 		t.Errorf("secretRef called %d times, want 0", calls)

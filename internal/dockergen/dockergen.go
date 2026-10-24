@@ -13,6 +13,7 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/storescript"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/yamlwriter"
 )
 
@@ -40,6 +41,20 @@ type Mount struct {
 	Target string // absolute container path
 }
 
+// CreatedStore is a created store the service carries: its tls.stores name,
+// and the compose secret -- read from the environment variable of the same
+// name -- its base64-encoded bytes travel in.
+type CreatedStore struct {
+	Name   string
+	Secret string
+}
+
+// StoresDigestVar is the environment variable compose fills the
+// spec.LabelStoresDigestKey label from: deploy sets it to the sha256 of the
+// created stores, so a changed store changes the service and compose recreates
+// the container.
+const StoresDigestVar = "_GEN_TLS_STORES_SHA256"
+
 // Input is everything the compose renderer needs. The caller resolves stores/libs
 // to host bind mounts and reduces credentials to their stable names before
 // calling.
@@ -51,8 +66,12 @@ type Input struct {
 	// entry rather than a file on disk.
 	Syslog  *spec.Syslog
 	Secrets []string // stable secret names; nil/empty when there are no credentials
-	Stores  []Mount  // .jks bind mounts (read-only); nil/empty when no stores
+	Stores  []Mount  // existing stores' bind mounts (read-only); nil/empty when none
 	Libs    *Mount   // libs dir bind mount (read-only); nil when no libs
+	// Created are the created stores the service carries, decoded at every
+	// start by the storescript entrypoint; nil when none, and then nothing
+	// about the service changes.
+	Created []CreatedStore
 }
 
 // yw is the indentation-aware line writer used by every renderer here.
@@ -83,8 +102,15 @@ func Render(in Input) string {
 	if in.Syslog != nil {
 		renderContentConfig(w, in.Instance.Name+"-logback", logback.XML(in.Syslog.Protocol))
 	}
+	if len(in.Created) > 0 {
+		renderContentConfig(w, in.Instance.Name+"-stores-init", storescript.Render())
+	}
 
-	renderSecrets(w, in.Secrets)
+	secrets := append([]string(nil), in.Secrets...)
+	for _, c := range in.Created {
+		secrets = append(secrets, c.Secret)
+	}
+	renderSecrets(w, secrets)
 
 	return w.String()
 }
@@ -115,6 +141,13 @@ func renderService(w *yw, in Input, inst Instance) {
 	w.Line(2, inst.Name+":")
 	w.Line(4, "image: "+inst.Image)
 	w.Line(4, "container_name: "+inst.Name)
+	// A service carrying created stores starts through the storescript, which
+	// decodes them and then execs the image's own command, handed over here --
+	// setting entrypoint: drops the image's CMD too.
+	if len(in.Created) > 0 {
+		w.Line(4, "entrypoint: "+flowList([]string{storescript.Shell, storescript.ContainerPath}))
+		w.Line(4, "command: "+flowList(storescript.Command()))
+	}
 	// labels: le-mode is always set; role: active only for standalone and
 	// active_active -- an active_standby role is only knowable live from the
 	// actuator, so it is never asserted statically here.
@@ -126,6 +159,11 @@ func renderService(w *yw, in Input, inst Instance) {
 	w.Line(6, spec.LabelModeKey+": "+mode)
 	if mode == spec.LeaderStandalone || mode == spec.LeaderActiveActive {
 		w.Line(6, spec.LabelRoleKey+": "+spec.LabelRoleActive)
+	}
+	// Left for compose to interpolate from deploy's environment: the stores
+	// are not in this file, so their digest cannot be either.
+	if len(in.Created) > 0 {
+		w.Line(6, spec.LabelStoresDigestKey+": ${"+StoresDigestVar+"}")
 	}
 	if d.Restart != "" {
 		w.Line(4, "restart: "+d.Restart)
@@ -179,11 +217,18 @@ func renderService(w *yw, in Input, inst Instance) {
 	// at compose's own /run/secrets/<name> with no way to say otherwise, and
 	// /run/secrets is exactly the directory this tool had to move off (see
 	// spec.SecretsMountPath). An absolute target is what compose takes instead.
-	if len(in.Secrets) > 0 {
+	//
+	// A created store lands encoded beside them, under its store name in
+	// spec.EncodedStoresMountPath, for the storescript to decode.
+	if len(in.Secrets) > 0 || len(in.Created) > 0 {
 		w.Line(4, "secrets:")
 		for _, n := range in.Secrets {
 			w.Line(6, "- source: "+n)
 			w.Line(8, "target: "+spec.SecretsMountPath+"/"+n)
+		}
+		for _, c := range in.Created {
+			w.Line(6, "- source: "+c.Secret)
+			w.Line(8, "target: "+spec.EncodedStoresMountPath+"/"+c.Name)
 		}
 	}
 	// configs: the inlined application.yml and status script, plus the logback
@@ -200,6 +245,20 @@ func renderService(w *yw, in Input, inst Instance) {
 	if in.Syslog != nil {
 		w.Line(6, "- source: "+inst.Name+"-logback")
 		w.Line(8, "target: "+logback.ContainerPath)
+	}
+	if len(in.Created) > 0 {
+		w.Line(6, "- source: "+inst.Name+"-stores-init")
+		w.Line(8, "target: "+storescript.ContainerPath)
+		// The decoded stores live in memory, owned by the identity the
+		// connector runs as and closed to everyone else; the existing stores
+		// bind-mounted below land inside it, the engine mounting the
+		// directory first.
+		opts := "mode=0700"
+		if !inst.RunAs.Image {
+			opts += ",uid=" + strconv.Itoa(inst.RunAs.UID) + ",gid=" + strconv.Itoa(inst.RunAs.GID)
+		}
+		w.Line(4, "tmpfs:")
+		w.Line(6, "- "+spec.DefaultStoresMountPath+":"+opts)
 	}
 	renderHealthcheck(w)
 	// volumes: stores first, then libs; omit the key when there are neither.
@@ -240,6 +299,17 @@ func renderHealthcheck(w *yw) {
 
 // seconds spells a duration the way compose wants it.
 func seconds(n int) string { return strconv.Itoa(n) + "s" }
+
+// flowList renders a list of fixed strings as a one-line YAML flow sequence of
+// double-quoted scalars, as the healthcheck's test: is written. Every value is
+// the tool's own constant, never an operator's, and holds no '$' or quote.
+func flowList(items []string) string {
+	q := make([]string, len(items))
+	for i, it := range items {
+		q[i] = `"` + it + `"`
+	}
+	return "[" + strings.Join(q, ", ") + "]"
+}
 
 // renderContentConfig emits one top-level configs entry inlining payload as a
 // block scalar under content: -- the application.yml and the status script are

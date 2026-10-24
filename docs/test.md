@@ -15,10 +15,12 @@ measure coverage with the `cov` task.
 - [internal/spec](#internalspec)
 - [internal/consolidate](#internalconsolidate)
 - [internal/tls](#internaltls)
+- [internal/storebuild](#internalstorebuild)
 - [internal/yamlwriter](#internalyamlwriter)
 - [internal/render](#internalrender)
 - [internal/logback](#internallogback)
 - [internal/statusscript](#internalstatusscript)
+- [internal/storescript](#internalstorescript)
 - [internal/deploy](#internaldeploy)
 - [internal/dockergen](#internaldockergen)
 - [internal/podmangen](#internalpodmangen)
@@ -48,7 +50,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 916 test functions, 1240 case rows across 18 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 965 test functions, 1363 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -127,7 +129,7 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestParseWorkflowAmbiguousSystemAndDest | solace and mq both set | HasSystem returns false when both systems present |
 | TestParseWorkflowAmbiguousSystemAndDest | queue and topic both set | DestKind is empty string when queue+topic ambiguous |
 | TestParseWorkflowSyntaxError | - | malformed yaml returns non-nil error |
-| TestParseDefaultsFull | - | parses named tls stores (mq-ca, mq-client), management port 8090 with exposure health (not a configurable key, but parsed anyway so validate can reject it), security enabled false with 1 user, leader-election standalone, logging/solace-defaults nodes captured |
+| TestParseDefaultsFull | - | parses named tls stores (mq-ca, mq-client) naming their existing PKCS12, management port 8090 with exposure health (not a configurable key, but parsed anyway so validate can reject it), security enabled false with 1 user, leader-election standalone, logging/solace-defaults nodes captured |
 | TestParseSecurityUserRoles | absent / one / several | security.users[].roles parses to no roles (the connector's read-only default), a single role, and several in authored order |
 | TestParseDefaultsSecurityEnabledKeyOmittedStaysNil | - | security.enabled is not a configurable key: an omitted key parses to Security.Enabled nil rather than being defaulted |
 | TestParseDefaultsEmpty | - | empty input yields a zero-valued Management (Management{}), Security.Enabled nil with no users, and TLS.Truststore nil |
@@ -170,6 +172,7 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestExpandDefaultVarSetUsesValue | - | `${VPN:fallback}` uses the looked-up value when VPN is set |
 | TestExpandDefaultVarUnsetUsesDefault | - | `${VPN:fallback}` falls back to the default when VPN is unset |
 | TestExpandUnsetNoDefaultPassesThroughWithWarning | - | unset defaultless `${TYPO}` passes through verbatim and Warn is called exactly once naming TYPO |
+| TestExpandStorePathsNotPasswordsOrAliases | - | a store's paths expand -- existing.pkcs12, every certs file, the key entry's cert, chain and key, the jks -- while password, password-env and a certs alias stay as written |
 | TestExpandBareDollarVarUntouched | - | bare `$VPN` (no braces) is left untouched even though VPN is set |
 | TestExpandCredentialFieldLeftAlone | - | Side.Password/PasswordEnv (`expand:"no"`) never expand |
 | TestExpandYAMLNodePassthroughLeftAlone | - | a `*yaml.Node` field (APIProps) is never walked or rewritten |
@@ -205,16 +208,25 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestMisplacedWorkflowTransforms | - | a transform-header: typo, the legacy transform-payload section (either spelling), and transform or transform-headers under a side, its solace:/mq: block (also when that block is an alias and the key reaches it through a << merge), or that block's consumer:/producer: are each reported as the dotted path they were found at, in file order, while both top-level blocks still parse |
 | TestMisplacedEnvTransforms | - | every transform key in env.yaml (transform included) -- top level, a connection, or the connection's solace:/mq: block -- is reported, identically through ParseEnv and ParseDefaults, and a clean or empty env.yaml reports none |
 | TestParseEnvTopLevelSyslog | present / absent | logging.syslog parses beside logging.level at the top level, protocol defaults to udp, and an absent block stays nil (presence is what turns syslog on) |
-| TestStoreHasFile | nil | a nil store is not configured |
-| TestStoreHasFile | no file | a block with a password and type but no file is not configured |
-| TestStoreHasFile | file | a block naming a file is configured |
+| TestStoreConfigured | nil | a nil store is not configured |
+| TestStoreConfigured | no source | a block with only a password is not configured |
+| TestStoreConfigured | existing without a path | an existing block naming no PKCS12 is not configured |
+| TestStoreConfigured | existing | an existing PKCS12 is configured, and Path is it |
+| TestStoreConfigured | created | a created store is configured, Created, and has no Path |
 | TestTLSConfigStoreLookup | - | an empty or undefined store name is no store, and StoreNames lists the defined names sorted |
 | TestParseTLSIsStrict | retired truststore | tls.truststore is an error naming tls.stores and the per-connection selectors |
 | TestParseTLSIsStrict | retired keystore | tls.keystore is the same error |
 | TestParseTLSIsStrict | unknown key | any other key under tls: is an error |
-| TestParseTLSIsStrict | unknown store key | a key a store does not take (passwrd-env) is an error naming tls.stores.<name>.<key>; a valid store and one written with no block both parse |
-| TestParseTLSIsStrict | not a mapping | tls: as a list is an error |
-| TestParseTLSIsStrict | stores not a mapping | tls.stores as a list is an error |
+| TestParseTLSIsStrict | retired file | a store's file: is an error naming existing: {pkcs12: <file>} and create: |
+| TestParseTLSIsStrict | retired type | so is its type: |
+| TestParseTLSIsStrict | unknown store key | a key a store does not take (passwrd-env) is an error naming tls.stores.<name>.<key> |
+| TestParseTLSIsStrict | existing not a mapping / unknown existing key | existing: must be a mapping holding only pkcs12 |
+| TestParseTLSIsStrict | create not a mapping / unknown create key | create: must be a mapping holding only certs, keys and jks |
+| TestParseTLSIsStrict | certs a scalar | certs must be a list or a map |
+| TestParseTLSIsStrict | keys a mapping / key entry a scalar / unknown key-entry key / chain a scalar | keys is a list of mappings holding only cert, chain and key, and chain is a list |
+| TestParseTLSIsStrict | not a mapping / stores not a mapping | tls: and tls.stores as lists are errors; a valid store and one written with no block both parse |
+| TestParseCreateBlock | - | certs decode as a list (in order, unnamed) or a map (in written order, named), one key entry with its chain, a jks; a create: with nothing in it is no create block |
+| TestStoreKeyListsAreSorted | - | the store, create, key-entry and existing key lists come back sorted, for the generator page to be checked against |
 
 ## internal/consolidate
 
@@ -261,7 +273,7 @@ Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [cons
 | TestAppendPassthroughCollision | passthrough T collides with existing T | output has 2 props and 1 collision warning reading `binder "bndr": passthrough overrides tool-managed key "T"; tool value kept` byte for byte, since the owner label is caller-supplied now |
 | TestNodeToProps | mapping with scalar and nested keys | 2 props, first key k1/val v1, second has Sub set |
 | TestNodeToProps | nil node | nodeToProps returns nil |
-| TestBuildMQmTLSBundle | mq TLS side selecting mq-ca and mq-client with keyAlias plus a solace target selecting mq-ca | MQTLS true, 1 bundle with truststore and keystore, KeyAlias mc, KeystoreTyp PKCS12, TruststoreTyp JKS; Stores lists mq-ca then mq-client (Private); the shared mq-ca password is one secret |
+| TestBuildMQmTLSBundle | mq TLS side selecting mq-ca and mq-client with keyAlias plus a solace target selecting mq-ca | MQTLS true, 1 bundle with truststore and keystore, KeyAlias mc, both typed PKCS12; Stores lists mq-ca (Trusted) then mq-client (Private); the shared mq-ca password is one secret |
 | TestBuildCipherConflictWarning | two mq sources with different ciphers C1/C2 | warnings contain conflicting cipher |
 | TestBuildMessageLoopWarning | same side used as source and target dest `SAME` | warnings contain message loop |
 | TestBuildSolaceTopicSourceEmitsConsumerTopic | solace topic source -> mq queue target | input-0 solace binding is consumer with DestType topic; consolidate renders whatever it is given, so this stays covered even though validate now rejects the combination |
@@ -290,8 +302,9 @@ Tests: [consolidate_test.go](../internal/consolidate/consolidate_test.go), [cons
 | TestEnvCredentialsShareOneMountName | two binders, one -env variable | two positions naming the same host variable dedup to a single SecretRef and record no conflict |
 | TestSecretNameConflictIsRecorded | security.users "ops.1" and "ops-1" | two derived names folding to one via stableToken -- the collision that survives the reserved prefix; Model.SecretConflicts records the key plus both positions, and the first credential still wins the name so the model stays deterministic |
 | TestBuildSolaceBinderPassesValidateCertificateThrough | - | a conn-ref Solace binder and its leader-election session, selecting the store MQ uses, carry the store wiring then the connection's own SSL_VALIDATE_CERTIFICATE: false, with no collision warning; the MQ bundle is unchanged and the shared store's password is one secret |
-| TestBuildSeparateStoresPerConnection | - | MQ and Solace each wired to the stores they select (Solace trust + client store, MQ trust only, the session its own pair); Model.Stores lists every selected store once in first-use order, Private when used as a keystore anywhere; each store password is its own secret; an MQ binder selecting nothing gets no bundle and no warning; an unselected store is never referenced |
+| TestBuildSeparateStoresPerConnection | - | MQ and Solace each wired to the stores they select (Solace trust + client store, MQ trust only, the session its own pair); Model.Stores lists every selected store once in first-use order, Trusted when used as a truststore and Private when used as a keystore anywhere -- mq-ca is both; each store password is its own secret; an MQ binder selecting nothing gets no bundle and no warning; an unselected store is never referenced |
 | TestBuildMQKeystoreOnlyBundle | - | an MQ binder selecting only a keystore gets a bundle with the client certificate and alias and no truststore section, and the store is listed Private |
+| TestBuildCreatedStores | - | a created store is listed Created and Trusted with no File, wired at its mount path in deploy mode, and at no path in config mode, which gen.Config refuses |
 
 ## internal/tls
 
@@ -304,11 +317,12 @@ Tests: [tls_test.go](../internal/tls/tls_test.go)
 | TestMountPathIsPerStore | mq-ca | MountDir/mq-ca, whatever the file is called |
 | TestMountPathIsPerStore | solace-client | MountDir/solace-client, so two stores never share a path |
 | TestSolacePropsUseStoreMountPaths | - | mount=true sets SSL_TRUST_STORE and SSL_KEY_STORE to MountDir/solace-ca and MountDir/solace-client, the selected stores' names, though both files are named store.p12 and written with backslashes |
-| TestStorePathConfigVsDeploy | mq-ca, mount=false | StorePath returns the raw path ./certs/t.jks unchanged |
+| TestSolacePropsWireACreatedStoreAtItsMountPath | - | a created store, having no file, is wired at MountDir/<name> with PKCS12 and its password placeholder |
+| TestStorePathConfigVsDeploy | mq-ca, mount=false | StorePath returns the raw path ./certs/t.p12 unchanged |
 | TestStorePathConfigVsDeploy | mq-client, mount=false | a backslash path is kept exactly as written |
 | TestStorePathConfigVsDeploy | mq-ca, mount=true | MountDir/mq-ca from backslash input |
-| TestStorePathConfigVsDeploy | mq-client, mount=true | MountDir/mq-client even for a file named t.jks |
-| TestSolacePropsRawPathWhenNotMounted | - | mount=false keeps SSL_TRUST_STORE as raw ./certs/truststore.jks path |
+| TestStorePathConfigVsDeploy | mq-client, mount=true | MountDir/mq-client even for a file named t.p12 |
+| TestSolacePropsRawPathWhenNotMounted | - | mount=false keeps SSL_TRUST_STORE as the existing store's raw ./certs/truststore.p12 path |
 | TestSolacePropsStorePasswordIsPlaceholderNeverLiteral | - | store passwords reach api-properties only as the placeholder secretRef returns; secretRef gets each selected store's own name and credential, and no literal or env-var name leaks into any value |
 | TestSolacePropsSkipsSecretRefWhenNothingSelected | - | no selection, or names nothing defines, emits nothing and never calls secretRef |
 | TestSolacePropsWritesNoValidationPolicy | none | no stores: no keys |
@@ -316,8 +330,79 @@ Tests: [tls_test.go](../internal/tls/tls_test.go)
 | TestSolacePropsWritesNoValidationPolicy | keystore without alias | a keystore alone presents its certificate: SSL_KEY_STORE, _PASSWORD, _FORMAT, no alias |
 | TestSolacePropsWritesNoValidationPolicy | keystore with alias | SSL_KEY_STORE, _PASSWORD, _FORMAT, SSL_PRIVATE_KEY_ALIAS |
 | TestSolacePropsWritesNoValidationPolicy | both with alias | truststore keys then keystore keys, no validation policy |
-| TestSolacePropsOmitsFormatWhenTypeEmpty | - | a store without a type writes no SSL_TRUST_STORE_FORMAT / SSL_KEY_STORE_FORMAT |
-| TestSolacePropsSkipsStoreWithoutFile | - | file-less store blocks are not wired and their passwords are never recorded |
+| TestSolacePropsAlwaysWritePKCS12 | - | both FORMAT keys are always PKCS12 -- every store is one |
+| TestSolacePropsSkipsUnconfiguredStore | - | a store with no source, or an existing block without a path, is not wired and its password is never recorded |
+
+## internal/storebuild
+
+Build created PKCS12 stores in memory -- a truststore from certificate files or a JKS's trusted entries, a keystore from one key and its chain -- deterministically, marked for Java, and without secrets in any message.
+
+Tests: [storebuild_test.go](../internal/storebuild/storebuild_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestTruststoreFromCertsList | - | a certs list numbers every certificate of a PEM file and a DER file ca-1..ca-3, warns about nothing, and DecodeTrustStore -- which accepts only certificates carrying Java's trusted-cert attribute -- returns the three in order |
+| TestTruststoreNamedAliases | - | a named map aliases each certificate by its name, numbers a second certificate in the same file (roots, roots-2), and reports the alias Java will list, lower-cased (issuing) |
+| TestTruststoreAliasCollision | - | two names differing only in case are one Java alias: an error naming both files, not a silently lost certificate |
+| TestTruststoreWarnings | a self-signed leaf is pinned | warns that it is trusted as-is, so only that exact certificate is accepted |
+| TestTruststoreWarnings | expired | warns that it expired, and still builds |
+| TestTruststoreWarnings | expiring | warns that it expires within 30 days |
+| TestTruststoreWarnings | repeated | the same certificate twice is kept once, with a warning |
+| TestTruststoreWarnings | a key beside the certificates | a private key in a certs file is left out, with a warning |
+| TestTruststoreRejects | not a certificate | error naming tls.stores.ca.create.certs[0] (./junk.txt): no certificate |
+| TestTruststoreRejects | only a key | a file holding only a private key has no certificate |
+| TestTruststoreRejects | a broken certificate | certificate 1 does not parse |
+| TestTruststoreRejects | no source | no certificate to trust |
+| TestKeystoreFromPEMChain | - | the leaf is found by its key among the cert file's certificates, the chain is ordered issuing then root across files, the one key entry is reported as alias 1, and DecodeChain returns the leaf, [issuing, root] and the key |
+| TestKeystoreKeyEncodings | PKCS#8 PEM | builds |
+| TestKeystoreKeyEncodings | SEC1 PEM | builds |
+| TestKeystoreKeyEncodings | PKCS#1 PEM | builds (RSA) |
+| TestKeystoreKeyEncodings | PKCS#8 DER | builds |
+| TestKeystoreKeyEncodings | PKCS#1 DER | builds (RSA), after PKCS#8 fails to parse it |
+| TestKeystoreKeyEncodings | SEC1 DER | builds, after PKCS#8 and PKCS#1 fail to parse it |
+| TestKeystoreKeyEncodings | one file with the certificate and the key | the same file serves as cert and key |
+| TestKeystoreRejects | encrypted PKCS#8 | error: an encrypted private key cannot be read, with the decrypt remedy |
+| TestKeystoreRejects | legacy encrypted PEM | a Proc-Type: 4,ENCRYPTED block gets the same error |
+| TestKeystoreRejects | two keys | more than one private key |
+| TestKeystoreRejects | no key | a key file holding only certificates has no private key |
+| TestKeystoreRejects | a broken key | the private key does not parse |
+| TestKeystoreRejects | a key of another certificate | no certificate matches the key, naming the cert and key positions and files |
+| TestKeystoreRejects | an expired certificate | an expired leaf is an error: the peer refuses it |
+| TestKeystoreRejects | an X25519 key | a key that cannot sign is not supported, naming its type |
+| TestKeystoreWarnings | - | a certificate outside the leaf's chain is left out with a warning, a not-yet-valid leaf is reported but built, and the chain holds only issuing and root |
+| TestJKSTrustedEntriesBecomeATruststore | - | a JKS of trusted certificates becomes a truststore keeping its aliases, in alias order |
+| TestJKSSingleKeyBecomesAKeystore | - | a JKS holding exactly one key becomes a keystore with that key's leaf and two-certificate chain |
+| TestJKSRejects | trusted and a key | error listing every alias by kind: a created store is a truststore or one key |
+| TestJKSRejects | two keys | two keys are refused the same way |
+| TestJKSRejects | empty | a JKS with no entries |
+| TestJKSRejects | another password | the JKS integrity check fails: the store's own password must open it |
+| TestJKSRejects | a key with its own password | the key does not open with the store password, with the keytool -keypasswd remedy |
+| TestJKSRejects | JCEKS | JCEKS magic: not readable here, with the keytool conversion |
+| TestJKSRejects | already PKCS12 | PKCS12 bytes under create.jks: name the file with existing: {pkcs12: <file>} |
+| TestJKSRejects | not a keystore | anything else is not a JKS |
+| TestJKSRejects | truncated | a JKS cut short is not readable |
+| TestJKSRejects | a key that is not its certificate's | a key entry whose key does not match its chain's first certificate |
+| TestJKSRejects | a key without a certificate | a key entry with no certificate |
+| TestJKSRejects | a non-X.509 entry | an entry of another certificate type is named, with its type |
+| TestJKSRejects | a damaged certificate | an entry whose certificate does not parse is named |
+| TestCertsWithJKS | - | certs plus a JKS's trusted entries make one truststore (ca-1, legacy); a JKS holding a key cannot join a truststore, nor one the store password does not open |
+| TestKeystoreRejectsBrokenFiles | the cert file | a cert file holding no certificate is named by its own position |
+| TestKeystoreRejectsBrokenFiles | a chain file | so is a chain file |
+| TestKeystoreLeafWithoutItsIssuer | - | a leaf given without its issuer builds with an empty chain -- the peer may already hold the intermediate |
+| TestPasswordOutsideBMP | truststore | a password outside the Basic Multilingual Plane cannot be encoded (UCS-2): an error, not an unreadable file |
+| TestPasswordOutsideBMP | keystore | the same for a keystore |
+| TestReadBackError | no decoder error | a store that does not read back as built is reported as a bug |
+| TestReadBackError | a decoder error | the decoder's error is carried in the report |
+| TestBuildIsDeterministic | - | the same inputs and password encode to the same bytes, moving a source file changes nothing, and another password or another certificate changes the bytes |
+| TestBuildNeedsPasswordAndBoundedSources | - | an empty password is an error, and so is a source over 1 MiB, naming its position and size |
+| TestGuardTurnsPanicIntoError | - | a library panic becomes an error naming the store and the panic's type, never its value |
+| TestErrorsCarryNoSecrets | - | a key mismatch, a wrong JKS password and a key-only certs file fail without the password or the key's bytes in the message |
+| TestSubjectIsPrintable | - | control characters in a certificate subject are replaced before printing |
+| TestSniff | JKS / JCEKS / PKCS12 | FEEDFEED, CECECECE and a DER SEQUENCE are told apart |
+| TestSniff | PEM text | text is unknown |
+| TestSniff | empty | no bytes are unknown |
+| TestJavaReadsBuiltStores | truststore | keytool lists the named entry as a trustedCertEntry (skipped when keytool is not on PATH) |
+| TestJavaReadsBuiltStores | keystore | keytool lists one PrivateKeyEntry aliased 1 -- the fact behind the key-alias rule for created keystores |
 
 ## internal/yamlwriter
 
@@ -371,7 +456,7 @@ Tests: [render_test.go](../internal/render/render_test.go)
 | TestApplicationKeystoreOnlyBundle | - | a binder selecting only a keystore renders a bundle with keystore and key.alias and no truststore section |
 | TestApplicationConfigImport | ConfigImport set / empty | Application() leads with spring.config.import when Model.ConfigImport is set, and omits the block entirely when it is empty |
 | TestApplicationSecurityUserRoles | - | a roles-bearing user renders a block-style roles sequence under its password; a role-less user and the reserved solmq-status account emit no roles key at all, keeping pre-roles output byte-identical |
-| TestApplicationOmitsEmptyStoreType | - | stores without a type render no bundle type line and no FORMAT api-properties, while locations, alias and SSL_TRUST_STORE still render |
+| TestApplicationWritesPKCS12Everywhere | - | the MQ bundle's truststore and keystore are both typed PKCS12 and both Solace FORMAT keys say PKCS12, with locations, alias and SSL_TRUST_STORE rendered |
 
 ## internal/logback
 
@@ -430,6 +515,17 @@ Tests: [statusscript_test.go](../internal/statusscript/statusscript_test.go)
 | TestHealthParseIsKeyOrderIndependent | pretty-printed | a document with every key on its own line reads the same as a compact one |
 | TestHealthParseIsKeyOrderIndependent | no components | a document without components (show-details off) reads its status and prints no rows |
 | TestHealthParseIsKeyOrderIndependent | no document | an empty answer prints nothing, which the healthcheck reports as unreachable |
+
+## internal/storescript
+
+Render the startup script a docker service carrying created stores starts through -- decode every base64 store into the in-memory store directory, then exec the image's own command -- and record that command.
+
+Tests: [storescript_test.go](../internal/storescript/storescript_test.go)
+
+| Test | Case | Verifies |
+|------|------|----------|
+| TestRenderDecodesEveryStoreThenExecs | - | the script stops on any failure, keeps the decoded stores to the connector's identity (umask 077), decodes each file of /app/external/var/stores through a temporary name into /app/external/classpath/truststores under its own name, and execs the command it is handed |
+| TestCommandIsTheImagesOwn | - | the script sits at /app/external/.stores-init, and Command is the image's entrypoint then its command, returned as a copy |
 
 ## internal/deploy
 
@@ -516,6 +612,9 @@ Tests: [dockergen_test.go](../internal/dockergen/dockergen_test.go)
 | TestRenderSyslogAddsConfigAndEnv | - | compose inlines the logback config as a third configs entry targeted at logback.ContainerPath, and sets the three LOGGING_SYSLOG_* env vars the config reads at runtime |
 | TestRenderSyslogTCPUsesTheLogstashAppender | - | the protocol reaches the inlined config: tcp renders the logstash appender, since the two have different classpath requirements and the wrong one fails at runtime rather than at generate time |
 | TestRenderWithoutSyslogEmitsNeither | - | no block, no config entry, no env vars |
+| TestRenderCreatedStores | - | a created store makes the service start through the storescript with the image's own command handed over, mounts the encoded store at /app/external/var/stores/<name> after the credentials, adds the script as a config (its $ doubled), a 0700 tmpfs owned by the run-as uid:gid and the stores label filled from ${_GEN_TLS_STORES_SHA256}, and declares the store a top-level environment secret after the credentials; an existing store is still bind-mounted |
+| TestRenderCreatedStoresRunAsImageAndNone | run-as image | the tmpfs names no uid or gid |
+| TestRenderCreatedStoresRunAsImageAndNone | no created store | no entrypoint, command, tmpfs, script, label or encoded mount appears |
 
 ## internal/podmangen
 
@@ -588,6 +687,9 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestPodmanRemoveStopsRemovesReloads | - | stop then daemon-reload called and unit file removed from disk |
 | TestPodmanDeployStartFailureIsReported | daemon-reload / start / restart | a failing daemon-reload stops at call 0; a failing start or restart (call 2, after daemon-reload and is-active) surfaces naming the verb, `systemctl start a.service` or `systemctl restart a.service`; nothing runs after the failure |
 | TestDockerUnknownAction | - | unknown action rejected, error returned, zero calls made |
+| TestDockerImageCommand | an image the engine has | one image inspect call returns the entrypoint and command |
+| TestDockerImageCommand | not pulled / one line / not json | an engine that cannot answer, or an answer that does not parse, leaves nothing to compare -- no error |
+| TestDockerImageCommand | unsafe command | rejected before anything runs |
 | TestPodmanRemoveStopFailureIsReported | - | stop failure surfaces error containing 'stop solmq-connector.service' |
 | TestPodmanSecretCreateRemovesThenCreatesValueOnStdin | - | PodmanSecretCreate issues rm `--ignore` then create with the value on stdin, never in argv |
 | TestPodmanSecretCreateSkipsCreateWhenRmFails | - | a failed rm surfaces an error naming it, and create never runs |
@@ -820,7 +922,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckContainerNameRejected | Bad_Name | rejected for both docker.name and podman.name |
 | TestCheckContainerNameRejected | valid-default-name | solmq-connector accepted with no docker.name error |
 | TestDockerPodmanTLSNeedsNoStoresOptIn | docker / podman | a workflow selecting a store with no stores: block warns about nothing, since every selected store is mounted (bind mounts on docker, the secret store on podman) |
-| TestContainerStorePathsGatedPerPlatform | docker | an unsafe character in tls.stores.ts.file, or a spaced directory, is rejected with no stores: block present, since docker bind-mounts the path itself |
+| TestContainerStorePathsGatedPerPlatform | docker | an unsafe character in tls.stores.ts.existing.pkcs12, or a spaced directory, is rejected with no stores: block present, since docker bind-mounts the path itself |
 | TestContainerStorePathsGatedPerPlatform | podman | neither the path nor the file name reaches the unit, which mounts each store under its name, so `$(evil)`, a spaced directory, ',', '%' and a space all pass |
 | TestContainerStorePathsGatedPerPlatform | kubernetes | the same path is not gated for kubernetes, which embeds the store content in a Secret rather than naming a host path |
 | TestRunAsCheckedOnEveryPlatform | kubernetes / docker / podman | the default, unset, image and a non-root id are quiet; a value outside the grammar is an error naming the section and the reason; uid 0 warns it runs as root, adding that it is host root on docker and podman, which use no user namespace |
@@ -837,7 +939,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestSelectsStores | conn-ref leader session selecting | so does the connection the management session conn-refs |
 | TestCheckContainerRestartUnsafe | newline in restart | docker.restart is rejected; image and timezone are top-level keys, covered by their own per-platform-rejection and charset tests |
 | TestCheckContainerRestartUnsafe | realistic value | on-failure:5 is accepted |
-| TestCheckContainerHostPathsUnsafe | newline in tls.stores.ts.file | docker's bind-mounted store path rejected |
+| TestCheckContainerHostPathsUnsafe | newline in tls.stores.ts.existing.pkcs12 | docker's bind-mounted store path rejected |
 | TestCheckContainerHostPathsUnsafe | space in libs.dir | podman.libs.dir rejected |
 | TestCheckContainerHostPathsUnsafe | windows paths | `C:\certs\...` store paths and `C:\libs` accepted (backslash and colon permitted) |
 | TestCheckKubeSecretNames | cred existing bad | non-DNS-1123 credentials existing rejected |
@@ -904,7 +1006,21 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestValidatePostureSession | standalone session is not a site | an unrendered inline session reports nothing |
 | TestValidatePostureSession | session off, sides validate | the session's false warns, and its divergence from the workflow sides on its tuple warns |
 | TestValidatePostureSession | sides off, session validates | the reverse divergence warns too |
-| TestStoreBlockWithoutFile | - | a store without a file -- a block without one, or a name with no block -- is an error naming the store; stores with files are accepted |
+| TestStoreDefinitions | no block / no source | a store with neither create: nor existing: is an error naming both |
+| TestStoreDefinitions | both | create: and existing: together is an error |
+| TestStoreDefinitions | existing without a path | existing.pkcs12 empty is an error |
+| TestStoreDefinitions | created without a password | a created store needs its own password: it is encrypted with it |
+| TestStoreDefinitions | created from nothing | a create: naming no source is an error |
+| TestStoreDefinitions | certs and a key / a jks and a key | trusted certificates and a key in one store are an error: a truststore or a keystore |
+| TestStoreDefinitions | two keys | more than one key entry is an error: one store per identity |
+| TestStoreDefinitions | a key entry without its key | a key entry needs cert and key |
+| TestStoreDefinitions | an empty chain file / an empty certs entry / an empty named entry | an empty path is an error naming its position |
+| TestStoreDefinitions | an empty alias / an alias twice | a named map needs every alias, unique ignoring case |
+| TestStoreDefinitions | well-formed | existing, a certs list, a named map, one key entry with its chain, a jks alone and certs with a jks are all accepted |
+| TestCreatedStoreSelections | a key store as truststore | a store created from a key selected as truststore is an error |
+| TestCreatedStoreSelections | a certificate store as keystore | a store created from certificates selected as keystore is an error |
+| TestCreatedStoreSelections | a key-alias on a created keystore | key-alias on a created keystore is an error: its one key needs no alias (Java names it 1) |
+| TestCreatedStoreSelections | fitting roles | roles that fit pass, and a jks-only store's role is left to deploy |
 | TestUnusedStoreWarns | - | a store nothing selects warns that it is not mounted; one a connection selects (even an unused connection) does not |
 
 ## internal/examples
@@ -921,6 +1037,7 @@ Tests: [examples_test.go](../internal/examples/examples_test.go)
 | TestWriteMkdirError | - | Write returns error when target dir path is under a regular file |
 | TestShippedExamplesGenerateConfig | - | embedded example set written to disk generates config via gen.Config with no errors and at least one non-empty rendered application.yml |
 | TestEnvExtraKeysExampleValidWhenUncommented | - | uncommenting the other-key examples shipped in env.yaml (two connection lines and the mq-defaults block) still generates with no finding about them, and each key lands under its binder |
+| TestEnvCreatedStoreExamplesValidWhenUncommented | - | uncommenting the created-store examples shipped in env.yaml (a certs list, a certs map, a key entry, a jks) still validates with no error, each store read and reported only as not selected |
 | TestWorkflow0TransformExampleValidWhenUncommented | - | uncommenting the transform example shipped in workflow-0.yaml still generates, with no transform finding and the block rendered under workflow 0, so the example a new user copies cannot rot |
 | TestWorkflowExamplesMatchGoldenSpecs | workflow-0..3 | the four workflow files are byte-identical to testdata/golden/specs (go:embed cannot share one copy); env.yaml is excluded, it diverges on purpose |
 
@@ -928,14 +1045,14 @@ Tests: [examples_test.go](../internal/examples/examples_test.go)
 
 Orchestrate parse -> validate -> consolidate -> render, resolve credentials/stores, and assert the byte-for-byte golden fixtures.
 
-Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.go](../internal/gen/gen_runas_test.go), [golden_test.go](../internal/gen/golden_test.go), [htmlgolden_test.go](../internal/gen/htmlgolden_test.go), [imagepull_test.go](../internal/gen/imagepull_test.go)
+Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.go](../internal/gen/gen_runas_test.go), [golden_test.go](../internal/gen/golden_test.go), [htmlgolden_test.go](../internal/gen/htmlgolden_test.go), [imagepull_test.go](../internal/gen/imagepull_test.go), [stores_test.go](../internal/gen/stores_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
 | TestParseExpandsNonCredentialAndWarnsOnUnsetDefaultless | - | parse() expands host/msg-vpn from Lookup, leaves client-password-env verbatim, and returns exactly one warning naming TYPO for the unset defaultless conn-name variable |
 | TestResolveStores | two selected stores with ReadFile | resolves 2 store files keyed by store name, in Model.Stores order |
 | TestResolveStores | no ReadFile provided | missing ReadFile returns error |
-| TestResolveStores | ReadFile returns error | read error propagates, naming tls.stores.<name>.file and the path |
+| TestResolveStores | ReadFile returns error | read error propagates, naming tls.stores.<name>.existing.pkcs12 and the path |
 | TestResolveStores | no stores selected | nil stores yields 0, no error |
 | TestResolveStores | over the Secret limit | a set over the 1 MiB a Kubernetes Secret holds, once base64-encoded, is an error naming each store's size |
 | TestToIssues | - | toIssues wraps each string into an Issue carrying it as Msg |
@@ -943,7 +1060,25 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestPodmanUnitStoreSecrets | - | the store secrets a previous unit mounts are its own Secret= lines with the container's store prefix -- not a credential, a document, an empty store name or another instance's store; no unit gives none |
 | TestResolvePodmanFiles | document / binary store / 511999 bytes | a document passes through as rendered, a store is read byte for byte (NUL, CR and non-UTF-8 included), and 511999 bytes is accepted |
 | TestResolvePodmanFiles | missing / no file access / empty / 512000 bytes / empty document | each fails before anything is loaded, naming the field and path (wrapping the read error) and never the content |
-| TestTargetMounts | selected stores + libs | 2 store mounts at MountDir/<store name>, each named tls.stores.<name>.file, the keystore Private (carried into HostMount), and a libs mount whose source is the resolved abs host dir and whose target is the fixed default libs path |
+| TestBuildStore | - | a created store is read through the resolver and built with the password from the environment; DecodeTrustStore reads it, and the expiring certificate comes back as an env.yaml warning |
+| TestBuildStoreReadsEverySourceByPosition | key entry with chain | a keystore built from cert, chain and key decodes with its leaf and chain |
+| TestBuildStoreReadsEverySourceByPosition | named certs / key cert / key / chain / jks | a missing source is named by its env.yaml position: create.certs.<alias>, keys[0].cert, keys[0].key, keys[0].chain[0], create.jks |
+| TestBuildStoreRejects | an unset / an empty password variable / no password / no environment access | each fails naming the variable or the missing password, never a value |
+| TestBuildStoreRejects | an unexpanded variable / no file access | a ${...} left in a path, or no file access, fails before anything is read |
+| TestBuildStoreRejects | a source the builder refuses | the builder's error propagates, naming the position and file |
+| TestBuildStoreRejects | a JKS key selected as truststore / a JKS truststore selected as keystore | a jks-only store whose content does not fit the role it is selected in fails at build |
+| TestBuildStoreRejects | not a created store | an existing store has nothing to build |
+| TestCreatedStoresOnEachPlatform | kubernetes | the stores Secret carries the built truststore, and an unchanged store renders the same manifest twice |
+| TestCreatedStoresOnEachPlatform | kubernetes, existing Secret | an existing stores Secret builds nothing: no source is read |
+| TestCreatedStoresOnEachPlatform | podman | the plan carries a trusted build with no source, and ResolvePodmanFiles builds the secret |
+| TestCreatedStoresOnEachPlatform | docker | the plan carries the store as a trusted docker store with no bind mount, the compose mounts its secret, and ResolveDockerStores returns its base64 -- the built truststore -- and a 64-hex digest that does not change while the store does not |
+| TestCreatedStoresOnEachPlatform | config | generate config refuses a created store by name |
+| TestCreatedStoreWarningsSurface | kubernetes / podman | a created store's expiry warning reaches the operator on both build paths |
+| TestResolveDockerStoresLimits | over the limit | a store whose base64 form would not fit one environment variable fails naming the store, its sizes, the limit and the host |
+| TestResolveDockerStoresLimits | a build failure | a store that does not build stops the deploy |
+| TestResolveDockerStoresLimits | no created store | no environment, no warning, no error |
+| TestDockerStorePlaceholders | - | remove's placeholders cover each created store's secret, named _GEN_TLS_<STORE>_STORE, and the digest -- never an existing store -- and a plan without created stores needs none |
+| TestTargetMounts | selected stores + libs | 2 store mounts at MountDir/<store name> -- a created store, having no host file, is skipped --, each named tls.stores.<name>.existing.pkcs12, the keystore Private (carried into HostMount), and a libs mount whose source is the resolved abs host dir and whose target is the fixed default libs path |
 | TestTargetMounts | no stores, no libs | yields nil,nil -- no selected store is the only way to get no store mounts |
 | TestResolveCredentials | nil refs | no kvs, no error |
 | TestResolveCredentials | literal + -env mix | literal ref passes through, -env ref reads from the resolver's environment |
@@ -1187,6 +1322,9 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 |------|------|----------|
 | TestHostReaderFollowsTheKernelsRule | 0600 / 0640 / 0604 / 0644 / 0044 x stranger / owner / group | a host file is judged as the kernel does: the owner bits for the owning uid, else the group bits for the group, else the other bits -- an owner with no owner bits cannot read however open the rest is |
 | TestMountChecksLabelEachPathByItsKey | store / keystore store / libs.dir / none | a plan's host mounts become checks labelled `<section> mounts <key>` at the plan's path, a store used as a keystore judged as a private key, libs.dir as a directory and any other store as a public file; no mounts give no checks |
+| TestMissingStoreFiles | a present store / libs.dir | a store file that is there passes, and libs.dir is left to the engine |
+| TestMissingStoreFiles | missing | a missing store is refused, naming the key and path: docker would create an empty directory in its place |
+| TestMissingStoreFiles | a directory | a directory where the store belongs is refused too: an earlier deploy may have made it |
 | TestUnreadableMountsNamesWhatTheConnectorCannotRead | - | the deploy warning names a 0600 truststore, a 0600 keystore, a 0600 jar inside a readable libs dir and a 0700 libs dir, each with its mode, the run-as identity and a remedy for its kind -- o+r or the group for a truststore or jar, o+rx or the group for a directory, the group rather than everyone for a private key; readable files, non-jar files and missing paths are not named |
 | TestUnreadableMountsJudgesRootByTheModeBits | image / uid 0 | root -- the image's own under run-as image, or uid 0 -- gets no pass with every capability dropped: a 0600 file another uid owns is named, a 0644 one is not; the platform gate checks on linux only |
 | TestRootlessReaderSeesTheInvokersGroup | gid 0 / gid 1000 / uid 0 / image | rootless podman's non-zero uid owns no host file and its gid 0 is the invoker's group, so a 0640 jar is readable and a 0600 one is not; a non-zero gid maps to no host group; container root -- uid 0 or image -- is the invoking user and reads its own 0600 file |
@@ -1262,9 +1400,14 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestDeployDockerSeamChildEnvCarriesCredentials | - | preflight call carries no env; the real `up` call (index 1) carries the resolved literal and -env credentials as STABLE=value pairs |
 | TestDeployDockerWarnsAboutMountsTheConnectorCannotRead | - | linux only: a 0600 truststore and a 0600 jar under libs.dir, both written with ${VAR}s and owned by another uid and gid than the run-as ones, are each named on stderr at their expanded path with their mode, and the deploy still runs (preflight, then up) |
 | TestRemoveDockerSeam | - | exit 0, 2 runner calls (preflight then down) argv [docker compose -f <compose> down] |
+| TestDeployDockerCarriesCreatedStores | - | a docker deploy runs info, image inspect (an answer that does not parse is an image not pulled yet) and compose up, whose child environment -- never argv -- carries the built store base64-encoded under _GEN_TLS_TS_STORE and its digest |
+| TestDeployDockerRefusesAnImageStartingOtherwise | - | an image the engine reports starting another way fails the deploy naming both commands, after only info and image inspect, with no compose file written |
+| TestRemoveDockerNeedsNoCreatedStoreSources | - | remove succeeds with the store's source gone -- its password resolved like every declared credential -- handing compose placeholders for the store secret and the digest |
+| TestEnvVarMax | windows / linux / darwin | 32767 on Windows, 131072 elsewhere |
+| TestDeployDockerRefusesAMissingStoreFile | - | a docker deploy whose existing store is missing exits 1 naming it, before any runner call; remove still tears down |
 | TestDeployPodmanSeamWritesUnitsAndStarts | - | exit 0, a leading `podman info` preflight, `podman secret rm --ignore`/`create` per credential (the selected store's literal password included), then for application.yml, the selected store (its bytes on stdin, unchanged) and the status script, one batched `secret rm --ignore` of the unmounted logback secret and of the store secret the previous unit mounted but this spec no longer selects, then `systemctl daemon-reload`, `is-active` and `restart` (the fake reports the unit running); the `.container` unit (0644) is the only file written, and a leftover base-dir is not even created |
 | TestDeployPodmanRootlessWarnsAboutAnUnlistableLibsDir | - | linux only, rootless: the default 1000:0 maps to no host uid and to the invoker's group, so a 0700 libs.dir written as ${VAR} is named on stderr at its expanded path with the listable remedy, and the deploy still runs |
-| TestDeployPodmanUnresolvedInputFailsBeforeAnyWrite | unreadable store | a selected store's file that cannot be read fails the deploy naming tls.stores.ts.file and its path, after only the read-only preflight probe and before any secret is created or the unit written: the steps that follow have side effects outside the process, so a late failure would leave a half-built deployment |
+| TestDeployPodmanUnresolvedInputFailsBeforeAnyWrite | unreadable store | a selected store's file that cannot be read fails the deploy naming tls.stores.ts.existing.pkcs12 and its path, after only the read-only preflight probe and before any secret is created or the unit written: the steps that follow have side effects outside the process, so a late failure would leave a half-built deployment |
 | TestDeployPodmanUnresolvedInputFailsBeforeAnyWrite | unset credential variable | a password-env naming an unset variable fails the same way, naming the variable, before any secret is created |
 | TestDeployPodmanFailureStopsBeforeSystemctl | credential | a failing `podman secret rm` for the first credential stops the deploy there (exit 1, the failed call named), with no unit written and no systemctl call |
 | TestDeployPodmanFailureStopsBeforeSystemctl | document | a failing secret call for application.yml stops the deploy the same way |

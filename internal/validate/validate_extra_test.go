@@ -781,21 +781,21 @@ func TestDockerPodmanTLSNeedsNoStoresOptIn(t *testing.T) {
 // file name is refused there.
 func TestContainerStorePathsGatedPerPlatform(t *testing.T) {
 	defs := defsWithStores()
-	defs.TLS.Stores["ts"].File = "./certs/$(evil).jks"
+	defs.TLS.Stores["ts"].Existing.PKCS12 = "./certs/$(evil).jks"
 
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defs, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "docker bind-mounts tls.stores.ts.file") {
-		t.Errorf("docker should reject an unsafe tls.stores.ts.file with no stores: block, got %v", e)
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: defs, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "docker bind-mounts tls.stores.ts.existing.pkcs12") {
+		t.Errorf("docker should reject an unsafe tls.stores.ts.existing.pkcs12 with no stores: block, got %v", e)
 	}
 	spaced := defsWithStores()
-	spaced.TLS.Stores["ts"].File = "/opt/my certs/truststore.jks"
+	spaced.TLS.Stores["ts"].Existing.PKCS12 = "/opt/my certs/truststore.jks"
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: spaced, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "unsafe character") {
 		t.Errorf("docker bind-mounts the path, so a spaced directory is refused, got %v", e)
 	}
 	for _, file := range []string{"./certs/$(evil).jks", "/opt/my certs/truststore.jks", "./certs/trust,store.jks", "./certs/trust%n.jks", "./certs/trust store.jks"} {
 		d := defsWithStores()
-		d.TLS.Stores["ts"].File = file
-		d.TLS.Stores["ks"].File = file
-		if e, _ := Run(Context{Workflows: wfOK(), Defaults: d, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); hasErr(e, ".file") {
+		d.TLS.Stores["ts"].Existing.PKCS12 = file
+		d.TLS.Stores["ks"].Existing.PKCS12 = file
+		if e, _ := Run(Context{Workflows: wfOK(), Defaults: d, Image: imageOK(), Podman: podmanOK(), CheckPodman: true}); hasErr(e, ".existing.pkcs12") {
 			t.Errorf("podman reads the store itself and mounts it under its name, so %q is fine, got %v", file, e)
 		}
 	}
@@ -816,13 +816,13 @@ func TestStoresMayShareAFileName(t *testing.T) {
 		{"./certs/combined.jks", "./certs/combined.jks"},
 	} {
 		d := defsWithStores()
-		d.TLS.Stores["ts"].File = c.trust
-		d.TLS.Stores["ks"].File = c.key
+		d.TLS.Stores["ts"].Existing.PKCS12 = c.trust
+		d.TLS.Stores["ks"].Existing.PKCS12 = c.key
 		for _, ctx := range []Context{
 			{Workflows: wfOK(), Defaults: d, Image: imageOK(), Docker: dockerOK(), CheckDocker: true},
 			{Workflows: wfOK(), Defaults: d, Image: imageOK(), Podman: podmanOK(), CheckPodman: true},
 		} {
-			if e, _ := Run(ctx); hasErr(e, ".file") {
+			if e, _ := Run(ctx); hasErr(e, ".existing.pkcs12") {
 				t.Errorf("%s + %s: want no store finding, got %v", c.trust, c.key, e)
 			}
 		}
@@ -851,7 +851,7 @@ func TestStoreNamesHeldToGrammar(t *testing.T) {
 		{"mq-", false},
 		{"mq.ca", false},
 	} {
-		d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{c.name: {File: "t.jks"}}}}
+		d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{c.name: {Existing: &spec.StoreExisting{PKCS12: "t.jks"}}}}}
 		errs, _ := Run(Context{Workflows: wfOK(), Defaults: d})
 		want := fmt.Sprintf("tls.stores %q: a store name must be lowercase letters and digits joined by single hyphens, at most 63 characters, because it names the mounted file, the Kubernetes Secret key and the podman secret; rename it", c.name)
 		if got := hasErr(errs, want); got == c.ok {
@@ -963,8 +963,8 @@ func TestCheckContainerHostPathsUnsafe(t *testing.T) {
 	// mount argument, so both are gated. A Windows-style path keeps validating -- '\'
 	// and ':' cannot escape any of the three sinks.
 	badStores := defsWithStores()
-	badStores.TLS.Stores["ts"].File = "t.jks\nprivileged: true"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: badStores, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "tls.stores.ts.file") {
+	badStores.TLS.Stores["ts"].Existing.PKCS12 = "t.jks\nprivileged: true"
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: badStores, Image: imageOK(), Docker: dockerOK(), CheckDocker: true}); !hasErr(e, "tls.stores.ts.existing.pkcs12") {
 		t.Errorf("want unsafe truststore path rejection, got %v", e)
 	}
 	p := podmanOK()
@@ -973,8 +973,8 @@ func TestCheckContainerHostPathsUnsafe(t *testing.T) {
 		t.Errorf("want unsafe libs.dir rejection, got %v", e)
 	}
 	winStores := defsWithStores()
-	winStores.TLS.Stores["ts"].File = `C:\certs\truststore.jks`
-	winStores.TLS.Stores["ks"].File = `C:\certs\keystore.jks`
+	winStores.TLS.Stores["ts"].Existing.PKCS12 = `C:\certs\truststore.jks`
+	winStores.TLS.Stores["ks"].Existing.PKCS12 = `C:\certs\keystore.jks`
 	dWin := dockerOK()
 	dWin.Libs = &spec.LibsMount{Dir: `C:\libs`}
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: winStores, Image: imageOK(), Docker: dWin, CheckDocker: true}); hasErr(e, "unsafe character") {
@@ -1469,7 +1469,7 @@ func TestCredentialsFoundOutsideAWorkflowSide(t *testing.T) {
 		defs *spec.Defaults
 	}{
 		{"a management account", &spec.Defaults{Security: spec.Security{Users: []spec.User{{Name: "ops", PasswordEnv: "OPS_PASSWORD"}}}}},
-		{"a store password", &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"ts": {File: "t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD", Type: "JKS"}}}}},
+		{"a store password", &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"ts": {Existing: &spec.StoreExisting{PKCS12: "t.jks"}, PasswordEnv: "TRUSTSTORE_PASSWORD"}}}}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, warns := Run(Context{Workflows: wfs, Defaults: c.defs, Image: imageOK(), Kube: kubeNoSecrets(), CheckKubernetes: true})

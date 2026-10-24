@@ -68,23 +68,23 @@ target:
 
 func TestResolveStores(t *testing.T) {
 	stores := []consolidate.StoreUse{{Name: "mq-ca", File: "certs/t.jks"}, {Name: "mq-client", File: "certs/k.jks", Private: true}}
-	sf, err := resolveStores(stores, Resolver{ReadFile: func(string) ([]byte, error) { return []byte("BYTES"), nil }})
+	sf, _, err := resolveStores(stores, spec.TLSConfig{}, Resolver{ReadFile: func(string) ([]byte, error) { return []byte("BYTES"), nil }})
 	if err != nil || len(sf) != 2 || sf[0].Name != "mq-ca" || sf[1].Name != "mq-client" {
 		t.Fatalf("sf=%+v err=%v", sf, err)
 	}
-	if _, err := resolveStores(stores, Resolver{}); err == nil {
+	if _, _, err := resolveStores(stores, spec.TLSConfig{}, Resolver{}); err == nil {
 		t.Error("no ReadFile should error")
 	}
-	_, err = resolveStores(stores, Resolver{ReadFile: func(string) ([]byte, error) { return nil, errors.New("x") }})
-	if err == nil || !strings.Contains(err.Error(), `reading tls.stores.mq-ca.file "certs/t.jks"`) {
+	_, _, err = resolveStores(stores, spec.TLSConfig{}, Resolver{ReadFile: func(string) ([]byte, error) { return nil, errors.New("x") }})
+	if err == nil || !strings.Contains(err.Error(), `reading tls.stores.mq-ca.existing.pkcs12 "certs/t.jks"`) {
 		t.Errorf("read error should propagate naming the store, got %v", err)
 	}
-	if sf2, err := resolveStores(nil, Resolver{ReadFile: func(string) ([]byte, error) { return nil, nil }}); err != nil || len(sf2) != 0 {
+	if sf2, _, err := resolveStores(nil, spec.TLSConfig{}, Resolver{ReadFile: func(string) ([]byte, error) { return nil, nil }}); err != nil || len(sf2) != 0 {
 		t.Fatalf("no stores: %v %v", sf2, err)
 	}
 	// A set the API server would refuse for size stops here, naming the stores.
 	big := func(string) ([]byte, error) { return make([]byte, 600_000), nil }
-	_, err = resolveStores(stores, Resolver{ReadFile: big})
+	_, _, err = resolveStores(stores, spec.TLSConfig{}, Resolver{ReadFile: big})
 	if err == nil || !strings.Contains(err.Error(), "over the 1048576 bytes a Kubernetes Secret holds") || !strings.Contains(err.Error(), "mq-ca 800000 bytes") {
 		t.Errorf("want the Secret size error naming the stores, got %v", err)
 	}
@@ -162,10 +162,10 @@ func TestResolvePodmanFiles(t *testing.T) {
 	}}
 	doc := PodmanFile{StoreName: "c-application.yml", Data: "a: 1\n"}
 	store := func(src string) PodmanFile {
-		return PodmanFile{StoreName: "c-tls-mq-ca", Source: src, Field: "tls.stores.mq-ca.file"}
+		return PodmanFile{StoreName: "c-tls-mq-ca", Source: src, Field: "tls.stores.mq-ca.existing.pkcs12"}
 	}
 
-	kvs, err := ResolvePodmanFiles([]PodmanFile{doc, store("./certs/t.jks"), store("./certs/max.jks")}, res)
+	kvs, _, err := ResolvePodmanFiles([]PodmanFile{doc, store("./certs/t.jks"), store("./certs/max.jks")}, res)
 	if err != nil {
 		t.Fatalf("ResolvePodmanFiles: %v", err)
 	}
@@ -180,14 +180,14 @@ func TestResolvePodmanFiles(t *testing.T) {
 		want  string
 		cause error
 	}{
-		{"missing store", store("./certs/gone.jks"), res, `reading tls.stores.mq-ca.file "./certs/gone.jks" for podman's secret store`, fs.ErrNotExist},
-		{"no file access", store("./certs/t.jks"), Resolver{}, `cannot read tls.stores.mq-ca.file "./certs/t.jks" for podman's secret store (no file access)`, nil},
-		{"empty store", store("./certs/empty.jks"), res, `tls.stores.mq-ca.file "./certs/empty.jks" is empty, and podman's secret store cannot hold an empty secret`, nil},
-		{"over the limit", store("./certs/big.jks"), res, `tls.stores.mq-ca.file "./certs/big.jks" is 512000 bytes, over the 511999 bytes podman's secret store holds per secret`, nil},
+		{"missing store", store("./certs/gone.jks"), res, `reading tls.stores.mq-ca.existing.pkcs12 "./certs/gone.jks" for podman's secret store`, fs.ErrNotExist},
+		{"no file access", store("./certs/t.jks"), Resolver{}, `cannot read tls.stores.mq-ca.existing.pkcs12 "./certs/t.jks" for podman's secret store (no file access)`, nil},
+		{"empty store", store("./certs/empty.jks"), res, `tls.stores.mq-ca.existing.pkcs12 "./certs/empty.jks" is empty, and podman's secret store cannot hold an empty secret`, nil},
+		{"over the limit", store("./certs/big.jks"), res, `tls.stores.mq-ca.existing.pkcs12 "./certs/big.jks" is 512000 bytes, over the 511999 bytes podman's secret store holds per secret`, nil},
 		{"empty document", PodmanFile{StoreName: "c-application.yml"}, res, "c-application.yml is empty", nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			kvs, err := ResolvePodmanFiles([]PodmanFile{doc, c.file}, c.res)
+			kvs, _, err := ResolvePodmanFiles([]PodmanFile{doc, c.file}, c.res)
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("err = %v, want it to contain %q", err, c.want)
 			}
@@ -205,12 +205,12 @@ func TestResolvePodmanFiles(t *testing.T) {
 }
 
 func TestTargetMounts(t *testing.T) {
-	stores := []consolidate.StoreUse{{Name: "mq-ca", File: "certs/t.jks"}, {Name: "mq-client", File: "certs/k.jks", Private: true}}
+	stores := []consolidate.StoreUse{{Name: "mq-ca", File: "certs/t.jks"}, {Name: "made", Trusted: true, Created: true}, {Name: "mq-client", File: "certs/k.jks", Private: true}}
 	res := Resolver{Abs: func(p string) string { return "/abs/" + p }}
 	// The store bind-mount target is the in-container store dir plus the store's
 	// name; only the host Source comes from res.Abs. Stores are not opt-in --
-	// every selected store is mounted because application.yml already points at
-	// the mounted path.
+	// every selected existing store is mounted because application.yml already
+	// points at the mounted path. A created store has no host file to mount.
 	sm, lm := targetMounts(stores, &spec.LibsMount{Dir: "libs"}, res)
 	if len(sm) != 2 {
 		t.Fatalf("store mounts=%d want 2", len(sm))
@@ -218,7 +218,7 @@ func TestTargetMounts(t *testing.T) {
 	if sm[0].Source != "/abs/certs/t.jks" || sm[0].Target != spec.DefaultStoresMountPath+"/mq-ca" || sm[0].Field != StoreField("mq-ca") || sm[0].Private {
 		t.Errorf("store mount 0 = %+v", sm[0])
 	}
-	if sm[1].Target != spec.DefaultStoresMountPath+"/mq-client" || sm[1].Field != "tls.stores.mq-client.file" || !sm[1].Private {
+	if sm[1].Target != spec.DefaultStoresMountPath+"/mq-client" || sm[1].Field != "tls.stores.mq-client.existing.pkcs12" || !sm[1].Private {
 		t.Errorf("store mount 1 = %+v", sm[1])
 	}
 	if hm := hostMounts(sm, nil); len(hm) != 2 || hm[0].Private || !hm[1].Private {
@@ -687,9 +687,9 @@ image:
 tls:
   stores:
     ts:
-      file: ./certs/truststore.jks
+      existing:
+        pkcs12: ./certs/truststore.jks
       password: ts
-      type: JKS
 docker:
   command: docker
   name: solmq-connector
@@ -765,13 +765,13 @@ func TestPlansCarryTheExpandedHostPathsTheyMount(t *testing.T) {
 	const tlsBlock = `tls:
   stores:
     ts:
-      file: ${CERTS}/truststore.jks
+      existing:
+        pkcs12: ${CERTS}/truststore.jks
       password: ts
-      type: JKS
     ks:
-      file: ${CERTS}/keystore.jks
+      existing:
+        pkcs12: ${CERTS}/keystore.jks
       password: ks
-      type: JKS
 `
 	const image = `image:
   name: solace/connector
@@ -803,8 +803,8 @@ func TestPlansCarryTheExpandedHostPathsTheyMount(t *testing.T) {
 		t.Fatalf("docker: unexpected errors: %v", errs)
 	}
 	want := []HostMount{
-		{Field: "tls.stores.ts.file", Path: "/env/certs/truststore.jks"},
-		{Field: "tls.stores.ks.file", Path: "/env/certs/keystore.jks", Private: true},
+		{Field: "tls.stores.ts.existing.pkcs12", Path: "/env/certs/truststore.jks"},
+		{Field: "tls.stores.ks.existing.pkcs12", Path: "/env/certs/keystore.jks", Private: true},
 		{Field: MountLibs, Path: "/env/jars"},
 	}
 	if !slices.Equal(dp.Mounts, want) {
@@ -1013,9 +1013,9 @@ func TestRetiredCreateNamesDeployButDoNotValidate(t *testing.T) {
 tls:
   stores:
     ts:
-      file: ./certs/truststore.jks
+      existing:
+        pkcs12: ./certs/truststore.jks
       password: ts
-      type: JKS
 kubernetes:
   deployment:
     name: solmq
@@ -1433,13 +1433,13 @@ func TestGeneratePodmanNeverReadsTheStores(t *testing.T) {
 tls:
   stores:
     ts:
-      file: ./certs/trust.p12
+      existing:
+        pkcs12: ./certs/trust.p12
       password: ts
-      type: PKCS12
     ks:
-      file: ./certs/key.p12
+      existing:
+        pkcs12: ./certs/key.p12
       password: ks
-      type: PKCS12
 podman:
   command: podman
   name: c
@@ -1454,8 +1454,8 @@ podman:
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	want := []PodmanFile{
-		{StoreName: "c-tls-ts", Source: "./certs/trust.p12", Field: "tls.stores.ts.file"},
-		{StoreName: "c-tls-ks", Source: "./certs/key.p12", Field: "tls.stores.ks.file"},
+		{StoreName: "c-tls-ts", Source: "./certs/trust.p12", Field: "tls.stores.ts.existing.pkcs12"},
+		{StoreName: "c-tls-ks", Source: "./certs/key.p12", Field: "tls.stores.ks.existing.pkcs12"},
 	}
 	if len(plan.Files) < 3 || !slices.Equal(plan.Files[1:3], want) {
 		t.Errorf("store files = %+v, want %+v after application.yml", plan.Files, want)
@@ -1483,8 +1483,8 @@ func TestStoresSharingAFileNameMountApart(t *testing.T) {
 		{"one file as both", "./certs/combined.p12", "./certs/combined.p12"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			stores := "tls:\n  stores:\n    ts:\n      file: " + c.trust + "\n      password: ts\n      type: PKCS12\n" +
-				"    ks:\n      file: " + c.key + "\n      password: ks\n      type: PKCS12\n"
+			stores := "tls:\n  stores:\n    ts:\n      password: ts\n      existing:\n        pkcs12: " + c.trust + "\n" +
+				"    ks:\n      password: ks\n      existing:\n        pkcs12: " + c.key + "\n"
 			req := func(section string) Request {
 				return Request{Env: &File{Name: "env.yaml", Data: []byte("image:\n  name: img\n  tag: v1\n" + stores + section)}, Workflows: synthTLSWorkflowFiles(1, "ts", "ks")}
 			}
@@ -1575,9 +1575,9 @@ func TestGenerateMissingTargetSection(t *testing.T) {
 	envData := `tls:
   stores:
     ts:
-      file: ./certs/truststore.jks
+      existing:
+        pkcs12: ./certs/truststore.jks
       password: ts
-      type: JKS
 `
 	cases := []struct {
 		name string
@@ -1629,9 +1629,9 @@ target:
 tls:
   stores:
     ts:
-      file: ./certs/truststore.jks
+      existing:
+        pkcs12: ./certs/truststore.jks
       password: ts
-      type: JKS
 kubernetes:
   deployment:
     name: c
@@ -1663,9 +1663,9 @@ func TestValidateReportsValidationOffOnEveryCommand(t *testing.T) {
 	envData := `tls:
   stores:
     mq-ca:
-      file: ./certs/truststore.jks
+      existing:
+        pkcs12: ./certs/truststore.jks
       password-env: TRUSTSTORE_PASSWORD
-      type: JKS
 connections:
   edge:
     solace:

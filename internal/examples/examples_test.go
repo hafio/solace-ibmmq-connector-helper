@@ -168,6 +168,43 @@ func TestEnvExtraKeysExampleValidWhenUncommented(t *testing.T) {
 	}
 }
 
+// TestEnvCreatedStoreExamplesValidWhenUncommented keeps the created-store
+// examples shipped in env.yaml honest: uncommented -- every line from
+// "# broker-ca:" to the end of the tls.stores block loses its "# " -- the set
+// still validates with no error, and every example store is read: the one
+// finding about each is that no connection selects it.
+func TestEnvCreatedStoreExamplesValidWhenUncommented(t *testing.T) {
+	dir := t.TempDir()
+	req := shippedExamplesRequest(t, dir)
+	lines := strings.Split(string(req.Env.Data), "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.HasPrefix(l, "    # broker-ca:") {
+			start = i
+		}
+	}
+	if start < 0 {
+		t.Fatal("env.yaml no longer carries the commented # broker-ca: created-store example")
+	}
+	for i := start; i < len(lines) && strings.HasPrefix(lines[i], "    # "); i++ {
+		lines[i] = "    " + strings.TrimPrefix(lines[i], "    # ")
+	}
+	req.Env.Data = []byte(strings.Join(lines, "\n"))
+	errs, warns := gen.Validate(req, testResolver(dir))
+	if len(errs) != 0 {
+		t.Fatalf("the uncommented examples must validate, got: %v", errs)
+	}
+	for _, name := range []string{"broker-ca", "partner-ca", "client-id", "legacy-ca"} {
+		found := false
+		for _, w := range warns {
+			found = found || strings.Contains(w.Msg, `tls.stores "`+name+`" is not selected by any connection`)
+		}
+		if !found {
+			t.Errorf("no not-selected finding for %s, so the example was not read: %v", name, warns)
+		}
+	}
+}
+
 // shippedExamplesRequest writes the embedded example set into dir and loads it
 // the way `generate config` does -- env.yaml, then the workflows its
 // workflows.dir and file_pattern select -- into a gen.Request.

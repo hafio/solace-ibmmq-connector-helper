@@ -2074,3 +2074,35 @@ func TestParsedFailureCarriesBothStreams(t *testing.T) {
 		}
 	}
 }
+
+// DockerImageCommand reads the image's entrypoint and command through the
+// engine, one inspect call; an engine that cannot answer -- the image not
+// pulled yet -- or an answer that does not parse leaves nothing to compare,
+// and an unsafe command never runs.
+func TestDockerImageCommand(t *testing.T) {
+	f := &fakeRunner{out: "[\"java\",\"-cp\",\"@/app/jib-classpath-file\"]\n[\"--x=1\"]\n"}
+	ep, cmd, found, err := DockerImageCommand(f, "docker", "img:1", nil)
+	if err != nil || !found || !reflect.DeepEqual(ep, []string{"java", "-cp", "@/app/jib-classpath-file"}) || !reflect.DeepEqual(cmd, []string{"--x=1"}) {
+		t.Fatalf("ep=%q cmd=%q found=%v err=%v", ep, cmd, found, err)
+	}
+	want := []string{"docker", "image", "inspect", "--format", "{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}", "img:1"}
+	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("argv = %v, want %v", f.calls, want)
+	}
+	for _, c := range []struct {
+		name string
+		f    *fakeRunner
+	}{
+		{"not pulled", &fakeRunner{err: fmt.Errorf("Error: No such image: img:1")}},
+		{"one line", &fakeRunner{out: "[\"java\"]"}},
+		{"not json", &fakeRunner{out: "out\nout"}},
+	} {
+		if _, _, found, err := DockerImageCommand(c.f, "docker", "img:1", nil); found || err != nil {
+			t.Errorf("%s: found=%v err=%v, want nothing to compare", c.name, found, err)
+		}
+	}
+	unsafe := &fakeRunner{}
+	if _, _, _, err := DockerImageCommand(unsafe, "docker; rm -rf /", "img:1", nil); err == nil || len(unsafe.calls) != 0 {
+		t.Errorf("an unsafe command must be rejected before running: err=%v calls=%d", err, len(unsafe.calls))
+	}
+}

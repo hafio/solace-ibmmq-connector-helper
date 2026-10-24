@@ -209,18 +209,18 @@ func TestBuildMQmTLSBundle(t *testing.T) {
 		Truststore: "mq-ca", Keystore: "mq-client", KeyAlias: "mc", DestKind: spec.DestQueue, Dest: "IN"}
 	sol := spec.Side{System: spec.SystemSolace, Host: "tcps://b", MsgVPN: "v", ClientUserEnv: "SOL_USER", ClientPassEnv: "SOL_PASSWORD", Truststore: "mq-ca", DestKind: spec.DestQueue, Dest: "OUT"}
 	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
-		"mq-ca":     {File: "t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"},
-		"mq-client": {File: "k.jks", PasswordEnv: "KEYSTORE_PASSWORD_ENV", Type: "PKCS12"},
+		"mq-ca":     {Existing: &spec.StoreExisting{PKCS12: "t.jks"}, PasswordEnv: "TRUSTSTORE_PASSWORD_ENV"},
+		"mq-client": {Existing: &spec.StoreExisting{PKCS12: "k.jks"}, PasswordEnv: "KEYSTORE_PASSWORD_ENV"},
 	}}}
 	m, _ := Build([]spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mq, Target: sol}}, d, Opts{MountStores: true})
 	if !m.MQTLS || len(m.Bundles) != 1 {
 		t.Fatalf("MQTLS=%v bundles=%d", m.MQTLS, len(m.Bundles))
 	}
 	b := m.Bundles[0]
-	if !b.HasTruststore || !b.HasKeystore || b.KeyAlias != "mc" || b.KeystoreTyp != "PKCS12" || b.TruststoreTyp != "JKS" {
+	if !b.HasTruststore || !b.HasKeystore || b.KeyAlias != "mc" || b.KeystoreTyp != "PKCS12" || b.TruststoreTyp != "PKCS12" {
 		t.Fatalf("bundle=%+v", b)
 	}
-	if want := []StoreUse{{Name: "mq-ca", File: "t.jks", Type: "JKS"}, {Name: "mq-client", File: "k.jks", Type: "PKCS12", Private: true}}; !reflect.DeepEqual(m.Stores, want) {
+	if want := []StoreUse{{Name: "mq-ca", File: "t.jks", Trusted: true}, {Name: "mq-client", File: "k.jks", Private: true}}; !reflect.DeepEqual(m.Stores, want) {
 		t.Errorf("Stores = %+v, want %+v", m.Stores, want)
 	}
 	// The truststore password is referenced twice -- once by the MQ SSL bundle,
@@ -396,8 +396,8 @@ func TestBuildStorePathsRawVsMount(t *testing.T) {
 		Truststore: "mq-ca", Keystore: "mq-client", KeyAlias: "mc", DestKind: spec.DestQueue, Dest: "IN"}
 	sol := spec.Side{System: spec.SystemSolace, Host: "tcps://b", MsgVPN: "v", ClientUserEnv: "SOL_USER", ClientPassEnv: "SOL_PASSWORD", DestKind: spec.DestQueue, Dest: "OUT"}
 	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
-		"mq-ca":     {File: "./certs/t.jks", PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"},
-		"mq-client": {File: "./certs/k.jks", PasswordEnv: "KEYSTORE_PASSWORD_ENV", Type: "JKS"},
+		"mq-ca":     {Existing: &spec.StoreExisting{PKCS12: "./certs/t.jks"}, PasswordEnv: "TRUSTSTORE_PASSWORD_ENV"},
+		"mq-client": {Existing: &spec.StoreExisting{PKCS12: "./certs/k.jks"}, PasswordEnv: "KEYSTORE_PASSWORD_ENV"},
 	}}}
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mq, Target: sol}}
 	raw, _ := Build(wfs, d, Opts{MountStores: false}) // config: reflect the env.yaml path verbatim
@@ -457,8 +457,8 @@ func TestBuildLeaderElection(t *testing.T) {
 		},
 		SolaceDefaults: propsNode(t, "connect-retries: -1\nreconnect-retries: -1\n"),
 		TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
-			"edge-ca":     {File: "./certs/truststore.jks", PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"},
-			"edge-client": {File: "./certs/keystore.jks", PasswordEnv: "KEYSTORE_PASSWORD_ENV", Type: "JKS"},
+			"edge-ca":     {Existing: &spec.StoreExisting{PKCS12: "./certs/truststore.jks"}, PasswordEnv: "TRUSTSTORE_PASSWORD_ENV"},
+			"edge-client": {Existing: &spec.StoreExisting{PKCS12: "./certs/keystore.jks"}, PasswordEnv: "KEYSTORE_PASSWORD_ENV"},
 		}},
 	}
 	happySecretRef, happySecrets := testSecretRef()
@@ -554,7 +554,7 @@ func TestBuildLeaderElection(t *testing.T) {
 		Connections: map[string]spec.Side{
 			"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUserEnv: "EDGE_USER", ClientPassEnv: "EDGE_PASS", Truststore: "edge-ca"},
 		},
-		TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"edge-ca": {File: "./certs/truststore.jks", PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"}}},
+		TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"edge-ca": {Existing: &spec.StoreExisting{PKCS12: "./certs/truststore.jks"}, PasswordEnv: "TRUSTSTORE_PASSWORD_ENV"}}},
 	}
 	rawSecretRef, _ := testSecretRef()
 	mntSecretRef, _ := testSecretRef()
@@ -583,7 +583,7 @@ func TestBuildLeaderElectionSessionPassthroughCollision(t *testing.T) {
 			"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUserEnv: "EDGE_USER", ClientPassEnv: "EDGE_PASS", Truststore: "edge-ca",
 				APIProps: propsNode(t, "SSL_TRUST_STORE: /wrong.jks\nREAPPLY_SUBSCRIPTIONS: true\n")},
 		},
-		TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"edge-ca": {File: "./certs/truststore.jks", PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"}}},
+		TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"edge-ca": {Existing: &spec.StoreExisting{PKCS12: "./certs/truststore.jks"}, PasswordEnv: "TRUSTSTORE_PASSWORD_ENV"}}},
 	}
 	secretRef, _ := testSecretRef()
 	var warns []string
@@ -611,7 +611,7 @@ func TestBuildLeaderElectionWarningsReachBuild(t *testing.T) {
 			"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUserEnv: "EDGE_USER", ClientPassEnv: "EDGE_PASS", Truststore: "edge-ca",
 				APIProps: propsNode(t, "SSL_TRUST_STORE: /wrong.jks\n")},
 		},
-		TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"edge-ca": {File: "./certs/truststore.jks", PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"}}},
+		TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"edge-ca": {Existing: &spec.StoreExisting{PKCS12: "./certs/truststore.jks"}, PasswordEnv: "TRUSTSTORE_PASSWORD_ENV"}}},
 	}
 	_, warns := Build(nil, d, Opts{})
 	if !containsSub(warns, "leader-election session: passthrough overrides tool-managed key") {
@@ -675,7 +675,7 @@ func TestBuildLeaderElectionSharesBinderSecretNames(t *testing.T) {
 // untouched and the shared store's password is still one secret.
 func TestBuildSolaceBinderPassesValidateCertificateThrough(t *testing.T) {
 	d := &spec.Defaults{
-		TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"mq-ca": {File: "./certs/truststore.jks", PasswordEnv: "TRUSTSTORE_PASSWORD_ENV", Type: "JKS"}}},
+		TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"mq-ca": {Existing: &spec.StoreExisting{PKCS12: "./certs/truststore.jks"}, PasswordEnv: "TRUSTSTORE_PASSWORD_ENV"}}},
 		Connections: map[string]spec.Side{
 			"edge": {System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "prod", ClientUserEnv: "EDGE_USER", ClientPassEnv: "EDGE_PASS", Truststore: "mq-ca",
 				APIProps: propsNode(t, "SSL_VALIDATE_CERTIFICATE: false\nREAPPLY_SUBSCRIPTIONS: true\n")},
@@ -739,10 +739,10 @@ func TestBuildSolaceBinderPassesValidateCertificateThrough(t *testing.T) {
 func TestBuildSeparateStoresPerConnection(t *testing.T) {
 	d := &spec.Defaults{
 		TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
-			"mq-ca":         {File: "./certs/mq-ca.jks", Password: "mq-ca-pw", Type: "JKS"},
-			"solace-ca":     {File: "./certs/sol-ca.p12", PasswordEnv: "SOL_TS_PW", Type: "PKCS12"},
-			"solace-client": {File: "./certs/sol-client.p12", PasswordEnv: "SOL_KS_PW", Type: "PKCS12"},
-			"unused":        {File: "./certs/unused.jks", PasswordEnv: "UNUSED_PW"},
+			"mq-ca":         {Existing: &spec.StoreExisting{PKCS12: "./certs/mq-ca.jks"}, Password: "mq-ca-pw"},
+			"solace-ca":     {Existing: &spec.StoreExisting{PKCS12: "./certs/sol-ca.p12"}, PasswordEnv: "SOL_TS_PW"},
+			"solace-client": {Existing: &spec.StoreExisting{PKCS12: "./certs/sol-client.p12"}, PasswordEnv: "SOL_KS_PW"},
+			"unused":        {Existing: &spec.StoreExisting{PKCS12: "./certs/unused.jks"}, PasswordEnv: "UNUSED_PW"},
 		}},
 		LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q",
 			Session: &spec.Side{System: spec.SystemSolace, Host: "tcps://mgmt:55443", MsgVPN: "v", ClientUserEnv: "L_USER", ClientPassEnv: "L_PASS", Truststore: "solace-ca", Keystore: "mq-ca"}},
@@ -761,12 +761,12 @@ func TestBuildSeparateStoresPerConnection(t *testing.T) {
 		}
 	}
 	want := []StoreUse{
-		{Name: "mq-ca", File: "./certs/mq-ca.jks", Type: "JKS", Private: true},
-		{Name: "solace-ca", File: "./certs/sol-ca.p12", Type: "PKCS12"},
-		{Name: "solace-client", File: "./certs/sol-client.p12", Type: "PKCS12", Private: true},
+		{Name: "mq-ca", File: "./certs/mq-ca.jks", Trusted: true, Private: true},
+		{Name: "solace-ca", File: "./certs/sol-ca.p12", Trusted: true},
+		{Name: "solace-client", File: "./certs/sol-client.p12", Private: true},
 	}
 	if !reflect.DeepEqual(m.Stores, want) {
-		t.Errorf("Stores = %+v, want %+v (binders in appearance order; mq-ca turns private as the session's keystore)", m.Stores, want)
+		t.Errorf("Stores = %+v, want %+v (binders in appearance order; mq-ca, trusted by the MQ binder, also turns private as the session's keystore)", m.Stores, want)
 	}
 	if len(m.Bundles) != 1 || m.Bundles[0].TruststoreLoc != "/app/external/classpath/truststores/mq-ca" || m.Bundles[0].HasKeystore {
 		t.Fatalf("Bundles = %+v, want one truststore-only bundle on mq-ca", m.Bundles)
@@ -812,7 +812,7 @@ func TestBuildSeparateStoresPerConnection(t *testing.T) {
 // gets a bundle carrying its client certificate and no truststore section --
 // before named stores the keystore was dropped whenever no truststore existed.
 func TestBuildMQKeystoreOnlyBundle(t *testing.T) {
-	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"mq-client": {File: "./certs/k.jks", PasswordEnv: "KS_PW", Type: "JKS"}}}}
+	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"mq-client": {Existing: &spec.StoreExisting{PKCS12: "./certs/k.jks"}, PasswordEnv: "KS_PW"}}}}
 	mq := spec.Side{System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM1", Channel: "CH", UserEnv: "MQ_USER", PasswordEnv: "MQ_PASSWORD", TLS: true, Cipher: "CIPH", Keystore: "mq-client", KeyAlias: "app", DestKind: spec.DestQueue, Dest: "IN"}
 	sol := spec.Side{System: spec.SystemSolace, Host: "tcp://b:55555", MsgVPN: "v", DestKind: spec.DestTopic, Dest: "t"}
 	m, _ := Build([]spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mq, Target: sol}}, d, Opts{})
@@ -823,7 +823,31 @@ func TestBuildMQKeystoreOnlyBundle(t *testing.T) {
 	if b.HasTruststore || !b.HasKeystore || b.KeystoreLoc != "./certs/k.jks" || b.KeyAlias != "app" {
 		t.Errorf("bundle = %+v, want keystore only with alias app", b)
 	}
-	if want := []StoreUse{{Name: "mq-client", File: "./certs/k.jks", Type: "JKS", Private: true}}; !reflect.DeepEqual(m.Stores, want) {
+	if want := []StoreUse{{Name: "mq-client", File: "./certs/k.jks", Private: true}}; !reflect.DeepEqual(m.Stores, want) {
 		t.Errorf("Stores = %+v, want %+v", m.Stores, want)
+	}
+}
+
+// TestBuildCreatedStores pins how a created store is consolidated: listed in
+// Model.Stores as Created, with the roles it is selected in and no File; wired
+// at its mount path in deploy mode, the only path it has; and at no path at all
+// in config mode, which gen.Config refuses before anything is rendered.
+func TestBuildCreatedStores(t *testing.T) {
+	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
+		"made-ca": {PasswordEnv: "CA_PW", Create: &spec.StoreSources{Certs: spec.CertSources{Items: []spec.CertSource{{File: "./ca.pem"}}}}},
+	}}}
+	mq := spec.Side{System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM1", Channel: "CH", UserEnv: "MQ_USER", PasswordEnv: "MQ_PASSWORD", TLS: true, Cipher: "CIPH", Truststore: "made-ca", DestKind: spec.DestQueue, Dest: "IN"}
+	sol := spec.Side{System: spec.SystemSolace, Host: "tcp://b:55555", MsgVPN: "v", DestKind: spec.DestTopic, Dest: "t"}
+	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mq, Target: sol}}
+	mnt, _ := Build(wfs, d, Opts{MountStores: true})
+	if want := []StoreUse{{Name: "made-ca", Trusted: true, Created: true}}; !reflect.DeepEqual(mnt.Stores, want) {
+		t.Errorf("Stores = %+v, want %+v", mnt.Stores, want)
+	}
+	if len(mnt.Bundles) != 1 || mnt.Bundles[0].TruststoreLoc != "/app/external/classpath/truststores/made-ca" || mnt.Bundles[0].TruststoreTyp != "PKCS12" {
+		t.Fatalf("Bundles = %+v, want one on the mount path, PKCS12", mnt.Bundles)
+	}
+	raw, _ := Build(wfs, d, Opts{})
+	if loc := raw.Bundles[0].TruststoreLoc; loc != "" {
+		t.Errorf("config-mode location = %q, want none: a created store has no file", loc)
 	}
 }

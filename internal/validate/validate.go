@@ -420,9 +420,10 @@ func checkSideCredentials(add, warn func(string, string, ...any), env func(strin
 // that password name unique to the store (consolidate.StorePasswordName).
 var storeNameRE = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
-// checkStoreFiles checks each tls.stores entry: its name, and that it names a
-// file. Every reader wires a store only when it has one (spec.Store.HasFile),
-// so a store without one would otherwise be silently skipped -- the connection
+// checkStoreFiles checks each tls.stores entry: its name, and its definition
+// (checkStoreDefinition). Every reader wires a store only when it is
+// configured (spec.Store.Configured), so a store that is neither created nor
+// names its PKCS12 would otherwise be silently skipped -- the connection
 // trusting the JVM default store, or presenting no client certificate, while
 // env.yaml says otherwise.
 func checkStoreFiles(add func(string, string, ...any), d *spec.Defaults) {
@@ -430,9 +431,7 @@ func checkStoreFiles(add func(string, string, ...any), d *spec.Defaults) {
 		if len(name) > 63 || !storeNameRE.MatchString(name) {
 			add(fileEnv, "tls.stores %q: a store name must be lowercase letters and digits joined by single hyphens, at most 63 characters, because it names the mounted file, the Kubernetes Secret key and the podman secret; rename it", name)
 		}
-		if !d.TLS.Stores[name].HasFile() {
-			add(fileEnv, "tls.stores.%s has no file: a store names the file to load; add file, or remove the store and every truststore:/keystore: that selects it", name)
-		}
+		checkStoreDefinition(add, name, d.TLS.Stores[name])
 	}
 }
 
@@ -540,8 +539,9 @@ func checkTuple(add func(string, string, ...any), file, label string, s spec.Sid
 }
 
 // checkStoreSelection checks the stores a connection selects: each must be
-// defined under tls.stores, and a key-alias picks a key from the keystore it
-// selects, so it needs one.
+// defined under tls.stores, a key-alias picks a key from the keystore it
+// selects, so it needs one, and a created store must be what it is selected as
+// (checkCreatedSelection).
 func checkStoreSelection(add func(string, string, ...any), file, where string, s spec.Side, stores spec.TLSConfig) {
 	for _, sel := range []struct{ key, name string }{{"truststore", s.Truststore}, {"keystore", s.Keystore}} {
 		if sel.name == "" {
@@ -558,6 +558,7 @@ func checkStoreSelection(add func(string, string, ...any), file, where string, s
 	if s.KeyAlias != "" && s.Keystore == "" {
 		add(file, "%s: key-alias %q selects a key from a keystore, but no keystore is selected; add keystore: <store>", where, s.KeyAlias)
 	}
+	checkCreatedSelection(add, file, where, s, stores)
 }
 
 // edaAdvisory emits the event-driven-architecture warning (allowed, not an error):
@@ -1532,25 +1533,25 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 	}
 }
 
-// checkContainerStores gates the store file paths docker bind-mounts: the path
+// checkContainerStores gates the PKCS12 paths docker bind-mounts: the path
 // itself lands on a compose YAML line, so an unsafe character would add content
 // the spec never declared. Podman never names the path -- deploy reads the file
 // into podman's secret store -- and every platform mounts a store under its
 // tls.stores name (tls.MountPath), so on podman neither the path nor the file
 // name reaches the unit, and two stores may share a file name or be one file.
-// Kubernetes does not reach checkContainerTarget: the stores travel in a
-// Secret keyed by store name.
+// A created store has no path to mount. Kubernetes does not reach
+// checkContainerTarget: the stores travel in a Secret keyed by store name.
 func checkContainerStores(add func(string, string, ...any), section, platform string, stores spec.TLSConfig) {
 	if platform == PlatformPodman {
 		return
 	}
 	for _, name := range stores.StoreNames() {
-		st := stores.Stores[name]
-		if !st.HasFile() {
+		path := stores.Stores[name].Path()
+		if path == "" {
 			continue
 		}
-		if !safeHostPath(st.File) {
-			add(fileEnv, "%s bind-mounts tls.stores.%s.file %q, which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", section, name, st.File)
+		if !safeHostPath(path) {
+			add(fileEnv, "%s bind-mounts tls.stores.%s.existing.pkcs12 %q, which contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)", section, name, path)
 		}
 	}
 }

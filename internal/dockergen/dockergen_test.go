@@ -606,3 +606,58 @@ func minimalDockerInput() Input {
 		},
 	}
 }
+
+// A service carrying created stores starts through the storescript -- handed
+// the image's own command, since entrypoint: drops its CMD -- with the encoded
+// stores mounted beside the credentials, the script as a configs entry, the
+// in-memory store directory owned by the run-as identity, and a stores label
+// compose fills from deploy's environment so a changed store recreates the
+// container. Every created store is a top-level secret read from the
+// environment, after the credentials.
+func TestRenderCreatedStores(t *testing.T) {
+	out := Render(Input{
+		Docker:   &spec.Docker{Name: "solmq"},
+		Instance: Instance{Name: "solmq", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", RunAs: spec.RunAsID{UID: 1000, GID: 0}},
+		Secrets:  []string{"SOL_PASSWORD"},
+		Stores:   []Mount{{Source: "/h/mq-ca.p12", Target: "/app/external/classpath/truststores/mq-ca"}},
+		Created:  []CreatedStore{{Name: "solace-ca", Secret: "_GEN_TLS_SOLACE_CA_STORE"}},
+	})
+	for _, want := range []string{
+		"    container_name: solmq\n    entrypoint: [\"/bin/sh\", \"/app/external/.stores-init\"]\n" +
+			"    command: [\"java\", \"-cp\", \"@/app/jib-classpath-file\", \"com.solace.connector.jms.JmsConnector\", \"--spring.config.additional-location=optional:file:/app/external/spring/config/,optional:file:/app/external/spring/config/*/\"]\n",
+		"      solace-connector/stores-sha256: ${_GEN_TLS_STORES_SHA256}\n",
+		"    secrets:\n      - source: SOL_PASSWORD\n        target: /app/external/var/secrets/SOL_PASSWORD\n" +
+			"      - source: _GEN_TLS_SOLACE_CA_STORE\n        target: /app/external/var/stores/solace-ca\n",
+		"      - source: solmq-stores-init\n        target: /app/external/.stores-init\n",
+		"    tmpfs:\n      - /app/external/classpath/truststores:mode=0700,uid=1000,gid=0\n",
+		"    volumes:\n      - /h/mq-ca.p12:/app/external/classpath/truststores/mq-ca:ro\n",
+		"  solmq-stores-init:\n    content: |\n      #!/bin/sh\n",
+		"      base64 -d \"$$f\" > \"/app/external/classpath/truststores/$$name.tmp\"\n",
+		"secrets:\n  SOL_PASSWORD:\n    environment: SOL_PASSWORD\n  _GEN_TLS_SOLACE_CA_STORE:\n    environment: _GEN_TLS_SOLACE_CA_STORE\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("compose lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// With run-as: image the identity is the image's own, so the in-memory store
+// directory names no uid or gid; without created stores nothing about the
+// service changes.
+func TestRenderCreatedStoresRunAsImageAndNone(t *testing.T) {
+	in := Input{
+		Docker:   &spec.Docker{Name: "s"},
+		Instance: Instance{Name: "s", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", RunAs: spec.RunAsID{Image: true}},
+		Created:  []CreatedStore{{Name: "ca", Secret: "_GEN_TLS_CA_STORE"}},
+	}
+	if out := Render(in); !strings.Contains(out, "    tmpfs:\n      - /app/external/classpath/truststores:mode=0700\n") {
+		t.Errorf("run-as image tmpfs wrong:\n%s", out)
+	}
+	in.Created = nil
+	out := Render(in)
+	for _, absent := range []string{"entrypoint:", "command:", "tmpfs:", "stores-init", "stores-sha256", "/app/external/var/stores"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("no created store, but the compose holds %q:\n%s", absent, out)
+		}
+	}
+}

@@ -6,20 +6,20 @@ spring:
       jks:
         mq-conn-1-bundle:
           truststore:
-            location: ./certs/truststore.jks
+            location: ./certs/truststore.p12
             password: ${TRUSTSTORE_PASSWORD}
-            type: JKS
+            type: PKCS12
           keystore:
-            location: ./certs/keystore.jks
+            location: ./certs/keystore.p12
             password: ${KEYSTORE_PASSWORD}
-            type: JKS
+            type: PKCS12
           key:
             alias: mq-client
         mq-archive-bundle:
           truststore:
-            location: ./certs/truststore.jks
+            location: ./certs/truststore.p12
             password: ${TRUSTSTORE_PASSWORD}
-            type: JKS
+            type: PKCS12
   cloud:
     stream:
       binders:
@@ -48,12 +48,12 @@ spring:
                 connect-retries: -1
                 reconnect-retries: -1
                 api-properties:
-                  SSL_TRUST_STORE: ./certs/truststore.jks
+                  SSL_TRUST_STORE: ./certs/truststore.p12
                   SSL_TRUST_STORE_PASSWORD: ${TRUSTSTORE_PASSWORD}
-                  SSL_TRUST_STORE_FORMAT: JKS
-                  SSL_KEY_STORE: ./certs/keystore.jks
+                  SSL_TRUST_STORE_FORMAT: PKCS12
+                  SSL_KEY_STORE: ./certs/keystore.p12
                   SSL_KEY_STORE_PASSWORD: ${KEYSTORE_PASSWORD}
-                  SSL_KEY_STORE_FORMAT: JKS
+                  SSL_KEY_STORE_FORMAT: PKCS12
                   SSL_PRIVATE_KEY_ALIAS: solace-client
                   REAPPLY_SUBSCRIPTIONS: true
         mq-archive:
@@ -155,12 +155,12 @@ solace:
         connect-retries: -1
         reconnect-retries: -1
         api-properties:
-          SSL_TRUST_STORE: ./certs/truststore.jks
+          SSL_TRUST_STORE: ./certs/truststore.p12
           SSL_TRUST_STORE_PASSWORD: ${TRUSTSTORE_PASSWORD}
-          SSL_TRUST_STORE_FORMAT: JKS
-          SSL_KEY_STORE: ./certs/keystore.jks
+          SSL_TRUST_STORE_FORMAT: PKCS12
+          SSL_KEY_STORE: ./certs/keystore.p12
           SSL_KEY_STORE_PASSWORD: ${KEYSTORE_PASSWORD}
-          SSL_KEY_STORE_FORMAT: JKS
+          SSL_KEY_STORE_FORMAT: PKCS12
           SSL_PRIVATE_KEY_ALIAS: solace-client
           REAPPLY_SUBSCRIPTIONS: true
 management:

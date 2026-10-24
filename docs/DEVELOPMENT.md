@@ -13,11 +13,13 @@ tool, see [userguide.md](userguide.md); for a quick start, [README.md](../README
 
 ## Build
 
-Requires Go 1.27+ (the `go` directive in `go.mod`). Dependency: `gopkg.in/yaml.v3` only.
+Requires Go 1.27+ (the `go` directive in `go.mod`). Dependencies: `gopkg.in/yaml.v3`, plus
+`software.sslmate.com/src/go-pkcs12` (writes the PKCS12 stores `create:` builds, on
+`golang.org/x/crypto`) and `github.com/pavlo-v-chernykh/keystore-go/v4` (reads a `create.jks`).
 
 ```sh
 # from the repo root
-go mod tidy          # offline if the module cache already has yaml.v3
+go mod tidy          # offline if the module cache already has the dependencies
 go build -o solmq-conn-util ./cmd/solmq-conn-util   # CGO_ENABLED=0 for a static binary
 ```
 
@@ -41,8 +43,11 @@ stay out of every aggregate for the same reason `regen` does (below), since a ga
 what it measures proves nothing. `go vet` and the format check both always run, so one pass
 reports both rather than hiding vet errors behind a formatting failure.
 
-`scan` is `go tool govulncheck ./...`, fatal on any finding -- every Go vuln-DB finding is
-reachable-and-fixable, so there is nothing to warn-and-pass on.
+`scan` is `go tool govulncheck ./...`, fatal on any vulnerability the code calls; there is no
+warn-and-pass list. govulncheck also reports, without failing, vulnerabilities in imported packages
+or required modules that the code never calls. Expect one: `golang.org/x/crypto`, which go-pkcs12
+requires for `pbkdf2`, also holds the frozen, unmaintained `openpgp`, whose advisory names no fixed
+version. Nothing here imports `openpgp`, and no `x/crypto` bump clears the line.
 
 The scanner is pinned in `go.mod` as a tool dependency rather than invoked as `go run ...@latest`:
 that form ignores `go.mod` and builds the scanner on whatever toolchain its own module requires,
@@ -199,7 +204,9 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
 - **Layered core.** The CLI (`cmd/solmq-conn-util`) is a thin shell over `internal/gen`, which
   ties parse -> validate -> consolidate -> render together. Packages: `scan`, `spec`,
   `consolidate`, `tls`, `render`, `deploy`, `dockergen`, `podmangen`, `runner`, `validate`,
-  `examples`, `gen`, `libs`, `statusscript`, `statusreport`, `yamlwriter`, `logback`.
+  `examples`, `gen`, `libs`, `statusscript`, `statusreport`, `yamlwriter`, `logback`,
+  `storebuild`, `storescript`; `certfixture` mints certificates, keys and JKS files for
+  tests only.
 - **Deploy exec layer.** `internal/runner` shells out to the CLI named by each section's
   `command:` through an `os/exec` argv slice -- never `sh -c`. Every config-derived token is
   validated against a safe charset before it reaches argv (shell metacharacters and control

@@ -83,8 +83,8 @@ func TestMountChecksLabelEachPathByItsKey(t *testing.T) {
 		{Field: gen.MountLibs, Path: "/srv/jars"},
 	})
 	want := []mountCheck{
-		{label: "docker mounts tls.stores.mq-ca.file", path: "/certs/t.jks", kind: mountPublic},
-		{label: "docker mounts tls.stores.mq-client.file", path: "/certs/k.jks", kind: mountPrivate},
+		{label: "docker mounts tls.stores.mq-ca.existing.pkcs12", path: "/certs/t.jks", kind: mountPublic},
+		{label: "docker mounts tls.stores.mq-client.existing.pkcs12", path: "/certs/k.jks", kind: mountPrivate},
 		{label: "docker mounts libs.dir", path: "/srv/jars", kind: mountDir},
 	}
 	if !slices.Equal(got, want) {
@@ -126,18 +126,18 @@ func TestUnreadableMountsNamesWhatTheConnectorCannotRead(t *testing.T) {
 	ra := spec.RunAsID{UID: os.Getuid() + 1, GID: os.Getgid() + 1}
 	g := strconv.Itoa(ra.GID)
 	got := sharedIDs(ra).unreadable("docker", []mountCheck{
-		{label: "docker mounts tls.stores.ca.file", path: open, kind: mountPublic},
-		{label: "docker mounts tls.stores.ca.file", path: trust, kind: mountPublic},
-		{label: "docker mounts tls.stores.client.file", path: key, kind: mountPrivate},
+		{label: "docker mounts tls.stores.ca.existing.pkcs12", path: open, kind: mountPublic},
+		{label: "docker mounts tls.stores.ca.existing.pkcs12", path: trust, kind: mountPublic},
+		{label: "docker mounts tls.stores.client.existing.pkcs12", path: key, kind: mountPrivate},
 		{label: "docker mounts libs.dir", path: libs, kind: mountDir},
 		{label: "docker mounts libs.dir", path: shutDir, kind: mountDir},
-		{label: "docker mounts tls.stores.ca.file", path: filepath.Join(dir, "missing.jks"), kind: mountPublic},
+		{label: "docker mounts tls.stores.ca.existing.pkcs12", path: filepath.Join(dir, "missing.jks"), kind: mountPublic},
 	})
 	const because = " is not readable by the connector, which runs as "
 	want := []struct{ prefix, suffix string }{
-		{"docker mounts tls.stores.ca.file " + trust + " (mode 0600)" + because + ra.String(),
+		{"docker mounts tls.stores.ca.existing.pkcs12 " + trust + " (mode 0600)" + because + ra.String(),
 			"Make it readable: chmod o+r, or give it to group " + g + " with g+r -- or change docker.run-as"},
-		{"docker mounts tls.stores.client.file " + key + " (mode 0600)" + because + ra.String(),
+		{"docker mounts tls.stores.client.existing.pkcs12 " + key + " (mode 0600)" + because + ra.String(),
 			"Give it to group " + g + " and chmod g+r rather than opening a private key to everyone, or set docker.run-as to its owner's uid"},
 		{"docker mounts libs.dir jar " + filepath.Join(libs, "shut.jar") + " (mode 0600)",
 			"Make it readable: chmod o+r, or give it to group " + g + " with g+r -- or change docker.run-as"},
@@ -169,8 +169,8 @@ func TestUnreadableMountsJudgesRootByTheModeBits(t *testing.T) {
 	writeMode(t, shut, 0o600)
 	writeMode(t, open, 0o644)
 	checks := []mountCheck{
-		{label: "docker mounts tls.stores.client.file", path: shut, kind: mountPrivate},
-		{label: "docker mounts tls.stores.ca.file", path: open, kind: mountPublic},
+		{label: "docker mounts tls.stores.client.existing.pkcs12", path: shut, kind: mountPrivate},
+		{label: "docker mounts tls.stores.ca.existing.pkcs12", path: open, kind: mountPublic},
 	}
 	for _, c := range []struct {
 		ra  spec.RunAsID
@@ -273,5 +273,32 @@ func TestSubIDWarningsNeedARangeWideEnough(t *testing.T) {
 	}
 	if currentUserName() == "" {
 		t.Error("currentUserName must fall back to the uid, never return empty")
+	}
+}
+
+// missingStoreFiles refuses a bind-mounted store that is missing or a
+// directory -- docker would mount, or once mounted, an empty directory in its
+// place -- naming the env.yaml key and the path, and leaves a present file and
+// libs.dir alone.
+func TestMissingStoreFiles(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "ts.p12")
+	writeMode(t, file, 0o644)
+	asDir := filepath.Join(dir, "made-by-docker")
+	if err := os.Mkdir(asDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "gone.p12")
+	store := func(p string) gen.HostMount { return gen.HostMount{Field: gen.StoreField("ts"), Path: p} }
+	if err := missingStoreFiles("docker", []gen.HostMount{store(file), {Field: gen.MountLibs, Path: missing}}); err != nil {
+		t.Errorf("a present store, and a libs dir left to the engine, pass: %v", err)
+	}
+	for _, c := range []struct{ name, path, want string }{
+		{"missing", missing, "docker mounts tls.stores.ts.existing.pkcs12 " + missing + ", which does not exist: put the PKCS12 there, or fix the path"},
+		{"a directory", asDir, "docker mounts tls.stores.ts.existing.pkcs12 " + asDir + ", which is a directory, not a PKCS12 file"},
+	} {
+		if err := missingStoreFiles("docker", []gen.HostMount{store(c.path)}); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want %q", c.name, err, c.want)
+		}
 	}
 }
