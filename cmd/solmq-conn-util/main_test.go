@@ -1538,6 +1538,83 @@ func TestValidateOKAndErrors(t *testing.T) {
 	}
 }
 
+// validate makes the checks a docker deploy makes on its host: each
+// bind-mounted store that is missing, or a directory where its PKCS12 belongs,
+// is an error, every one reported in the same run, and nothing is executed.
+func TestValidateChecksDockerHost(t *testing.T) {
+	f := useFakeRunner(t)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "certs", "ks.p12"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stores := "\ntls:\n  stores:\n    ts:\n      password: ts\n      existing:\n        pkcs12: ./certs/missing.p12\n" +
+		"    ks:\n      password: ks\n      existing:\n        pkcs12: ./certs/ks.p12\n"
+	write(t, dir, "env.yaml", sharedEnv+stores+dockerEnv)
+	write(t, dir, "10.yaml", strings.Replace(tlsWF, "    truststore: ts\n", "    truststore: ts\n    keystore: ks\n", 1))
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"validate", "-e", filepath.Join(dir, "env.yaml")}, f)
+	})
+	for _, want := range []string{
+		"docker mounts tls.stores.ts.existing.pkcs12 " + filepath.Join(dir, "certs", "missing.p12") + ", which does not exist",
+		"docker mounts tls.stores.ks.existing.pkcs12 " + filepath.Join(dir, "certs", "ks.p12") + ", which is a directory",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("validate does not report %q:\n%s", want, stderr)
+		}
+	}
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("validate must run nothing, got %+v", f.calls)
+	}
+}
+
+// validate warns, as deploy does, about each host mount the connector could
+// not read: a 0600 docker truststore owned by another uid than its run-as, and
+// a rootless podman libs.dir only its owner may enter. Warnings alone exit 0,
+// and nothing is executed. Linux only, like the deploy check.
+func TestValidateWarnsAboutHostMountsTheConnectorCannotRead(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the mount check runs on Linux only")
+	}
+	f := useFakeRunner(t)
+	podmanQuadletHome(t) // skips as root, so podman is rootless
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "certs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	truststore := filepath.Join(dir, "certs", "truststore.p12")
+	writeMode(t, truststore, 0o600)
+	libs := filepath.Join(dir, "libs")
+	if err := os.Mkdir(libs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runAs := fmt.Sprintf("%d:%d", os.Getuid()+1, os.Getgid()+1)
+	write(t, dir, "env.yaml", sharedEnv+"\ntls:\n  stores:\n    ts:\n      password: ts\n      existing:\n        pkcs12: ./certs/truststore.p12\n"+
+		dockerEnv+"  run-as: \""+runAs+"\"\n"+podmanEnv()+"  libs:\n    dir: ./libs\n")
+	write(t, dir, "10.yaml", tlsWF)
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"validate", "-e", filepath.Join(dir, "env.yaml")}, f)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want warnings only:\n%s", code, stderr)
+	}
+	for _, want := range []string{
+		"docker mounts tls.stores.ts.existing.pkcs12 " + truststore + " (mode 0600) is not readable by the connector, which runs as " + runAs,
+		"podman mounts libs.dir " + libs + " (mode 0700) is not readable by the connector",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("validate does not warn %q:\n%s", want, stderr)
+		}
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("validate must run nothing, got %+v", f.calls)
+	}
+}
+
 // ---- i) examples CLI contract ------------------------------------------------------
 
 func TestExamplesWriteSkipForceThenGenerate(t *testing.T) {
@@ -6612,16 +6689,6 @@ func TestRemoveDockerNeedsNoCreatedStoreSources(t *testing.T) {
 	}
 	if v, _ := envValue(down.env, "_GEN_TLS_STORES_SHA256"); v != "-" {
 		t.Errorf("_GEN_TLS_STORES_SHA256 = %q, want the placeholder", v)
-	}
-}
-
-// One environment variable holds 32767 characters on Windows; 131072 bytes is
-// Linux's cap on one string, kept everywhere else.
-func TestEnvVarMax(t *testing.T) {
-	for goos, want := range map[string]int{"windows": 32767, "linux": 131072, "darwin": 131072} {
-		if got := envVarMax(goos); got != want {
-			t.Errorf("envVarMax(%s) = %d, want %d", goos, got, want)
-		}
 	}
 }
 

@@ -10,7 +10,8 @@ import (
 // checkStoreDefinition checks one tls.stores entry's shape: create: or
 // existing:, exactly one, and for create: sources the PKCS12 writer can turn
 // into one store. Nothing here opens a file -- a source that is missing,
-// unreadable or not a certificate is reported when deploy builds the store.
+// unreadable or not a certificate is reported when the validate verb or deploy
+// builds the store (gen.Validate, gen.BuildStore).
 func checkStoreDefinition(add func(string, string, ...any), name string, st *spec.Store) {
 	switch {
 	case st == nil || (st.Create == nil && st.Existing == nil):

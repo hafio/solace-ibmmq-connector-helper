@@ -366,8 +366,8 @@ run, not whether each is active, and an engine query that degrades never changes
 it -- see [section 12.9](#129-what-the-exit-code-means-and-what-each-view-costs).
 
 - **`generate config`** reads the workflow files + the connector defaults from
-  `env.yaml` and prints `application.yml`. It **fails fast**: it stops at the first
-  error and writes nothing.
+  `env.yaml` and prints `application.yml` -- the one `deploy` ships on every
+  platform. It **fails fast**: it stops at the first error and writes nothing.
 - **`generate` with no `config`** (or `generate --platform <platform>`) renders the
   resolved platform's deploy artifacts from the matching `env.yaml` section,
   resolving secret values and store bytes as needed -- building a created store
@@ -393,7 +393,15 @@ it -- see [section 12.9](#129-what-the-exit-code-means-and-what-each-view-costs)
   notice, so a script can still read the version off it. Takes no flags.
 - **`validate`** runs **every** check across the whole `env.yaml` (including any
   present `kubernetes:`/`docker:`/`podman:` sections) and its workflows, and prints
-  all findings (non-zero exit if any errors). Use it as a linter.
+  all findings (non-zero exit if any errors). Use it as a linter. It reports every
+  error `generate` and `deploy` would stop at before they reach a platform, all in
+  one run: once the spec itself validates, it also reads each TLS store a present
+  platform loads, builds each created one in memory (and discards it), holds them
+  to each platform's size limit, and checks docker's bind-mount sources on this
+  host. An unset `-env` variable is a warning, so it runs without the production
+  secrets exported; a created store whose password is unset is still built, with
+  a stand-in, unless it comes from a JKS, which opens with that password. Logins,
+  the image, and the cluster or engine itself are left to `deploy`.
 - **`auto-complete <shell>`** prints a completion script for `bash`, `zsh`, `fish` or
   `powershell` on stdout -- see [section 1.1](#11-shell-completion). It reads no
   `env.yaml` and touches nothing on disk.
@@ -1179,7 +1187,10 @@ What the build checks, and when:
 - **Every `deploy`** (and `generate --platform kubernetes`, which embeds the store)
   reads the sources and the password, so both must be present there: the
   `password-env` variable exported and non-empty, and every file readable.
-  `validate` and `generate config` never open them.
+  **`validate`** builds the store too, for every platform section present, and
+  reports what the build reports; with the password unset it builds with a
+  stand-in (a JKS source, which opens with the password, waits for it).
+  `generate config` never opens them.
 - **Errors**: a file holding no certificate, an encrypted private key (decrypt it
   to a file only you can read, for example `openssl pkey -in key.pem -out
   plain.pem`, and name that), more than one key in a key file, no certificate
@@ -1206,7 +1217,7 @@ Where it goes:
 | kubernetes | built into the stores Secret when `secrets.stores.create: true`. With `secrets.stores.existing` the tool writes no Secret, so `create:` is not built: that Secret must already hold the store under its name ([section 8.1](#81-kubernetes)) |
 | podman | built by `deploy` into its podman secret, `<name>-tls-<store>`, like an existing store's file ([section 8.3](#83-podman)) |
 | docker | carried as a compose secret read from deploy's environment, base64-encoded -- docker has no secret store for a binary file, and an environment variable cannot hold a PKCS12's bytes. The service starts through a small startup script that decodes every such store into an in-memory directory on each start, then runs the image's own command ([section 8.2](#82-docker)) |
-| `generate config` | an error: the `application.yml` it writes for a connector you run yourself needs a file to name, and a created store has none -- use `existing:` there |
+| `generate config` | referenced at its mount path like every store -- the `application.yml` it writes is the one `deploy` ships -- and never built |
 
 Rotating a certificate is a redeploy: replace the file and run `deploy`. The
 connector reads its stores only when it starts, so restart it to pick the new store
@@ -1629,7 +1640,7 @@ name or be one file -- and `libs.dir` bind-mounts a host jar directory to
 is a directory, before it starts anything: compose creates a missing bind source as
 an empty directory, so the connector would start without its store, and that
 directory would sit where the PKCS12 belongs (which is why one found there is
-refused too).
+refused too). It names every such store at once, and `validate` reports the same.
 
 A **created store** ([section 7.2](#72-created-stores-create)) has no host file to
 bind-mount, and docker has no secret store for a binary file: a compose secret read
@@ -2581,13 +2592,15 @@ than 20 workflows is rejected -- see [section 5](#5-the-config-file-and-workflow
 Point `-o` **outside** the workflow folder so the output is not re-scanned as a
 workflow on the next run.
 
-**Store paths differ by platform.** `generate config` writes each store's
-location exactly as its `file` appears in `env.yaml`, so you can run the connector
-wherever those files already live. The container platforms rewrite them to a mount
-path -- the `application.yml` that kubernetes/docker/podman ship points at
-`/app/external/classpath/truststores/<store name>` because each selected store is
-mounted there under its name (a Secret volume for kubernetes, a bind mount for
-docker, a secret-store mount for podman).
+**Store paths are the same everywhere.** `generate config` writes the
+`application.yml` that `deploy` ships, so every store is located at
+`/app/external/classpath/truststores/<store name>` -- where each platform mounts
+each selected store under its name (a Secret volume for kubernetes, a bind mount
+for docker existing stores and an in-memory directory for created ones, a
+secret-store mount for podman) -- never at the path its `existing.pkcs12` gives,
+which is only where `deploy` reads it from. To run that document outside a
+deployment, provide the stores at those paths and the credentials under the
+configtree directory ([section 9.2](#92-mount-names)).
 
 **The status script and its labels ship on every platform.** All
 three platforms always carry the rendered status script

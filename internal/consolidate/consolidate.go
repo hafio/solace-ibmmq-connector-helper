@@ -48,7 +48,6 @@ type acc struct {
 
 // Opts tunes one Build.
 type Opts struct {
-	MountStores  bool
 	ConfigImport string
 
 	// StatusPassword is the already-resolved password for the reserved
@@ -64,7 +63,6 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 	if d == nil {
 		d = &spec.Defaults{}
 	}
-	mountStores := opts.MountStores
 	m := &Model{
 		Security:     d.Security,
 		Management:   Management{Port: d.EffectiveManagementPort(), HealthShowDetails: d.EffectiveHealthShowDetails()},
@@ -248,7 +246,7 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 			if a.tls {
 				sel := tls.Selection{Truststore: a.truststore, Keystore: a.keystore, KeyAlias: a.keyAlias}
 				useStores(sel)
-				for _, kv := range tls.SolaceProps(d, sel, mountStores, storeSecret(secretRef)) {
+				for _, kv := range tls.SolaceProps(d, sel, storeSecret(secretRef)) {
 					props = append(props, Prop{Key: kv.Key, Val: kv.Val})
 				}
 			}
@@ -268,7 +266,7 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 				// A binder that selects no store has no bundle to reference: it
 				// still negotiates TLS, trusting the JVM's default store -- a
 				// legitimate choice, so nothing is reported.
-				if b := buildBundle(a, d, mountStores, secretRef); b != nil {
+				if b := buildBundle(a, d, secretRef); b != nil {
 					useStores(tls.Selection{Truststore: a.truststore, Keystore: a.keystore})
 					mb.SSLBundle = b.Name
 					m.Bundles = append(m.Bundles, b)
@@ -321,7 +319,7 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 	}
 
 	// leader-election block (active_active / active_standby); standalone/absent ⇒ nil.
-	m.LeaderElection = buildLeaderElection(d, mountStores, secretRef, leaderNames, &warns)
+	m.LeaderElection = buildLeaderElection(d, secretRef, leaderNames, &warns)
 	if m.LeaderElection != nil {
 		if sess := leaderSession(d); sess != nil && isTCPS(sess.Host) {
 			useStores(tls.Selection{Truststore: sess.Truststore, Keystore: sess.Keystore})
@@ -418,8 +416,9 @@ func sanitize(s string) string {
 // the stores it selects -- a truststore section, a keystore section (with
 // key.alias when an alias picks one key), or both -- or nil when it selects
 // neither. A bundle without a truststore is valid: Spring then trusts the JVM's
-// default store, the same trust a binder with no bundle gets.
-func buildBundle(a *acc, d *spec.Defaults, mount bool, secretRef secretFn) *Bundle {
+// default store, the same trust a binder with no bundle gets. Each store is
+// located at its in-container tls.MountPath.
+func buildBundle(a *acc, d *spec.Defaults, secretRef secretFn) *Bundle {
 	ts, ks := d.TLS.Store(a.truststore), d.TLS.Store(a.keystore)
 	if !ts.Configured() && !ks.Configured() {
 		return nil
@@ -428,13 +427,13 @@ func buildBundle(a *acc, d *spec.Defaults, mount bool, secretRef secretFn) *Bund
 	b := &Bundle{Name: a.name + "-bundle"}
 	if ts.Configured() {
 		b.HasTruststore = true
-		b.TruststoreLoc = tls.StorePath(a.truststore, ts.Path(), mount)
+		b.TruststoreLoc = tls.MountPath(a.truststore)
 		b.TruststorePwd = ref(a.truststore, ts.Secret())
 		b.TruststoreTyp = spec.StoreFormat
 	}
 	if ks.Configured() {
 		b.HasKeystore = true
-		b.KeystoreLoc = tls.StorePath(a.keystore, ks.Path(), mount)
+		b.KeystoreLoc = tls.MountPath(a.keystore)
 		b.KeystorePwd = ref(a.keystore, ks.Secret())
 		b.KeystoreTyp = spec.StoreFormat
 		b.KeyAlias = a.keyAlias
@@ -447,8 +446,8 @@ func buildBundle(a *acc, d *spec.Defaults, mount bool, secretRef secretFn) *Bund
 // same key set as a Solace binder -- the connector documents session.* as the
 // same interface as solace.java.* -- so solace-defaults, the connection's own
 // other keys and its verbatim api-properties land here too, on top of the
-// wiring of the stores the session selects (config vs deploy path via mount).
-func buildLeaderElection(d *spec.Defaults, mount bool, secretRef secretFn, names leaderNameFn, warns *[]string) *LeaderElectionModel {
+// wiring of the stores the session selects.
+func buildLeaderElection(d *spec.Defaults, secretRef secretFn, names leaderNameFn, warns *[]string) *LeaderElectionModel {
 	le := d.LeaderElection
 	if !le.Present || le.Mode == "" || le.Mode == spec.LeaderStandalone {
 		return nil
@@ -466,7 +465,7 @@ func buildLeaderElection(d *spec.Defaults, mount bool, secretRef secretFn, names
 		var props []Prop
 		if isTCPS(sess.Host) {
 			sel := tls.Selection{Truststore: sess.Truststore, Keystore: sess.Keystore, KeyAlias: sess.KeyAlias}
-			for _, kv := range tls.SolaceProps(d, sel, mount, storeSecret(secretRef)) {
+			for _, kv := range tls.SolaceProps(d, sel, storeSecret(secretRef)) {
 				props = append(props, Prop{Key: kv.Key, Val: kv.Val})
 			}
 		}

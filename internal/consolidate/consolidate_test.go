@@ -57,7 +57,7 @@ func TestBinderDedupAcrossWorkflows(t *testing.T) {
 		{File: "20.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 			Source: mqSide("QM1", "MQ2", spec.DestQueue, false), Target: solaceSide("prod", "Q2", spec.DestQueue, "")},
 	}
-	m, _ := Build(wfs, nil, Opts{MountStores: true})
+	m, _ := Build(wfs, nil, Opts{})
 	// Inline (no conn-ref) sides get generated names, numbered per system by appearance.
 	if got, want := binderNames(m), []string{"sol-conn-1", "mq-conn-1", "undefined"}; !eqStrs(got, want) {
 		t.Fatalf("binders = %v, want %v", got, want)
@@ -67,7 +67,7 @@ func TestBinderDedupAcrossWorkflows(t *testing.T) {
 func TestSolaceToSolaceSingleBinder(t *testing.T) {
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 		Source: solaceSide("prod", "IN", spec.DestQueue, ""), Target: solaceSide("prod", "OUT", spec.DestQueue, "")}}
-	m, _ := Build(wfs, nil, Opts{MountStores: true})
+	m, _ := Build(wfs, nil, Opts{})
 	if got, want := binderNames(m), []string{"sol-conn-1", "undefined"}; !eqStrs(got, want) {
 		t.Fatalf("binders = %v, want %v", got, want)
 	}
@@ -79,7 +79,7 @@ func TestSolaceToSolaceSingleBinder(t *testing.T) {
 func TestMQToMQSingleBinder(t *testing.T) {
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 		Source: mqSide("QM1", "IN", spec.DestQueue, false), Target: mqSide("QM1", "OUT", spec.DestQueue, false)}}
-	m, _ := Build(wfs, nil, Opts{MountStores: true})
+	m, _ := Build(wfs, nil, Opts{})
 	if got, want := binderNames(m), []string{"mq-conn-1", "undefined"}; !eqStrs(got, want) {
 		t.Fatalf("binders = %v, want %v", got, want)
 	}
@@ -97,7 +97,7 @@ func TestConnRefNamingAndClashSuffix(t *testing.T) {
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 		Source: spec.Side{System: spec.SystemSolace, ConnRef: "svc.a", DestKind: spec.DestQueue, Dest: "A"},
 		Target: spec.Side{System: spec.SystemSolace, ConnRef: "svc/a", DestKind: spec.DestQueue, Dest: "B"}}}
-	m, _ := Build(wfs, d, Opts{MountStores: true})
+	m, _ := Build(wfs, d, Opts{})
 	// Binders take the sanitized connection name; the second (same base) is disambiguated.
 	if got, want := binderNames(m), []string{"svc-a", "svc-a-2", "undefined"}; !eqStrs(got, want) {
 		t.Fatalf("clash names = %v", got)
@@ -117,7 +117,7 @@ func TestConnRefDedupCollapsesToOneBinder(t *testing.T) {
 		{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: ref(spec.SystemSolace, "edge", "A"), Target: ref(spec.SystemMQ, "qm", "B")},
 		{File: "20.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: ref(spec.SystemSolace, "edge", "C"), Target: ref(spec.SystemMQ, "qm", "D")},
 	}
-	m, _ := Build(wfs, d, Opts{MountStores: true})
+	m, _ := Build(wfs, d, Opts{})
 	if got, want := binderNames(m), []string{"edge", "qm", "undefined"}; !eqStrs(got, want) {
 		t.Fatalf("binders = %v, want %v", got, want)
 	}
@@ -132,7 +132,7 @@ func TestDerivedDestinationTypes(t *testing.T) {
 		{File: "20.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 			Source: solaceSide("prod", "Q.IN", spec.DestQueue, ""), Target: mqSide("QM1", "MQ.OUT", spec.DestQueue, false)},
 	}
-	m, _ := Build(wfs, nil, Opts{MountStores: true})
+	m, _ := Build(wfs, nil, Opts{})
 
 	// jms input-0 consumer topic + durable
 	var in0 *JMSBinding

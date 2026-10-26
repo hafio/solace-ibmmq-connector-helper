@@ -12,7 +12,9 @@ import (
 	"strings"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
 
 // mountKind is what a bind-mounted host path holds, which decides both what
@@ -108,7 +110,7 @@ func unreadableMounts(h hostReader, section string, checks []mountCheck) []strin
 	return h.unreadable(section, checks)
 }
 
-// missingStoreFiles refuses a deploy whose bind-mounted store is not a file
+// missingStoreFiles refuses each bind-mounted store that is not a file
 // there. Compose's short bind syntax creates a missing source as an empty
 // directory, so the connector would start without its store and fail when it
 // needs it, and the directory would be left where the PKCS12 belongs -- which
@@ -116,7 +118,8 @@ func unreadableMounts(h hostReader, section string, checks []mountCheck) []strin
 // made it. libs.dir is a directory by design and is left to the engine. A path
 // that cannot be checked for another reason is left too: the engine may still
 // reach it.
-func missingStoreFiles(section string, ms []gen.HostMount) error {
+func missingStoreFiles(section string, ms []gen.HostMount) []error {
+	var out []error
 	for _, m := range ms {
 		if m.Field == gen.MountLibs {
 			continue
@@ -124,12 +127,37 @@ func missingStoreFiles(section string, ms []gen.HostMount) error {
 		info, err := os.Stat(m.Path)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			return fmt.Errorf("%s mounts %s %s, which does not exist: put the PKCS12 there, or fix the path -- docker would create an empty directory in its place", section, m.Field, m.Path)
+			out = append(out, fmt.Errorf("%s mounts %s %s, which does not exist: put the PKCS12 there, or fix the path -- docker would create an empty directory in its place", section, m.Field, m.Path))
 		case err == nil && info.IsDir():
-			return fmt.Errorf("%s mounts %s %s, which is a directory, not a PKCS12 file -- docker creates one at a missing bind source, so an earlier deploy may have left it: remove it and put the PKCS12 there", section, m.Field, m.Path)
+			out = append(out, fmt.Errorf("%s mounts %s %s, which is a directory, not a PKCS12 file -- docker creates one at a missing bind source, so an earlier deploy may have left it: remove it and put the PKCS12 there", section, m.Field, m.Path))
 		}
 	}
-	return nil
+	return out
+}
+
+// dockerHostChecks is what a docker deploy checks on its own host before it
+// starts anything, and validate on its host too: every bind-mounted store
+// source that is missing or a directory, as errors, and a warning for each
+// mount the run-as identity cannot read.
+func dockerHostChecks(plan gen.DockerPlan) (errs []error, warns []string) {
+	return missingStoreFiles(validate.PlatformDocker, plan.Mounts),
+		unreadableMounts(sharedIDs(plan.RunAs), validate.PlatformDocker, mountChecks(validate.PlatformDocker, plan.Mounts))
+}
+
+// podmanReader is the identity a podman unit's bind mounts are read with: the
+// host's own ids when deployed as root, the subordinate ranges when rootless.
+func podmanReader(plan gen.PodmanPlan, sc runner.QuadletScope) hostReader {
+	if sc.UserMode {
+		return rootlessIDs(plan.RunAs)
+	}
+	return sharedIDs(plan.RunAs)
+}
+
+// podmanHostChecks warns, for deploy and validate alike, about each mount the
+// podman unit's run-as identity cannot read on this host -- only the libs
+// directory: everything else reaches the container from podman's secret store.
+func podmanHostChecks(plan gen.PodmanPlan, sc runner.QuadletScope) []string {
+	return unreadableMounts(podmanReader(plan, sc), validate.PlatformPodman, mountChecks(validate.PlatformPodman, plan.Mounts))
 }
 
 // unreadable is unreadableMounts without the platform gate. A path that

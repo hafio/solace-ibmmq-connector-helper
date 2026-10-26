@@ -2,6 +2,7 @@ package gen
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -159,18 +160,6 @@ func storePassword(name string, c spec.Cred, res Resolver) (string, error) {
 	return v, nil
 }
 
-// createdStoreErrors reports every selected created store as an error for a
-// command that cannot carry one, with why.
-func createdStoreErrors(stores []consolidate.StoreUse, format string) []Issue {
-	var out []Issue
-	for _, st := range stores {
-		if st.Created {
-			out = append(out, Issue{File: fileEnv, Msg: fmt.Sprintf(format, st.Name)})
-		}
-	}
-	return out
-}
-
 // DockerStore is a created store a compose file carries: its build, and the
 // compose secret -- read from the environment variable of the same name -- its
 // base64-encoded bytes travel in.
@@ -230,9 +219,8 @@ func ResolveDockerStores(plan DockerPlan, res Resolver, envMax int, host string)
 		}
 		warns = append(warns, w...)
 		enc := b64(data)
-		// The variable as the OS holds it: NAME=value and its terminating NUL.
-		if n := len(ds.Secret) + 1 + len(enc) + 1; n > envMax {
-			return nil, nil, fmt.Errorf("tls.stores.%s is %d bytes, %d once base64-encoded, over the %d an environment variable holds on %s; trim the certificates, or deploy with podman or kubernetes", ds.Build.Name, len(data), len(enc), envMax, host)
+		if err := dockerEnvSizeError(ds, len(data), len(enc), envMax, host); err != nil {
+			return nil, nil, err
 		}
 		out = append(out, KV{Key: ds.Secret, Val: enc})
 		sum.Write([]byte(ds.Build.Name + "\x00"))
@@ -240,6 +228,27 @@ func ResolveDockerStores(plan DockerPlan, res Resolver, envMax int, host string)
 	}
 	out = append(out, KV{Key: dockergen.StoresDigestVar, Val: hex.EncodeToString(sum.Sum(nil))})
 	return out, warns, nil
+}
+
+// dockerEnvSizeError refuses a created store whose base64 encoding, n raw
+// bytes and enc once encoded, overflows the environment variable that carries
+// it: NAME=value and its terminating NUL, as the OS holds it, past envMax.
+func dockerEnvSizeError(ds DockerStore, n, enc, envMax int, host string) error {
+	if len(ds.Secret)+1+enc+1 <= envMax {
+		return nil
+	}
+	return fmt.Errorf("tls.stores.%s is %d bytes, %d once base64-encoded, over the %d an environment variable holds on %s; trim the certificates, or deploy with podman or kubernetes", ds.Build.Name, n, enc, envMax, host)
+}
+
+// EnvVarMax is the most one environment variable -- NAME=value and its
+// terminating NUL -- may hold on goos: Windows caps a variable at 32767
+// characters; Linux caps one string at 131072 bytes (MAX_ARG_STRLEN), which is
+// also kept as the bound everywhere else.
+func EnvVarMax(goos string) int {
+	if goos == "windows" {
+		return 32767
+	}
+	return 131072
 }
 
 // DockerStorePlaceholders is the environment `docker compose down` runs with
@@ -255,4 +264,106 @@ func DockerStorePlaceholders(plan DockerPlan) []KV {
 		out = append(out, KV{Key: ds.Secret, Val: "-"})
 	}
 	return append(out, KV{Key: dockergen.StoresDigestVar, Val: "-"})
+}
+
+// storePasswordStandIn encrypts a created store validate builds without its
+// real password. The store is discarded, so only the build's checks of its
+// sources matter, and those do not depend on the password -- except a JKS
+// source's, which opens with it.
+const storePasswordStandIn = "validate-only-stand-in"
+
+// validateStores does for validate what deploy does with the stores the
+// rendered connections select, on every platform env.yaml has a section for:
+// it reads each existing store a platform loads, builds each created one in
+// memory and discards it, and holds the bytes to each platform's size limit --
+// the kubernetes stores Secret (with secrets.stores.create; an existing Secret
+// is loaded by nobody here), a podman secret, docker's environment variable
+// for a created store. A docker existing store is a bind mount whose source the
+// validate verb checks on its own host. Unlike deploy it stops at no failure,
+// and it reads or builds a store once however many platforms carry it.
+//
+// Credentials are not resolved: an unset -env variable stays validate.Run's
+// warning. A created store whose password is unset is built with a stand-in,
+// so every source check still runs, unless it comes from a JKS, which opens
+// with that very password.
+func validateStores(e *spec.Env, stores []consolidate.StoreUse, res Resolver) (errs, warns []Issue) {
+	kube := e.Kubernetes != nil && e.Kubernetes.Secrets.Stores != nil && e.Kubernetes.Secrets.Stores.Create != nil
+	docker, podman := e.Docker != nil, e.Podman != nil
+	host := res.goos()
+	fail := func(err error) { errs = append(errs, Issue{File: fileEnv, Msg: err.Error()}) }
+	total := 0
+	var sizes []string
+	for _, st := range stores {
+		sb := storeBuild(st, e.Defaults.TLS)
+		if !kube && !podman && (!docker || sb == nil) {
+			continue
+		}
+		data, w, err := validateStoreBytes(st, sb, res)
+		warns = append(warns, w...)
+		switch {
+		case err != nil:
+			fail(err)
+			continue
+		case data == nil:
+			continue
+		}
+		enc := base64.StdEncoding.EncodedLen(len(data))
+		if kube {
+			total += enc
+			sizes = append(sizes, fmt.Sprintf("%s %d bytes", st.Name, enc))
+		}
+		if podman {
+			what := storeField(st)
+			if sb == nil {
+				what = fmt.Sprintf("%s %q", what, st.File)
+			}
+			if err := podmanSecretSizeError(what, len(data)); err != nil {
+				fail(err)
+			}
+		}
+		if docker && sb != nil {
+			if err := dockerEnvSizeError(DockerStore{Build: *sb, Secret: dockerStoreSecret(st.Name)}, len(data), enc, EnvVarMax(host), host); err != nil {
+				fail(err)
+			}
+		}
+	}
+	if kube {
+		if err := kubeStoresSizeError(total, sizes); err != nil {
+			fail(err)
+		}
+	}
+	return errs, warns
+}
+
+// validateStoreBytes reads an existing store, or builds a created one (sb),
+// for validateStores. It returns no bytes and no error for a store it cannot
+// build without its password: one from a JKS whose password is unset.
+func validateStoreBytes(st consolidate.StoreUse, sb *StoreBuild, res Resolver) ([]byte, []Issue, error) {
+	if sb == nil {
+		if res.ReadFile == nil {
+			return nil, nil, fmt.Errorf("cannot read %s %q (no file access)", StoreField(st.Name), st.File)
+		}
+		b, err := res.ReadFile(st.File)
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading %s %q: %v", StoreField(st.Name), st.File, err)
+		}
+		return b, nil, nil
+	}
+	if c := sb.Store.Secret(); c.Literal == "" && !envSet(res, c.EnvVar) {
+		if sb.Store.Create.JKS != "" {
+			return nil, nil, nil
+		}
+		// The store's password is the one variable a build reads.
+		res.Env = func(string) (string, bool) { return storePasswordStandIn, true }
+	}
+	return BuildStore(*sb, res)
+}
+
+// envSet reports whether the environment variable name holds a value.
+func envSet(res Resolver, name string) bool {
+	if res.Env == nil || name == "" {
+		return false
+	}
+	v, ok := res.Env(name)
+	return ok && v != ""
 }

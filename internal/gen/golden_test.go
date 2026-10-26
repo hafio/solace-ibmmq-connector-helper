@@ -139,18 +139,51 @@ func TestGoldenConfig(t *testing.T) {
 	}
 }
 
-// goldenMounted turns the golden application.yml into what kubernetes renders:
-// every store is mounted under its tls.stores name, so the path `config` keeps
-// as written in env.yaml becomes MountDir/<store>. The golden spec points two
-// stores at each fixture file -- MQ's in the SSL bundles (location:), Solace's
-// in the api-properties -- so the replacement keys on the property as well.
-func goldenMounted(appYAML string) string {
-	return strings.NewReplacer(
-		"location: ./certs/truststore.p12", "location: /app/external/classpath/truststores/mq-ca",
-		"location: ./certs/keystore.p12", "location: /app/external/classpath/truststores/mq-client",
-		"SSL_TRUST_STORE: ./certs/truststore.p12", "SSL_TRUST_STORE: /app/external/classpath/truststores/solace-ca",
-		"SSL_KEY_STORE: ./certs/keystore.p12", "SSL_KEY_STORE: /app/external/classpath/truststores/solace-client",
-	).Replace(appYAML)
+// generate config writes the application.yml deploy ships: the kubernetes
+// goldens embed the very file TestGoldenConfig pins, and here the podman unit
+// mounts it byte for byte from podman's secret store and the compose file
+// inlines it -- indented, with compose's every '$' doubled.
+func TestConfigIsWhatDeployShips(t *testing.T) {
+	setGoldenCredEnv(t)
+	req := loadSpecs(t)
+	res := gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()}
+	cfg, errs, _ := gen.Config(req, res)
+	if len(errs) > 0 {
+		t.Fatalf("config: %v", errs)
+	}
+	withSection := func(section string) gen.Request {
+		r := req
+		r.Env = &gen.File{Name: "env.yaml", Data: append(append([]byte(nil), req.Env.Data...), section...)}
+		return r
+	}
+	plan, errs, _ := gen.GeneratePodman(withSection("podman:\n  command: podman\n  name: c\n"), res)
+	if len(errs) > 0 {
+		t.Fatalf("podman: %v", errs)
+	}
+	var shipped *gen.PodmanFile
+	for i := range plan.Files {
+		if plan.Files[i].StoreName == gen.PodmanSecretStoreName("c", "application.yml") {
+			shipped = &plan.Files[i]
+		}
+	}
+	if shipped == nil || shipped.Data != cfg {
+		t.Errorf("podman ships a different application.yml than generate config writes")
+	}
+	dp, errs, _ := gen.GenerateDocker(withSection("docker:\n  command: docker\n  name: c\n"), res)
+	if len(errs) > 0 {
+		t.Fatalf("docker: %v", errs)
+	}
+	var inlined strings.Builder
+	for _, ln := range strings.SplitAfter(cfg, "\n") {
+		if ln == "\n" || ln == "" {
+			inlined.WriteString(ln)
+			continue
+		}
+		inlined.WriteString("      " + strings.ReplaceAll(ln, "$", "$$"))
+	}
+	if !strings.Contains(dp.Compose, "    content: |\n"+inlined.String()) {
+		t.Errorf("docker ships a different application.yml than generate config writes:\n%s", dp.Compose)
+	}
 }
 
 func TestGoldenKubernetesCreate(t *testing.T) {
@@ -164,10 +197,9 @@ func TestGoldenKubernetesCreate(t *testing.T) {
 	}
 
 	appYAML := norm(string(mustRead(t, "../../testdata/golden/application.yml")))
-	appMounted := goldenMounted(appYAML)
 	want := norm(strings.Join([]string{
 		namespaceDoc, // deploy always emits the Namespace first
-		configMapDoc(appMounted, true),
+		configMapDoc(appYAML, true),
 		credDoc,
 		storesDoc,
 		pvDoc,
@@ -190,10 +222,9 @@ func TestGoldenKubernetesNoSecrets(t *testing.T) {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	appYAML := norm(string(mustRead(t, "../../testdata/golden/application.yml")))
-	appMounted := goldenMounted(appYAML)
 	want := norm(strings.Join([]string{
 		namespaceDoc,
-		configMapDoc(appMounted, false),
+		configMapDoc(appYAML, false),
 		deploymentDoc(false, false, false, false), // no envFrom, stores, syslog, or libs
 		serviceDoc,
 	}, "---\n"))

@@ -303,7 +303,7 @@ var cliVerbs = []cliVerb{
 		Example:    "solmq-conn-util generate --platform kubernetes -e env.yaml -o k8s.yaml",
 		TreeSuffix: bt + "[config]" + bt + " " + bt + platformArgBracket + bt,
 		Detail: "Renders artifacts and prints them to stdout (or " + bt + "-o" + bt + "). Fails fast: stops at the first error and writes nothing; output is buffered, so a failed run never leaves a half-written " + bt + "-o" + bt + " file.\n\n" +
-			"The " + bt + "config" + bt + " positional renders " + bt + "application.yml" + bt + " from env.yaml and never involves a platform (" + platformSpan + " is ignored); leaving it off renders the resolved platform's artifacts instead. " + platformResolutionPointer,
+			"The " + bt + "config" + bt + " positional renders the " + bt + "application.yml" + bt + " deploy ships on every platform -- each TLS store at its mount path, each credential a placeholder resolved from the mounted secrets -- and never involves a platform (" + platformSpan + " is ignored); leaving it off renders the resolved platform's artifacts instead. " + platformResolutionPointer,
 		Targets: []cliTarget{
 			{Name: "config", Aliases: []string{"cfg"}, Summary: "Emit application.yml", Example: "solmq-conn-util generate config -e env.yaml -o application.yml"},
 		},
@@ -417,7 +417,8 @@ var cliVerbs = []cliVerb{
 		Name: "validate", Args: "[-e env.yaml]", Flags: []string{"-e"}, PosArg: posNone, Aliases: []string{"vld"},
 		Synopsis: "validate [flags]",
 		Summary:  "Lint the whole env.yaml + workflows", Example: "solmq-conn-util validate -e env.yaml",
-		Detail: "Runs every check across the whole " + bt + "env.yaml" + bt + " (including any " + bt + "kubernetes:" + bt + "/" + bt + "docker:" + bt + "/" + bt + "podman:" + bt + " sections) and its workflows, printing all findings. Non-zero exit if any errors. Use it as a linter.",
+		Detail: "Runs every check across the whole " + bt + "env.yaml" + bt + " (including any " + bt + "kubernetes:" + bt + "/" + bt + "docker:" + bt + "/" + bt + "podman:" + bt + " sections) and its workflows, printing all findings. Non-zero exit if any errors. Use it as a linter.\n\n" +
+			"It reports every error " + bt + "generate" + bt + " and " + bt + "deploy" + bt + " would stop at before they reach a platform: once the spec itself validates, it reads each TLS store a present platform loads, builds each created one in memory and discards it, holds them to each platform's size limit, and checks docker's bind-mount sources on this host. An unset " + bt + "-env" + bt + " variable is a warning. Logins, the image, and the cluster or engine itself are left to " + bt + "deploy" + bt + ".",
 	},
 	{
 		Name: "examples", Args: "[dir] [-f]", Flags: []string{"-f"}, TreeSuffix: bt + "[dir]" + bt, PosArg: posDir, Aliases: []string{"eg"},

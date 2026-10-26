@@ -97,9 +97,9 @@ auto-named durable subscription. Full breakdown:
 
 Prefer a form to a text editor? Open
 [solmq-conn-util-generator.html](solmq-conn-util-generator.html) in a browser (no server, no
-install): it builds the whole spec folder, lints it with the same rules `validate`
-enforces, previews the `application.yml` it consolidates into, and downloads the
-set as a zip.
+install): it builds the whole spec folder, lints it with the same `env.yaml` rules
+`validate` enforces (the store files are left to the CLI, which can read them),
+previews the `application.yml` it consolidates into, and downloads the set as a zip.
 
 ## Minimal working example
 
@@ -180,7 +180,9 @@ alias, target word, platform short form, and flag abbreviation:
 
 `generate` fails fast: it stops at the first error and writes nothing, and its
 output is buffered so a failed run never leaves a half-written `-o` file;
-`validate` instead reports every finding it can.
+`validate` instead reports every finding in one run, including every error
+`generate` and `deploy` would stop at on the TLS store files before they reach a
+platform.
 
 `deploy`, `remove`, `status`, `logs`, and `cli` all run the platform CLI named
 by each section's `command:` through an argv slice -- never a shell. Every

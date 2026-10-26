@@ -8,12 +8,10 @@
   "15": "completion_test.go",
   "16": "MQ To Solace Example Workflow",
   "20": "Solace To MQ Example Workflow",
-  "21": "deploy_test.go",
   "22": "Go Module Definition",
   "23": "runner_test.go",
   "24": "RenderQuadlet",
   "27": "withProgressClock",
-  "29": "JavaOptions",
   "33": "Graphify Project Guidance",
   "34": "Consolidate Package",
   "35": "Deploy Package",
@@ -49,13 +47,9 @@
   "87": "libs.go",
   "94": "Expand",
   "97": "repeatableName",
-  "98": "dispatch",
   "99": "tailFlag",
-  "100": "Secrets Model User Guide",
   "102": "Command Reference Overview",
   "103": "Project Overview And Quick Start",
-  "106": "validate.go",
   "108": "yw",
-  "111": "Support Notice Wording",
-  "131": ".Write"
+  "111": "Support Notice Wording"
 }

@@ -74,7 +74,7 @@ func TestBuildCarriesEachWorkflowsTransformBlocks(t *testing.T) {
 		{File: "b.yaml", Enabled: false, SourceSet: true, TargetSet: true, Source: solaceSide("v", "IN-B", spec.DestQueue, ""), Target: mqSide("QM", "OUT-B", spec.DestQueue, false), TransformHeaders: th},
 		{File: "c.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: solaceSide("v", "IN-C", spec.DestQueue, ""), Target: mqSide("QM", "OUT-C", spec.DestQueue, false)},
 	}
-	m, _ := Build(wfs, &spec.Defaults{}, Opts{MountStores: true})
+	m, _ := Build(wfs, &spec.Defaults{}, Opts{})
 	if len(m.Workflows) != 3 {
 		t.Fatalf("workflows = %+v, want 3", m.Workflows)
 	}
@@ -212,7 +212,7 @@ func TestBuildMQmTLSBundle(t *testing.T) {
 		"mq-ca":     {Existing: &spec.StoreExisting{PKCS12: "t.jks"}, PasswordEnv: "TRUSTSTORE_PASSWORD_ENV"},
 		"mq-client": {Existing: &spec.StoreExisting{PKCS12: "k.jks"}, PasswordEnv: "KEYSTORE_PASSWORD_ENV"},
 	}}}
-	m, _ := Build([]spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mq, Target: sol}}, d, Opts{MountStores: true})
+	m, _ := Build([]spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mq, Target: sol}}, d, Opts{})
 	if !m.MQTLS || len(m.Bundles) != 1 {
 		t.Fatalf("MQTLS=%v bundles=%d", m.MQTLS, len(m.Bundles))
 	}
@@ -257,7 +257,7 @@ func TestBuildCipherConflictWarning(t *testing.T) {
 		{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mk("C1", "A"), Target: sol},
 		{File: "20.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mk("C2", "B"), Target: sol},
 	}
-	_, warns := Build(wfs, nil, Opts{MountStores: true})
+	_, warns := Build(wfs, nil, Opts{})
 	if !containsSub(warns, "conflicting cipher") {
 		t.Fatalf("want cipher conflict, got %v", warns)
 	}
@@ -265,7 +265,7 @@ func TestBuildCipherConflictWarning(t *testing.T) {
 
 func TestBuildMessageLoopWarning(t *testing.T) {
 	s := spec.Side{System: spec.SystemMQ, ConnName: "h(1)", QueueManager: "QM1", Channel: "CH", UserEnv: "MQ_USER", PasswordEnv: "MQ_PASSWORD", DestKind: spec.DestQueue, Dest: "SAME"}
-	_, warns := Build([]spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: s, Target: s}}, nil, Opts{MountStores: true})
+	_, warns := Build([]spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: s, Target: s}}, nil, Opts{})
 	if !containsSub(warns, "message loop") {
 		t.Fatalf("want loop warn, got %v", warns)
 	}
@@ -274,7 +274,7 @@ func TestBuildMessageLoopWarning(t *testing.T) {
 func TestBuildSolaceTopicSourceEmitsConsumerTopic(t *testing.T) {
 	src := spec.Side{System: spec.SystemSolace, Host: "tcps://b", MsgVPN: "v", ClientUserEnv: "SOL_USER", ClientPassEnv: "SOL_PASSWORD", DestKind: spec.DestTopic, Dest: "evt/in"}
 	tgt := spec.Side{System: spec.SystemMQ, ConnName: "h(1)", QueueManager: "QM", Channel: "C", UserEnv: "MQ_USER", PasswordEnv: "MQ_PASSWORD", DestKind: spec.DestQueue, Dest: "OUT"}
-	m, _ := Build([]spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: src, Target: tgt}}, nil, Opts{MountStores: true})
+	m, _ := Build([]spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: src, Target: tgt}}, nil, Opts{})
 	var in0 *SolaceBinding
 	for _, sb := range m.SolaceBindings {
 		if sb.Name == "input-0" {
@@ -295,7 +295,7 @@ func TestBuildSolaceTopicSourceEmitsConsumerTopic(t *testing.T) {
 func TestApplyStatusAccessNoOperatorUsers(t *testing.T) {
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 		Source: solaceSide("prod", "IN", spec.DestQueue, ""), Target: solaceSide("prod", "OUT", spec.DestQueue, "")}}
-	m, _ := Build(wfs, nil, Opts{MountStores: true, StatusPassword: "status-literal"})
+	m, _ := Build(wfs, nil, Opts{StatusPassword: "status-literal"})
 
 	if len(m.Security.Users) != 1 || m.Security.Users[0].Name != spec.StatusUserName || m.Security.Users[0].Password != "status-literal" {
 		t.Fatalf("Security.Users = %+v, want one reserved user carrying the literal password", m.Security.Users)
@@ -320,7 +320,7 @@ func TestApplyStatusAccessCarriesOperatorRoles(t *testing.T) {
 	}}}
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 		Source: solaceSide("prod", "IN", spec.DestQueue, ""), Target: solaceSide("prod", "OUT", spec.DestQueue, "")}}
-	m, _ := Build(wfs, d, Opts{MountStores: true, StatusPassword: "status-literal"})
+	m, _ := Build(wfs, d, Opts{StatusPassword: "status-literal"})
 
 	if len(m.Security.Users) != 3 {
 		t.Fatalf("Security.Users = %+v, want 3 (2 operator + 1 reserved)", m.Security.Users)
@@ -350,7 +350,7 @@ func TestApplyStatusAccessAppendsAfterExistingUsers(t *testing.T) {
 	}}}
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 		Source: solaceSide("prod", "IN", spec.DestQueue, ""), Target: solaceSide("prod", "OUT", spec.DestQueue, "")}}
-	m, _ := Build(wfs, d, Opts{MountStores: true, StatusPassword: "status-literal"})
+	m, _ := Build(wfs, d, Opts{StatusPassword: "status-literal"})
 
 	if len(m.Security.Users) != 3 {
 		t.Fatalf("Security.Users = %+v, want 3 (2 existing + 1 reserved)", m.Security.Users)
@@ -384,32 +384,31 @@ func TestApplyStatusAccessAppendsAfterExistingUsers(t *testing.T) {
 func TestApplyStatusAccessExposureIsFixed(t *testing.T) {
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true,
 		Source: solaceSide("prod", "IN", spec.DestQueue, ""), Target: solaceSide("prod", "OUT", spec.DestQueue, "")}}
-	m, _ := Build(wfs, &spec.Defaults{}, Opts{MountStores: true})
+	m, _ := Build(wfs, &spec.Defaults{}, Opts{})
 	const want = "health,info,metrics,leaderelection,workflows"
 	if m.Management.Exposure != want {
 		t.Errorf("Exposure = %q, want %q", m.Management.Exposure, want)
 	}
 }
 
-func TestBuildStorePathsRawVsMount(t *testing.T) {
+// Every store is located at its in-container mount path, named after the
+// store -- never the PKCS12 path env.yaml gives for an existing one, which is
+// only where deploy reads it from.
+func TestBuildStorePathsAreMountPaths(t *testing.T) {
 	mq := spec.Side{System: spec.SystemMQ, ConnName: "h(1)", QueueManager: "QM", Channel: "C", UserEnv: "MQ_USER", PasswordEnv: "MQ_PASSWORD", TLS: true,
 		Truststore: "mq-ca", Keystore: "mq-client", KeyAlias: "mc", DestKind: spec.DestQueue, Dest: "IN"}
 	sol := spec.Side{System: spec.SystemSolace, Host: "tcps://b", MsgVPN: "v", ClientUserEnv: "SOL_USER", ClientPassEnv: "SOL_PASSWORD", DestKind: spec.DestQueue, Dest: "OUT"}
 	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
-		"mq-ca":     {Existing: &spec.StoreExisting{PKCS12: "./certs/t.jks"}, PasswordEnv: "TRUSTSTORE_PASSWORD_ENV"},
-		"mq-client": {Existing: &spec.StoreExisting{PKCS12: "./certs/k.jks"}, PasswordEnv: "KEYSTORE_PASSWORD_ENV"},
+		"mq-ca":     {Existing: &spec.StoreExisting{PKCS12: "./certs/t.p12"}, PasswordEnv: "TRUSTSTORE_PASSWORD_ENV"},
+		"mq-client": {Existing: &spec.StoreExisting{PKCS12: "./certs/k.p12"}, PasswordEnv: "KEYSTORE_PASSWORD_ENV"},
 	}}}
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mq, Target: sol}}
-	raw, _ := Build(wfs, d, Opts{MountStores: false}) // config: reflect the env.yaml path verbatim
-	if raw.Bundles[0].TruststoreLoc != "./certs/t.jks" {
-		t.Fatalf("config (mount=false) truststore loc = %q, want ./certs/t.jks", raw.Bundles[0].TruststoreLoc)
+	m, _ := Build(wfs, d, Opts{})
+	if m.Bundles[0].TruststoreLoc != "/app/external/classpath/truststores/mq-ca" {
+		t.Errorf("truststore loc = %q", m.Bundles[0].TruststoreLoc)
 	}
-	mnt, _ := Build(wfs, d, Opts{MountStores: true}) // deploy: rewrite to the container mount path
-	if mnt.Bundles[0].TruststoreLoc != "/app/external/classpath/truststores/mq-ca" {
-		t.Fatalf("deploy (mount=true) truststore loc = %q", mnt.Bundles[0].TruststoreLoc)
-	}
-	if mnt.Bundles[0].KeystoreLoc != "/app/external/classpath/truststores/mq-client" {
-		t.Fatalf("deploy (mount=true) keystore loc = %q", mnt.Bundles[0].KeystoreLoc)
+	if m.Bundles[0].KeystoreLoc != "/app/external/classpath/truststores/mq-client" {
+		t.Errorf("keystore loc = %q", m.Bundles[0].KeystoreLoc)
 	}
 }
 
@@ -438,7 +437,7 @@ func TestBuildLeaderElection(t *testing.T) {
 		Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q", ConnRef: "missing",
 	}}
 	var warns []string
-	le := buildLeaderElection(dangling, true, noopSecretRef, fixedLeaderNames, &warns)
+	le := buildLeaderElection(dangling, noopSecretRef, fixedLeaderNames, &warns)
 	if le == nil || le.Mode != spec.LeaderActiveStby || le.Queue != "mgmt-q" {
 		t.Fatalf("dangling conn-ref: le = %+v", le)
 	}
@@ -462,7 +461,7 @@ func TestBuildLeaderElection(t *testing.T) {
 		}},
 	}
 	happySecretRef, happySecrets := testSecretRef()
-	le = buildLeaderElection(happy, true, happySecretRef, fixedLeaderNames, &warns)
+	le = buildLeaderElection(happy, happySecretRef, fixedLeaderNames, &warns)
 	if le == nil || le.Session == nil || le.Session.Host != "tcps://b:55443" || le.Session.MsgVPN != "prod" {
 		t.Fatalf("conn-ref happy path: le = %+v", le)
 	}
@@ -527,7 +526,7 @@ func TestBuildLeaderElection(t *testing.T) {
 		SolaceDefaults: propsNode(t, "connect-retries: -1\n"),
 	}
 	inlineSecretRef, _ := testSecretRef()
-	le = buildLeaderElection(inline, true, inlineSecretRef, fixedLeaderNames, &warns)
+	le = buildLeaderElection(inline, inlineSecretRef, fixedLeaderNames, &warns)
 	if le == nil || le.Session == nil || le.Session.Host != "tcp://b:55555" {
 		t.Fatalf("inline session: le = %+v", le)
 	}
@@ -547,8 +546,8 @@ func TestBuildLeaderElection(t *testing.T) {
 		t.Errorf("inline session: Extras = %+v, want %+v", le.Session.Extras, want)
 	}
 
-	// mount rewrite in both states: config (mount=false) keeps the env.yaml path
-	// verbatim; deploy (mount=true) rewrites to the container mount path.
+	// The session's store is located at its container mount path, not the
+	// PKCS12 path env.yaml gives it.
 	mountable := &spec.Defaults{
 		LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby, Queue: "mgmt-q", ConnRef: "edge"},
 		Connections: map[string]spec.Side{
@@ -556,15 +555,10 @@ func TestBuildLeaderElection(t *testing.T) {
 		},
 		TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"edge-ca": {Existing: &spec.StoreExisting{PKCS12: "./certs/truststore.jks"}, PasswordEnv: "TRUSTSTORE_PASSWORD_ENV"}}},
 	}
-	rawSecretRef, _ := testSecretRef()
 	mntSecretRef, _ := testSecretRef()
-	raw := buildLeaderElection(mountable, false, rawSecretRef, fixedLeaderNames, &warns)
-	mnt := buildLeaderElection(mountable, true, mntSecretRef, fixedLeaderNames, &warns)
-	if rawTS := trustStoreVal(raw); rawTS != "./certs/truststore.jks" {
-		t.Errorf("config (mount=false) truststore = %q, want ./certs/truststore.jks", rawTS)
-	}
+	mnt := buildLeaderElection(mountable, mntSecretRef, fixedLeaderNames, &warns)
 	if mntTS := trustStoreVal(mnt); mntTS != "/app/external/classpath/truststores/edge-ca" {
-		t.Errorf("deploy (mount=true) truststore = %q", mntTS)
+		t.Errorf("truststore = %q, want the mount path", mntTS)
 	}
 
 	if len(warns) != 0 {
@@ -587,8 +581,8 @@ func TestBuildLeaderElectionSessionPassthroughCollision(t *testing.T) {
 	}
 	secretRef, _ := testSecretRef()
 	var warns []string
-	le := buildLeaderElection(d, false, secretRef, fixedLeaderNames, &warns)
-	if ts := trustStoreVal(le); ts != "./certs/truststore.jks" {
+	le := buildLeaderElection(d, secretRef, fixedLeaderNames, &warns)
+	if ts := trustStoreVal(le); ts != "/app/external/classpath/truststores/edge-ca" {
 		t.Errorf("SSL_TRUST_STORE = %q, want the tool value to win", ts)
 	}
 	if last := le.Session.APIProps[len(le.Session.APIProps)-1]; last.Key != "REAPPLY_SUBSCRIPTIONS" {
@@ -717,7 +711,7 @@ func TestBuildSolaceBinderPassesValidateCertificateThrough(t *testing.T) {
 		t.Fatal("leader-election session not built")
 	}
 	check("leader-election session", m.LeaderElection.Session.APIProps)
-	if len(m.Bundles) != 1 || m.Bundles[0].TruststoreLoc != "./certs/truststore.jks" {
+	if len(m.Bundles) != 1 || m.Bundles[0].TruststoreLoc != "/app/external/classpath/truststores/mq-ca" {
 		t.Fatalf("MQ bundle = %+v, want one bundle on the shared truststore", m.Bundles)
 	}
 	var refs int
@@ -754,7 +748,7 @@ func TestBuildSeparateStoresPerConnection(t *testing.T) {
 		{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mq, Target: sol},
 		{File: "20.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: spec.Side{System: spec.SystemSolace, Host: "tcps://b:55443", MsgVPN: "v", ClientUserEnv: "SOL_USER", ClientPassEnv: "SOL_PASSWORD", Truststore: "solace-ca", Keystore: "solace-client", KeyAlias: "c", DestKind: spec.DestQueue, Dest: "Q"}, Target: plainMQ},
 	}
-	m, warns := Build(wfs, d, Opts{MountStores: true})
+	m, warns := Build(wfs, d, Opts{})
 	for _, w := range warns {
 		if strings.Contains(w, "truststore") || strings.Contains(w, "bundle") {
 			t.Errorf("unexpected TLS warning: %s", w)
@@ -820,7 +814,7 @@ func TestBuildMQKeystoreOnlyBundle(t *testing.T) {
 		t.Fatalf("Bundles = %+v, want one", m.Bundles)
 	}
 	b := m.Bundles[0]
-	if b.HasTruststore || !b.HasKeystore || b.KeystoreLoc != "./certs/k.jks" || b.KeyAlias != "app" {
+	if b.HasTruststore || !b.HasKeystore || b.KeystoreLoc != "/app/external/classpath/truststores/mq-client" || b.KeyAlias != "app" {
 		t.Errorf("bundle = %+v, want keystore only with alias app", b)
 	}
 	if want := []StoreUse{{Name: "mq-client", File: "./certs/k.jks", Private: true}}; !reflect.DeepEqual(m.Stores, want) {
@@ -829,9 +823,8 @@ func TestBuildMQKeystoreOnlyBundle(t *testing.T) {
 }
 
 // TestBuildCreatedStores pins how a created store is consolidated: listed in
-// Model.Stores as Created, with the roles it is selected in and no File; wired
-// at its mount path in deploy mode, the only path it has; and at no path at all
-// in config mode, which gen.Config refuses before anything is rendered.
+// Model.Stores as Created, with the roles it is selected in and no File, and
+// wired at its mount path like every store.
 func TestBuildCreatedStores(t *testing.T) {
 	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{
 		"made-ca": {PasswordEnv: "CA_PW", Create: &spec.StoreSources{Certs: spec.CertSources{Items: []spec.CertSource{{File: "./ca.pem"}}}}},
@@ -839,15 +832,11 @@ func TestBuildCreatedStores(t *testing.T) {
 	mq := spec.Side{System: spec.SystemMQ, ConnName: "h(1414)", QueueManager: "QM1", Channel: "CH", UserEnv: "MQ_USER", PasswordEnv: "MQ_PASSWORD", TLS: true, Cipher: "CIPH", Truststore: "made-ca", DestKind: spec.DestQueue, Dest: "IN"}
 	sol := spec.Side{System: spec.SystemSolace, Host: "tcp://b:55555", MsgVPN: "v", DestKind: spec.DestTopic, Dest: "t"}
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mq, Target: sol}}
-	mnt, _ := Build(wfs, d, Opts{MountStores: true})
+	mnt, _ := Build(wfs, d, Opts{})
 	if want := []StoreUse{{Name: "made-ca", Trusted: true, Created: true}}; !reflect.DeepEqual(mnt.Stores, want) {
 		t.Errorf("Stores = %+v, want %+v", mnt.Stores, want)
 	}
 	if len(mnt.Bundles) != 1 || mnt.Bundles[0].TruststoreLoc != "/app/external/classpath/truststores/made-ca" || mnt.Bundles[0].TruststoreTyp != "PKCS12" {
 		t.Fatalf("Bundles = %+v, want one on the mount path, PKCS12", mnt.Bundles)
-	}
-	raw, _ := Build(wfs, d, Opts{})
-	if loc := raw.Bundles[0].TruststoreLoc; loc != "" {
-		t.Errorf("config-mode location = %q, want none: a created store has no file", loc)
 	}
 }

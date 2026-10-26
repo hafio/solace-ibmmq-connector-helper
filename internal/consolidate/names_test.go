@@ -47,7 +47,7 @@ func TestBinderFieldsCarryStablePlaceholders(t *testing.T) {
 		DestKind: spec.DestQueue, Dest: "IN"}
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: sol, Target: mq}}
 
-	m, _ := Build(wfs, nil, Opts{MountStores: true})
+	m, _ := Build(wfs, nil, Opts{})
 
 	var solBinder *SolaceBinder
 	var mqBinder *MQBinder
@@ -109,7 +109,7 @@ func TestEnvCredentialsShareOneMountName(t *testing.T) {
 		PasswordEnv: "SHARED_PASS", DestKind: spec.DestQueue, Dest: "OUT"}
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: mqA, Target: mqB}}
 
-	m, _ := Build(wfs, nil, Opts{MountStores: true})
+	m, _ := Build(wfs, nil, Opts{})
 
 	if len(m.SecretConflicts) != 0 {
 		t.Errorf("SecretConflicts = %v, want none: one variable named by two positions is one credential", m.SecretConflicts)
@@ -142,7 +142,7 @@ func TestSecretNameConflictIsRecorded(t *testing.T) {
 	}}}
 	wfs := []spec.Workflow{{File: "10.yaml", Enabled: true, SourceSet: true, TargetSet: true, Source: sol, Target: mq}}
 
-	m, _ := Build(wfs, d, Opts{MountStores: true, StatusPassword: "status-pw"})
+	m, _ := Build(wfs, d, Opts{StatusPassword: "status-pw"})
 
 	want := SecretConflict{
 		Name:   "_GEN_SECURITY_USER_OPS_1_PASSWORD",
@@ -229,7 +229,7 @@ func TestGeneratedSecretNamesStayOutOfChildEnvDanger(t *testing.T) {
 		Target: spec.Side{System: spec.SystemMQ, ConnRef: "ld-preload", DestKind: spec.DestQueue, Dest: "OUT"},
 	}}
 
-	m, _ := Build(wfs, d, Opts{MountStores: true})
+	m, _ := Build(wfs, d, Opts{})
 
 	if len(m.Secrets) == 0 {
 		t.Fatal("Secrets is empty; the fixture did not exercise any secret-name producer")

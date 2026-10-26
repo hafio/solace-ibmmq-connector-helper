@@ -136,7 +136,10 @@ in a `<script type="text/plain" id="golden">` block and its **Self-test** button
 shipped sample set against it. A second `<script type="text/plain" id="golden-findings">`
 block holds the findings `gen.Validate` reports for that same golden spec folder
 (`testdata/golden/specs`), and Self-test also diffs the JS `validateModel` port's findings
-against it -- so Self-test checks rule parity as well as the rendered bytes. Both blocks
+against it -- so Self-test checks rule parity as well as the rendered bytes. The port
+covers the static rules only: `gen.Validate` also reads and builds the selected stores
+(`validateStores`), which a page cannot, so the golden spec's selected stores are readable
+fixtures that add no finding. Both blocks
 are kept in sync by `TestGeneratorPageGoldenInSync` and `TestGeneratorPageFindingsGoldenInSync`
 (`internal/gen/htmlgolden_test.go`), regenerated the same way: `go test ./internal/gen -run
 <TestName> -update-html-golden`. Three rules follow:

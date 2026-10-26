@@ -172,10 +172,20 @@ func TestEnvExtraKeysExampleValidWhenUncommented(t *testing.T) {
 // examples shipped in env.yaml honest: uncommented -- every line from
 // "# broker-ca:" to the end of the tls.stores block loses its "# " -- the set
 // still validates with no error, and every example store is read: the one
-// finding about each is that no connection selects it.
+// finding about each is that no connection selects it. validate reads each
+// store a platform loads, as deploy does, and the examples ship none, so
+// stand-ins sit where env.yaml names the selected ones.
 func TestEnvCreatedStoreExamplesValidWhenUncommented(t *testing.T) {
 	dir := t.TempDir()
 	req := shippedExamplesRequest(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, "certs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"solace-ca", "solace-client", "mq-ca", "mq-client"} {
+		if err := os.WriteFile(filepath.Join(dir, "certs", name+".p12"), []byte("P12"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	lines := strings.Split(string(req.Env.Data), "\n")
 	start := -1
 	for i, l := range lines {

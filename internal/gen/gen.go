@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -59,6 +60,10 @@ type Resolver struct {
 	// Now is the time a created store's certificates are judged against for
 	// expiry. Tests pin it; nil means time.Now.
 	Now func() time.Time
+	// GOOS is the operating system the command runs on, which bounds what one
+	// environment variable holds for a docker created store (EnvVarMax).
+	// Tests pin it; empty means runtime.GOOS.
+	GOOS string
 }
 
 func (res Resolver) now() time.Time {
@@ -66,6 +71,13 @@ func (res Resolver) now() time.Time {
 		return time.Now()
 	}
 	return res.Now()
+}
+
+func (res Resolver) goos() string {
+	if res.GOOS == "" {
+		return runtime.GOOS
+	}
+	return res.GOOS
 }
 
 func (res Resolver) abs(p string) string {
@@ -81,8 +93,10 @@ type KV = deploy.KV
 // Issue re-exports validate.Issue for callers that only import gen.
 type Issue = validate.Issue
 
-// Config parses+validates the request and returns the application.yml. One
-// folder is one connector instance: validate rejects a folder holding more than
+// Config parses+validates the request and returns the application.yml -- the
+// same document deploy ships on every platform: each store at its mount path,
+// each credential a placeholder resolved from the mounted secrets. One folder
+// is one connector instance: validate rejects a folder holding more than
 // validate.MaxWorkflows workflows rather than splitting it.
 func Config(r Request, res Resolver) (out string, errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
@@ -96,18 +110,20 @@ func Config(r Request, res Resolver) (out string, errs, warns []Issue) {
 	if err != nil {
 		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
-	b, cw, err := build(wfs, &e.Defaults, false, statusPW)
+	b, cw, err := build(wfs, &e.Defaults, statusPW)
 	warns = append(warns, toIssues(cw)...)
 	if err != nil {
 		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
-	if errs := createdStoreErrors(b.model.Stores, "tls.stores.%s is created at deploy and has no file for generate config to reference; use existing: {pkcs12: <file>} for a connector you run yourself"); errs != nil {
-		return "", errs, warns
-	}
 	return b.appYAML, nil, warns
 }
 
-// Validate runs every check for every section present and returns all findings.
+// Validate runs every check for every section present and returns all findings:
+// every error generate and deploy would stop at before they reach a platform,
+// short of what only the deploy host can tell -- the validate verb adds those
+// (docker's bind-mount sources) -- so a clean validate leaves only the live
+// system to fail: logins, the image, the cluster or engine itself. An unset
+// -env variable is a warning.
 func Validate(r Request, res Resolver) (errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
 	verrs, w := validate.Run(validate.Context{
@@ -130,16 +146,22 @@ func Validate(r Request, res Resolver) (errs, warns []Issue) {
 	// A mount-name collision is only visible once names are assigned, which
 	// happens in consolidate rather than in validate.Run -- so lint it here
 	// instead of leaving it to generate/deploy, matching the rule every other
-	// credential check follows: catch it while authoring, not mid-deploy.
+	// credential check follows: catch it while authoring, not mid-deploy. The
+	// stores the rendered connections select are known only then too, so the
+	// store files are read, and the created stores built, here as well
+	// (validateStores).
 	//
 	// Only on an otherwise-clean spec: consolidate assumes validated input.
 	// The status password is a placeholder because it is rendered as a literal
 	// and never becomes a mount name, so it cannot affect the result, and the
 	// rendered document is discarded.
 	if len(errs) == 0 {
-		if _, _, berr := build(wfs, &e.Defaults, false, statusPasswordPlaceholder); berr != nil {
-			errs = append(errs, Issue{File: fileEnv, Msg: berr.Error()})
+		b, _, berr := build(wfs, &e.Defaults, statusPasswordPlaceholder)
+		if berr != nil {
+			return append(errs, Issue{File: fileEnv, Msg: berr.Error()}), warns
 		}
+		serrs, swarns := validateStores(e, b.model.Stores, res)
+		errs, warns = append(errs, serrs...), append(warns, swarns...)
 	}
 	return errs, warns
 }
@@ -191,7 +213,7 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 	if err != nil {
 		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
-	b, cw, err := build(wfs, &e.Defaults, true, statusPW)
+	b, cw, err := build(wfs, &e.Defaults, statusPW)
 	warns = append(warns, toIssues(cw)...)
 	if err != nil {
 		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
@@ -296,7 +318,7 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 	if err != nil {
 		return DockerPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
-	b, cw, err := build(wfs, &e.Defaults, true, statusPW)
+	b, cw, err := build(wfs, &e.Defaults, statusPW)
 	warns = append(warns, toIssues(cw)...)
 	if err != nil {
 		return DockerPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
@@ -485,6 +507,18 @@ func PodmanUnitStoreSecrets(unit, container string) []string {
 // refuses empty data and anything of 512000 bytes or more.
 const podmanSecretMax = 511999
 
+// podmanSecretSizeError refuses what podman's secret store cannot hold: an
+// empty secret, or one over podmanSecretMax. what names the secret's source.
+func podmanSecretSizeError(what string, n int) error {
+	switch {
+	case n == 0:
+		return fmt.Errorf("%s is empty, and podman's secret store cannot hold an empty secret; point it at the real file", what)
+	case n > podmanSecretMax:
+		return fmt.Errorf("%s is %d bytes, over the %d bytes podman's secret store holds per secret; trim it to what this connector needs (for a truststore, the CA certificates of the brokers and queue managers it connects to)", what, n, podmanSecretMax)
+	}
+	return nil
+}
+
 // ResolvePodmanFiles turns a plan's files into the name/value pairs deploy
 // loads into podman's secret store: a rendered document as it stands, an
 // existing TLS store read from its file (resolved against env.yaml, as
@@ -520,11 +554,8 @@ func ResolvePodmanFiles(files []PodmanFile, res Resolver) ([]KV, []Issue, error)
 			}
 			data = string(b)
 		}
-		switch {
-		case len(data) == 0:
-			return nil, nil, fmt.Errorf("%s is empty, and podman's secret store cannot hold an empty secret; point it at the real file", what)
-		case len(data) > podmanSecretMax:
-			return nil, nil, fmt.Errorf("%s is %d bytes, over the %d bytes podman's secret store holds per secret; trim it to what this connector needs (for a truststore, the CA certificates of the brokers and queue managers it connects to)", what, len(data), podmanSecretMax)
+		if err := podmanSecretSizeError(what, len(data)); err != nil {
+			return nil, nil, err
 		}
 		out = append(out, KV{Key: f.StoreName, Val: data})
 	}
@@ -557,7 +588,7 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 	if err != nil {
 		return PodmanPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
-	b, cw, err := build(wfs, &e.Defaults, true, statusPW)
+	b, cw, err := build(wfs, &e.Defaults, statusPW)
 	warns = append(warns, toIssues(cw)...)
 	if err != nil {
 		return PodmanPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
@@ -707,9 +738,8 @@ const ConfigImport = "optional:configtree:" + spec.SecretsMountPath + "/"
 // statusPassword is the already-resolved password for the reserved status
 // account (see resolveStatusPassword); it flows straight into
 // consolidate.Opts so it is threaded through, never recomputed.
-func build(wfs []spec.Workflow, d *spec.Defaults, mountStores bool, statusPassword string) (built, []string, error) {
+func build(wfs []spec.Workflow, d *spec.Defaults, statusPassword string) (built, []string, error) {
 	m, warns := consolidate.Build(wfs, d, consolidate.Opts{
-		MountStores:    mountStores,
 		ConfigImport:   ConfigImport,
 		StatusPassword: statusPassword,
 	})
@@ -765,9 +795,8 @@ type mount struct {
 // stores (they come from its secret store) and takes only the libs mount.
 //
 // The stores are exactly consolidate's Model.Stores: application.yml references
-// the mounted path for every one of them (consolidate is called with
-// MountStores true), and a store no connection selects is neither referenced
-// nor mounted. libs stays opt-in -- it has a host dir to name.
+// the mounted path for every one of them, and a store no connection selects is
+// neither referenced nor mounted. libs stays opt-in -- it has a host dir to name.
 func targetMounts(stores []consolidate.StoreUse, libs *spec.LibsMount, res Resolver) (sm []mount, lm *mount) {
 	for _, st := range stores {
 		if st.Created {
@@ -882,6 +911,15 @@ func parse(r Request, res Resolver) (wfs []spec.Workflow, e *spec.Env, issues, w
 // kubeSecretMax is the most data one Kubernetes Secret holds (1 MiB).
 const kubeSecretMax = 1 << 20
 
+// kubeStoresSizeError refuses a stores Secret the API server would reject for
+// size: total is its base64-encoded data, sizes each store's share of it.
+func kubeStoresSizeError(total int, sizes []string) error {
+	if total <= kubeSecretMax {
+		return nil
+	}
+	return fmt.Errorf("the stores Secret would hold %d bytes once base64-encoded (%s), over the %d bytes a Kubernetes Secret holds; trim the stores to the certificates these connections need, or reference an existing Secret with kubernetes.secrets.stores.existing", total, strings.Join(sizes, ", "), kubeSecretMax)
+}
+
 // resolveStores reads the files of the existing stores the rendered
 // connections select, and builds the created ones (BuildStore), so the
 // kubernetes stores Secret can carry their bytes. Unlike credentials, these
@@ -918,8 +956,8 @@ func resolveStores(stores []consolidate.StoreUse, defs spec.TLSConfig, res Resol
 		sizes = append(sizes, fmt.Sprintf("%s %d bytes", st.Name, len(enc)))
 		out = append(out, deploy.StoreFile{Name: st.Name, Base64: enc})
 	}
-	if total > kubeSecretMax {
-		return nil, nil, fmt.Errorf("the stores Secret would hold %d bytes once base64-encoded (%s), over the %d bytes a Kubernetes Secret holds; trim the stores to the certificates these connections need, or reference an existing Secret with kubernetes.secrets.stores.existing", total, strings.Join(sizes, ", "), kubeSecretMax)
+	if err := kubeStoresSizeError(total, sizes); err != nil {
+		return nil, nil, err
 	}
 	return out, warns, nil
 }

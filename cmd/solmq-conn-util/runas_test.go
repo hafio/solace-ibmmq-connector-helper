@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
@@ -276,10 +277,10 @@ func TestSubIDWarningsNeedARangeWideEnough(t *testing.T) {
 	}
 }
 
-// missingStoreFiles refuses a bind-mounted store that is missing or a
+// missingStoreFiles refuses every bind-mounted store that is missing or a
 // directory -- docker would mount, or once mounted, an empty directory in its
-// place -- naming the env.yaml key and the path, and leaves a present file and
-// libs.dir alone.
+// place -- each naming the env.yaml key and the path, in mount order, and
+// leaves a present file and libs.dir alone.
 func TestMissingStoreFiles(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "ts.p12")
@@ -290,15 +291,34 @@ func TestMissingStoreFiles(t *testing.T) {
 	}
 	missing := filepath.Join(dir, "gone.p12")
 	store := func(p string) gen.HostMount { return gen.HostMount{Field: gen.StoreField("ts"), Path: p} }
-	if err := missingStoreFiles("docker", []gen.HostMount{store(file), {Field: gen.MountLibs, Path: missing}}); err != nil {
-		t.Errorf("a present store, and a libs dir left to the engine, pass: %v", err)
+	if errs := missingStoreFiles("docker", []gen.HostMount{store(file), {Field: gen.MountLibs, Path: missing}}); len(errs) != 0 {
+		t.Errorf("a present store, and a libs dir left to the engine, pass: %v", errs)
 	}
-	for _, c := range []struct{ name, path, want string }{
-		{"missing", missing, "docker mounts tls.stores.ts.existing.pkcs12 " + missing + ", which does not exist: put the PKCS12 there, or fix the path"},
-		{"a directory", asDir, "docker mounts tls.stores.ts.existing.pkcs12 " + asDir + ", which is a directory, not a PKCS12 file"},
-	} {
-		if err := missingStoreFiles("docker", []gen.HostMount{store(c.path)}); err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("%s: err = %v, want %q", c.name, err, c.want)
+	errs := missingStoreFiles("docker", []gen.HostMount{store(missing), store(file), store(asDir)})
+	wants := []string{
+		"docker mounts tls.stores.ts.existing.pkcs12 " + missing + ", which does not exist: put the PKCS12 there, or fix the path",
+		"docker mounts tls.stores.ts.existing.pkcs12 " + asDir + ", which is a directory, not a PKCS12 file",
+	}
+	if len(errs) != len(wants) {
+		t.Fatalf("errs = %v, want one per bad source", errs)
+	}
+	for i, want := range wants {
+		if !strings.Contains(errs[i].Error(), want) {
+			t.Errorf("errs[%d] = %v, want %q", i, errs[i], want)
 		}
+	}
+}
+
+// A podman unit's bind mounts are read with the host's own ids when it is
+// deployed as root, and through the subordinate ranges when rootless -- the
+// reader deploy and validate both judge a libs directory by.
+func TestPodmanReader(t *testing.T) {
+	ra := spec.RunAsID{UID: 4242, GID: 4242}
+	plan := gen.PodmanPlan{RunAs: ra}
+	if got := podmanReader(plan, runner.QuadletScope{}); got != sharedIDs(ra) {
+		t.Errorf("as root: reader = %+v, want the host's own ids", got)
+	}
+	if got := podmanReader(plan, runner.QuadletScope{UserMode: true}); got != rootlessIDs(ra) {
+		t.Errorf("rootless: reader = %+v, want the subordinate ranges", got)
 	}
 }

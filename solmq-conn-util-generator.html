@@ -417,18 +417,18 @@ details[open]>summary::before{content:"- "}
       jks:
         mq-conn-1-bundle:
           truststore:
-            location: ./certs/truststore.p12
+            location: /app/external/classpath/truststores/mq-ca
             password: ${TRUSTSTORE_PASSWORD}
             type: PKCS12
           keystore:
-            location: ./certs/keystore.p12
+            location: /app/external/classpath/truststores/mq-client
             password: ${KEYSTORE_PASSWORD}
             type: PKCS12
           key:
             alias: mq-client
         mq-archive-bundle:
           truststore:
-            location: ./certs/truststore.p12
+            location: /app/external/classpath/truststores/mq-ca
             password: ${TRUSTSTORE_PASSWORD}
             type: PKCS12
   cloud:
@@ -459,10 +459,10 @@ details[open]>summary::before{content:"- "}
                 connect-retries: -1
                 reconnect-retries: -1
                 api-properties:
-                  SSL_TRUST_STORE: ./certs/truststore.p12
+                  SSL_TRUST_STORE: /app/external/classpath/truststores/solace-ca
                   SSL_TRUST_STORE_PASSWORD: ${TRUSTSTORE_PASSWORD}
                   SSL_TRUST_STORE_FORMAT: PKCS12
-                  SSL_KEY_STORE: ./certs/keystore.p12
+                  SSL_KEY_STORE: /app/external/classpath/truststores/solace-client
                   SSL_KEY_STORE_PASSWORD: ${KEYSTORE_PASSWORD}
                   SSL_KEY_STORE_FORMAT: PKCS12
                   SSL_PRIVATE_KEY_ALIAS: solace-client
@@ -566,10 +566,10 @@ solace:
         connect-retries: -1
         reconnect-retries: -1
         api-properties:
-          SSL_TRUST_STORE: ./certs/truststore.p12
+          SSL_TRUST_STORE: /app/external/classpath/truststores/solace-ca
           SSL_TRUST_STORE_PASSWORD: ${TRUSTSTORE_PASSWORD}
           SSL_TRUST_STORE_FORMAT: PKCS12
-          SSL_KEY_STORE: ./certs/keystore.p12
+          SSL_KEY_STORE: /app/external/classpath/truststores/solace-client
           SSL_KEY_STORE_PASSWORD: ${KEYSTORE_PASSWORD}
           SSL_KEY_STORE_FORMAT: PKCS12
           SSL_PRIVATE_KEY_ALIAS: solace-client
@@ -2817,9 +2817,13 @@ function appendPassthrough(tool, pass, warns, owner){
   });
   return tool;
 }
-// storePath mirrors tls.StorePath: config output keeps the path exactly as written
-// in env.yaml (the deploy path rewrites it to the mounted location instead).
-function storePath(file){ return file; }
+// STORE_MOUNT_DIR mirrors tls.MountDir: every selected store is mounted there,
+// under its tls.stores name, on every platform.
+const STORE_MOUNT_DIR = '/app/external/classpath/truststores';
+// storePath mirrors tls.MountPath: the application.yml this page previews is
+// the one deploy ships, so each store is located at its mount path, whatever
+// its file is called.
+function storePath(name){ return STORE_MOUNT_DIR + '/' + name; }
 // STORE_FORMAT mirrors spec.StoreFormat: every store is PKCS12.
 const STORE_FORMAT = 'PKCS12';
 
@@ -2939,12 +2943,12 @@ function solaceProps(m, sel, secretRef){
   const out = [];
   const ts = storeByName(m, sel.truststore), ks = storeByName(m, sel.keystore);
   if(storeConfigured(ts)){
-    out.push({ key: 'SSL_TRUST_STORE', val: storePath(ts.pkcs12) });
+    out.push({ key: 'SSL_TRUST_STORE', val: storePath(sel.truststore) });
     out.push({ key: 'SSL_TRUST_STORE_PASSWORD', val: storeSecret(secretRef, m, sel.truststore) });
     out.push({ key: 'SSL_TRUST_STORE_FORMAT', val: STORE_FORMAT });
   }
   if(storeConfigured(ks)){
-    out.push({ key: 'SSL_KEY_STORE', val: storePath(ks.pkcs12) });
+    out.push({ key: 'SSL_KEY_STORE', val: storePath(sel.keystore) });
     out.push({ key: 'SSL_KEY_STORE_PASSWORD', val: storeSecret(secretRef, m, sel.keystore) });
     out.push({ key: 'SSL_KEY_STORE_FORMAT', val: STORE_FORMAT });
     if(sel.keyAlias) out.push({ key: 'SSL_PRIVATE_KEY_ALIAS', val: sel.keyAlias });
@@ -2964,13 +2968,13 @@ function buildBundle(a, m, secretRef){
               hasKeystore: false, ksLoc: '', ksPwd: '', ksTyp: '', keyAlias: '' };
   if(hasTs){
     b.hasTruststore = true;
-    b.tsLoc = storePath(ts.pkcs12);
+    b.tsLoc = storePath(a.truststore);
     b.tsPwd = storeSecret(secretRef, m, a.truststore);
     b.tsTyp = STORE_FORMAT;
   }
   if(hasKs){
     b.hasKeystore = true;
-    b.ksLoc = storePath(ks.pkcs12);
+    b.ksLoc = storePath(a.keystore);
     b.ksPwd = storeSecret(secretRef, m, a.keystore);
     b.ksTyp = STORE_FORMAT;
     b.keyAlias = a.keyAlias;
@@ -3000,20 +3004,9 @@ function consolidateBuild(wfs, m, statusPassword){
     management: { port: effectiveManagementPort(m),
                   healthShowDetails: (m.management.present && m.management.healthShowDetails) || DEFAULT_HEALTH_SHOW_DETAILS },
     loggingLevel: m.loggingLevel,
-    leader: null, mqTLS: false, secrets: [], secretConflicts: [], configImport: CONFIG_IMPORT,
-    stores: []
+    leader: null, mqTLS: false, secrets: [], secretConflicts: [], configImport: CONFIG_IMPORT
   };
   const warns = [];
-  // useStores mirrors consolidate.Build's useStores: the configured stores a
-  // rendered connection selects, in first-use order, and whether each is
-  // created -- which generate config cannot reference.
-  const useStores = sel => {
-    [sel.truststore, sel.keystore].forEach(name => {
-      const st = storeByName(m, name);
-      if(!storeConfigured(st) || model.stores.some(u => u.name === name)) return;
-      model.stores.push({ name: name, created: !!st.create });
-    });
-  };
 
   // Mirrors consolidate.Build's secretRef. A credential that names a host
   // variable is mounted under that very name, so an `existing:` Secret's keys
@@ -3111,7 +3104,6 @@ function consolidateBuild(wfs, m, statusPassword){
                    extras: overlayExtras((m.solaceDefaults || []).slice(), dropManaged(a.extra, 'solace', warns, binderOwner(a.name))), apiProps: [] };
       let props = [];
       if(a.tls){
-        useStores({ truststore: a.truststore, keystore: a.keystore });
         props = solaceProps(m, { truststore: a.truststore, keystore: a.keystore, keyAlias: a.keyAlias }, secretRef);
       }
       sb.apiProps = appendPassthrough(props, a.pass2, warns, binderOwner(a.name));
@@ -3128,7 +3120,6 @@ function consolidateBuild(wfs, m, statusPassword){
         // choice, so nothing is reported.
         const b = buildBundle(a, m, secretRef);
         if(b){
-          useStores({ truststore: a.truststore, keystore: a.keystore });
           mb.sslBundle = b.name;
           model.bundles.push(b);
         }
@@ -3168,12 +3159,6 @@ function consolidateBuild(wfs, m, statusPassword){
     return [LEADER_USERNAME_NAME, LEADER_PASSWORD_NAME];
   };
   model.leader = buildLeaderElection(m, secretRef, leaderNames, warns);
-  if(model.leader){
-    const le = m.leader;
-    const c = le.connRef ? m.connections.find(x => x.name === le.connRef) : null;
-    const sess = le.connRef ? (c ? c.side : null) : le.session;
-    if(sess && isTCPS(sess.host)) useStores({ truststore: sess.truststore || '', keystore: sess.keystore || '' });
-  }
 
   // The status script needs actuator access in every deployment, so the
   // exposure list and the reserved read-only status account are forced onto
@@ -3231,10 +3216,6 @@ function buildConfig(m){
     const parts = r.model.secretConflicts.map(c => `${c.name} (claimed by ${c.first} and ${c.second})`);
     return { out: '', warns: r.warns, errs: [`two different credentials are mounted under one name: ${parts.join('; ')}. One mounted file holds one value, so rename one of them; names differing only in punctuation ("ops.1" vs "ops-1") fold to the same mount name`] };
   }
-  // A created store exists only inside a deployment, so the config this page
-  // previews has no file to name for it -- gen.Config's createdStoreErrors.
-  const created = r.model.stores.filter(u => u.created).map(u => `tls.stores.${u.name} is created at deploy and has no file for generate config to reference; use existing: {pkcs12: <file>} for a connector you run yourself`);
-  if(created.length) return { out: '', warns: r.warns, errs: created };
   return { out: renderApplication(r.model), warns: r.warns, errs: [] };
 }
 

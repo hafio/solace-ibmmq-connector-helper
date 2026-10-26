@@ -123,7 +123,7 @@ Alias: `gen`.
 
 Renders artifacts and prints them to stdout (or `-o`). Fails fast: stops at the first error and writes nothing; output is buffered, so a failed run never leaves a half-written `-o` file.
 
-The `config` positional renders `application.yml` from env.yaml and never involves a platform (`--platform` is ignored); leaving it off renders the resolved platform's artifacts instead. For how the platform is picked, see [Platform resolution](#platform-resolution).
+The `config` positional renders the `application.yml` deploy ships on every platform -- each TLS store at its mount path, each credential a placeholder resolved from the mounted secrets -- and never involves a platform (`--platform` is ignored); leaving it off renders the resolved platform's artifacts instead. For how the platform is picked, see [Platform resolution](#platform-resolution).
 
 Flags: `--platform`; `-e`, `--env`; `-o`, `--out`.
 
@@ -258,6 +258,8 @@ solmq-conn-util version
 Alias: `vld`.
 
 Runs every check across the whole `env.yaml` (including any `kubernetes:`/`docker:`/`podman:` sections) and its workflows, printing all findings. Non-zero exit if any errors. Use it as a linter.
+
+It reports every error `generate` and `deploy` would stop at before they reach a platform: once the spec itself validates, it reads each TLS store a present platform loads, builds each created one in memory and discards it, holds them to each platform's size limit, and checks docker's bind-mount sources on this host. An unset `-env` variable is a warning. Logins, the image, and the cluster or engine itself are left to `deploy`.
 
 Flags: `-e`, `--env`.
 

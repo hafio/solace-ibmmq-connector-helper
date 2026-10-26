@@ -55,7 +55,7 @@ func TestSolacePropsUseStoreMountPaths(t *testing.T) {
 		"solace-client": existing(`.\key\store.p12`, "KS_PW"),
 	})
 	got := map[string]string{}
-	for _, kv := range SolaceProps(d, Selection{Truststore: "solace-ca", Keystore: "solace-client", KeyAlias: "c"}, true, placeholderSecretRef) {
+	for _, kv := range SolaceProps(d, Selection{Truststore: "solace-ca", Keystore: "solace-client", KeyAlias: "c"}, placeholderSecretRef) {
 		got[kv.Key] = kv.Val
 	}
 	want := map[string]string{
@@ -77,40 +77,11 @@ func TestSolacePropsWireACreatedStoreAtItsMountPath(t *testing.T) {
 		"made": {PasswordEnv: "PW", Create: &spec.StoreSources{Certs: spec.CertSources{Items: []spec.CertSource{{File: "./ca.pem"}}}}},
 	})
 	got := map[string]string{}
-	for _, kv := range SolaceProps(d, Selection{Truststore: "made"}, true, placeholderSecretRef) {
+	for _, kv := range SolaceProps(d, Selection{Truststore: "made"}, placeholderSecretRef) {
 		got[kv.Key] = kv.Val
 	}
 	if got["SSL_TRUST_STORE"] != MountDir+"/made" || got["SSL_TRUST_STORE_FORMAT"] != "PKCS12" || got["SSL_TRUST_STORE_PASSWORD"] != "${made}" {
 		t.Errorf("SolaceProps = %v", got)
-	}
-}
-
-func TestStorePathConfigVsDeploy(t *testing.T) {
-	for _, c := range []struct {
-		store string
-		file  string
-		mount bool
-		want  string
-	}{
-		{"mq-ca", "./certs/t.p12", false, "./certs/t.p12"},
-		{"mq-client", `.\certs\k.p12`, false, `.\certs\k.p12`},
-		{"mq-ca", `.\certs\t.p12`, true, MountDir + "/mq-ca"},
-		{"mq-client", "./certs/t.p12", true, MountDir + "/mq-client"},
-	} {
-		if got := StorePath(c.store, c.file, c.mount); got != c.want {
-			t.Errorf("StorePath(%q, %q, %v) = %q, want %q", c.store, c.file, c.mount, got, c.want)
-		}
-	}
-}
-
-func TestSolacePropsRawPathWhenNotMounted(t *testing.T) {
-	d := defaults(map[string]*spec.Store{"solace-ca": existing("./certs/truststore.p12", "TS_PW")})
-	got := map[string]string{}
-	for _, kv := range SolaceProps(d, Selection{Truststore: "solace-ca"}, false, placeholderSecretRef) {
-		got[kv.Key] = kv.Val
-	}
-	if got["SSL_TRUST_STORE"] != "./certs/truststore.p12" {
-		t.Errorf("mount=false should keep the raw store path, got %q", got["SSL_TRUST_STORE"])
 	}
 }
 
@@ -131,7 +102,7 @@ func TestSolacePropsStorePasswordIsPlaceholderNeverLiteral(t *testing.T) {
 		return "${" + store + "}"
 	}
 	got := map[string]string{}
-	for _, kv := range SolaceProps(d, Selection{Truststore: "solace-ca", Keystore: "solace-client", KeyAlias: "c"}, false, rec) {
+	for _, kv := range SolaceProps(d, Selection{Truststore: "solace-ca", Keystore: "solace-client", KeyAlias: "c"}, rec) {
 		got[kv.Key] = kv.Val
 	}
 	if got["SSL_TRUST_STORE_PASSWORD"] != "${solace-ca}" || got["SSL_KEY_STORE_PASSWORD"] != "${solace-client}" {
@@ -157,7 +128,7 @@ func TestSolacePropsSkipsSecretRefWhenNothingSelected(t *testing.T) {
 	calls := 0
 	rec := func(store string, c spec.Cred) string { calls++; return "${" + store + "}" }
 	for _, sel := range []Selection{{}, {Truststore: "nope", Keystore: "nope"}} {
-		if got := SolaceProps(d, sel, false, rec); len(got) != 0 {
+		if got := SolaceProps(d, sel, rec); len(got) != 0 {
 			t.Errorf("SolaceProps(%+v) = %v, want empty", sel, got)
 		}
 	}
@@ -188,7 +159,7 @@ func TestSolacePropsWritesNoValidationPolicy(t *testing.T) {
 		{"both with alias", Selection{Truststore: "ca", Keystore: "client", KeyAlias: "a"}, "SSL_TRUST_STORE,SSL_TRUST_STORE_PASSWORD,SSL_TRUST_STORE_FORMAT,SSL_KEY_STORE,SSL_KEY_STORE_PASSWORD,SSL_KEY_STORE_FORMAT,SSL_PRIVATE_KEY_ALIAS"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got := SolaceProps(d, c.sel, false, placeholderSecretRef)
+			got := SolaceProps(d, c.sel, placeholderSecretRef)
 			for _, kv := range got {
 				if kv.Key == "SSL_VALIDATE_CERTIFICATE" {
 					t.Errorf("SolaceProps wrote validation policy %v", kv)
@@ -209,7 +180,7 @@ func TestSolacePropsAlwaysWritePKCS12(t *testing.T) {
 		"client": existing("./k.p12", "KS_PW"),
 	})
 	got := map[string]string{}
-	for _, kv := range SolaceProps(d, Selection{Truststore: "ca", Keystore: "client"}, false, placeholderSecretRef) {
+	for _, kv := range SolaceProps(d, Selection{Truststore: "ca", Keystore: "client"}, placeholderSecretRef) {
 		got[kv.Key] = kv.Val
 	}
 	if got["SSL_TRUST_STORE_FORMAT"] != "PKCS12" || got["SSL_KEY_STORE_FORMAT"] != "PKCS12" {
@@ -227,7 +198,7 @@ func TestSolacePropsSkipsUnconfiguredStore(t *testing.T) {
 	})
 	calls := 0
 	rec := func(store string, c spec.Cred) string { calls++; return "${" + store + "}" }
-	if got := SolaceProps(d, Selection{Truststore: "ca", Keystore: "client", KeyAlias: "a"}, true, rec); len(got) != 0 {
+	if got := SolaceProps(d, Selection{Truststore: "ca", Keystore: "client", KeyAlias: "a"}, rec); len(got) != 0 {
 		t.Errorf("SolaceProps with unconfigured stores = %v, want empty", got)
 	}
 	if calls != 0 {

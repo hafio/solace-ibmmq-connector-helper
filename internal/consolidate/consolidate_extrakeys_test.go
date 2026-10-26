@@ -114,7 +114,7 @@ func TestBuildCarriesExtraKeysOntoBothBinders(t *testing.T) {
 	d := &spec.Defaults{SolaceDefaults: propsNode(t, "connect-retries: -1\nreconnect-retries: -1\n")}
 	src := withExtra(t, mqSide("QM", "IN", spec.DestQueue, false), "user-authentication-mqcsp: false\npool:\n  max-connections: 5\n")
 	tgt := withExtra(t, solaceSide("v", "OUT", spec.DestQueue, ""), "connect-retries: 5\nclient-name: n\n")
-	m, warns := Build([]spec.Workflow{extraWF("0.yaml", src, tgt)}, d, Opts{MountStores: true})
+	m, warns := Build([]spec.Workflow{extraWF("0.yaml", src, tgt)}, d, Opts{})
 	if len(warns) != 0 {
 		t.Errorf("unexpected warnings: %v", warns)
 	}
@@ -139,7 +139,7 @@ func TestBuildCarriesExtraKeysOntoBothBinders(t *testing.T) {
 func TestBuildMergesExtraKeysAcrossSidesOfOneBinder(t *testing.T) {
 	a := extraWF("0.yaml", withExtra(t, mqSide("QM", "IN-0", spec.DestQueue, false), "client-id: c\n"), solaceSide("v", "OUT-0", spec.DestQueue, ""))
 	b := extraWF("1.yaml", withExtra(t, mqSide("QM", "IN-1", spec.DestQueue, false), "application-name: app\n"), solaceSide("v", "OUT-1", spec.DestQueue, ""))
-	m, warns := Build([]spec.Workflow{a, b}, &spec.Defaults{}, Opts{MountStores: true})
+	m, warns := Build([]spec.Workflow{a, b}, &spec.Defaults{}, Opts{})
 	if len(warns) != 0 {
 		t.Errorf("a union of keys must not warn: %v", warns)
 	}
@@ -149,7 +149,7 @@ func TestBuildMergesExtraKeysAcrossSidesOfOneBinder(t *testing.T) {
 	}
 
 	b.Source = withExtra(t, mqSide("QM", "IN-1", spec.DestQueue, false), "client-id: other\n")
-	m, warns = Build([]spec.Workflow{a, b}, &spec.Defaults{}, Opts{MountStores: true})
+	m, warns = Build([]spec.Workflow{a, b}, &spec.Defaults{}, Opts{})
 	if len(warns) != 1 || !strings.Contains(warns[0], `passthrough key "client-id" set more than once; last (by filename) wins`) {
 		t.Errorf("a disagreement must warn once, got %v", warns)
 	}
@@ -171,7 +171,7 @@ func TestBuildNestedExtraKeyThroughSharedConnRefIsQuiet(t *testing.T) {
 		src := spec.Side{System: spec.SystemMQ, ConnRef: "qm", DestKind: spec.DestQueue, Dest: "IN-" + n}
 		wfs = append(wfs, extraWF(n, src, solaceSide("v", "OUT-"+n, spec.DestQueue, "")))
 	}
-	m, warns := Build(wfs, d, Opts{MountStores: true})
+	m, warns := Build(wfs, d, Opts{})
 	if len(warns) != 0 {
 		t.Errorf("a shared nested extra key warned: %v", warns)
 	}
@@ -190,7 +190,7 @@ func TestBuildDropsExtraKeysTheToolManages(t *testing.T) {
 	mqs.Truststore = "mq-ca"
 	src := withExtra(t, mqs, "ssl-bundle: theirs\nqueueManager: OTHER\n")
 	tgt := withExtra(t, solaceSide("v", "OUT", spec.DestQueue, ""), "msgVpn: other\n")
-	m, warns := Build([]spec.Workflow{extraWF("0.yaml", src, tgt)}, d, Opts{MountStores: true})
+	m, warns := Build([]spec.Workflow{extraWF("0.yaml", src, tgt)}, d, Opts{})
 	mq := binderOfKind(t, m, spec.SystemMQ).MQ
 	if mq.SSLBundle != "mq-conn-1-bundle" || mq.QueueManager != "QM" || len(mq.Extras) != 0 {
 		t.Errorf("mq binder = %+v, want the tool's bundle and queue manager and no Extras", mq)
@@ -228,7 +228,7 @@ func TestBuildLeaderElectionSessionCarriesExtraKeys(t *testing.T) {
 	}
 	secretRef, _ := testSecretRef()
 	var warns []string
-	le := buildLeaderElection(d, true, secretRef, fixedLeaderNames, &warns)
+	le := buildLeaderElection(d, secretRef, fixedLeaderNames, &warns)
 	if le == nil || le.Session == nil {
 		t.Fatalf("le = %+v", le)
 	}
@@ -248,7 +248,7 @@ func TestBuildMQDefaultsOverriddenByConnection(t *testing.T) {
 	d := &spec.Defaults{MQDefaults: propsNode(t, "channel: nope\nuser-authentication-mqcsp: false\napplication-name: fleet\n")}
 	a := extraWF("0.yaml", withExtra(t, mqSide("QM1", "IN-0", spec.DestQueue, false), "applicationName: mine\n"), solaceSide("v", "OUT-0", spec.DestQueue, ""))
 	b := extraWF("1.yaml", mqSide("QM2", "IN-1", spec.DestQueue, false), solaceSide("v", "OUT-1", spec.DestQueue, ""))
-	m, warns := Build([]spec.Workflow{a, b}, d, Opts{MountStores: true})
+	m, warns := Build([]spec.Workflow{a, b}, d, Opts{})
 	if len(warns) != 1 || warns[0] != `mq-defaults: passthrough overrides tool-managed key "channel"; tool value kept` {
 		t.Errorf("warns = %v, want the one mq-defaults warning", warns)
 	}

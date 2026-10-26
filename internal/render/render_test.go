@@ -108,7 +108,7 @@ func buildRich(t *testing.T) *consolidate.Model {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", richSrcYAML)}, d, consolidate.Opts{MountStores: true, StatusPassword: "status-literal-pw"})
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", richSrcYAML)}, d, consolidate.Opts{StatusPassword: "status-literal-pw"})
 	return m
 }
 
@@ -331,7 +331,7 @@ target:
 `),
 		wf(t, "2.yaml", fmt.Sprintf(sides, 2, 2)+"transform: {}\n"),
 	}
-	m, _ := consolidate.Build(wfs, &spec.Defaults{}, consolidate.Opts{MountStores: true, StatusPassword: "status-literal-pw"})
+	m, _ := consolidate.Build(wfs, &spec.Defaults{}, consolidate.Opts{StatusPassword: "status-literal-pw"})
 	out := Application(m)
 
 	want := `    workflows:
@@ -400,7 +400,7 @@ target:
     client-password: x
     queue: OUT
 `
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{MountStores: true, StatusPassword: "status-literal-pw"})
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{StatusPassword: "status-literal-pw"})
 	out := Application(m)
 	// TLS and logging stay absent with nothing configured. management and
 	// security are no longer part of this check: consolidate's
@@ -484,7 +484,7 @@ func renderLeaderFixture(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", leaderSrc)}, d, consolidate.Opts{MountStores: true})
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", leaderSrc)}, d, consolidate.Opts{})
 	return Application(m)
 }
 
@@ -628,7 +628,7 @@ target:
     msg-vpn: v
     topic: OUT
 `
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{MountStores: true, StatusPassword: "status-literal-pw"})
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{StatusPassword: "status-literal-pw"})
 	out := Application(m)
 	// Binders still render their identity...
 	for _, want := range []string{"conn-name: h(1414)", "queue-manager: QM1", "host: tcp://b:55555", "msg-vpn: v"} {
@@ -681,7 +681,7 @@ security:
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{MountStores: true})
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{})
 	out := Application(m)
 	for _, want := range []string{
 		`conn-name: "h(1414) #1"`,   // " #" would start a comment
@@ -722,7 +722,7 @@ target:
     msg-vpn: v
     topic: OUT
 `
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{MountStores: true})
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{})
 	out := Application(m)
 	want := `                  CERT: |
                     -----BEGIN CERTIFICATE-----
@@ -756,7 +756,7 @@ target:
     msg-vpn: v
     topic: OUT
 `
-	m, warns := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{MountStores: true})
+	m, warns := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{})
 	out := Application(m)
 	for _, no := range []string{"ssl:", "bundle:", "ssl-bundle:", "location: ", "truststore:"} {
 		if strings.Contains(out, no) {
@@ -795,7 +795,7 @@ target:
 	d := &spec.Defaults{TLS: spec.TLSConfig{Stores: map[string]*spec.Store{"client": {Existing: &spec.StoreExisting{PKCS12: "certs/k.jks"}, PasswordEnv: "KS_PW"}}}}
 	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{})
 	out := Application(m)
-	want := "        mq-conn-1-bundle:\n          keystore:\n            location: certs/k.jks\n            password: ${KS_PW}\n            type: PKCS12\n          key:\n            alias: app\n"
+	want := "        mq-conn-1-bundle:\n          keystore:\n            location: /app/external/classpath/truststores/client\n            password: ${KS_PW}\n            type: PKCS12\n          key:\n            alias: app\n"
 	if !strings.Contains(out, want) {
 		t.Errorf("want the keystore-only bundle\n%s\n---\n%s", want, out)
 	}
@@ -828,7 +828,7 @@ target:
 		{Name: "probe", Password: "probe-pass"},
 	}}}
 	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d,
-		consolidate.Opts{MountStores: true, StatusPassword: "status-literal-pw"})
+		consolidate.Opts{StatusPassword: "status-literal-pw"})
 	out := Application(m)
 
 	want := "        - name: ops\n" +
@@ -871,14 +871,14 @@ target:
 	const configImport = "optional:configtree:/app/external/var/secrets/"
 
 	withImport, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{},
-		consolidate.Opts{MountStores: true, ConfigImport: configImport})
+		consolidate.Opts{ConfigImport: configImport})
 	out := Application(withImport)
 	want := "spring:\n  config:\n    import: " + configImport + "\n"
 	if !strings.HasPrefix(out, want) {
 		t.Errorf("want Application to lead with %q when ConfigImport is set\n---\n%s", want, out)
 	}
 
-	noImport, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{MountStores: true})
+	noImport, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{})
 	out2 := Application(noImport)
 	if strings.Contains(out2, "config:") || strings.Contains(out2, "import:") {
 		t.Errorf("want no config.import block when ConfigImport is empty\n---\n%s", out2)
@@ -943,7 +943,7 @@ target:
     api-properties:
       REAPPLY_SUBSCRIPTIONS: true
 `
-	m, warns := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{MountStores: true})
+	m, warns := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{})
 	if len(warns) != 0 {
 		t.Errorf("unexpected warnings: %v", warns)
 	}
@@ -1009,7 +1009,7 @@ func TestApplicationSessionCarriesExtraKeysLikeTheBinder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", leaderSrc)}, d, consolidate.Opts{MountStores: true})
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", leaderSrc)}, d, consolidate.Opts{})
 	out := Application(m)
 	binder := blockKeys(t, out, "              java:")
 	session := blockKeys(t, out, "      session:")
@@ -1052,7 +1052,7 @@ target:
     truststore: ca
     queue: OUT
 `
-	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{MountStores: true})
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{})
 	out := Application(m)
 	topLevel := func(keys []string) []string {
 		var top []string
@@ -1107,7 +1107,7 @@ target:
 	if n := strings.Count(out, "\n            type: PKCS12\n"); n != 2 {
 		t.Errorf("the bundle's truststore and keystore must both be typed PKCS12, got %d\n---\n%s", n, out)
 	}
-	for _, yes := range []string{"SSL_TRUST_STORE_FORMAT: PKCS12", "SSL_KEY_STORE_FORMAT: PKCS12", "location: certs/t.jks", "location: certs/k.jks", "alias: mq-client", "SSL_TRUST_STORE: certs/t.jks", "SSL_PRIVATE_KEY_ALIAS: sol-client"} {
+	for _, yes := range []string{"SSL_TRUST_STORE_FORMAT: PKCS12", "SSL_KEY_STORE_FORMAT: PKCS12", "location: /app/external/classpath/truststores/ca", "location: /app/external/classpath/truststores/client", "alias: mq-client", "SSL_TRUST_STORE: /app/external/classpath/truststores/ca", "SSL_PRIVATE_KEY_ALIAS: sol-client"} {
 		if !strings.Contains(out, yes) {
 			t.Errorf("want %q in the output\n---\n%s", yes, out)
 		}

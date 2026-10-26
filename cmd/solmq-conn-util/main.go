@@ -584,7 +584,7 @@ func actDocker(o actionOpts, r runner.Runner) int {
 	// so remove passes placeholders and needs no store's sources.
 	storeKVs := gen.DockerStorePlaceholders(plan)
 	if action == runner.ActionDeploy {
-		skvs, swarns, serr := gen.ResolveDockerStores(plan, res, envVarMax(runtime.GOOS), runtime.GOOS)
+		skvs, swarns, serr := gen.ResolveDockerStores(plan, res, gen.EnvVarMax(runtime.GOOS), runtime.GOOS)
 		printWarnings(swarns)
 		if serr != nil {
 			return errExit(serr)
@@ -592,14 +592,15 @@ func actDocker(o actionOpts, r runner.Runner) int {
 		storeKVs = skvs
 	}
 	if action == runner.ActionDeploy {
-		if err := missingStoreFiles(validate.PlatformDocker, plan.Mounts); err != nil {
-			return errExit(err)
-		}
 		// docker bind-mounts the TLS stores and the libs jars, which the
 		// connector reads as its run-as identity with the host's own ids. The
 		// paths are the plan's, as the compose file mounts them: expanded and
 		// absolute.
-		for _, w := range unreadableMounts(sharedIDs(plan.RunAs), validate.PlatformDocker, mountChecks(validate.PlatformDocker, plan.Mounts)) {
+		herrs, hwarns := dockerHostChecks(plan)
+		if len(herrs) > 0 {
+			return failAll(herrs)
+		}
+		for _, w := range hwarns {
 			fmt.Fprintln(os.Stderr, "warning:", w)
 		}
 	}
@@ -623,17 +624,6 @@ func actDocker(o actionOpts, r runner.Runner) int {
 		_ = os.Remove(path)
 	}
 	return report(action, tgtDocker, out, rerr)
-}
-
-// envVarMax is the most one environment variable -- NAME=value and its
-// terminating NUL -- may hold on goos: Windows caps a variable at 32767
-// characters; Linux caps one string at 131072 bytes (MAX_ARG_STRLEN), which is
-// also kept as the bound everywhere else.
-func envVarMax(goos string) int {
-	if goos == "windows" {
-		return 32767
-	}
-	return 131072
 }
 
 // checkImageCommand holds a docker deploy that carries created stores to the
@@ -692,16 +682,12 @@ func actPodman(o actionOpts, r runner.Runner) int {
 	// readable by any uid; the libs jars are a bind mount, read with the host's
 	// ids when deployed as root and through the subordinate ranges rootless --
 	// which also have to exist for the run-as ids to be mapped at all.
-	reader := sharedIDs(plan.RunAs)
-	if sc.UserMode {
-		reader = rootlessIDs(plan.RunAs)
-		if runtime.GOOS == "linux" {
-			for _, w := range subIDWarnings(plan.RunAs, os.ReadFile, os.Getuid(), currentUserName()) {
-				fmt.Fprintln(os.Stderr, "warning:", w)
-			}
+	if sc.UserMode && runtime.GOOS == "linux" {
+		for _, w := range subIDWarnings(plan.RunAs, os.ReadFile, os.Getuid(), currentUserName()) {
+			fmt.Fprintln(os.Stderr, "warning:", w)
 		}
 	}
-	for _, w := range unreadableMounts(reader, validate.PlatformPodman, mountChecks(validate.PlatformPodman, plan.Mounts)) {
+	for _, w := range podmanHostChecks(plan, sc) {
 		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
 	return podmanDeploy(sc, plan, e.Podman, res, r, extraAllowed)
@@ -986,11 +972,14 @@ func runValidate(args []string) int {
 	if _, err := collectFlagsAndDirs(fs, args); err != nil {
 		return flagExit("validate", err)
 	}
-	req, _, envDir, lerr := loadEnv(*env)
+	req, e, envDir, lerr := loadEnv(*env)
 	if lerr != nil {
 		return errExit(lerr)
 	}
-	errs, warns := gen.Validate(req, resolver(envDir))
+	res := resolver(envDir)
+	errs, warns := gen.Validate(req, res)
+	herrs, hwarns := hostChecks(req, e, res)
+	errs, warns = append(errs, herrs...), append(warns, hwarns...)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		for _, e := range errs { // validate: report every error
@@ -1001,6 +990,35 @@ func runValidate(args []string) int {
 	}
 	fmt.Fprintln(os.Stderr, "ok: no errors")
 	return 0
+}
+
+// hostChecks runs, for validate, the checks a docker or podman deploy makes on
+// this host before it starts anything, for each of those sections env.yaml
+// has: dockerHostChecks and podmanHostChecks. Each needs its platform's plan,
+// so it runs only once the spec generates for that platform; until then
+// gen.Validate's own errors are the ones to fix.
+func hostChecks(req gen.Request, e *spec.Env, res gen.Resolver) (errs, warns []gen.Issue) {
+	issue := func(msg string) gen.Issue { return gen.Issue{File: defaultEnvFile, Msg: msg} }
+	if e.Docker != nil {
+		if plan, perrs, _ := gen.GenerateDocker(req, res); len(perrs) == 0 {
+			herrs, hwarns := dockerHostChecks(plan)
+			for _, err := range herrs {
+				errs = append(errs, issue(err.Error()))
+			}
+			for _, w := range hwarns {
+				warns = append(warns, issue(w))
+			}
+		}
+	}
+	if e.Podman != nil {
+		sc, serr := runner.ResolveQuadletScope()
+		if plan, perrs, _ := gen.GeneratePodman(req, res); serr == nil && len(perrs) == 0 {
+			for _, w := range podmanHostChecks(plan, sc) {
+				warns = append(warns, issue(w))
+			}
+		}
+	}
+	return errs, warns
 }
 
 // runExamples writes the embedded starter env.yaml + workflows to dir (default
@@ -1543,6 +1561,14 @@ func errExit(err error) int {
 
 func failFast(errs []gen.Issue) int {
 	fmt.Fprintln(os.Stderr, "error:", errs[0].String())
+	return 1
+}
+
+// failAll reports every error, one per line, and exits non-zero.
+func failAll(errs []error) int {
+	for _, err := range errs {
+		fmt.Fprintln(os.Stderr, "error:", err)
+	}
 	return 1
 }
 

@@ -2,6 +2,7 @@ package gen
 
 import (
 	"encoding/base64"
+	"fmt"
 	"io/fs"
 	"strings"
 	"testing"
@@ -156,8 +157,8 @@ func createdEnv(section string) Request {
 // plans it as a build that deploy carries out, and docker as a compose secret
 // whose base64 deploy puts in the environment, with a digest that stays put
 // while the store does. An existing stores Secret is the operator's, so
-// nothing is built for it; generate config, which has no secret to carry it,
-// refuses it by name.
+// nothing is built for it; generate config references it at its mount path,
+// like any store, and reads nothing.
 func TestCreatedStoresOnEachPlatform(t *testing.T) {
 	ca := certfixture.CA(t, "Root")
 	var reads []string
@@ -242,8 +243,9 @@ func TestCreatedStoresOnEachPlatform(t *testing.T) {
 	if again, _, _ := ResolveDockerStores(dp, res, 131072, "linux"); again[1].Val != env[1].Val {
 		t.Error("an unchanged created store must keep its digest, or every deploy recreates the container")
 	}
-	if _, errs, _ := Config(createdEnv(""), res); len(errs) != 1 || !strings.Contains(errs[0].Msg, "tls.stores.ts is created at deploy and has no file for generate config to reference; use existing: {pkcs12: <file>} for a connector you run yourself") {
-		t.Errorf("config: errs = %v", errs)
+	reads = nil
+	if out, errs, _ := Config(createdEnv(""), res); len(errs) != 0 || !strings.Contains(out, "location: /app/external/classpath/truststores/ts\n") || len(reads) != 0 {
+		t.Errorf("config: errs = %v, reads = %v, want the store at its mount path:\n%s", errs, reads, out)
 	}
 }
 
@@ -304,5 +306,154 @@ func TestDockerStorePlaceholders(t *testing.T) {
 	}
 	if DockerStorePlaceholders(DockerPlan{}) != nil {
 		t.Error("no created store needs no placeholder")
+	}
+}
+
+// One environment variable holds 32767 characters on Windows; 131072 bytes is
+// Linux's cap on one string, kept everywhere else.
+func TestEnvVarMax(t *testing.T) {
+	for goos, want := range map[string]int{"windows": 32767, "linux": 131072, "darwin": 131072} {
+		if got := EnvVarMax(goos); got != want {
+			t.Errorf("EnvVarMax(%s) = %d, want %d", goos, got, want)
+		}
+	}
+}
+
+// validateEnv is an env.yaml with the image, the tls.stores entries in stores
+// (each indented as under tls.stores), and the platform sections.
+func validateEnv(stores string, sections ...string) Request {
+	env := "image:\n  name: img\n  tag: v1\ntls:\n  stores:\n" + stores + strings.Join(sections, "")
+	return Request{Env: &File{Name: "env.yaml", Data: []byte(env)}, Workflows: synthTLSWorkflowFiles(1, "ts", "ks")}
+}
+
+// validate reads and builds what deploy would, for each platform env.yaml has
+// a section for, and reports every failure in one run: an existing store that
+// cannot be read, a created one that does not build -- even with its password
+// unset, built with a stand-in, unless a JKS needs that password to open -- and
+// every platform's size limit. A store is read once however many platforms
+// carry it; one nothing selects, one an existing kubernetes Secret holds, and
+// a docker bind mount (the verb checks those on its host) are never read.
+func TestValidateReadsWhatDeployReads(t *testing.T) {
+	const (
+		kube     = "kubernetes:\n  command: kubectl\n  deployment:\n    name: c\n    namespace: ns\n  secrets:\n    stores:\n      create: true\n"
+		kubeHeld = "kubernetes:\n  command: kubectl\n  deployment:\n    name: c\n    namespace: ns\n  secrets:\n    stores:\n      existing: my-tls\n"
+		podman   = "podman:\n  command: podman\n  name: c\n"
+		docker   = "docker:\n  command: docker\n  name: c\n"
+	)
+	existing := func(name, file string) string {
+		return "    " + name + ":\n      password-env: CA_PW\n      existing:\n        pkcs12: " + file + "\n"
+	}
+	created := func(name, pwEnv, file string) string {
+		return "    " + name + ":\n      password-env: " + pwEnv + "\n      create:\n        certs:\n          - " + file + "\n"
+	}
+	now := time.Now()
+	ca := certfixture.PEM(certfixture.CA(t, "Root"))
+	soon := certfixture.PEM(certfixture.CA(t, "Soon", certfixture.Validity(now.Add(-time.Hour), now.Add(5*24*time.Hour))))
+	var many []certfixture.Cert
+	for i := 0; i < 80; i++ {
+		many = append(many, certfixture.CA(t, fmt.Sprintf("CA %d", i)))
+	}
+	files := map[string][]byte{
+		"./ca.pem": ca, "./soon.pem": soon, "./many.pem": certfixture.PEM(many...), "./junk.pem": []byte("not a certificate"),
+		"./t.p12": []byte("P12"), "./big.p12": make([]byte, 800*1024), "./mid.p12": make([]byte, 600000),
+	}
+	for _, c := range []struct {
+		name      string
+		req       Request
+		goos      string
+		errs      []string // each reported exactly once, and nothing else
+		warns     []string // each reported exactly once
+		readsNone bool
+	}{
+		{name: "a readable existing store", req: validateEnv(existing("ts", "./t.p12")+existing("ks", "./t.p12"), kube, podman)},
+		{name: "a missing existing store, kubernetes", req: validateEnv(existing("ts", "./gone.p12")+existing("ks", "./t.p12"), kube),
+			errs: []string{`reading tls.stores.ts.existing.pkcs12 "./gone.p12"`}},
+		{name: "a missing existing store, podman", req: validateEnv(existing("ts", "./gone.p12")+existing("ks", "./t.p12"), podman),
+			errs: []string{`reading tls.stores.ts.existing.pkcs12 "./gone.p12"`}},
+		{name: "missing under two platforms, reported once", req: validateEnv(existing("ts", "./gone.p12")+existing("ks", "./t.p12"), kube, podman),
+			errs: []string{`reading tls.stores.ts.existing.pkcs12 "./gone.p12"`}},
+		{name: "two bad stores, both reported", req: validateEnv(existing("ts", "./gone.p12")+existing("ks", "./lost.p12"), podman),
+			errs: []string{`reading tls.stores.ts.existing.pkcs12 "./gone.p12"`, `reading tls.stores.ks.existing.pkcs12 "./lost.p12"`}},
+		{name: "a docker existing store is the host's to check", req: validateEnv(existing("ts", "./gone.p12")+existing("ks", "./gone.p12"), docker), readsNone: true},
+		{name: "a created store that does not build", req: validateEnv(created("ts", "CA_PW", "./junk.pem")+existing("ks", "./t.p12"), docker),
+			errs: []string{"holds no certificate"}},
+		{name: "unset password: built with a stand-in", req: validateEnv(created("ts", "NOPE", "./junk.pem")+existing("ks", "./t.p12"), podman),
+			errs: []string{"holds no certificate"}, warns: []string{"tls.stores.ts.password-env names NOPE, which is not set in this environment"}},
+		{name: "unset password: a JKS is not opened", req: validateEnv("    ts:\n      password-env: NOPE\n      create:\n        jks: ./gone.jks\n"+existing("ks", "./t.p12"), kube),
+			warns: []string{"tls.stores.ts.password-env names NOPE, which is not set in this environment"}},
+		{name: "an existing kubernetes Secret is not read", req: validateEnv(created("ts", "CA_PW", "./gone.pem")+existing("ks", "./gone.p12"), kubeHeld), readsNone: true},
+		{name: "an expiring certificate, warned once", req: validateEnv(created("ts", "CA_PW", "./soon.pem")+existing("ks", "./t.p12"), kube, podman, docker),
+			warns: []string{"expires on"}},
+		{name: "over the kubernetes Secret", req: validateEnv(existing("ts", "./big.p12")+existing("ks", "./t.p12"), kube),
+			errs: []string{"the stores Secret would hold"}},
+		{name: "over a podman secret", req: validateEnv(existing("ts", "./mid.p12")+existing("ks", "./t.p12"), podman),
+			errs: []string{`tls.stores.ts.existing.pkcs12 "./mid.p12" is 600000 bytes, over the 511999 bytes podman's secret store holds`}},
+		{name: "over a windows environment variable", goos: "windows", req: validateEnv(created("ts", "CA_PW", "./many.pem")+existing("ks", "./t.p12"), docker),
+			errs: []string{"an environment variable holds on windows"}},
+		{name: "within a linux environment variable", goos: "linux", req: validateEnv(created("ts", "CA_PW", "./many.pem")+existing("ks", "./t.p12"), docker)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var reads []string
+			res := Resolver{Env: storeEnv, Now: func() time.Time { return now }, GOOS: c.goos, ReadFile: func(p string) ([]byte, error) {
+				reads = append(reads, p)
+				return storeFiles(files)(p)
+			}}
+			// The unselected store sits beside every case's: never read.
+			c.req.Env.Data = []byte(strings.Replace(string(c.req.Env.Data), "  stores:\n", "  stores:\n"+existing("idle", "./idle.p12"), 1))
+			errs, warns := Validate(c.req, res)
+			if len(errs) != len(c.errs) {
+				t.Errorf("errs = %v, want %d: %q", errs, len(c.errs), c.errs)
+			}
+			for _, want := range c.errs {
+				if n := countIssues(errs, want); n != 1 {
+					t.Errorf("%q reported %d times in %v", want, n, errs)
+				}
+			}
+			for _, want := range c.warns {
+				if n := countIssues(warns, want); n != 1 {
+					t.Errorf("%q warned %d times in %v", want, n, warns)
+				}
+			}
+			for _, p := range reads {
+				if p == "./idle.p12" || c.readsNone {
+					t.Errorf("read %s, which deploy would not", p)
+				}
+			}
+		})
+	}
+}
+
+func countIssues(issues []Issue, sub string) int {
+	n := 0
+	for _, i := range issues {
+		if strings.Contains(i.Msg, sub) {
+			n++
+		}
+	}
+	return n
+}
+
+// Without file access validate says so, rather than pass an existing store it
+// never read. Without environment access a created store is still built, with
+// the stand-in password; a literal password is used as written.
+func TestValidateStoreBytesWithoutAccess(t *testing.T) {
+	if _, _, err := validateStoreBytes(consolidate.StoreUse{Name: "ts", File: "./t.p12"}, nil, Resolver{}); err == nil || err.Error() != `cannot read tls.stores.ts.existing.pkcs12 "./t.p12" (no file access)` {
+		t.Errorf("no file access: err = %v", err)
+	}
+	read := storeFiles(map[string][]byte{"./ca.pem": certfixture.PEM(certfixture.CA(t, "Root"))})
+	use := consolidate.StoreUse{Name: "ts", Trusted: true, Created: true}
+	data, _, err := validateStoreBytes(use, &StoreBuild{Name: "ts", Store: createdCA("./ca.pem"), Trusted: true}, Resolver{ReadFile: read})
+	if err != nil {
+		t.Fatalf("no environment access: %v", err)
+	}
+	if _, err := pkcs12.DecodeTrustStore(data, storePasswordStandIn); err != nil {
+		t.Errorf("the store was not built with the stand-in: %v", err)
+	}
+	literal := &spec.Store{Password: "lit-pw", Create: createdCA("./ca.pem").Create}
+	if data, _, err = validateStoreBytes(use, &StoreBuild{Name: "ts", Store: literal, Trusted: true}, Resolver{ReadFile: read}); err != nil {
+		t.Fatalf("literal password: %v", err)
+	}
+	if _, err := pkcs12.DecodeTrustStore(data, "lit-pw"); err != nil {
+		t.Errorf("the store was not built with its literal password: %v", err)
 	}
 }
