@@ -48,15 +48,15 @@
     "semantic_hash": ""
   },
   "internal/deploy/deploy.go": {
-    "mtime": 1793003248.4884036,
-    "seen": 1793003901.6033401,
-    "ast_hash": "500ae37ac7a1f956d1b07a1cc4212baf",
+    "mtime": 1793012396.2825289,
+    "seen": 1793013202.2654593,
+    "ast_hash": "a414b8f03e0a58312bc5dc7ce638e487",
     "semantic_hash": ""
   },
   "internal/deploy/deploy_test.go": {
-    "mtime": 1793003353.9911098,
-    "seen": 1793003901.6033437,
-    "ast_hash": "6be9e98b6f8b5b9efe35f76bd936e682",
+    "mtime": 1793012396.283661,
+    "seen": 1793013202.2654617,
+    "ast_hash": "9e09148d10f74c3dd6498398fd45999e",
     "semantic_hash": ""
   },
   "internal/examples/examples.go": {
@@ -90,9 +90,9 @@
     "semantic_hash": ""
   },
   "internal/render/render.go": {
-    "mtime": 1793002987.9727335,
-    "seen": 1793003901.6033938,
-    "ast_hash": "72704bfb040bca8579b2e6ae42f8f705",
+    "mtime": 1793008823.6653187,
+    "seen": 1793013202.2654955,
+    "ast_hash": "c5d2ba7c91f05e9b2b3e24983ab20395",
     "semantic_hash": ""
   },
   "internal/render/render_test.go": {
@@ -120,9 +120,9 @@
     "semantic_hash": ""
   },
   "internal/spec/kubernetes.go": {
-    "mtime": 1793003243.3462393,
-    "seen": 1793003901.6034293,
-    "ast_hash": "c40a3f16a755edfcbceae625dd0bc707",
+    "mtime": 1793012396.2811704,
+    "seen": 1793013202.2655196,
+    "ast_hash": "0fb0211a69c2945b43af8b426c95f6ee",
     "semantic_hash": ""
   },
   "internal/spec/spec.go": {
@@ -132,9 +132,9 @@
     "semantic_hash": ""
   },
   "internal/spec/spec_test.go": {
-    "mtime": 1793003353.99079,
-    "seen": 1793003901.6034396,
-    "ast_hash": "2b9013e77788f1cd96ee76c2a3e544cf",
+    "mtime": 1793012396.2828457,
+    "seen": 1793013202.2655263,
+    "ast_hash": "790ef53d43d98aa704cbc80f3a823b2c",
     "semantic_hash": ""
   },
   "internal/tls/tls.go": {
@@ -150,15 +150,15 @@
     "semantic_hash": ""
   },
   "internal/validate/validate.go": {
-    "mtime": 1793003243.346346,
-    "seen": 1793003901.603486,
-    "ast_hash": "11f27c00fdf5a6cdf63a13db6e7f0488",
+    "mtime": 1793012410.227653,
+    "seen": 1793013202.2655578,
+    "ast_hash": "912dca67c37cffe486f20db17f02d50e",
     "semantic_hash": ""
   },
   "internal/validate/validate_extra_test.go": {
-    "mtime": 1793003371.8637855,
-    "seen": 1793003901.6034932,
-    "ast_hash": "eeb84201e8c6575a40fbd975e813ef39",
+    "mtime": 1793012410.2283251,
+    "seen": 1793013202.265562,
+    "ast_hash": "408b5ff5ffce630bff401648cb0e0382",
     "semantic_hash": ""
   },
   "internal/validate/validate_test.go": {
@@ -246,9 +246,9 @@
     "semantic_hash": ""
   },
   "docs/DEVELOPMENT.md": {
-    "mtime": 1792991680.3364217,
-    "seen": 1792991882.8663862,
-    "ast_hash": "e13d26590b8cd38c7590f6805d4e6e78",
+    "mtime": 1793008939.2611728,
+    "seen": 1793013202.2655823,
+    "ast_hash": "412626f8bd5b6d6a05616a546d3e4d53",
     "semantic_hash": ""
   },
   ".github/dependabot.yml": {
@@ -318,9 +318,9 @@
     "semantic_hash": ""
   },
   "internal/examples/files/env.yaml": {
-    "mtime": 1793003433.8999248,
-    "seen": 1793003901.6035328,
-    "ast_hash": "60077e8462f4dea9f5d5a3790884d07e",
+    "mtime": 1793008939.2607126,
+    "seen": 1793013202.2655883,
+    "ast_hash": "968b667b7ca77991d3d0fe4def18883e",
     "semantic_hash": ""
   },
   "testdata/golden/specs/env.yaml": {
@@ -342,9 +342,9 @@
     "semantic_hash": ""
   },
   "docs/test.md": {
-    "mtime": 1793003457.6447463,
-    "seen": 1793003901.6035292,
-    "ast_hash": "b872e54cfa9f84e8de4217f6e8ae6955",
+    "mtime": 1793012416.1925335,
+    "seen": 1793013202.265586,
+    "ast_hash": "adee8137083fd1fc44eed5164dee8cdc",
     "semantic_hash": ""
   },
   "docs/commands.md": {
@@ -450,9 +450,9 @@
     "semantic_hash": ""
   },
   "solmq-conn-util-generator.html": {
-    "mtime": 1793003876.7954414,
-    "seen": 1793003901.6035428,
-    "ast_hash": "eca01dc19c77c02e19cf55bdce4dca67",
+    "mtime": 1793008852.4200492,
+    "seen": 1793013202.265595,
+    "ast_hash": "680a01f138ab71fbacbba0ac0e4086e6",
     "semantic_hash": ""
   },
   "internal/spec/defaults_test.go": {
@@ -654,9 +654,9 @@
     "semantic_hash": ""
   },
   "docs/userguide.md": {
-    "mtime": 1793003423.6334767,
-    "seen": 1793003901.6035311,
-    "ast_hash": "bfd48243d752c5e48ef0fb12cdd51002",
+    "mtime": 1793008939.259699,
+    "seen": 1793013202.265587,
+    "ast_hash": "5fc79382f74e3a8af41b1c4b0599a527",
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/testcatalog_test.go": {

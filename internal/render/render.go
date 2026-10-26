@@ -366,6 +366,13 @@ func renderProp(w *yw, indent int, p consolidate.Prop) {
 	renderContainer(w, indent+2, p.Sub)
 }
 
+// Node writes the children of a mapping or sequence node at indent the way a
+// passthrough block is written: keys as they stand, scalars in their source
+// quoting. Shared with the kubernetes renderer, which writes the verbatim
+// kubernetes.deployment.affinity block with it; validate holds that block's
+// keys to a plain form first.
+func Node(w *yw, indent int, n *yaml.Node) { renderContainer(w, indent, n) }
+
 // renderContainer emits the children of a mapping or sequence node.
 func renderContainer(w *yw, indent int, n *yaml.Node) {
 	switch n.Kind {

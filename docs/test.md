@@ -50,7 +50,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 974 test functions, 1386 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 979 test functions, 1395 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -140,6 +140,7 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestParseKubernetesFull | - | parses replicas 2, service enabled port 8090, credentials create name, stores create present; source and variables set on credentials.create parse structurally regardless, so RemovedKeys can report them |
 | TestParseKubernetesError | - | deployment as sequence instead of map returns non-nil error |
 | TestParseKubernetesNodeSelector | - | deployment.node-selector decodes to its label map; true and 2 arrive as the text written, an empty value as "", and an unset selector stays nil |
+| TestParseKubernetesScheduling | - | tolerations decode in Kubernetes' shape (tolerationSeconds as a pointer), spread is kept as written, and affinity is captured as its YAML node |
 | TestParseKubernetesResources | - | parses deployment resources CPU '1' and Memory 1Gi |
 | TestParseKubernetesLoggingLibsDefaults | syslog and libs download present | syslog Protocol defaults to udp and libs download Image defaults to busybox:1.37 |
 | TestParseKubernetesLoggingLibsDefaults | libs pvc create without storage | pvc create Storage defaults to 1Gi |
@@ -552,6 +553,10 @@ Tests: [deploy_test.go](../internal/deploy/deploy_test.go), [imagepull_test.go](
 | TestStoresVolumeMapsKeysToStoreNames | no model | storeItems returns nil: no store to list |
 | TestRenderConfigMapStatusScript | - | the ConfigMap always carries the status script under its own `status` key, alongside application.yml |
 | TestRenderDeploymentNodeSelector | - | the pod spec carries nodeSelector after automountServiceAccountToken, keys sorted, a key or value YAML would misread ("2", "true", "") quoted; no selector writes none |
+| TestRenderDeploymentTolerations | - | tolerations are written in Kubernetes' shape, each field only when set, a value YAML would misread quoted, before the pod's securityContext |
+| TestRenderDeploymentAffinityAndSpread | verbatim + preferred | the affinity block is written as it stands, then spread's preferred anti-affinity on kubernetes.io/hostname against app: <name>, weight 100 |
+| TestRenderDeploymentAffinityAndSpread | required | spread: required alone writes a required anti-affinity term |
+| TestRenderDeploymentAffinityAndSpread | none | spread none or unset and no affinity write no affinity block |
 | TestRenderStatusScriptMountAfterLibs | - | the single-file status mount is declared after the libs directory mount, so it is not shadowed, and carries `subPath: status` |
 | TestProbesSplitLivenessFromReadiness | - | liveness stays a tcpSocket check so a slow downstream cannot become a restart loop, while readiness execs `sh <ContainerPath> --health` with an explicit timeoutSeconds (kubernetes defaults it to 1s) against a path the pod actually mounts |
 | TestManagementPort | Defaults.Management.Port 9999 | ManagementPort returns 9999, ignoring Kube.Service.Port entirely |
@@ -801,6 +806,10 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckKubeNodeSelector | valid labels | prefixed, empty-valued and mixed-case label keys and values pass |
 | TestCheckKubeNodeSelector | bad keys | a space, a leading '-', two '/', an uppercase or empty prefix, and a 64-character name are each refused as a label key |
 | TestCheckKubeNodeSelector | bad values | a leading '-', a space, and 64 characters are each refused as a label value |
+| TestCheckKubeTolerations | valid | Equal with key and value, a prefixed key with only an effect, a key-less Exists, and NoExecute with tolerationSeconds all pass |
+| TestCheckKubeTolerations | invalid | a key-less Equal, a value with Exists, an unknown operator or effect, a bad label key or value, and tolerationSeconds without NoExecute are each refused |
+| TestCheckKubeSpreadAndAffinity | valid | spread none or unset beside an affinity with nodeAffinity and podAntiAffinity passes, and affinity: with no value counts as unset |
+| TestCheckKubeSpreadAndAffinity | invalid | an unknown spread, a non-mapping affinity, an unknown affinity kind, podAntiAffinity with a spread, an anchor or alias, and a key that is not plain are each refused |
 | TestCheckKubeServicePort | - | kubernetes.service.port is range-checked like docker/podman ports: a scalar or distinct host:container pair both pass, and an out-of-range host or container side each error independently naming the offending side |
 | TestCheckKubeCredentialCreateRemovedKeys | source/variables/values-file set | credentials.create carrying `source`, `variables`, and `values-file` errors naming all three and telling the operator to remove them |
 | TestCheckKubeCredentialCreateRemovedKeys | source alone | credentials.create carrying only `source` errors naming it alone |

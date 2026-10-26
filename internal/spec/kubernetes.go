@@ -29,7 +29,42 @@ type Deployment struct {
 	// NodeSelector is the pod's nodeSelector: the node labels, by key, a node
 	// must carry for the pod to be scheduled onto it. Nil when unset.
 	NodeSelector map[string]string `yaml:"node-selector"`
+
+	// Tolerations are the pod's tolerations, in Kubernetes' own shape, letting
+	// it onto nodes with the matching taints.
+	Tolerations []Toleration `yaml:"tolerations"`
+
+	// Spread asks for the replicas on different nodes: SpreadNone (the default,
+	// also when empty), SpreadPreferred or SpreadRequired.
+	Spread string `yaml:"spread"`
+
+	// Affinity is the pod's affinity block, written into the Deployment as it
+	// stands -- nodeAffinity, podAffinity, podAntiAffinity -- with only its
+	// outline checked here; the API server checks the rest. A value, not a
+	// pointer: yaml.v3 fills a yaml.Node field with the node itself, but
+	// decodes into a *yaml.Node field as if it were any other struct. The
+	// zero node (Kind 0) when unset.
+	Affinity yaml.Node `yaml:"affinity"`
 }
+
+// Toleration is one of the pod's tolerations, field for field Kubernetes'
+// own, so an example from its documentation reads the same here.
+type Toleration struct {
+	Key               string `yaml:"key"`
+	Operator          string `yaml:"operator"` // Equal (the default) or Exists
+	Value             string `yaml:"value"`
+	Effect            string `yaml:"effect"`            // NoSchedule, PreferNoSchedule or NoExecute; empty matches all
+	TolerationSeconds *int64 `yaml:"tolerationSeconds"` // NoExecute only
+}
+
+// The kubernetes.deployment.spread values: how the replicas are kept off one
+// node, by a pod anti-affinity on kubernetes.io/hostname against the
+// Deployment's own app label.
+const (
+	SpreadNone      = "none"      // no rule: the scheduler may put every replica on one node
+	SpreadPreferred = "preferred" // the scheduler avoids sharing a node, but may when it must
+	SpreadRequired  = "required"  // never two replicas on one node; extra ones stay Pending
+)
 
 // Service mirrors the kubernetes.service section of env.yaml. Port.Host is
 // the Service's own port; Port.Container is the container targetPort it

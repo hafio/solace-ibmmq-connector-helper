@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -898,6 +901,8 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 		add(fileEnv, "kubernetes.deployment.timezone is no longer configured here: the container timezone moved to the top-level timezone: key so one declaration serves every platform. Remove kubernetes.deployment.timezone")
 	}
 	checkNodeSelector(add, dep.NodeSelector)
+	checkTolerations(add, dep.Tolerations)
+	checkSpreadAndAffinity(add, dep.Spread, &dep.Affinity)
 
 	// service.port is the same scalar / "host:container" shape as docker/podman
 	// ports (Port.UnmarshalYAML enforces the shape itself at parse); range-check
@@ -1223,6 +1228,105 @@ func checkNodeSelector(add func(string, string, ...any), sel map[string]string) 
 			add(fileEnv, "kubernetes.deployment.node-selector.%s: %q is not a Kubernetes label value: at most 63 letters, digits, '-', '_' or '.', beginning and ending with a letter or digit", k, v)
 		}
 	}
+}
+
+// checkTolerations holds each toleration to the rules the API server applies,
+// so a bad one is reported here rather than by kubectl apply.
+func checkTolerations(add func(string, string, ...any), tols []spec.Toleration) {
+	for i, t := range tols {
+		at := fmt.Sprintf("kubernetes.deployment.tolerations[%d]", i)
+		switch t.Operator {
+		case "", "Equal":
+			if t.Key == "" {
+				add(fileEnv, "%s: a toleration without a key matches every taint, which only operator: Exists can express; add the key, or set operator: Exists", at)
+			}
+			if t.Value != "" && (len(t.Value) > 63 || !labelNameRE.MatchString(t.Value)) {
+				add(fileEnv, "%s.value: %q is not a Kubernetes label value: at most 63 letters, digits, '-', '_' or '.', beginning and ending with a letter or digit", at, t.Value)
+			}
+		case "Exists":
+			if t.Value != "" {
+				add(fileEnv, "%s: operator: Exists matches the key alone, so it takes no value; remove value: %q, or set operator: Equal", at, t.Value)
+			}
+		default:
+			add(fileEnv, "%s.operator: %q is not one Kubernetes accepts: Equal (the default) or Exists", at, t.Operator)
+		}
+		if t.Key != "" && !isLabelKey(t.Key) {
+			add(fileEnv, "%s.key: %q is not a Kubernetes label key: a name of at most 63 letters, digits, '-', '_' or '.', beginning and ending with a letter or digit, optionally after a DNS subdomain prefix and '/'", at, t.Key)
+		}
+		switch t.Effect {
+		case "", "NoSchedule", "PreferNoSchedule", "NoExecute":
+		default:
+			add(fileEnv, "%s.effect: %q is not one Kubernetes accepts: NoSchedule, PreferNoSchedule or NoExecute (or none, matching every effect)", at, t.Effect)
+		}
+		if t.TolerationSeconds != nil && t.Effect != "NoExecute" {
+			add(fileEnv, "%s: tolerationSeconds bounds how long the pod stays on a node after a NoExecute taint appears, so it needs effect: NoExecute", at)
+		}
+	}
+}
+
+// affinityKeys are the blocks a pod's affinity holds.
+var affinityKeys = []string{"nodeAffinity", "podAffinity", "podAntiAffinity"}
+
+// affinityKeyRE is a key the affinity block may carry anywhere inside it: a
+// Kubernetes field name or a label key. Each is written into the Deployment as
+// it stands, so one that YAML could read as anything else is refused.
+var affinityKeyRE = regexp.MustCompile(`^[A-Za-z0-9]([-A-Za-z0-9_./]*[A-Za-z0-9])?$`)
+
+// checkSpreadAndAffinity checks spread: and the outline of the verbatim
+// affinity: block -- a mapping of the three affinity kinds, plain keys, no
+// anchors -- and that the two do not both set podAntiAffinity. What a term
+// says is the API server's to check.
+func checkSpreadAndAffinity(add func(string, string, ...any), spread string, aff *yaml.Node) {
+	switch spread {
+	case "", spec.SpreadNone, spec.SpreadPreferred, spec.SpreadRequired:
+	default:
+		add(fileEnv, "kubernetes.deployment.spread: %q is not one of none, preferred or required", spread)
+	}
+	// Unset, or written with no value (affinity: alone): nothing to check.
+	if aff == nil || aff.Kind == 0 || (aff.Kind == yaml.ScalarNode && aff.ShortTag() == "!!null") {
+		return
+	}
+	if aff.Kind != yaml.MappingNode {
+		add(fileEnv, "kubernetes.deployment.affinity must be a mapping of nodeAffinity, podAffinity and podAntiAffinity, as in a pod spec")
+		return
+	}
+	for i := 0; i+1 < len(aff.Content); i += 2 {
+		k := aff.Content[i].Value
+		if !slices.Contains(affinityKeys, k) {
+			add(fileEnv, "kubernetes.deployment.affinity.%s is not an affinity kind: the block holds nodeAffinity, podAffinity and podAntiAffinity", k)
+			continue
+		}
+		if k == "podAntiAffinity" && spread != "" && spread != spec.SpreadNone {
+			add(fileEnv, "kubernetes.deployment.affinity.podAntiAffinity and spread: %s both write the pod's anti-affinity; keep one -- set spread: none, or move the spread into your own podAntiAffinity", spread)
+		}
+	}
+	if bad := badAffinityNode(aff); bad != "" {
+		add(fileEnv, "kubernetes.deployment.affinity %s", bad)
+	}
+}
+
+// badAffinityNode walks the affinity block for what cannot be written back as
+// it stands: an anchor or alias, a key that is not a plain scalar, or a key
+// outside affinityKeyRE. It returns the first one found, phrased for a
+// message, or "".
+func badAffinityNode(n *yaml.Node) string {
+	if n.Kind == yaml.AliasNode || n.Anchor != "" {
+		return "uses a YAML anchor or alias; write the block out in full"
+	}
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k := n.Content[i]
+			if k.Kind != yaml.ScalarNode || !affinityKeyRE.MatchString(k.Value) {
+				return fmt.Sprintf("has the key %q, which is not a Kubernetes field name or label key", k.Value)
+			}
+		}
+	}
+	for _, c := range n.Content {
+		if bad := badAffinityNode(c); bad != "" {
+			return bad
+		}
+	}
+	return ""
 }
 
 // isLabelKey reports whether k is a Kubernetes label key: a name, optionally

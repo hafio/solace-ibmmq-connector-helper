@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
@@ -243,6 +245,85 @@ func TestRenderDeploymentNodeSelector(t *testing.T) {
 	k.Deployment.NodeSelector = nil
 	if out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})}); strings.Contains(out, "nodeSelector") {
 		t.Errorf("no node selector set, so none may be written\n%s", out)
+	}
+}
+
+// Tolerations are written in Kubernetes' shape, each field only when set,
+// after the node selector and before the pod's securityContext.
+func TestRenderDeploymentTolerations(t *testing.T) {
+	k := baseKube()
+	secs := int64(300)
+	k.Deployment.Tolerations = []spec.Toleration{
+		{Key: "dedicated", Operator: "Equal", Value: "true", Effect: "NoSchedule"},
+		{Operator: "Exists", Effect: "NoExecute", TolerationSeconds: &secs},
+	}
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	want := "      tolerations:\n" +
+		"        - key: dedicated\n" +
+		"          operator: Equal\n" +
+		"          value: \"true\"\n" +
+		"          effect: NoSchedule\n" +
+		"        - operator: Exists\n" +
+		"          effect: NoExecute\n" +
+		"          tolerationSeconds: 300\n" +
+		"      securityContext:\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("want the tolerations in the pod spec\n%s\n---\n%s", want, out)
+	}
+}
+
+// The affinity block is written as it stands, then spread's anti-affinity on
+// kubernetes.io/hostname against the Deployment's own app label: preferred
+// with weight 100, or required. spread: none and no affinity write nothing.
+func TestRenderDeploymentAffinityAndSpread(t *testing.T) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte("nodeAffinity:\n  requiredDuringSchedulingIgnoredDuringExecution:\n    nodeSelectorTerms:\n      - matchExpressions:\n          - key: kubernetes.io/arch\n            operator: In\n            values:\n              - amd64\n"), &doc); err != nil {
+		t.Fatal(err)
+	}
+	render := func(spread string, aff *yaml.Node) string {
+		k := baseKube()
+		k.Deployment.Spread = spread
+		if aff != nil {
+			k.Deployment.Affinity = *aff
+		}
+		return Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	}
+	verbatim := "      affinity:\n" +
+		"        nodeAffinity:\n" +
+		"          requiredDuringSchedulingIgnoredDuringExecution:\n" +
+		"            nodeSelectorTerms:\n" +
+		"              -\n" +
+		"                matchExpressions:\n" +
+		"                  -\n" +
+		"                    key: kubernetes.io/arch\n" +
+		"                    operator: In\n" +
+		"                    values:\n" +
+		"                      - amd64\n"
+	preferred := "        podAntiAffinity:\n" +
+		"          preferredDuringSchedulingIgnoredDuringExecution:\n" +
+		"            - weight: 100\n" +
+		"              podAffinityTerm:\n" +
+		"                topologyKey: kubernetes.io/hostname\n" +
+		"                labelSelector:\n" +
+		"                  matchLabels:\n" +
+		"                    app: solmq\n"
+	if out := render(spec.SpreadPreferred, doc.Content[0]); !strings.Contains(out, verbatim+preferred+"      securityContext:\n") {
+		t.Errorf("want the verbatim affinity, then the preferred spread\n---\n%s", out)
+	}
+	required := "      affinity:\n" +
+		"        podAntiAffinity:\n" +
+		"          requiredDuringSchedulingIgnoredDuringExecution:\n" +
+		"            - topologyKey: kubernetes.io/hostname\n" +
+		"              labelSelector:\n" +
+		"                matchLabels:\n" +
+		"                  app: solmq\n"
+	if out := render(spec.SpreadRequired, nil); !strings.Contains(out, required) {
+		t.Errorf("want the required spread alone\n---\n%s", out)
+	}
+	for _, spread := range []string{"", spec.SpreadNone} {
+		if out := render(spread, nil); strings.Contains(out, "affinity:") {
+			t.Errorf("spread %q and no affinity must write none\n%s", spread, out)
+		}
 	}
 }
 

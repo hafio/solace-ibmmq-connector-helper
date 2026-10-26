@@ -139,7 +139,9 @@ block holds the findings `gen.Validate` reports for that same golden spec folder
 against it -- so Self-test checks rule parity as well as the rendered bytes. The port
 covers the static rules only: `gen.Validate` also reads and builds the selected stores
 (`validateStores`), which a page cannot, so the golden spec's selected stores are readable
-fixtures that add no finding. Both blocks
+fixtures that add no finding. Likewise the kubernetes `tolerations` and `affinity` fields
+are YAML textareas the page writes into `env.yaml` as entered, leaving their checks to the
+CLI. Both blocks
 are kept in sync by `TestGeneratorPageGoldenInSync` and `TestGeneratorPageFindingsGoldenInSync`
 (`internal/gen/htmlgolden_test.go`), regenerated the same way: `go test ./internal/gen -run
 <TestName> -update-html-golden`. Three rules follow:

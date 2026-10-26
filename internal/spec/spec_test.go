@@ -486,6 +486,44 @@ func TestParseKubernetesNodeSelector(t *testing.T) {
 	}
 }
 
+// tolerations decode field for field in Kubernetes' own shape, spread is kept
+// as written, and affinity is captured as the node it is, to be written back
+// as it stands.
+func TestParseKubernetesScheduling(t *testing.T) {
+	k, err := ParseKubernetes([]byte(`deployment:
+  name: c
+  namespace: ns
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: solace
+      effect: NoSchedule
+    - operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
+  spread: preferred
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution: {}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := k.Deployment
+	if len(d.Tolerations) != 2 || d.Tolerations[0] != (Toleration{Key: "dedicated", Operator: "Equal", Value: "solace", Effect: "NoSchedule"}) {
+		t.Errorf("tolerations = %+v", d.Tolerations)
+	}
+	if ts := d.Tolerations[1].TolerationSeconds; ts == nil || *ts != 300 || d.Tolerations[1].Operator != "Exists" {
+		t.Errorf("second toleration = %+v", d.Tolerations[1])
+	}
+	if d.Spread != SpreadPreferred {
+		t.Errorf("spread = %q", d.Spread)
+	}
+	if d.Affinity.Kind != yaml.MappingNode || d.Affinity.Content[0].Value != "nodeAffinity" {
+		t.Errorf("affinity = %+v", d.Affinity)
+	}
+}
+
 func TestParseKubernetesError(t *testing.T) {
 	if _, err := ParseKubernetes([]byte("deployment: [not a map\n")); err == nil {
 		t.Fatal("expected error")

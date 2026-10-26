@@ -10,8 +10,11 @@ import (
 	"strconv"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/render"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/tls"
@@ -117,6 +120,79 @@ type Input struct {
 
 // yw is the indentation-aware line writer used by every renderer here.
 type yw = yamlwriter.Writer
+
+// renderTolerations writes the pod's tolerations, each field only when set;
+// a key or value YAML would read as anything but a string is quoted.
+func renderTolerations(w *yw, tols []spec.Toleration) {
+	if len(tols) == 0 {
+		return
+	}
+	w.Line(6, "tolerations:")
+	for _, t := range tols {
+		first := true
+		field := func(k, v string) {
+			if first {
+				w.Line(8, "- "+k+": "+v)
+				first = false
+				return
+			}
+			w.Line(10, k+": "+v)
+		}
+		if t.Key != "" {
+			field("key", consolidate.QuoteScalar(t.Key))
+		}
+		if t.Operator != "" {
+			field("operator", t.Operator)
+		}
+		if t.Value != "" {
+			field("value", consolidate.QuoteScalar(t.Value))
+		}
+		if t.Effect != "" {
+			field("effect", t.Effect)
+		}
+		if t.TolerationSeconds != nil {
+			field("tolerationSeconds", strconv.FormatInt(*t.TolerationSeconds, 10))
+		}
+		if first {
+			w.Line(8, "- {}")
+		}
+	}
+}
+
+// renderAffinity writes the pod's affinity: the operator's verbatim
+// kubernetes.deployment.affinity block in its own order, then the
+// anti-affinity spread asks for -- the replicas kept off one node by
+// kubernetes.io/hostname, matched on the Deployment's own app label. Validate
+// refuses a podAntiAffinity in both.
+func renderAffinity(w *yw, spread string, aff *yaml.Node, app string) {
+	hasSpread := spread == spec.SpreadPreferred || spread == spec.SpreadRequired
+	hasAff := aff != nil && aff.Kind == yaml.MappingNode && len(aff.Content) > 0
+	if !hasSpread && !hasAff {
+		return
+	}
+	w.Line(6, "affinity:")
+	if hasAff {
+		render.Node(w, 8, aff)
+	}
+	switch spread {
+	case spec.SpreadPreferred:
+		w.Line(8, "podAntiAffinity:")
+		w.Line(10, "preferredDuringSchedulingIgnoredDuringExecution:")
+		w.Line(12, "- weight: 100")
+		w.Line(14, "podAffinityTerm:")
+		w.Line(16, "topologyKey: kubernetes.io/hostname")
+		w.Line(16, "labelSelector:")
+		w.Line(18, "matchLabels:")
+		w.Line(20, "app: "+app)
+	case spec.SpreadRequired:
+		w.Line(8, "podAntiAffinity:")
+		w.Line(10, "requiredDuringSchedulingIgnoredDuringExecution:")
+		w.Line(12, "- topologyKey: kubernetes.io/hostname")
+		w.Line(14, "labelSelector:")
+		w.Line(16, "matchLabels:")
+		w.Line(18, "app: "+app)
+	}
+}
 
 // renderPodSecurity writes the pod's securityContext. Identity is stated,
 // never inherited: the image declares no USER, so without runAsUser the
@@ -432,6 +508,8 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 			w.Line(8, consolidate.QuoteScalar(k)+": "+consolidate.QuoteScalar(sel[k]))
 		}
 	}
+	renderTolerations(w, dep.Tolerations)
+	renderAffinity(w, dep.Spread, &dep.Affinity, name)
 	renderPodSecurity(w, inst.RunAs)
 	lb := in.Kube.Libs
 	if lb != nil && lb.Download != nil {

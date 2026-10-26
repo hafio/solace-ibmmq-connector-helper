@@ -1595,3 +1595,91 @@ func TestCheckKubeNodeSelector(t *testing.T) {
 		}
 	}
 }
+
+// kubeWith runs validate over a valid kubernetes section whose deployment is
+// edited by edit, returning the errors.
+func kubeWith(edit func(*spec.Deployment)) []Issue {
+	dep := baseKubeDeploy()
+	edit(&dep)
+	k := &spec.Kubernetes{Deployment: dep, Command: spec.DefaultKubeCommand, Service: baseKubeService()}
+	errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
+	return errs
+}
+
+// Each toleration is held to the rules the API server applies: a known
+// operator and effect, a key unless operator: Exists, no value with Exists,
+// label syntax for the key and value, and tolerationSeconds only with
+// effect: NoExecute.
+func TestCheckKubeTolerations(t *testing.T) {
+	secs := int64(60)
+	ok := []spec.Toleration{
+		{Key: "dedicated", Operator: "Equal", Value: "solace", Effect: "NoSchedule"},
+		{Key: "example.com/gpu", Effect: "PreferNoSchedule"},
+		{Operator: "Exists"},
+		{Key: "node.kubernetes.io/unreachable", Operator: "Exists", Effect: "NoExecute", TolerationSeconds: &secs},
+	}
+	if errs := kubeWith(func(d *spec.Deployment) { d.Tolerations = ok }); hasErr(errs, "tolerations") {
+		t.Errorf("valid tolerations must pass: %v", errs)
+	}
+	for _, c := range []struct {
+		tol  spec.Toleration
+		want string
+	}{
+		{spec.Toleration{Value: "x"}, "tolerations[0]: a toleration without a key matches every taint, which only operator: Exists can express"},
+		{spec.Toleration{Key: "k", Operator: "Exists", Value: "x"}, `tolerations[0]: operator: Exists matches the key alone, so it takes no value; remove value: "x"`},
+		{spec.Toleration{Key: "k", Operator: "equal"}, `tolerations[0].operator: "equal" is not one Kubernetes accepts`},
+		{spec.Toleration{Key: "k", Effect: "NoScheduled"}, `tolerations[0].effect: "NoScheduled" is not one Kubernetes accepts`},
+		{spec.Toleration{Key: "bad key"}, `tolerations[0].key: "bad key" is not a Kubernetes label key`},
+		{spec.Toleration{Key: "k", Value: "-x"}, `tolerations[0].value: "-x" is not a Kubernetes label value`},
+		{spec.Toleration{Key: "k", Effect: "NoSchedule", TolerationSeconds: &secs}, "tolerations[0]: tolerationSeconds bounds how long the pod stays on a node after a NoExecute taint appears, so it needs effect: NoExecute"},
+	} {
+		if errs := kubeWith(func(d *spec.Deployment) { d.Tolerations = []spec.Toleration{c.tol} }); !hasErr(errs, c.want) {
+			t.Errorf("%+v: want %q, got %v", c.tol, c.want, errs)
+		}
+	}
+}
+
+// spread takes none, preferred or required. affinity is checked for its
+// outline only -- a mapping of the three affinity kinds, plain keys, no
+// anchors -- and may not carry a podAntiAffinity beside a spread.
+func TestCheckKubeSpreadAndAffinity(t *testing.T) {
+	node := func(src string) *yaml.Node {
+		var doc yaml.Node
+		if err := yaml.Unmarshal([]byte(src), &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc.Content[0]
+	}
+	valid := node("nodeAffinity:\n  requiredDuringSchedulingIgnoredDuringExecution:\n    nodeSelectorTerms:\n      - matchExpressions:\n          - key: kubernetes.io/arch\n            operator: In\n            values: [amd64]\npodAntiAffinity:\n  preferredDuringSchedulingIgnoredDuringExecution: []\n")
+	for _, spread := range []string{"", spec.SpreadNone} {
+		if errs := kubeWith(func(d *spec.Deployment) { d.Spread, d.Affinity = spread, *valid }); hasErr(errs, "affinity") || hasErr(errs, "spread") {
+			t.Errorf("spread %q with a valid affinity must pass: %v", spread, errs)
+		}
+	}
+	if errs := kubeWith(func(d *spec.Deployment) { d.Affinity = *node("~\n") }); hasErr(errs, "affinity") {
+		t.Errorf("affinity: with no value is unset, not an error: %v", errs)
+	}
+	for _, c := range []struct {
+		name   string
+		spread string
+		aff    *yaml.Node
+		want   string
+	}{
+		{"unknown spread", "always", nil, `kubernetes.deployment.spread: "always" is not one of none, preferred or required`},
+		{"not a mapping", "", node("- nodeAffinity\n"), "kubernetes.deployment.affinity must be a mapping of nodeAffinity, podAffinity and podAntiAffinity"},
+		{"unknown kind", "", node("nodeAfinity: {}\n"), "kubernetes.deployment.affinity.nodeAfinity is not an affinity kind"},
+		{"anti-affinity twice", spec.SpreadRequired, node("podAntiAffinity: {}\n"), "kubernetes.deployment.affinity.podAntiAffinity and spread: required both write the pod's anti-affinity"},
+		{"an alias", "", node("nodeAffinity: &a {}\npodAffinity: *a\n"), "kubernetes.deployment.affinity uses a YAML anchor or alias"},
+		{"a key that is not plain", "", node("nodeAffinity:\n  \"a: b\": x\n"), `kubernetes.deployment.affinity has the key "a: b", which is not a Kubernetes field name or label key`},
+	} {
+		edit := func(d *spec.Deployment) {
+			d.Spread = c.spread
+			if c.aff != nil {
+				d.Affinity = *c.aff
+			}
+		}
+		if errs := kubeWith(edit); !hasErr(errs, c.want) {
+			t.Errorf("%s: want %q, got %v", c.name, c.want, errs)
+		}
+	}
+}

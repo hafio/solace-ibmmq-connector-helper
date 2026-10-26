@@ -1531,6 +1531,18 @@ kubernetes:
       memory: 1Gi
     node-selector:               # optional; the node labels the pod's node must carry
       kubernetes.io/os: linux
+    tolerations:                 # optional; Kubernetes' own shape
+      - key: dedicated
+        operator: Equal          # Equal (default) | Exists
+        value: solace
+        effect: NoSchedule       # NoSchedule | PreferNoSchedule | NoExecute
+    spread: preferred            # optional; none (default) | preferred | required
+    # affinity:                  # optional; the pod's affinity block, written as it stands
+    #   nodeAffinity:
+    #     requiredDuringSchedulingIgnoredDuringExecution:
+    #       nodeSelectorTerms:
+    #         - matchExpressions:
+    #             - {key: kubernetes.io/arch, operator: In, values: [amd64]}
   service:
     enabled: true
     port: 8090                   # optional; bare or "host:container" (same syntax as docker/podman
@@ -1571,6 +1583,9 @@ kubernetes:
 | `deployment` | `name`, `namespace` | required; must be valid DNS-1123 labels; a `kind: Namespace` doc for `namespace` is always emitted first. Every object the tool creates is named after `name` (see below), so keep it short enough that the longest of those -- `<name>-credentials` when the tool builds the credentials Secret -- stays within 63 chars; `validate` names the one that does not |
 | `deployment` | `replicas` | default `1`; `standalone` leader-election requires `1`, `active_*` allow more. Replicas are copies of the one connector, and leader-election picks the active one |
 | `deployment` | `resources.cpu`, `resources.memory` | one value each; emitted as identical requests **and** limits (guaranteed QoS); a bare integer like `cpu: 1` is auto-quoted |
+| `deployment` | `tolerations` | optional list, field for field Kubernetes' own (`key`, `operator`, `value`, `effect`, `tolerationSeconds`) -> the pod's `tolerations`, letting it onto nodes with matching taints. `validate` applies the API server's rules: `operator` is `Equal` (the default) or `Exists`; a toleration without a key needs `Exists`, which takes no value; `effect` is `NoSchedule`, `PreferNoSchedule`, `NoExecute` or none (every effect); `tolerationSeconds` needs `NoExecute`; key and value are valid labels |
+| `deployment` | `spread` | optional, `none` (the default) / `preferred` / `required`: keep the replicas on different nodes, by a pod anti-affinity on `kubernetes.io/hostname` against the Deployment's own `app` label. `preferred` lets the scheduler share a node when it must; `required` never does, so replicas beyond the node count stay `Pending` |
+| `deployment` | `affinity` | optional, the pod's `affinity` block -- `nodeAffinity`, `podAffinity`, `podAntiAffinity` -- written into the Deployment **as it stands**, for anything `node-selector` and `spread` do not express. `validate` checks its outline only (a mapping of those three, plain keys, no YAML anchors) and refuses a `podAntiAffinity` together with a `spread` other than `none`; what each term says is checked by the API server at deploy -- the one part of the kubernetes section `validate` cannot vouch for |
 | `deployment` | `node-selector` | optional map of node label to value -> the pod's `nodeSelector`: the pod runs only on a node carrying every one of these labels. Keys and values must be valid Kubernetes labels (a key is a name of at most 63 letters, digits, `-`, `_` or `.`, optionally after a DNS subdomain prefix and `/`, as in `kubernetes.io/os`; a value is such a name or empty), which `validate` checks; keys are written sorted, and a key or value YAML would read as a boolean or number is quoted |
 | `secrets.image-pull` | `name` \| `create` | optional registry credential for pulling the image. `name` alone references a Secret you made (`kubectl create secret docker-registry`); `create: true` instead has the tool build `<name>-image-pull` from the top-level `image` block, and takes no `name`. Omitted, nothing is created -- see [section 9](#9-secrets-model) |
 | `service` | `enabled`, `port` | emit a Service on this port; `port` accepts a bare port or `host:container`, the same syntax as docker/podman `ports` ([section 8.2](#82-docker)/[8.3](#83-podman)); unset defaults to the effective management port |

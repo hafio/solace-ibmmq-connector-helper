@@ -280,6 +280,13 @@ details[open]>summary::before{content:"- "}
       </div>
       <div class="f"><label>Run As</label><input id="i-k8s-runas" placeholder="1000:0"><div class="h">uid[:gid] the connector runs as. Empty means the non-root default 1000:0; a bare uid runs with gid 0. "image" keeps the image's own user, which is root -- use it on OpenShift, where the SCC assigns the ids. The gid is also the pod's fsGroup.</div></div>
       <div class="f"><label>Node Selector</label><textarea id="i-k8s-nodesel" rows="2" placeholder="kubernetes.io/os: linux"></textarea><div class="h">The node labels the pod's node must carry, one key: value per line (the pod's nodeSelector). Empty lets the pod run on any node.</div></div>
+      <div class="f"><label>Spread</label><select id="i-k8s-spread">
+        <option value="">none</option>
+        <option value="preferred">preferred</option>
+        <option value="required">required</option>
+      </select><div class="h">Keep the replicas on different nodes: preferred lets the scheduler share a node when it must; required never does, leaving extra replicas Pending.</div></div>
+      <div class="f"><label>Tolerations</label><textarea id="i-k8s-tol" rows="3" placeholder="- key: dedicated&#10;  operator: Equal&#10;  value: solace&#10;  effect: NoSchedule"></textarea><div class="h">The pod's tolerations as a YAML list, in Kubernetes' own shape; written into env.yaml as entered. solmq-conn-util validate checks them.</div></div>
+      <div class="f"><label>Affinity</label><textarea id="i-k8s-aff" rows="3" placeholder="nodeAffinity:&#10;  requiredDuringSchedulingIgnoredDuringExecution:&#10;    ..."></textarea><div class="h">The pod's affinity block (nodeAffinity, podAffinity, podAntiAffinity) as YAML, written into the Deployment as it stands. A podAntiAffinity here and a Spread both is an error. solmq-conn-util validate checks its outline; Kubernetes checks the rest at deploy.</div></div>
       <div class="tgl"><input type="checkbox" id="i-k8s-svc"><label for="i-k8s-svc">Create a Service</label></div>
       <div class="f"><label>Service Port</label><input id="i-k8s-svcport" type="number" min="1" max="65535" value="8090"></div>
 
@@ -1285,7 +1292,8 @@ function readModel(){
       name: V('i-k8s-name'), namespace: V('i-k8s-ns'),
       replicas: parseInt(V('i-k8s-rep') || '1', 10) || 1,
       cpu: V('i-k8s-cpu'), memory: V('i-k8s-mem'),
-      nodeSelector: parseProps(V('i-k8s-nodesel'))
+      nodeSelector: parseProps(V('i-k8s-nodesel')),
+      spread: V('i-k8s-spread'), tolerations: V('i-k8s-tol'), affinity: V('i-k8s-aff')
     },
     service: { enabled: C('i-k8s-svc'), port: V('i-k8s-svcport') },
     runAs: V('i-k8s-runas'),
@@ -1458,6 +1466,12 @@ function emitCred(cred, ind){
   return `${ind}credentials:\n` + kv('existing', cred.existing, ind + '  ');
 }
 
+// indentLines re-indents a YAML block entered verbatim (tolerations,
+// affinity) under its key: every non-blank line gains ind, blank lines and a
+// trailing newline are dropped.
+function indentLines(text, ind){
+  return String(text).replace(/\r/g, '').split('\n').filter(l => l.trim()).map(l => ind + l.replace(/\s+$/, '') + '\n').join('');
+}
 function emitKube(k){
   let y = '# ---- kubernetes target ----\nkubernetes:\n' + kv('command', k.command, '  ');
   const d = k.deployment;
@@ -1465,6 +1479,9 @@ function emitKube(k){
      + knum('replicas', d.replicas, '    ');
   if(d.cpu || d.memory) y += '    resources:\n' + kv('cpu', d.cpu, '      ') + kv('memory', d.memory, '      ');
   if(d.nodeSelector && d.nodeSelector.length) y += '    node-selector:\n' + emitProps(d.nodeSelector, '      ');
+  if((d.tolerations || '').trim()) y += '    tolerations:\n' + indentLines(d.tolerations, '      ');
+  y += kv('spread', d.spread, '    ');
+  if((d.affinity || '').trim()) y += '    affinity:\n' + indentLines(d.affinity, '      ');
   y += '  service:\n' + kbool('enabled', k.service.enabled, '    ') + knum('port', k.service.port, '    ');
   // run-as is written only when set: unset is the CLI's non-root default.
   y += kv('run-as', k.runAs, '  ');
@@ -3945,7 +3962,7 @@ function sampleModel(){
     kube: {
       command: 'kubectl',
       deployment: { name: 'solmq-connector', namespace: 'solace-connectors',
-                    replicas: 2, cpu: '1', memory: '1Gi', nodeSelector: [] },
+                    replicas: 2, cpu: '1', memory: '1Gi', nodeSelector: [], spread: '', tolerations: '', affinity: '' },
       service: { enabled: true, port: '8090' },
       runAs: '',
       libs: null, cred: cred, stores: { create: true }, imagePull: null
@@ -4040,7 +4057,7 @@ function clearForm(){
   ['i-le-user-env', 'i-le-pass-env',
    'i-img-user-env', 'i-img-pass-env'].forEach(id => setC(id, true));
   ['i-log', 'i-soldef', 'i-mqdef', 'i-le-queue', 'i-le-fo', 'i-le-props', 'i-le-extra', 'i-k8s-name', 'i-k8s-ns',
-   'i-k8s-cpu', 'i-k8s-mem', 'i-k8s-nodesel', 'i-k8s-ipull-name', 'i-k8s-runas', 'i-dk-runas', 'i-pd-runas',
+   'i-k8s-cpu', 'i-k8s-mem', 'i-k8s-nodesel', 'i-k8s-tol', 'i-k8s-aff', 'i-k8s-spread', 'i-k8s-ipull-name', 'i-k8s-runas', 'i-dk-runas', 'i-pd-runas',
    'i-img-repo', 'i-img-name', 'i-img-tag', 'i-img-user', 'i-img-pass', 'i-tz', 'i-jto', 'i-jjo',
    'i-le-host', 'i-le-vpn', 'i-le-user', 'i-le-pass', 'i-le-ts', 'i-le-ks', 'i-le-alias'].forEach(id => setV(id, ''));
   setV('i-wf-dir', '.'); setV('i-wf-pat', '*');
@@ -4103,6 +4120,8 @@ function loadSample(){
   setV('i-k8s-rep', k.deployment.replicas); setV('i-k8s-cpu', k.deployment.cpu);
   setV('i-k8s-mem', k.deployment.memory);
   setV('i-k8s-nodesel', emitProps(k.deployment.nodeSelector || [], ''));
+  setV('i-k8s-spread', k.deployment.spread || '');
+  setV('i-k8s-tol', k.deployment.tolerations || ''); setV('i-k8s-aff', k.deployment.affinity || '');
   setV('i-k8s-runas', k.runAs || '');
   setC('i-k8s-svc', k.service.enabled); setV('i-k8s-svcport', k.service.port);
   setV('i-k8s-cred', 'create');
