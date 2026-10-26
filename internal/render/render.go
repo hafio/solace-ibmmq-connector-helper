@@ -86,6 +86,11 @@ func Application(m *consolidate.Model) string {
 	return w.String()
 }
 
+// MQBinderSources is the configuration class every MQ binder's context loads
+// (spring.main.sources): Spring Boot's SSL auto-configuration, so the binder
+// resolves ibm.mq.ssl-bundle (see renderCloudStream).
+const MQBinderSources = "org.springframework.boot.autoconfigure.ssl.SslAutoConfiguration"
+
 func renderBundles(w *yw, bundles []*consolidate.Bundle) {
 	w.Line(2, "ssl:")
 	w.Line(4, "bundle:")
@@ -153,6 +158,19 @@ func renderCloudStream(w *yw, m *consolidate.Model) {
 		case spec.SystemMQ:
 			w.Line(10, "type: jms")
 			w.Line(10, "environment:")
+			// A binder with an environment of its own runs in a Spring context
+			// with no parent: it inherits the properties, spring.ssl.bundle.*
+			// included, but none of the main context's beans, and loads no Spring
+			// Boot auto-configuration. Without an SslBundles bean there, the MQ
+			// binder hands IBM's connection factory none, which then skips
+			// ssl-bundle without a word and connects with the JVM's default SSL
+			// context -- public CAs, no client certificate. spring.main.sources
+			// is Spring Cloud Stream's hook for adding a configuration class to
+			// one binder's context; this one builds SslBundles from the
+			// inherited spring.ssl.bundle.*.
+			w.Line(12, "spring:")
+			w.Line(14, "main:")
+			w.Line(16, "sources: "+MQBinderSources)
 			w.Line(12, "ibm:")
 			w.Line(14, "mq:")
 			w.Line(16, "queue-manager: "+q(b.MQ.QueueManager))

@@ -643,7 +643,7 @@ Solace pattern is allowed but emits an advisory **warning** (see
 | `user` | no | omit for cert-based or channel (MCA) auth |
 | `password` | no | prefer the `password-env` twin ([section 9.1](#91-declaring-a-credential)); omit when not using password auth |
 | `tls` | no | `true` opts the connection into TLS (MQ has no URL scheme) |
-| `cipher` | no | JCE cipher -> `WMQ_SSL_CIPHER_SUITE`; requires `tls: true` |
+| `cipher` | no | JCE cipher -> `WMQ_SSL_CIPHER_SUITE`; requires `tls: true`. With `tls: true` and no cipher suite -- no `cipher:`, and no `ssl-cipher-suite` / `ssl-cipher-spec` key of the connection's own or from `mq-defaults` -- `validate` warns: the IBM MQ client negotiates TLS only when a cipher suite is set, so the connection would not use TLS. Name the JCE equivalent of the channel's `SSLCIPH` (for example `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384` for `ECDHE_RSA_AES_256_GCM_SHA384`) |
 | `truststore` | no | the `tls.stores` entry the queue manager certificate is validated against; requires `tls: true`. Unset: the JVM's default CA bundle |
 | `keystore` | no | the `tls.stores` entry holding the client certificate this connection presents -> **mTLS**; requires `tls: true` |
 | `key-alias` | no | picks one key in that keystore; requires `keystore` (and so `tls: true`) |
@@ -1091,6 +1091,21 @@ A store is either a PKCS12 you provide (`existing`) or one `deploy` builds from
 your certificate files (`create`, [section 7.2](#72-created-stores-create)); the
 connection cannot tell the difference.
 
+Every MQ binder's `environment:` also carries
+`spring.main.sources: org.springframework.boot.autoconfigure.ssl.SslAutoConfiguration`,
+TLS or not. Spring Cloud Stream runs a binder that has an `environment:` of its own
+in a Spring context with no parent: it inherits the properties, `spring.ssl.bundle.*`
+included, but none of the main context's beans, and loads no Spring Boot
+auto-configuration. Without that line the binder's context has no SSL bundles, the
+IBM MQ connection factory skips `ssl-bundle` without a word, and the connection
+uses the JVM's default SSL context -- public CAs and no client certificate -- which
+a queue manager with a private CA or mutual TLS refuses with `MQRC_JSSE_ERROR`
+(2397). `spring.main.sources` is Spring Cloud Stream's hook for adding a
+configuration class to one binder's context; this one builds the SSL bundles there
+from the inherited `spring.ssl.bundle.*`. A hand-written `application.yml` that puts
+`ibm.mq` at the top level instead has no binder context of its own and needs none
+of this, at the cost of one queue manager per connector.
+
 ### 7.1 The reserved status account (`solmq-status`)
 
 Every generated `application.yml` carries a read-only actuator account named
@@ -1514,6 +1529,8 @@ kubernetes:
     resources:                   # requests and limits are set to the same value
       cpu: "1"
       memory: 1Gi
+    node-selector:               # optional; the node labels the pod's node must carry
+      kubernetes.io/os: linux
   service:
     enabled: true
     port: 8090                   # optional; bare or "host:container" (same syntax as docker/podman
@@ -1554,6 +1571,7 @@ kubernetes:
 | `deployment` | `name`, `namespace` | required; must be valid DNS-1123 labels; a `kind: Namespace` doc for `namespace` is always emitted first. Every object the tool creates is named after `name` (see below), so keep it short enough that the longest of those -- `<name>-credentials` when the tool builds the credentials Secret -- stays within 63 chars; `validate` names the one that does not |
 | `deployment` | `replicas` | default `1`; `standalone` leader-election requires `1`, `active_*` allow more. Replicas are copies of the one connector, and leader-election picks the active one |
 | `deployment` | `resources.cpu`, `resources.memory` | one value each; emitted as identical requests **and** limits (guaranteed QoS); a bare integer like `cpu: 1` is auto-quoted |
+| `deployment` | `node-selector` | optional map of node label to value -> the pod's `nodeSelector`: the pod runs only on a node carrying every one of these labels. Keys and values must be valid Kubernetes labels (a key is a name of at most 63 letters, digits, `-`, `_` or `.`, optionally after a DNS subdomain prefix and `/`, as in `kubernetes.io/os`; a value is such a name or empty), which `validate` checks; keys are written sorted, and a key or value YAML would read as a boolean or number is quoted |
 | `secrets.image-pull` | `name` \| `create` | optional registry credential for pulling the image. `name` alone references a Secret you made (`kubectl create secret docker-registry`); `create: true` instead has the tool build `<name>-image-pull` from the top-level `image` block, and takes no `name`. Omitted, nothing is created -- see [section 9](#9-secrets-model) |
 | `service` | `enabled`, `port` | emit a Service on this port; `port` accepts a bare port or `host:container`, the same syntax as docker/podman `ports` ([section 8.2](#82-docker)/[8.3](#83-podman)); unset defaults to the effective management port |
 | `run-as` | `"<uid>:<gid>"` \| `image` | optional, default `1000:0`; the identity the pod runs as, with `fsGroup` set to the gid, or `image` to leave the ids to the image or the SCC ([section 8.4](#84-run-as-and-container-hardening)) |
@@ -3483,6 +3501,15 @@ container is called something else, is not reachable with `cli` -- reach it with
   the connector; on one side it is an error.
 - **`generate` fails fast; `validate` reports everything.** Use `validate` while
   authoring, `generate`/`deploy`/`remove` to produce or apply output.
+- **`tls: true` alone does not make an MQ connection use TLS.** The IBM MQ client
+  negotiates TLS only when a cipher suite is set, so without `cipher:` (or an
+  `ssl-cipher-suite` / `ssl-cipher-spec` key) it connects in plain text, and a
+  channel that requires TLS refuses it. `validate` warns.
+- **A hand-written `application.yml` and the tool's differ on MQ TLS by design.**
+  The tool gives every MQ connection its own binder `environment:`, and so its own
+  Spring context; that is why each MQ binder carries `spring.main.sources` (section 7).
+  Moving `ibm.mq` from the top level into a binder `environment:` by hand without it
+  silently drops `ssl-bundle`, and the connection fails with `MQRC_JSSE_ERROR` (2397).
 - **Stores are named and selected per connection.** `tls.stores` replaces the
   single `tls.truststore` / `tls.keystore`, which are now an error naming the
   replacement: define each store under a name and select it on the connection with

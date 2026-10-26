@@ -6,6 +6,7 @@ package deploy
 
 import (
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -415,6 +416,21 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 	if ip := in.ImagePull; ip != nil && ip.Name != "" {
 		w.Line(6, "imagePullSecrets:")
 		w.Line(8, "- name: "+ip.Name)
+	}
+	// The labels a node must carry to run the pod. Keys are sorted so an
+	// unchanged selector renders the same manifest on every run, and a key or
+	// value YAML would read as a boolean or number ("true", "2") is quoted, so
+	// the API gets the string a label is.
+	if sel := dep.NodeSelector; len(sel) > 0 {
+		keys := make([]string, 0, len(sel))
+		for k := range sel {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		w.Line(6, "nodeSelector:")
+		for _, k := range keys {
+			w.Line(8, consolidate.QuoteScalar(k)+": "+consolidate.QuoteScalar(sel[k]))
+		}
 	}
 	renderPodSecurity(w, inst.RunAs)
 	lb := in.Kube.Libs

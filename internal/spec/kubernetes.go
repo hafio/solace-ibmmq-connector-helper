@@ -25,6 +25,10 @@ type Deployment struct {
 	Replicas  int       `yaml:"replicas"`
 	Resources Resources `yaml:"resources"`
 	Timezone  string    `yaml:"timezone"` // removed; non-empty is a validation error
+
+	// NodeSelector is the pod's nodeSelector: the node labels, by key, a node
+	// must carry for the pod to be scheduled onto it. Nil when unset.
+	NodeSelector map[string]string `yaml:"node-selector"`
 }
 
 // Service mirrors the kubernetes.service section of env.yaml. Port.Host is

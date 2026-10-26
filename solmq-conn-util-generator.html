@@ -279,6 +279,7 @@ details[open]>summary::before{content:"- "}
         <div class="f"><label>Memory</label><input id="i-k8s-mem" placeholder="1Gi"></div>
       </div>
       <div class="f"><label>Run As</label><input id="i-k8s-runas" placeholder="1000:0"><div class="h">uid[:gid] the connector runs as. Empty means the non-root default 1000:0; a bare uid runs with gid 0. "image" keeps the image's own user, which is root -- use it on OpenShift, where the SCC assigns the ids. The gid is also the pod's fsGroup.</div></div>
+      <div class="f"><label>Node Selector</label><textarea id="i-k8s-nodesel" rows="2" placeholder="kubernetes.io/os: linux"></textarea><div class="h">The node labels the pod's node must carry, one key: value per line (the pod's nodeSelector). Empty lets the pod run on any node.</div></div>
       <div class="tgl"><input type="checkbox" id="i-k8s-svc"><label for="i-k8s-svc">Create a Service</label></div>
       <div class="f"><label>Service Port</label><input id="i-k8s-svcport" type="number" min="1" max="65535" value="8090"></div>
 
@@ -437,6 +438,9 @@ details[open]>summary::before{content:"- "}
         mq-conn-1:
           type: jms
           environment:
+            spring:
+              main:
+                sources: org.springframework.boot.autoconfigure.ssl.SslAutoConfiguration
             ibm:
               mq:
                 queue-manager: QM_CORE
@@ -470,6 +474,9 @@ details[open]>summary::before{content:"- "}
         mq-archive:
           type: jms
           environment:
+            spring:
+              main:
+                sources: org.springframework.boot.autoconfigure.ssl.SslAutoConfiguration
             ibm:
               mq:
                 queue-manager: QM_ARCHIVE
@@ -1277,7 +1284,8 @@ function readModel(){
     deployment: {
       name: V('i-k8s-name'), namespace: V('i-k8s-ns'),
       replicas: parseInt(V('i-k8s-rep') || '1', 10) || 1,
-      cpu: V('i-k8s-cpu'), memory: V('i-k8s-mem')
+      cpu: V('i-k8s-cpu'), memory: V('i-k8s-mem'),
+      nodeSelector: parseProps(V('i-k8s-nodesel'))
     },
     service: { enabled: C('i-k8s-svc'), port: V('i-k8s-svcport') },
     runAs: V('i-k8s-runas'),
@@ -1456,6 +1464,7 @@ function emitKube(k){
   y += '  deployment:\n' + kv('name', d.name, '    ') + kv('namespace', d.namespace, '    ')
      + knum('replicas', d.replicas, '    ');
   if(d.cpu || d.memory) y += '    resources:\n' + kv('cpu', d.cpu, '      ') + kv('memory', d.memory, '      ');
+  if(d.nodeSelector && d.nodeSelector.length) y += '    node-selector:\n' + emitProps(d.nodeSelector, '      ');
   y += '  service:\n' + kbool('enabled', k.service.enabled, '    ') + knum('port', k.service.port, '    ');
   // run-as is written only when set: unset is the CLI's non-root default.
   y += kv('run-as', k.runAs, '  ');
@@ -1693,6 +1702,7 @@ function validateModel(m){
   });
   if(m.leader.session) checkExtraKeys(add, warn, ENV_FILE, 'leader-election session', m.leader.session, m, false);
   if((m.mqDefaults || []).length) checkExtraKeys(add, warn, ENV_FILE, 'mq-defaults', { system: 'mq', tls: false, cipher: '', extra: m.mqDefaults }, m, true);
+  checkMQCipher(warn, m);
 
   checkStoreFiles(add, m);
   checkUnusedStores(warn, m);
@@ -1857,6 +1867,26 @@ function checkTuple(add, file, label, s, m){
     if((s.truststore || s.keystore) && !s.tls) add(file, `${label} mq: truststore/keystore require 'tls: true'`);
     checkStoreSelection(add, file, label + ' mq', s, m);
   }
+}
+
+// checkMQCipher mirrors validate.checkMQCipher: an MQ connection with tls: true
+// and no cipher suite -- no cipher:, no ssl-cipher-suite / ssl-cipher-spec key
+// of its own or from mq-defaults -- would not use TLS, since the IBM MQ client
+// negotiates it only when a cipher suite is set. Connections by name, then each
+// inline workflow side; a conn-ref side is its connection's.
+function checkMQCipher(warn, m){
+  const hasCipherKey = extra => (extra || []).some(p => p.key !== undefined && ['sslciphersuite', 'sslcipherspec'].includes(canonicalKey(p.key)));
+  if(hasCipherKey(m.mqDefaults)) return;
+  const check = (file, label, s) => {
+    if(s && s.system === 'mq' && s.tls && !s.cipher && !hasCipherKey(s.extra)) warn(file, `${label} mq: tls: true sets no cipher suite, and the IBM MQ client negotiates TLS only when one is set, so this connection would not use TLS; set cipher: to the JCE name of the channel's CipherSpec (for example TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384)`);
+  };
+  m.connections.filter(c => c.name).slice().sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+    .forEach(c => check(ENV_FILE, 'connections.' + c.name, c.side));
+  m.wfs.forEach(wf => {
+    if(!wf.file) return;
+    if(!wf.source.connRef) check(wf.file, 'source', wf.source);
+    if(!wf.target.connRef) check(wf.file, 'target', wf.target);
+  });
 }
 
 // storeNames lists the defined store names, sorted as Go's TLSConfig.StoreNames.
@@ -2403,6 +2433,30 @@ function javaOptionsProblem(s){
   return '';
 }
 
+// LABEL_NAME_RE and DNS_SUBDOMAIN_RE mirror validate's labelNameRE and
+// dnsSubdomainRE; isLabelKey and checkNodeSelector mirror its isLabelKey and
+// checkNodeSelector. A value still holding ${...} is left to the CLI, which
+// expands it before checking.
+const LABEL_NAME_RE = /^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$/;
+const DNS_SUBDOMAIN_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+function isLabelKey(k){
+  let name = k;
+  const i = k.indexOf('/');
+  if(i >= 0){
+    const prefix = k.slice(0, i);
+    if(prefix.length > 253 || !DNS_SUBDOMAIN_RE.test(prefix)) return false;
+    name = k.slice(i + 1);
+  }
+  return name.length <= 63 && LABEL_NAME_RE.test(name);
+}
+function checkNodeSelector(add, warn, sel){
+  sel.filter(p => p.key !== undefined).slice().sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0).forEach(p => {
+    if(!isLabelKey(p.key)) add(ENV_FILE, `kubernetes.deployment.node-selector: ${goQuote(p.key)} is not a Kubernetes label key: a name of at most 63 letters, digits, '-', '_' or '.', beginning and ending with a letter or digit, optionally after a DNS subdomain prefix and '/' (as in kubernetes.io/os)`);
+    const v = String(p.val || '').replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
+    if(v.indexOf('${') >= 0){ checkExpansion(warn, ENV_FILE, `kubernetes.deployment.node-selector.${p.key}`, v); return; }
+    if(v && (v.length > 63 || !LABEL_NAME_RE.test(v))) add(ENV_FILE, `kubernetes.deployment.node-selector.${p.key}: ${goQuote(v)} is not a Kubernetes label value: at most 63 letters, digits, '-', '_' or '.', beginning and ending with a letter or digit`);
+  });
+}
 function checkKube(add, warn, m){
   const k = m.kube, d = k.deployment;
   checkCommand(add, 'kubernetes.command', k.command, 'kubernetes');
@@ -2423,6 +2477,7 @@ function checkKube(add, warn, m){
   if(!d.namespace) add(ENV_FILE, 'deployment.namespace is required');
   else if(!isDNS1123(d.namespace)) add(ENV_FILE, `deployment.namespace "${d.namespace}" is not a valid DNS-1123 label`);
   checkExpansion(warn, ENV_FILE, 'deployment.namespace', d.namespace);
+  checkNodeSelector(add, warn, d.nodeSelector || []);
   if(k.imagePull && !k.imagePull.create){
     if(!k.imagePull.name) add(ENV_FILE, 'kubernetes.secrets.image-pull.name is required');
     else if(!isDNS1123(k.imagePull.name)) add(ENV_FILE, `kubernetes.secrets.image-pull.name "${k.imagePull.name}" is not a valid DNS-1123 label`);
@@ -3315,6 +3370,8 @@ function renderBundles(line, bundles){
     }
   });
 }
+// MQ_BINDER_SOURCES mirrors render.MQBinderSources.
+const MQ_BINDER_SOURCES = 'org.springframework.boot.autoconfigure.ssl.SslAutoConfiguration';
 function renderCloudStream(line, mm){
   line(2, 'cloud:'); line(4, 'stream:');
   line(6, 'binders:');
@@ -3337,6 +3394,9 @@ function renderCloudStream(line, mm){
     } else if(b.kind === 'mq'){
       line(10, 'type: jms');
       line(10, 'environment:');
+      // render.MQBinderSources: the MQ binder's own context loads Spring Boot's
+      // SSL auto-configuration, or ibm.mq.ssl-bundle resolves to nothing there.
+      line(12, 'spring:'); line(14, 'main:'); line(16, 'sources: ' + MQ_BINDER_SOURCES);
       line(12, 'ibm:');
       line(14, 'mq:');
       line(16, 'queue-manager: ' + yq(b.mq.queueManager));
@@ -3885,7 +3945,7 @@ function sampleModel(){
     kube: {
       command: 'kubectl',
       deployment: { name: 'solmq-connector', namespace: 'solace-connectors',
-                    replicas: 2, cpu: '1', memory: '1Gi' },
+                    replicas: 2, cpu: '1', memory: '1Gi', nodeSelector: [] },
       service: { enabled: true, port: '8090' },
       runAs: '',
       libs: null, cred: cred, stores: { create: true }, imagePull: null
@@ -3980,7 +4040,7 @@ function clearForm(){
   ['i-le-user-env', 'i-le-pass-env',
    'i-img-user-env', 'i-img-pass-env'].forEach(id => setC(id, true));
   ['i-log', 'i-soldef', 'i-mqdef', 'i-le-queue', 'i-le-fo', 'i-le-props', 'i-le-extra', 'i-k8s-name', 'i-k8s-ns',
-   'i-k8s-cpu', 'i-k8s-mem', 'i-k8s-ipull-name', 'i-k8s-runas', 'i-dk-runas', 'i-pd-runas',
+   'i-k8s-cpu', 'i-k8s-mem', 'i-k8s-nodesel', 'i-k8s-ipull-name', 'i-k8s-runas', 'i-dk-runas', 'i-pd-runas',
    'i-img-repo', 'i-img-name', 'i-img-tag', 'i-img-user', 'i-img-pass', 'i-tz', 'i-jto', 'i-jjo',
    'i-le-host', 'i-le-vpn', 'i-le-user', 'i-le-pass', 'i-le-ts', 'i-le-ks', 'i-le-alias'].forEach(id => setV(id, ''));
   setV('i-wf-dir', '.'); setV('i-wf-pat', '*');
@@ -4042,6 +4102,7 @@ function loadSample(){
   setV('i-k8s-ns', k.deployment.namespace);
   setV('i-k8s-rep', k.deployment.replicas); setV('i-k8s-cpu', k.deployment.cpu);
   setV('i-k8s-mem', k.deployment.memory);
+  setV('i-k8s-nodesel', emitProps(k.deployment.nodeSelector || [], ''));
   setV('i-k8s-runas', k.runAs || '');
   setC('i-k8s-svc', k.service.enabled); setV('i-k8s-svcport', k.service.port);
   setV('i-k8s-cred', 'create');

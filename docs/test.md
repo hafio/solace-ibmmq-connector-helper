@@ -50,7 +50,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 969 test functions, 1376 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 974 test functions, 1386 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -139,6 +139,7 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestDefaultRunAsIsNonRootAndParses | - | the default parses, is not root, and fits a stock rootless subuid/subgid range of 65536 ids |
 | TestParseKubernetesFull | - | parses replicas 2, service enabled port 8090, credentials create name, stores create present; source and variables set on credentials.create parse structurally regardless, so RemovedKeys can report them |
 | TestParseKubernetesError | - | deployment as sequence instead of map returns non-nil error |
+| TestParseKubernetesNodeSelector | - | deployment.node-selector decodes to its label map; true and 2 arrive as the text written, an empty value as "", and an unset selector stays nil |
 | TestParseKubernetesResources | - | parses deployment resources CPU '1' and Memory 1Gi |
 | TestParseKubernetesLoggingLibsDefaults | syslog and libs download present | syslog Protocol defaults to udp and libs download Image defaults to busybox:1.37 |
 | TestParseKubernetesLoggingLibsDefaults | libs pvc create without storage | pvc create Storage defaults to 1Gi |
@@ -447,6 +448,7 @@ Tests: [render_test.go](../internal/render/render_test.go)
 | TestApplicationQuotesRiskyScalars | plain values | ordinary hosts, conn-names, users and destinations stay unquoted |
 | TestApplicationBlockScalarPassthrough | - | a literal (\|) passthrough value is re-emitted as an indented block scalar, never flattened onto the key line |
 | TestApplicationSkipsBundleWithoutStores | - | tls: true selecting no store emits no ssl bundle or ssl-bundle reference, keeps MQTLS set, and warns about nothing: JVM default trust is a legitimate choice |
+| TestApplicationMQBinderLoadsSSLAutoConfiguration | - | every MQ binder environment, TLS or not, starts with spring.main.sources: SslAutoConfiguration, so ibm.mq.ssl-bundle resolves in the binder's own context; a Solace binder gets none |
 | TestApplicationKeystoreOnlyBundle | - | a binder selecting only a keystore renders a bundle with keystore and key.alias and no truststore section |
 | TestApplicationConfigImport | ConfigImport set / empty | Application() leads with spring.config.import when Model.ConfigImport is set, and omits the block entirely when it is empty |
 | TestApplicationSecurityUserRoles | - | a roles-bearing user renders a block-style roles sequence under its password; a role-less user and the reserved solmq-status account emit no roles key at all, keeping pre-roles output byte-identical |
@@ -549,6 +551,7 @@ Tests: [deploy_test.go](../internal/deploy/deploy_test.go), [imagepull_test.go](
 | TestStoresVolumeMapsKeysToStoreNames | existing, no store selected | the stores volume lists no items, so every key projects |
 | TestStoresVolumeMapsKeysToStoreNames | no model | storeItems returns nil: no store to list |
 | TestRenderConfigMapStatusScript | - | the ConfigMap always carries the status script under its own `status` key, alongside application.yml |
+| TestRenderDeploymentNodeSelector | - | the pod spec carries nodeSelector after automountServiceAccountToken, keys sorted, a key or value YAML would misread ("2", "true", "") quoted; no selector writes none |
 | TestRenderStatusScriptMountAfterLibs | - | the single-file status mount is declared after the libs directory mount, so it is not shadowed, and carries `subPath: status` |
 | TestProbesSplitLivenessFromReadiness | - | liveness stays a tcpSocket check so a slow downstream cannot become a restart loop, while readiness execs `sh <ContainerPath> --health` with an explicit timeoutSeconds (kubernetes defaults it to 1s) against a path the pod actually mounts |
 | TestManagementPort | Defaults.Management.Port 9999 | ManagementPort returns 9999, ignoring Kube.Service.Port entirely |
@@ -789,8 +792,15 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestSolaceKeyAliasRequiresTCPSAndKeystore | - | solace key-alias and store selections with a plain tcp host each error, requiring a tcps:// host |
 | TestMQKeyAliasRequiresKeystore | - | mq key-alias with no keystore selected errors the same way |
 | TestMQStoreSelectionRequiresTLS | - | an mq side selecting a store without tls: true errors truststore/keystore require tls: true |
+| TestMQTLSWithoutCipherWarns | inline side without cipher | tls: true with no cipher suite warns once, on the side, never an error |
+| TestMQTLSWithoutCipherWarns | cipher: / ssl-cipher-spec of its own / sslCipherSuite from mq-defaults | each counts as a cipher suite: no warning |
+| TestMQTLSWithoutCipherWarns | no tls | a plain-text connection is not warned |
+| TestMQTLSWithoutCipherWarns | conn-ref | warned once, on connections.<name> in env.yaml, not on the referring side |
 | TestStoreSelectionMustBeDefined | - | a truststore or keystore naming no tls.stores entry errors, listing the defined names (none when there are none) |
 | TestCheckKubeRequiredAndReplicas | - | kube deployment missing name/namespace and replicas 3 errors each field plus replicas: 1 message |
+| TestCheckKubeNodeSelector | valid labels | prefixed, empty-valued and mixed-case label keys and values pass |
+| TestCheckKubeNodeSelector | bad keys | a space, a leading '-', two '/', an uppercase or empty prefix, and a 64-character name are each refused as a label key |
+| TestCheckKubeNodeSelector | bad values | a leading '-', a space, and 64 characters are each refused as a label value |
 | TestCheckKubeServicePort | - | kubernetes.service.port is range-checked like docker/podman ports: a scalar or distinct host:container pair both pass, and an out-of-range host or container side each error independently naming the offending side |
 | TestCheckKubeCredentialCreateRemovedKeys | source/variables/values-file set | credentials.create carrying `source`, `variables`, and `values-file` errors naming all three and telling the operator to remove them |
 | TestCheckKubeCredentialCreateRemovedKeys | source alone | credentials.create carrying only `source` errors naming it alone |

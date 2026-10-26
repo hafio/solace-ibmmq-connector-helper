@@ -222,6 +222,30 @@ spec:
       targetPort: 8090
 `
 
+// The pod carries the node selector the operator set: keys sorted, so an
+// unchanged selector renders the same manifest every run, and a key or value
+// YAML would read as anything but a string quoted. None set writes none.
+func TestRenderDeploymentNodeSelector(t *testing.T) {
+	k := baseKube()
+	k.Deployment.NodeSelector = map[string]string{"zone": "a", "kubernetes.io/os": "linux", "gpu": "true", "spare": "", "2": "x"}
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	want := "      automountServiceAccountToken: false\n" +
+		"      nodeSelector:\n" +
+		"        \"2\": x\n" +
+		"        gpu: \"true\"\n" +
+		"        kubernetes.io/os: linux\n" +
+		"        spare: \"\"\n" +
+		"        zone: a\n" +
+		"      securityContext:\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("want the sorted, quoted nodeSelector in the pod spec\n%s\n---\n%s", want, out)
+	}
+	k.Deployment.NodeSelector = nil
+	if out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})}); strings.Contains(out, "nodeSelector") {
+		t.Errorf("no node selector set, so none may be written\n%s", out)
+	}
+}
+
 // TestRenderConfigMapStatusScript checks the ConfigMap always carries the
 // status script under its own key, alongside application.yml.
 func TestRenderConfigMapStatusScript(t *testing.T) {

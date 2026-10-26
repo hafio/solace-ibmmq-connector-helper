@@ -73,6 +73,20 @@ func checkAllExtraKeys(add, warn func(string, string, ...any), wfs []spec.Workfl
 	}
 }
 
+// hasCipherKey reports whether a block of other keys sets the cipher suite
+// itself, in any spelling of ssl-cipher-suite or ssl-cipher-spec.
+func hasCipherKey(extra *yaml.Node) bool {
+	if extra == nil || extra.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(extra.Content); i += 2 {
+		if ck := spec.CanonicalKey(extra.Content[i].Value); ck == "sslciphersuite" || ck == "sslcipherspec" {
+			return true
+		}
+	}
+	return false
+}
+
 // propPrefix is where a system's connection keys land in application.yml.
 func propPrefix(system string) string {
 	if system == spec.SystemSolace {

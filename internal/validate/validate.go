@@ -147,6 +147,7 @@ func Run(ctx Context) (errs, warns []Issue) {
 	// Every run: a block's other keys are passed through verbatim, so another
 	// spelling of a key the tool handles, or a typo, is not harmless to ignore.
 	checkAllExtraKeys(add, warn, ctx.Workflows, d)
+	checkMQCipher(warn, ctx.Workflows, d)
 	checkStoreFiles(add, d)
 	checkUnusedStores(warn, ctx.Workflows, d)
 	checkDefaultsCredentials(add, warn, ctx, d)
@@ -538,6 +539,41 @@ func checkTuple(add func(string, string, ...any), file, label string, s spec.Sid
 	}
 }
 
+// checkMQCipher warns about each MQ connection that sets tls: true but names
+// no cipher suite: no cipher:, and no ssl-cipher-suite or ssl-cipher-spec key
+// of its own or from mq-defaults. IBM's JMS client negotiates TLS only when a
+// cipher suite is set, so that connection would not use TLS at all, and a
+// channel that requires it refuses the connection. A warning rather than an
+// error: the connector still starts, and only the queue manager knows what its
+// channel requires. A connection is checked where it is written -- each
+// connections entry, each inline side; a conn-ref side is its connection's.
+func checkMQCipher(warn func(string, string, ...any), wfs []spec.Workflow, d *spec.Defaults) {
+	if hasCipherKey(d.MQDefaults) {
+		return
+	}
+	check := func(file, label string, s spec.Side) {
+		if s.System == spec.SystemMQ && s.TLS && s.Cipher == "" && !hasCipherKey(s.Extra) {
+			warn(file, "%s mq: tls: true sets no cipher suite, and the IBM MQ client negotiates TLS only when one is set, so this connection would not use TLS; set cipher: to the JCE name of the channel's CipherSpec (for example TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384)", label)
+		}
+	}
+	names := make([]string, 0, len(d.Connections))
+	for name := range d.Connections {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		check(fileEnv, "connections."+name, d.Connections[name])
+	}
+	for _, wf := range wfs {
+		if wf.SourceSet && wf.Source.ConnRef == "" {
+			check(wf.File, "source", wf.Source)
+		}
+		if wf.TargetSet && wf.Target.ConnRef == "" {
+			check(wf.File, "target", wf.Target)
+		}
+	}
+}
+
 // checkStoreSelection checks the stores a connection selects: each must be
 // defined under tls.stores, a key-alias picks a key from the keystore it
 // selects, so it needs one, and a created store must be what it is selected as
@@ -861,6 +897,7 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 	if dep.Timezone != "" {
 		add(fileEnv, "kubernetes.deployment.timezone is no longer configured here: the container timezone moved to the top-level timezone: key so one declaration serves every platform. Remove kubernetes.deployment.timezone")
 	}
+	checkNodeSelector(add, dep.NodeSelector)
 
 	// service.port is the same scalar / "host:container" shape as docker/podman
 	// ports (Port.UnmarshalYAML enforces the shape itself at parse); range-check
@@ -1160,6 +1197,46 @@ func usesCredentials(wfs []spec.Workflow, d *spec.Defaults) bool {
 }
 
 func isDNS1123(s string) bool { return len(s) <= 63 && dns1123RE.MatchString(s) }
+
+// labelNameRE is a Kubernetes label name -- a key's part after any prefix, and
+// a non-empty value -- whose 63-character limit is checked beside it;
+// dnsSubdomainRE is the DNS-1123 subdomain a key's prefix must be.
+var (
+	labelNameRE    = regexp.MustCompile(`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`)
+	dnsSubdomainRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
+)
+
+// checkNodeSelector holds kubernetes.deployment.node-selector to the label
+// syntax the API server enforces, so a bad key or value is reported here
+// rather than by kubectl apply partway through a deploy.
+func checkNodeSelector(add func(string, string, ...any), sel map[string]string) {
+	keys := make([]string, 0, len(sel))
+	for k := range sel {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !isLabelKey(k) {
+			add(fileEnv, "kubernetes.deployment.node-selector: %q is not a Kubernetes label key: a name of at most 63 letters, digits, '-', '_' or '.', beginning and ending with a letter or digit, optionally after a DNS subdomain prefix and '/' (as in kubernetes.io/os)", k)
+		}
+		if v := sel[k]; v != "" && (len(v) > 63 || !labelNameRE.MatchString(v)) {
+			add(fileEnv, "kubernetes.deployment.node-selector.%s: %q is not a Kubernetes label value: at most 63 letters, digits, '-', '_' or '.', beginning and ending with a letter or digit", k, v)
+		}
+	}
+}
+
+// isLabelKey reports whether k is a Kubernetes label key: a name, optionally
+// after a DNS subdomain prefix of at most 253 characters and a '/'.
+func isLabelKey(k string) bool {
+	name := k
+	if prefix, rest, found := strings.Cut(k, "/"); found {
+		if len(prefix) > 253 || !dnsSubdomainRE.MatchString(prefix) {
+			return false
+		}
+		name = rest
+	}
+	return len(name) <= 63 && labelNameRE.MatchString(name)
+}
 
 // checkSecretName gates a Secret name that is emitted verbatim into the manifest
 // (metadata.name, secretRef.name, volumes[].secret.secretName). An empty name is

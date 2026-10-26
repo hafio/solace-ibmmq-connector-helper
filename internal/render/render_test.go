@@ -161,6 +161,9 @@ const richApplicationWant = `spring:
         mq-conn-1:
           type: jms
           environment:
+            spring:
+              main:
+                sources: org.springframework.boot.autoconfigure.ssl.SslAutoConfiguration
             ibm:
               mq:
                 queue-manager: QM1
@@ -735,6 +738,35 @@ target:
 	// The naive form (everything on the key's line) must not appear.
 	if strings.Contains(out, "CERT: -----BEGIN") {
 		t.Errorf("multi-line value was flattened onto the key line\n---\n%s", out)
+	}
+}
+
+// Every MQ binder's own context loads Spring Boot's SSL auto-configuration,
+// TLS or not -- without it ibm.mq.ssl-bundle resolves to nothing in a binder
+// with an environment -- while a Solace binder, which reads no SSL bundle, is
+// left alone.
+func TestApplicationMQBinderLoadsSSLAutoConfiguration(t *testing.T) {
+	src := `
+source:
+  mq:
+    conn-name: h(1414)
+    queue-manager: QM1
+    channel: CH
+    queue: IN
+target:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: v
+    topic: OUT
+`
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, &spec.Defaults{}, consolidate.Opts{})
+	out := Application(m)
+	want := "          type: jms\n          environment:\n            spring:\n              main:\n                sources: " + MQBinderSources + "\n            ibm:\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("the MQ binder does not load %s first in its environment\n---\n%s", MQBinderSources, out)
+	}
+	if n := strings.Count(out, "sources: "); n != 1 {
+		t.Errorf("sources: written %d times, want once -- for the MQ binder only\n---\n%s", n, out)
 	}
 }
 

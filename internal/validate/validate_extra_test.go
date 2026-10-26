@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
@@ -1503,5 +1505,93 @@ func TestLibsPVNameLengthIsCapped(t *testing.T) {
 	errs, _ = Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
 	if hasErr(errs, "exceeds the 63-char DNS-1123 limit") {
 		t.Errorf("a name that fits must not be flagged, got %v", errs)
+	}
+}
+
+// An MQ connection with tls: true and no cipher suite would not use TLS -- the
+// IBM MQ client negotiates it only when one is set -- so validate warns, once,
+// where the connection is written; never an error. cipher:, an
+// ssl-cipher-suite or ssl-cipher-spec key of its own, or one from mq-defaults
+// each count as a cipher suite.
+func TestMQTLSWithoutCipherWarns(t *testing.T) {
+	const msg = "mq: tls: true sets no cipher suite, and the IBM MQ client negotiates TLS only when one is set, so this connection would not use TLS"
+	keyNode := func(k string) *yaml.Node {
+		return &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{{Kind: yaml.ScalarNode, Value: k}, {Kind: yaml.ScalarNode, Value: "ANY_TLS12"}}}
+	}
+	tlsMQ := func(edit func(*spec.Side)) spec.Side {
+		s := vMQ("M", spec.DestQueue, true)
+		if edit != nil {
+			edit(&s)
+		}
+		return s
+	}
+	refSide := spec.Side{System: spec.SystemMQ, ConnRef: "core", DestKind: spec.DestQueue, Dest: "M"}
+	conn := tlsMQ(func(s *spec.Side) { s.DestKind, s.Dest = "", "" })
+	for _, c := range []struct {
+		name  string
+		side  spec.Side
+		defs  *spec.Defaults
+		where string // the warning's label and file; "" for none
+		file  string
+	}{
+		{"inline side without cipher", tlsMQ(nil), &spec.Defaults{}, "target ", "x.yaml"},
+		{"cipher:", tlsMQ(func(s *spec.Side) { s.Cipher = "TLS_X" }), &spec.Defaults{}, "", ""},
+		{"ssl-cipher-spec of its own", tlsMQ(func(s *spec.Side) { s.Extra = keyNode("ssl-cipher-spec") }), &spec.Defaults{}, "", ""},
+		{"sslCipherSuite from mq-defaults", tlsMQ(nil), &spec.Defaults{MQDefaults: keyNode("sslCipherSuite")}, "", ""},
+		{"no tls", vMQ("M", spec.DestQueue, false), &spec.Defaults{}, "", ""},
+		{"conn-ref: once, on the connection", refSide, &spec.Defaults{Connections: map[string]spec.Side{"core": conn}}, "connections.core ", "env.yaml"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			errs, warns := Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), c.side)}, Defaults: c.defs})
+			if hasErr(errs, msg) {
+				t.Errorf("a missing cipher suite must not be an error: %v", errs)
+			}
+			n := 0
+			for _, w := range warns {
+				if strings.Contains(w.Msg, msg) {
+					n++
+					if c.where == "" || !strings.HasPrefix(w.Msg, c.where+msg) || w.File != c.file {
+						t.Errorf("warning %v, want it on %q in %s", w, c.where, c.file)
+					}
+				}
+			}
+			if want := map[bool]int{true: 1, false: 0}[c.where != ""]; n != want {
+				t.Errorf("warned %d times, want %d: %v", n, want, warns)
+			}
+		})
+	}
+}
+
+// kubernetes.deployment.node-selector is held to the label syntax the API
+// server enforces: a key is a name of at most 63 characters, optionally after
+// a DNS subdomain prefix and '/'; a value is empty or such a name. Each bad
+// key or value is its own error, naming it.
+func TestCheckKubeNodeSelector(t *testing.T) {
+	run := func(sel map[string]string) []Issue {
+		dep := baseKubeDeploy()
+		dep.NodeSelector = sel
+		k := &spec.Kubernetes{Deployment: dep, Command: spec.DefaultKubeCommand, Service: baseKubeService()}
+		errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
+		return errs
+	}
+	good := map[string]string{"kubernetes.io/os": "linux", "node-role.example.com/connector": "", "zone": "ap-southeast-1a", "Rack_2.b": "A-1"}
+	if errs := run(good); hasErr(errs, "node-selector") {
+		t.Errorf("valid labels must pass: %v", errs)
+	}
+	long := strings.Repeat("a", 64)
+	for _, c := range []struct{ key, val, want string }{
+		{"bad key", "x", `kubernetes.deployment.node-selector: "bad key" is not a Kubernetes label key`},
+		{"-lead", "x", `"-lead" is not a Kubernetes label key`},
+		{"a/b/c", "x", `"a/b/c" is not a Kubernetes label key`},
+		{"Example.com/os", "x", `"Example.com/os" is not a Kubernetes label key`},
+		{"/os", "x", `"/os" is not a Kubernetes label key`},
+		{long, "x", `"` + long + `" is not a Kubernetes label key`},
+		{"zone", "-a", `kubernetes.deployment.node-selector.zone: "-a" is not a Kubernetes label value`},
+		{"zone", "a b", `"a b" is not a Kubernetes label value`},
+		{"zone", long, `"` + long + `" is not a Kubernetes label value`},
+	} {
+		if errs := run(map[string]string{c.key: c.val}); !hasErr(errs, c.want) {
+			t.Errorf("%q: %q: want %q, got %v", c.key, c.val, c.want, errs)
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"reflect"
 	"slices"
 	"testing"
 
@@ -465,6 +466,23 @@ secrets:
 	}
 	if k.Secrets.Stores == nil || k.Secrets.Stores.Create == nil {
 		t.Errorf("stores: %+v", k.Secrets.Stores)
+	}
+}
+
+// deployment.node-selector decodes to the label map the pod's nodeSelector
+// carries; a value YAML would read as a boolean or number arrives as the text
+// written, and an empty one as "".
+func TestParseKubernetesNodeSelector(t *testing.T) {
+	k, err := ParseKubernetes([]byte("deployment:\n  name: c\n  namespace: ns\n  node-selector:\n    kubernetes.io/os: linux\n    gpu: true\n    rack: 2\n    spare:\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"kubernetes.io/os": "linux", "gpu": "true", "rack": "2", "spare": ""}
+	if !reflect.DeepEqual(k.Deployment.NodeSelector, want) {
+		t.Errorf("node-selector = %#v, want %#v", k.Deployment.NodeSelector, want)
+	}
+	if k, _ := ParseKubernetes([]byte("deployment:\n  name: c\n")); k.Deployment.NodeSelector != nil {
+		t.Errorf("an unset node-selector must stay nil, got %#v", k.Deployment.NodeSelector)
 	}
 }
 
