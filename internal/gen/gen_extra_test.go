@@ -855,7 +855,7 @@ image:
 podman:
   command: podman
   name: solmq-connector
-  restart: unless-stopped
+  restart: always
   ports:
     - 8090
 `

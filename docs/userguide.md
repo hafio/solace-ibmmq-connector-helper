@@ -2032,7 +2032,7 @@ mounts.
 podman:
   command: podman
   name: solmq-connector
-  restart: unless-stopped
+  restart: always                # systemd's words, not compose's; this is the default
   run-as: "1000:0"               # optional; this is the default. uid[:gid] the container runs as,
                                  # or "image" to keep the image's own user (section 8.4)
   ports:
@@ -2050,7 +2050,14 @@ podman:
 Common docker/podman options: `name` (a DNS-1123 label -- it flows
 into filenames, a systemctl unit, and the podman secret-store namespace; when
 omitted it defaults to `connector`, the same name kubernetes always gives the
-connector container -- [section 14.5](#145-which-container-it-enters)); `restart`;
+connector container -- [section 14.5](#145-which-container-it-enters)); `restart`,
+in each engine's own words -- docker takes compose's (`no`, `always`,
+`on-failure`, `on-failure:<retries>`, `unless-stopped`, the default) and podman
+systemd's `Restart=` values (`no`, `always`, the default, `on-success`,
+`on-failure`, `on-abnormal`, `on-abort`, `on-watchdog`), since podman's lands in
+the quadlet unit. systemd never restarts a unit you stopped, so its `always` is
+what compose's `unless-stopped` means; `unless-stopped` itself is an error on
+podman, as systemd would ignore the line and never restart the connector;
 `ports` (a bare port, or `host:container` to map a distinct host port; each 1-65535;
 **omit it and nothing is published** -- exposing a container port to the host is
 your decision, and `status` reaches the connector by exec'ing into it rather than

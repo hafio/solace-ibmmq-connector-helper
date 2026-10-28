@@ -346,7 +346,7 @@ details[open]>summary::before{content:"- "}
       </div>
       <div class="fr">
         <div class="f"><label>Compose Project Name</label><input id="i-dk-project" value="solace-ibmmq-connectors"></div>
-        <div class="f"><label>Restart Policy</label><input id="i-dk-restart" value="unless-stopped"></div>
+        <div class="f"><label>Restart Policy</label><input id="i-dk-restart" value="unless-stopped"><div class="h">Compose's words: no, always, on-failure, on-failure:&lt;retries&gt;, unless-stopped.</div></div>
       </div>
       <div class="f"><label>Run As</label><input id="i-dk-runas" placeholder="1000:0"><div class="h">uid[:gid] the connector runs as. Empty means the non-root default 1000:0; a bare uid runs with gid 0. "image" keeps the image's own user, which is root. The TLS store files and libs jars it mounts must be readable by that uid or group.</div></div>
       <div class="sub-h">Published Ports</div>
@@ -371,7 +371,7 @@ details[open]>summary::before{content:"- "}
       </div>
       <div class="h">Nothing here names a host directory: deploy loads application.yml, the status script, the logback config and the TLS stores into podman's secret store (by default a file under the deploying user's container storage), and the .container unit goes to the directory systemd loads for whoever runs the tool -- root system-wide, anyone else their own home.</div>
       <div class="fr">
-        <div class="f"><label>Restart Policy</label><input id="i-pd-restart" value="unless-stopped"></div>
+        <div class="f"><label>Restart Policy</label><input id="i-pd-restart" value="always"><div class="h">systemd's Restart= words, not compose's: no, always, on-success, on-failure, on-abnormal, on-abort, on-watchdog. always already spares a unit you stopped.</div></div>
       </div>
       <div class="f"><label>Run As</label><input id="i-pd-runas" placeholder="1000:0"><div class="h">uid[:gid] the connector runs as. Empty means the non-root default 1000:0; a bare uid runs with gid 0. "image" keeps the image's own user, which is root. Deployed rootless, the ids map into your subuid and subgid ranges (65536 ids by default).</div></div>
       <div class="sub-h">Published Ports</div>
@@ -1333,7 +1333,7 @@ function readCtr(p, section){
     section: section,
     command: V('i-' + p + '-cmd') || section,
     name: V('i-' + p + '-name') || 'connector',
-    restart: V('i-' + p + '-restart') || 'unless-stopped',
+    restart: V('i-' + p + '-restart') || (section === 'podman' ? 'always' : 'unless-stopped'),
     ports: Array.from(document.querySelectorAll('#' + p + '-ports .p-val')).map(i => i.value.trim()).filter(Boolean),
     cred: readCred(p),
     libsDir: C('i-' + p + '-libs-on') ? V('i-' + p + '-libs-dir') : '',
@@ -2605,6 +2605,24 @@ function checkLibs(add, warn, lb){
     checkExpansion(warn, ENV_FILE, 'kubernetes.libs.download.image', lb.image);
   }
 }
+// checkRestart mirrors validate.checkRestart: each section's restart in its
+// engine's own words -- compose's for docker, systemd's Restart= for podman,
+// where compose's unless-stopped is ignored and the connector never restarts.
+// A ${...} is left to the CLI, which checks the value it expands to.
+const RE_COMPOSE_RESTART = /^(no|always|unless-stopped|on-failure(:[1-9][0-9]*)?)$/;
+const SYSTEMD_RESTART = ['no', 'always', 'on-success', 'on-failure', 'on-abnormal', 'on-abort', 'on-watchdog'];
+function checkRestart(add, warn, section, v){
+  if(!v) return;
+  if(v.indexOf('${') >= 0){ checkExpansion(warn, ENV_FILE, `${section}.restart`, v); return; }
+  if(section !== 'podman'){
+    if(!RE_COMPOSE_RESTART.test(v)) add(ENV_FILE, `${section}.restart "${v}" is not a compose restart policy: use no, always, on-failure, on-failure:<retries> or unless-stopped`);
+    return;
+  }
+  if(SYSTEMD_RESTART.indexOf(v) >= 0) return;
+  if(v === 'unless-stopped') add(ENV_FILE, `${section}.restart "${v}" is docker's word, which systemd does not know: it ignores the line and never restarts the connector. Write always -- systemd never restarts a unit you stopped, so always is what unless-stopped means here`);
+  else if(RE_COMPOSE_RESTART.test(v)) add(ENV_FILE, `${section}.restart "${v}" is docker's spelling: systemd's Restart= takes no retry count. Write on-failure`);
+  else add(ENV_FILE, `${section}.restart "${v}" is not a systemd restart policy: use ${SYSTEMD_RESTART.join(', ')}`);
+}
 // checkQuantity mirrors validate.checkQuantity: cpu, memory and the libs
 // claim size are written unquoted into the manifest, so each is held to the
 // Kubernetes quantity grammar. A ${...} is left to the CLI, which expands it
@@ -2718,8 +2736,7 @@ function checkContainerTarget(add, warn, m, c){
   if(!isDNS1123(c.name)) add(ENV_FILE, `${c.section}.name "${c.name}" is not a valid DNS-1123 label`);
   checkExpansion(warn, ENV_FILE, `${c.section}.name`, c.name);
   checkCommand(add, c.section + '.command', c.command, c.section);
-  if(c.restart && !safeToken(c.restart)) add(ENV_FILE, `${c.section}.restart "${c.restart}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
-  checkExpansion(warn, ENV_FILE, `${c.section}.restart`, c.restart);
+  checkRestart(add, warn, c.section, c.restart);
   c.ports.forEach(p => {
     const parts = p.split(':');
     if(parts.length > 2){ add(ENV_FILE, `${c.section}.ports entry "${p}" must be "host:container" (exactly one colon)`); return; }
@@ -4033,7 +4050,7 @@ function sampleModel(){
     },
     podman: {
       section: 'podman', command: 'podman', name: 'connector',
-      restart: 'unless-stopped', ports: ['8090'],
+      restart: 'always', ports: ['8090'],
       cred: null, libsDir: '', runAs: ''
     }
   };

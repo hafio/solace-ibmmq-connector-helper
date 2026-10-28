@@ -50,7 +50,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 1005 test functions, 1445 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 1006 test functions, 1447 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -160,7 +160,7 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestParseEnvPortsInvalid | mapping node {a: 1} | error 'env.yaml: ports entry must be an integer or "host:container", got a !!map' |
 | TestApplyDockerDefaultsFillsMissing | - | docker defaults command/name/project-name/restart/run-as applied (run-as the non-root default, since the image's own user is root), ports stay empty (publishing is opt-in), stores/libs stay nil |
 | TestApplyDockerDefaultsOverrideWins | - | explicit command/name/project-name/restart/run-as/ports override defaults exactly as given; a custom name does not drag project-name with it |
-| TestApplyPodmanDefaultsFillsMissing | - | podman defaults command/name/restart/run-as applied, ports stay empty (publishing is opt-in), and both rejected keys left alone: mode empty and Quadlet nil. Defaulting either would trip validate's rejection for something the operator never wrote, and nothing dereferences Quadlet -- the unit dir comes from the invoking uid |
+| TestApplyPodmanDefaultsFillsMissing | - | podman defaults command/name/restart (systemd's always, not compose's unless-stopped)/run-as applied, ports stay empty (publishing is opt-in), and both rejected keys left alone: mode empty and Quadlet nil. Defaulting either would trip validate's rejection for something the operator never wrote, and nothing dereferences Quadlet -- the unit dir comes from the invoking uid |
 | TestApplyPodmanDefaultsOverrideWins | - | explicit command/name/restart/run-as/ports override defaults exactly, and a present quadlet: block still decodes non-nil so validate can reject it by name |
 | TestRemovedMountKeysDecodeButAreNotDefaulted | - | libs dir kept verbatim while mount-path is left empty (defaulting it would trip validate's rejection for a value nobody wrote), and a present stores: still decodes non-nil so validate can name it |
 | TestPortDefaultsFollowManagementPort | - | management.port 9091 with docker/podman/kubernetes present: kubernetes Service.Port defaults to {9091,9091}; docker/podman publish nothing with ports: omitted |
@@ -971,6 +971,8 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestSelectsStores | conn-ref leader session selecting | so does the connection the management session conn-refs |
 | TestCheckContainerRestartUnsafe | newline in restart | docker.restart is rejected; image and timezone are top-level keys, covered by their own per-platform-rejection and charset tests |
 | TestCheckContainerRestartUnsafe | realistic value | on-failure:5 is accepted |
+| TestRestartIsEachEnginesOwnWord | docker | compose's no, always, unless-stopped, on-failure and on-failure:5 pass; on-abnormal, on-failure:0 and an unknown word are not a compose restart policy |
+| TestRestartIsEachEnginesOwnWord | podman | systemd's seven Restart= words pass; unless-stopped is an error naming always, on-failure:5 one naming on-failure, and an unknown word lists systemd's words |
 | TestCheckContainerHostPathsUnsafe | newline in tls.stores.ts.existing.pkcs12 | docker's bind-mounted store path rejected |
 | TestCheckContainerHostPathsUnsafe | space in libs.dir | podman.libs.dir rejected |
 | TestCheckContainerHostPathsUnsafe | windows paths | `C:\certs\...` store paths and `C:\libs` accepted (backslash and colon permitted) |

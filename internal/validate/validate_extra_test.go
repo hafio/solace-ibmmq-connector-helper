@@ -1012,8 +1012,9 @@ func TestBinderIdentityUsesTheCredentialPair(t *testing.T) {
 // TestImageBlockRequired and TestTopLevelTimezoneUnsafe).
 //
 // restart is still concatenated unquoted into the quadlet unit and the compose
-// YAML, so an embedded newline or metacharacter is rejected
-// at the gate. A realistic value (on-failure:N) must still pass.
+// YAML, so an embedded newline is rejected at the gate -- by each engine's
+// restart vocabulary (TestRestartIsEachEnginesOwnWord), which admits no
+// character beyond its words. A realistic value (on-failure:N) must still pass.
 func TestCheckContainerRestartUnsafe(t *testing.T) {
 	dR := dockerOK()
 	dR.Restart = "unless-stopped\nprivileged: true"
@@ -1024,6 +1025,50 @@ func TestCheckContainerRestartUnsafe(t *testing.T) {
 	dOK.Restart = "on-failure:5"
 	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: dOK, CheckDocker: true}); len(e) != 0 {
 		t.Errorf("a realistic restart policy should pass, got %v", e)
+	}
+}
+
+// TestRestartIsEachEnginesOwnWord is CR-0025: docker's restart lands in the
+// compose file and podman's in the quadlet as systemd's Restart=, and neither
+// knows the other's words. The compose default unless-stopped written into a
+// quadlet is ignored by systemd, so the connector was never restarted -- it is
+// now an error naming always, systemd's equivalent, and podman defaults to it.
+func TestRestartIsEachEnginesOwnWord(t *testing.T) {
+	docker := func(v string) []Issue {
+		d := dockerOK()
+		d.Restart = v
+		e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d, CheckDocker: true})
+		return e
+	}
+	podman := func(v string) []Issue {
+		p := podmanOK()
+		p.Restart = v
+		e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Podman: p, CheckPodman: true})
+		return e
+	}
+	for _, v := range []string{"no", "always", "unless-stopped", "on-failure", "on-failure:5"} {
+		if e := docker(v); hasErr(e, "docker.restart") {
+			t.Errorf("docker restart %q is compose's, got %v", v, e)
+		}
+	}
+	for _, v := range []string{"on-abnormal", "on-failure:0", "sometimes"} {
+		if e := docker(v); !hasErr(e, `docker.restart "`+v+`" is not a compose restart policy`) {
+			t.Errorf("docker restart %q must be refused, got %v", v, e)
+		}
+	}
+	for _, v := range []string{"no", "always", "on-success", "on-failure", "on-abnormal", "on-abort", "on-watchdog"} {
+		if e := podman(v); hasErr(e, "podman.restart") {
+			t.Errorf("podman restart %q is systemd's, got %v", v, e)
+		}
+	}
+	for v, want := range map[string]string{
+		"unless-stopped": `podman.restart "unless-stopped" is docker's word, which systemd does not know: it ignores the line and never restarts the connector. Write always`,
+		"on-failure:5":   `podman.restart "on-failure:5" is docker's spelling: systemd's Restart= takes no retry count. Write on-failure`,
+		"sometimes":      `podman.restart "sometimes" is not a systemd restart policy: use no, always, on-success, on-failure, on-abnormal, on-abort, on-watchdog`,
+	} {
+		if e := podman(v); !hasErr(e, want) {
+			t.Errorf("podman restart %q: want %q, got %v", v, want, e)
+		}
 	}
 }
 

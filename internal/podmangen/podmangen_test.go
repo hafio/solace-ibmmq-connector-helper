@@ -19,7 +19,7 @@ func fullInput() Input {
 			Command: "podman",
 			Name:    "solmq-connector",
 			Ports:   []spec.Port{{Host: 8090, Container: 8090}, {Host: 8080, Container: 8091}},
-			Restart: "unless-stopped",
+			Restart: "always",
 		},
 		Instance: Instance{Name: "solmq-connector", Image: testImage, Timezone: "Asia/Singapore", AppYAMLSecret: "solmq-connector-application.yml", MQTLS: true, StatusScriptSecret: "solmq-connector-status-script", LeaderMode: spec.LeaderActiveActive, RunAs: spec.RunAsID{UID: 1000, GID: 0}},
 		Secrets: []SecretRef{
@@ -103,7 +103,7 @@ HealthRetries=3
 HealthStartPeriod=60s
 
 [Service]
-Restart=unless-stopped
+Restart=always
 
 [Install]
 WantedBy=default.target

@@ -24,8 +24,15 @@ const (
 // process.
 const (
 	DefaultConnectorName = ConnectorContainerName
-	DefaultRestart       = "unless-stopped"
 	DefaultMgmtPort      = 8090
+
+	// DefaultRestart is docker's, in compose's words. DefaultPodmanRestart is
+	// systemd's: podman's restart lands in the quadlet as Restart=, where the
+	// compose word unless-stopped is unknown -- systemd ignores the line and
+	// never restarts the connector -- and always already means "unless you
+	// stopped it", since systemd never restarts a unit that was stopped.
+	DefaultRestart       = "unless-stopped"
+	DefaultPodmanRestart = "always"
 )
 
 // DefaultComposeProject is the compose project every generated compose file
@@ -296,7 +303,7 @@ func applyPodmanDefaults(p *Podman) {
 		p.Name = DefaultConnectorName
 	}
 	if p.Restart == "" {
-		p.Restart = DefaultRestart
+		p.Restart = DefaultPodmanRestart
 	}
 	if p.RunAs == "" {
 		p.RunAs = DefaultRunAs

@@ -172,8 +172,8 @@ podman:
 	if p.Name != DefaultConnectorName {
 		t.Errorf("name = %q want %q", p.Name, DefaultConnectorName)
 	}
-	if p.Restart != DefaultRestart {
-		t.Errorf("restart = %q want %q", p.Restart, DefaultRestart)
+	if p.Restart != DefaultPodmanRestart {
+		t.Errorf("restart = %q want %q", p.Restart, DefaultPodmanRestart)
 	}
 	if len(p.Ports) != 0 {
 		t.Errorf("ports = %+v, want none when ports: is omitted", p.Ports)

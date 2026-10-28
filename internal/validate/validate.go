@@ -1737,6 +1737,40 @@ type containerTarget struct {
 // here for error messages; spec.SecretsMountPath is the definition.
 const secretsMountPath = spec.SecretsMountPath
 
+// composeRestartRE is a compose restart policy; systemdRestart lists the words
+// systemd's Restart= takes, which is where podman's restart lands.
+var (
+	composeRestartRE = regexp.MustCompile(`^(no|always|unless-stopped|on-failure(:[1-9][0-9]*)?)$`)
+	systemdRestart   = []string{"no", "always", "on-success", "on-failure", "on-abnormal", "on-abort", "on-watchdog"}
+)
+
+// checkRestart holds a section's restart to its engine's own words. Each is
+// written unquoted -- a compose YAML line, a quadlet directive -- and neither
+// engine shares the other's vocabulary: compose fails at up on a word it does
+// not know, and systemd ignores the line, leaving a connector it never restarts.
+func checkRestart(add func(string, string, ...any), section, platform, v string) {
+	if v == "" {
+		return
+	}
+	if platform != PlatformPodman {
+		if !composeRestartRE.MatchString(v) {
+			add(fileEnv, "%s.restart %q is not a compose restart policy: use no, always, on-failure, on-failure:<retries> or unless-stopped", section, v)
+		}
+		return
+	}
+	if slices.Contains(systemdRestart, v) {
+		return
+	}
+	switch {
+	case v == "unless-stopped":
+		add(fileEnv, "%s.restart %q is docker's word, which systemd does not know: it ignores the line and never restarts the connector. Write always -- systemd never restarts a unit you stopped, so always is what unless-stopped means here", section, v)
+	case composeRestartRE.MatchString(v):
+		add(fileEnv, "%s.restart %q is docker's spelling: systemd's Restart= takes no retry count. Write on-failure", section, v)
+	default:
+		add(fileEnv, "%s.restart %q is not a systemd restart policy: use %s", section, v, strings.Join(systemdRestart, ", "))
+	}
+}
+
 // checkContainerTarget runs the checks common to the docker and podman sections:
 // a DNS-1123 name (it flows into filesystem paths and a systemctl unit token), a
 // deploy command gated by CheckDeployCommand (bare, allowlisted binary plus
@@ -1775,9 +1809,7 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 	if t.Image != "" {
 		add(fileEnv, "%s.image is no longer configured here: the image moved to the top-level image: block (repo/name/tag) so one declaration serves every platform. Remove %s.image", section, section)
 	}
-	if t.Restart != "" && !SafeToken(t.Restart) {
-		add(fileEnv, "%s.restart %q contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)", section, t.Restart)
-	}
+	checkRestart(add, section, t.Platform, t.Restart)
 	if t.Timezone != "" {
 		add(fileEnv, "%s.timezone is no longer configured here: the container timezone moved to the top-level timezone: key so one declaration serves every platform. Remove %s.timezone", section, section)
 	}
