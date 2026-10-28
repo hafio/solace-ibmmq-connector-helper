@@ -3697,7 +3697,7 @@ func TestWatchFlagAcceptsBareAndInterval(t *testing.T) {
 // is ever exec'd into -- the in-container script is not involved at all.
 func TestStatusContainerViewReadsEngineFactsWithoutExecing(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
-		{"", nil},       // preflight: kubectl auth can-i create deployment
+		{"", nil},       // preflight: kubectl auth can-i get pods
 		{podsJSON, nil}, // get pods -o json: discovery and facts together
 	}}
 	var code int
@@ -5510,6 +5510,44 @@ func TestLogsPlatformWithNoSectionAtAllIsLoud(t *testing.T) {
 	}
 }
 
+// TestReadVerbsReportTheirOwnRefusal is CR-0006 at the seam: a view-only
+// operator refused by the cluster is told which verb failed and which
+// permission it lacked -- not "deploy kubernetes failed" with a login hint --
+// and nothing past the probe runs.
+func TestReadVerbsReportTheirOwnRefusal(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+	t.Chdir(dir)
+	refused := []queuedResp{{"no\n", fmt.Errorf("exit status 1")}}
+	status := &queueRunner{resp: refused}
+	logs := &streamRunner{resp: refused}
+	cli := &attachRunner{resp: refused}
+	for _, c := range []struct {
+		args  []string
+		r     runner.Runner
+		calls func() int
+		want  []string
+	}{
+		{[]string{"status", "container", "--platform", "kubernetes", "--namespace", "prod"}, status, func() int { return len(status.calls) }, []string{"error: status kubernetes failed", `may not get pods in namespace "prod"`}},
+		{[]string{"logs", "--platform", "kubernetes", "--pod", "p", "--namespace", "prod"}, logs, func() int { return len(logs.calls) }, []string{"error: logs kubernetes failed", `may not get pods/log in namespace "prod"`}},
+		{[]string{"cli", "--platform", "kubernetes", "--pod", "p", "--namespace", "prod"}, cli, func() int { return len(cli.calls) }, []string{"error: cli kubernetes failed", `may not create pods/exec in namespace "prod"`}},
+	} {
+		var code int
+		stderr := captureStderr(t, func() { code = dispatch(c.args, c.r) })
+		if code != 1 {
+			t.Errorf("%s: exit=%d, want 1", c.args[0], code)
+		}
+		for _, w := range c.want {
+			if !strings.Contains(stderr, w) {
+				t.Errorf("%s: stderr missing %q:\n%s", c.args[0], w, stderr)
+			}
+		}
+		if n := c.calls(); n != 1 {
+			t.Errorf("%s: want only the preflight to run, got %d calls", c.args[0], n)
+		}
+	}
+}
+
 // TestLogsNamedPodIsNotPreChecked pins what naming a pod outright now costs,
 // and what it no longer does. A name is taken at its word: there is no
 // `get pods <name>` first, because the only thing that lookup ever established
@@ -5531,7 +5569,12 @@ func TestLogsNamedPodIsNotPreChecked(t *testing.T) {
 	if len(q.calls) != 2 {
 		t.Fatalf("want 2 calls (preflight, the read), got %d: %+v", len(q.calls), q.calls)
 	}
-	for _, c := range q.calls {
+	// The preflight asks can-i about the log subresource, which spells "get"
+	// too; it is a permission question, not a lookup of the pod.
+	if want := []string{"kubectl", "auth", "can-i", "get", "pods", "--subresource", "log", "--namespace", "prod"}; !reflect.DeepEqual(q.calls[0].argv, want) {
+		t.Errorf("preflight argv = %v, want %v", q.calls[0].argv, want)
+	}
+	for _, c := range q.calls[1:] {
 		if containsToken(c.argv, "get") {
 			t.Errorf("a named pod must not cost a discovery query, got %v", c.argv)
 		}

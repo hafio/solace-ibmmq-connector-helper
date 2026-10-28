@@ -181,8 +181,8 @@ func actShell(o shellOpts, r runner.Runner) int {
 
 	// The same read-only preflight probe status and logs run, for the same
 	// reason: fail on an unreachable engine once, up front, rather than at the
-	// point of attach.
-	if code, ok := preflight(r, runner.ActionDeploy, sess.platform, sess.command, sess.ns, o.allow); !ok {
+	// point of attach. On kubernetes it asks for exec, what cli actually does.
+	if code, ok := preflight(r, runner.ActionCLI, sess.platform, sess.command, sess.ns, o.allow); !ok {
 		return code
 	}
 

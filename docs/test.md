@@ -50,7 +50,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 1002 test functions, 1442 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 1005 test functions, 1445 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -724,6 +724,8 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestPreflightDockerArgvIsInfo | - | docker preflight issues <argv> info |
 | TestPreflightPodmanArgvIsInfo | - | podman preflight issues <argv> info |
 | TestPreflightFailureWrapsPlatformHint | kubernetes / docker / podman | a failing probe's error contains "preflight failed for <platform>", preserves the underlying cause, and carries the platform's login/daemon hint |
+| TestPreflightReadVerbsAskOnlyWhatTheyUse | status / logs / cli | kubernetes asks can-i get pods, get pods --subresource log, and create pods --subresource exec (never deploy's create deployment); docker still runs info |
+| TestPreflightRefusalNamesThePermission | "no" / "no - reason" / unreachable | a can-i "no" names the permission, the namespace (or the current one) and the answer, without the login hint and with nothing else to print; an unreachable cluster keeps the login hint |
 | TestPreflightRejectsDisallowedBinaryBeforeRunning | - | a command outside the platform allowlist (curl) is rejected before the probe ever runs, zero runner calls |
 | TestPreflightExtraAllowedThreadsThrough | - | "sudo podman" is rejected without extraAllowed and accepted with it, running argv [sudo podman info] |
 | TestPreflightUnknownAction | - | an action other than deploy/remove/start/stop/restart is rejected, zero runner calls |
@@ -1620,7 +1622,8 @@ The `logs` verb shares status's platform resolution and instance discovery (inst
 | TestLogsNeedsAStreamingRunner | - | logs reads through runner.Streamer and a Runner without it fails loudly, rather than silently falling back to a buffered read that would merge diagnostics into the log |
 | TestLogsWithoutASectionToDiscoverFrom | kubernetes / docker / podman | the discovery branch with nothing to work from, reached by naming an instance with the other platform's flag (`--container` on kubernetes, `--pod` on docker/podman); the error names the missing section and the way forward, and must *not* name `--all`, which logs does not have |
 | TestLogsPlatformWithNoSectionAtAllIsLoud | - | an env.yaml that parses but describes no platform cannot answer `--platform` either, and says so naming all three sections before discovery is attempted |
-| TestLogsNamedPodIsNotPreChecked | - | a name is taken at its word: no `get pods <name>` precedes the read, and a pod that is not there is reported by the platform on the read itself |
+| TestLogsNamedPodIsNotPreChecked | - | a name is taken at its word: no `get pods <name>` precedes the read (the preflight asks can-i get pods --subresource log), and a pod that is not there is reported by the platform on the read itself |
+| TestReadVerbsReportTheirOwnRefusal | status / logs / cli | a can-i "no" exits 1 with "<verb> kubernetes failed" and the permission it lacked, and nothing runs past the probe |
 | TestLogsUsesTheSectionCommandOverride | - | logs reaches for the binary env.yaml names (oc, not kubectl) on every call, through the shared instanceCommand resolution |
 | TestLogsCommandFlagOverridesTheSection | - | `--command` wins over the section, and a binary outside the per-platform allowlist is refused by name before anything runs |
 | TestLogsAllIsNotALogsFlag | - | `--all` searches by image and returns many, the one thing logs cannot do, so it is an unknown flag here rather than one accepted and then refused |

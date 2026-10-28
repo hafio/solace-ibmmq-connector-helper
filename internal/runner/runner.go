@@ -45,7 +45,7 @@ var preflightHints = map[string]string{
 // the operator verbatim (report's "ok: remove kubernetes", runAction's flag-error
 // prefix), so they stay spelled as the verbs are. The platform subcommands they
 // map to are separate literals -- kubeVerb returns kubectl's own "delete",
-// canIVerb the can-i permission of the same name, Docker compose's "down".
+// canIProbe the can-i permission of the same name, Docker compose's "down".
 const (
 	ActionDeploy = "deploy"
 	ActionRemove = "remove"
@@ -55,6 +55,13 @@ const (
 	ActionStart   = "start"
 	ActionStop    = "stop"
 	ActionRestart = "restart"
+
+	// The read-only verbs change nothing; they name only the permission their
+	// preflight asks for, so a view-only operator is not refused a write it
+	// never makes.
+	ActionStatus = "status"
+	ActionLogs   = "logs"
+	ActionCLI    = "cli"
 )
 
 // Cmd is one process invocation. Argv[0] is the program and Argv[1:] its
@@ -561,13 +568,17 @@ func Preflight(r Runner, platform, command, action, namespace string, extraAllow
 	if err != nil {
 		return "", err
 	}
+	var probe canI
 	switch platform {
 	case validate.PlatformKubernetes:
-		verb, verr := canIVerb(action)
-		if verr != nil {
-			return "", verr
+		var perr error
+		if probe, perr = canIProbe(action); perr != nil {
+			return "", perr
 		}
-		argv = append(argv, "auth", "can-i", verb, "deployment")
+		argv = append(argv, "auth", "can-i", probe.verb, probe.resource)
+		if probe.subresource != "" {
+			argv = append(argv, "--subresource", probe.subresource)
+		}
 		if namespace != "" {
 			argv = append(argv, "--namespace", namespace)
 		}
@@ -578,6 +589,16 @@ func Preflight(r Runner, platform, command, action, namespace string, extraAllow
 	}
 	out, runErr := r.Run(Cmd{Argv: argv})
 	if runErr != nil {
+		// can-i exits 1 both when it cannot reach the cluster and when the
+		// answer is no; only the answer tells them apart, and a refusal is not
+		// fixed by logging in again.
+		if answer, denied := canIDenied(out); platform == validate.PlatformKubernetes && denied {
+			where := "the current namespace"
+			if namespace != "" {
+				where = fmt.Sprintf("namespace %q", namespace)
+			}
+			return "", fmt.Errorf("preflight failed for %s: your account may not %s in %s (kubectl auth can-i answered %q): ask for that permission, or select a context that has it", platform, probe, where, answer)
+		}
 		hint, ok := preflightHints[platform]
 		if !ok {
 			return out, fmt.Errorf("preflight failed for %s: %w", platform, runErr)
@@ -587,21 +608,54 @@ func Preflight(r Runner, platform, command, action, namespace string, extraAllow
 	return out, nil
 }
 
-// canIVerb maps a deploy/remove action to the verb `kubectl auth can-i` expects,
-// which is create/delete -- not apply/delete, the actual manifest verbs kubeVerb
-// returns -- because can-i asks about a permission, not a subcommand.
-func canIVerb(action string) (string, error) {
+// canI is one permission `kubectl auth can-i` is asked about.
+type canI struct{ verb, resource, subresource string }
+
+// String spells the permission the way RBAC rules name it: "get pods/log".
+func (c canI) String() string {
+	if c.subresource != "" {
+		return c.verb + " " + c.resource + "/" + c.subresource
+	}
+	return c.verb + " " + c.resource
+}
+
+// canIProbe maps an action to the permission its preflight asks about. The
+// verb is can-i's own -- create/delete, not apply/delete, the manifest verbs
+// kubeVerb returns -- because can-i asks about a permission, not a subcommand.
+// A mutating action asks about the Deployment it changes; a read-only verb asks
+// for the one thing it cannot work without. A subresource goes in
+// --subresource, since "pods/log" would name a pod called log.
+func canIProbe(action string) (canI, error) {
 	switch action {
 	case ActionDeploy:
-		return "create", nil
+		return canI{"create", "deployment", ""}, nil
 	case ActionRemove:
-		return "delete", nil
+		return canI{"delete", "deployment", ""}, nil
 	case ActionStart, ActionStop, ActionRestart:
 		// scale and rollout restart both patch the Deployment.
-		return "patch", nil
+		return canI{"patch", "deployment", ""}, nil
+	case ActionStatus:
+		// Finding the pods is what status cannot do without; a pod it may not
+		// exec into is reported against that pod.
+		return canI{"get", "pods", ""}, nil
+	case ActionLogs:
+		return canI{"get", "pods", "log"}, nil
+	case ActionCLI:
+		return canI{"create", "pods", "exec"}, nil
 	default:
-		return "", fmt.Errorf("unknown action %q (want %q or %q)", action, ActionDeploy, ActionRemove)
+		return canI{}, fmt.Errorf("unknown action %q", action)
 	}
+}
+
+// canIDenied reports whether can-i's output is a "no" -- alone, or with the
+// reason some authorizers add -- and returns that line.
+func canIDenied(out string) (string, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		if l := strings.TrimSpace(line); l == "no" || strings.HasPrefix(l, "no - ") {
+			return l, true
+		}
+	}
+	return "", false
 }
 
 // PodmanVersion is the podman client's version, as `podman version --format

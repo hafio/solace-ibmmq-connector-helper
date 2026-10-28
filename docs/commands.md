@@ -151,7 +151,7 @@ Alias: `dp`.
 
 Generates for the platform, then applies it by shelling out to the section's `command:` (`kubectl`/`oc`, `docker`, or `podman` + `systemctl`) through an argv slice -- never a shell. The env file must contain the matching section.
 
-`command:`'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); `--allow-command` approves an extra binary for this invocation (e.g. a `sudo` prefix). Before anything is written or applied, a read-only preflight probe (login/permission check) must succeed, or the run stops with a login hint. For how the platform is picked, see [Platform resolution](#platform-resolution).
+`command:`'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); `--allow-command` approves an extra binary for this invocation (e.g. a `sudo` prefix). Before anything is written or applied, a read-only preflight probe (on kubernetes, `auth can-i create deployment`) must succeed, or the run stops: naming the missing permission when the cluster answers no, with a login hint when it cannot be reached. For how the platform is picked, see [Platform resolution](#platform-resolution).
 
 Flags: `--platform`; `-e`, `--env`; `--allow-command`.
 
@@ -255,7 +255,7 @@ solmq-conn-util status all -d
 
 Alias: `lg`.
 
-Prints what one connector instance of the resolved platform has written, read through the same read-only `kubectl`/`docker`/`podman` path `status` uses -- the same `command:`, the same binary allowlist, `--allow-command`, and the same preflight probe -- and discovering the same instances from `env.yaml`, so the two verbs can never disagree about which ones they mean. It is the answer to the question `status` leaves open: that view reports a restart count and an exit code, and this one reports the lines that preceded them.
+Prints what one connector instance of the resolved platform has written, read through the same read-only `kubectl`/`docker`/`podman` path `status` uses -- the same `command:`, the same binary allowlist, `--allow-command`, and the same preflight probe, which on kubernetes asks only to read pod logs (`auth can-i get pods --subresource log`) -- and discovering the same instances from `env.yaml`, so the two verbs can never disagree about which ones they mean. It is the answer to the question `status` leaves open: that view reports a restart count and an exit code, and this one reports the lines that preceded them.
 
 One instance is read per run. When discovery finds several and none was named, nothing is read: the matching instances are listed on stdout as commands that can be pasted back verbatim, carrying the flags already typed, and the run exits 0. `--pod` and `--container` name the instance, and each may be given once -- a second is refused rather than silently losing the first. Either accepts an **index** as well as a name: `--pod 0` is the first instance in the listed order, which is alphabetical by name and the same order `status` prints. A name always wins, so an instance genuinely called `0` is still reachable by name.
 
@@ -271,7 +271,7 @@ solmq-conn-util logs --tail 100 -e env.yaml
 
 ### cli
 
-Opens an interactive shell inside one connector instance of the resolved platform, reached through the same read-only `kubectl`/`docker`/`podman` path `status` and `logs` use -- the same `command:`, the same binary allowlist, `--allow-command`, the same preflight probe, and the same instance discovery from `env.yaml`, so the three verbs can never disagree about which instance they mean. It is where the questions `status` and `logs` cannot answer get settled: whether the truststore really mounted, what is actually in `/app/external/libs`, which `application.yml` the process is running. For how the platform is picked, see [Platform resolution](#platform-resolution).
+Opens an interactive shell inside one connector instance of the resolved platform, reached through the same read-only `kubectl`/`docker`/`podman` path `status` and `logs` use -- the same `command:`, the same binary allowlist, `--allow-command`, the same preflight probe (on kubernetes it asks to exec into pods, `auth can-i create pods --subresource exec`), and the same instance discovery from `env.yaml`, so the three verbs can never disagree about which instance they mean. It is where the questions `status` and `logs` cannot answer get settled: whether the truststore really mounted, what is actually in `/app/external/libs`, which `application.yml` the process is running. For how the platform is picked, see [Platform resolution](#platform-resolution).
 
 Everything after `--` is run in the instance instead of a shell, non-interactively, which is the form for a script -- an interactive run with no terminal on stdin is refused with that as the next step rather than opening a session nobody can type into. The shell is `sh`: the connector image is Alpine, so its userland is busybox and there is no `bash` to ask for.
 

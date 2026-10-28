@@ -380,8 +380,8 @@ it -- see [section 12.9](#129-what-the-exit-code-means-and-what-each-view-costs)
   `podman` + `systemctl`); **`remove`** tears the same thing down. The env file
   must contain the resolved section (a docker deploy needs `docker:`).
   `command:`'s binary must be on the platform allowlist (or approved with
-  `--allow-command`), and both verbs run a read-only login/daemon preflight before
-  writing or applying anything -- see [section 8](#8-platform-sections-kubernetes-docker-podman).
+  `--allow-command`), and both verbs run a read-only permission/daemon preflight
+  before writing or applying anything -- see [section 8](#8-platform-sections-kubernetes-docker-podman).
   A kubernetes `deploy` then reads each Secret you manage that the pod mounts --
   one a store names (`existing.secret`), an existing credentials Secret -- and
   stops before applying when one is missing or lacks a key the pod reads; this is
@@ -395,7 +395,7 @@ it -- see [section 12.9](#129-what-the-exit-code-means-and-what-each-view-costs)
   `systemctl [--user] stop`/`start`/`restart` on its unit. They read `env.yaml`
   for the section's names and `command:` only -- nothing is rendered, no
   credential resolved, no store opened -- and run the same preflight probe as
-  `deploy`. `restart` is how the connector picks up a rotated TLS store or a
+  `deploy`, which on kubernetes asks to patch the Deployment. `restart` is how the connector picks up a rotated TLS store or a
   changed `application.yml` where `deploy` does not restart it (kubernetes, or a
   Secret you manage).
 - **`status`** reports the state of each instance of the resolved platform. Its
@@ -1324,15 +1324,31 @@ it for that invocation only -- authority lives with whoever runs the command, ne
 with whoever wrote `env.yaml`. `command: sudo podman` fails both `validate` and
 `deploy` until you run `deploy --platform podman --allow-command sudo`.
 
-Before `deploy`/`remove` write or apply anything, they run a **read-only preflight
-probe** against the platform: kubernetes checks `auth can-i create|delete deployment`
-(the permission the run will actually need -- `create` for `deploy`, `delete` for
-`remove`, which are kubectl's own verb names); docker/podman check `info`
-(daemon/socket reachability). A failing probe stops the run before any file is
-written or any mutating command runs, with the underlying CLI error plus a login
-hint (e.g. "log in or select a context first ... then re-run" for kubernetes,
-a daemon-unreachable hint for docker/podman). There is no way to skip it -- a
-failing preflight means the real command would fail anyway.
+Before any verb that reaches the platform writes, applies or reads anything, it
+runs a **read-only preflight probe**: docker/podman run `info` (daemon/socket
+reachability), and kubernetes asks `kubectl auth can-i` for the one permission
+that verb needs -- so an account that may only read pods and their logs can still
+run `status` and `logs`:
+
+| verb | kubernetes asks `auth can-i` |
+|---|---|
+| `deploy` | `create deployment` |
+| `remove` | `delete deployment` |
+| `start`, `stop`, `restart` | `patch deployment` |
+| `status` | `get pods` |
+| `logs` | `get pods --subresource log` |
+| `cli` | `create pods --subresource exec` |
+
+`create`/`delete` are can-i's names for the permission, not kubectl's own
+subcommands. `status` also execs into each pod to run the status script; a pod it
+may not exec into is reported against that pod rather than refused up front.
+
+A failing probe stops the run before any file is written or any other command
+runs. When the cluster answers no, the error names the missing permission and
+the namespace (`your account may not get pods/log in namespace "prod"`); when it
+cannot be reached, it carries a login hint ("log in or select a context first ...
+then re-run"), and docker/podman a daemon-unreachable hint. There is no way to
+skip it -- a failing preflight means the real command would fail anyway.
 
 `remove` asks before it acts. It is the only verb that destroys rather than
 creates, so it names what it is about to tear down and waits:

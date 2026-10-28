@@ -900,6 +900,63 @@ func TestPreflightFailureWrapsPlatformHint(t *testing.T) {
 	}
 }
 
+// TestPreflightReadVerbsAskOnlyWhatTheyUse is CR-0006: status, logs and cli
+// change nothing, so their probe asks for the one read or exec they need rather
+// than deploy's create -- which refused every view-only operator up front. A
+// subresource travels in --subresource: "pods/log" would name a pod called log.
+func TestPreflightReadVerbsAskOnlyWhatTheyUse(t *testing.T) {
+	for _, c := range []struct {
+		action string
+		want   []string
+	}{
+		{ActionStatus, []string{"kubectl", "auth", "can-i", "get", "pods", "--namespace", "prod"}},
+		{ActionLogs, []string{"kubectl", "auth", "can-i", "get", "pods", "--subresource", "log", "--namespace", "prod"}},
+		{ActionCLI, []string{"kubectl", "auth", "can-i", "create", "pods", "--subresource", "exec", "--namespace", "prod"}},
+	} {
+		f := &fakeRunner{}
+		if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", c.action, "prod", nil); err != nil {
+			t.Fatalf("%s: %v", c.action, err)
+		}
+		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
+			t.Errorf("%s: argv = %v, want %v", c.action, f.calls[0].argv, c.want)
+		}
+		// docker and podman have no permission to ask about: reachability only.
+		f = &fakeRunner{}
+		if _, err := Preflight(f, validate.PlatformDocker, "docker", c.action, "", nil); err != nil || !reflect.DeepEqual(f.calls[0].argv, []string{"docker", "info"}) {
+			t.Errorf("%s on docker: argv = %v, err = %v, want docker info", c.action, f.calls[0].argv, err)
+		}
+	}
+}
+
+// TestPreflightRefusalNamesThePermission: can-i exits 1 both when the cluster
+// is unreachable and when the answer is no. A no is not fixed by logging in, so
+// it names the permission and the namespace instead of the login hint.
+func TestPreflightRefusalNamesThePermission(t *testing.T) {
+	for _, c := range []struct {
+		out, ns, want string
+	}{
+		{"no\n", "prod", `your account may not get pods/log in namespace "prod" (kubectl auth can-i answered "no")`},
+		{"Warning: something\nno - RBAC: access denied\n", "", `your account may not get pods/log in the current namespace (kubectl auth can-i answered "no - RBAC: access denied")`},
+	} {
+		f := &fakeRunner{out: c.out, err: fmt.Errorf("exit status 1")}
+		out, err := Preflight(f, validate.PlatformKubernetes, "kubectl", ActionLogs, c.ns, nil)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("out %q: error = %v, want it to contain %s", c.out, err, c.want)
+		}
+		if err != nil && strings.Contains(err.Error(), "oc login") {
+			t.Errorf("out %q: a refusal must not blame the login: %v", c.out, err)
+		}
+		if out != "" {
+			t.Errorf("out %q: the answer is in the error; nothing else to print, got %q", c.out, out)
+		}
+	}
+	// An unreachable cluster still gets the login hint.
+	f := &fakeRunner{out: "error: You must be logged in to the server (Unauthorized)\n", err: fmt.Errorf("exit status 1")}
+	if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", ActionLogs, "prod", nil); err == nil || !strings.Contains(err.Error(), "oc login") {
+		t.Errorf("an unreachable cluster keeps the login hint, got %v", err)
+	}
+}
+
 func TestPreflightRejectsDisallowedBinaryBeforeRunning(t *testing.T) {
 	f := &fakeRunner{}
 	if _, err := Preflight(f, validate.PlatformKubernetes, "curl", ActionDeploy, "", nil); err == nil {

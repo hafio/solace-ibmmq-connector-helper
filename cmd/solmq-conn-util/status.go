@@ -323,11 +323,11 @@ func actStatus(o statusOpts, r runner.Runner) int {
 	defer prog.stop()
 
 	// Reuse the read-only preflight probe before touching anything, same as
-	// deploy/remove. The action argument only steers kubernetes' can-i verb
-	// (docker/podman ignore it); status never creates or deletes a deployment,
-	// so deploy's "create" is used as the closer of the two existing checks.
+	// deploy/remove. The action only steers kubernetes' can-i question
+	// (docker/podman ignore it): status asks to get pods, the one permission it
+	// cannot work without, so a view-only operator is not refused a write.
 	prog.step("preflight")
-	if code, ok := preflight(r, runner.ActionDeploy, sess.platform, sess.command, sess.ns, o.allow); !ok {
+	if code, ok := preflight(r, runner.ActionStatus, sess.platform, sess.command, sess.ns, o.allow); !ok {
 		return code
 	}
 

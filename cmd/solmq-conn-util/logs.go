@@ -212,7 +212,8 @@ func actLogs(o logsOpts, r runner.Runner) int {
 
 	// The same read-only preflight probe status runs, for the same reason: fail
 	// on an unreachable engine once, up front, rather than at the point of read.
-	if code, ok := preflight(r, runner.ActionDeploy, sess.platform, sess.command, sess.ns, o.allow); !ok {
+	// On kubernetes it asks for the log subresource, what logs actually reads.
+	if code, ok := preflight(r, runner.ActionLogs, sess.platform, sess.command, sess.ns, o.allow); !ok {
 		return code
 	}
 
