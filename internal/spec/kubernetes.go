@@ -148,19 +148,24 @@ func (c *CredentialsSecret) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// StoreCreate embeds the files of the tls.stores connections select into a Secret
-// named <deployment.name>-stores (Kubernetes.StoresSecretName). It is written
-// create: true; the older create: {name: ...} still means "create".
+// StoreCreate is the retired kubernetes.secrets.stores.create block. It is
+// kept parsed, with its own retired name: key, so validate can name it.
 type StoreCreate struct {
-	// Name is retired, for the reason CredCreate.Name is: ignored by generate
-	// and deploy, reported by validate.
 	Name string `yaml:"name"`
 }
 
-// StoresSecret is the Secret carrying the tls.stores files connections select
-// (volume mount). Create XOR Existing, enforced by validate. Either way the
-// Secret is keyed by store name, and the pod mounts each key under that name,
-// which is what the rendered config points at.
+// StoresSecret is the retired kubernetes.secrets.stores block. It no longer
+// decides anything: the tool renders <deployment.name>-stores whenever a
+// connection selects a store it holds (Kubernetes.StoresSecretName), as docker
+// and podman deliver every selected store without a switch, and a store held
+// in a Secret the operator manages names that Secret on the store itself
+// (tls.stores.<name>.existing.secret).
+//
+// The type survives so an old env.yaml still decodes into it: ParseEnv decodes
+// without KnownFields, so a deleted field would drop the block in silence.
+// create: (any spelling) is ignored by generate and deploy and reported by
+// validate; existing: NAME moved its meaning to the stores and is refused on
+// every kubernetes path but remove (validate.checkKube).
 type StoresSecret struct {
 	Create   *StoreCreate `yaml:"create"`
 	Existing string       `yaml:"existing"`
@@ -218,7 +223,8 @@ func decodeCreate(n *yaml.Node, field string, legacy any) (bool, error) {
 	return false, fmt.Errorf("%s must be true or false, got a %s", field, YAMLKind(n))
 }
 
-// Secrets groups the optional secret wirings.
+// Secrets groups the optional secret wirings. Stores is retired (see
+// StoresSecret) and kept only so validate can name it.
 type Secrets struct {
 	Credentials *CredentialsSecret `yaml:"credentials"`
 	Stores      *StoresSecret      `yaml:"stores"`
@@ -321,16 +327,14 @@ func (k *Kubernetes) CredentialsSecretName() (name string, created bool) {
 	return c.Existing, false
 }
 
-// StoresSecretName is CredentialsSecretName for the truststore/keystore Secret.
+// StoresSecretName is the Secret the tool carries the stores it holds in --
+// every selected store read from a file or built, keyed by store name. The
+// name belongs to the instance whether or not this spec renders it: deploy
+// renders it only when a selected store is not held in an operator's Secret
+// (deploy.Render decides from the model), and remove always deletes it, which
+// also clears one an earlier deploy or an older spec left.
 func (k *Kubernetes) StoresSecretName() (name string, created bool) {
-	s := k.Secrets.Stores
-	switch {
-	case s == nil:
-		return "", false
-	case s.Create != nil:
-		return k.Deployment.Name + StoresSecretSuffix, true
-	}
-	return s.Existing, false
+	return k.Deployment.Name + StoresSecretSuffix, true
 }
 
 // ImagePullSecretName is the registry Secret the pod pulls with, and whether
@@ -358,7 +362,8 @@ func (k *Kubernetes) LibsPVCName() string {
 
 // CreatedNames lists every namespaced object the tool creates for this
 // instance, in a fixed order: the Deployment (and its Service, which shares the
-// name), the ConfigMap, then each Secret and claim the config asks it to build.
+// name), the ConfigMap, then each Secret and claim the config asks it to build
+// -- the stores Secret always, since its name is reserved for the instance.
 // validate holds each to the DNS-1123 label limit, and remove uses the list to
 // tell a straggler of its own from someone else's object.
 func (k *Kubernetes) CreatedNames() []string {

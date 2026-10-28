@@ -533,17 +533,28 @@ func actKubernetes(o actionOpts, r runner.Runner) int {
 	if e.Kubernetes == nil {
 		return errExit(fmt.Errorf("env.yaml has no kubernetes: section to %s", action))
 	}
-	// A teardown renders differently in two ways -- no Namespace document, and
+	// A teardown renders differently in three ways -- no Namespace document,
 	// the documents reversed so kubectl does not block deleting a PVC a running
-	// pod still holds. See deploy.Input.Teardown.
+	// pod still holds, and every Secret by name alone, so nothing is resolved.
+	// See deploy.Input.Teardown.
+	var probes []gen.SecretProbe
 	manifest, errs, warns := gen.GenerateKubernetes(req, resolver(envDir),
-		gen.KubeOpts{Teardown: action == runner.ActionRemove}, extraAllowed...)
+		gen.KubeOpts{Teardown: action == runner.ActionRemove, Probes: &probes}, extraAllowed...)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
 	}
 	if code, ok := preflight(r, action, validate.PlatformKubernetes, e.Kubernetes.Command, e.Kubernetes.Deployment.Namespace, extraAllowed); !ok {
 		return code
+	}
+	if action == runner.ActionDeploy && len(probes) > 0 {
+		perrs, pwarns := probeOperatorSecrets(r, e.Kubernetes, probes, extraAllowed)
+		for _, w := range pwarns {
+			fmt.Fprintln(os.Stderr, "warning:", w)
+		}
+		if len(perrs) > 0 {
+			return failAll(perrs)
+		}
 	}
 	out, rerr := runner.Kubernetes(r, e.Kubernetes.Command, action, manifest, extraAllowed)
 	warnIfPVUnchanged(action, out)

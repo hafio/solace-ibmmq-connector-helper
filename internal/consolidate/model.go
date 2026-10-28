@@ -64,14 +64,25 @@ type Bundle struct {
 // platform mounts at tls.MountPath(Name). Trusted marks a store some
 // connection uses as a truststore; Private one used as a keystore: it holds a
 // private key, so deploy checks it is not readable by everyone. Created marks a
-// store the tool builds at deploy (create:), which has no File.
+// store the tool builds at deploy (create:), which has no File. Secret is the
+// kubernetes Secret the operator keeps it in (existing.secret), nil when none.
 type StoreUse struct {
 	Name    string
 	File    string // existing.pkcs12 as written in env.yaml; "" for a created store
 	Trusted bool
 	Private bool
 	Created bool
+	Secret  *spec.StoreSecret
 }
+
+// ClusterHeld reports whether kubernetes reads the store from a Secret the
+// operator manages. Kubernetes then never opens its file or builds it: the
+// tool's own stores Secret carries exactly the stores that are not.
+func (s StoreUse) ClusterHeld() bool { return s.Secret != nil }
+
+// HostHeld reports whether the store has a host-side source -- built, or read
+// from its PKCS12 -- which is what docker and podman deliver.
+func (s StoreUse) HostHeld() bool { return s.Created || s.File != "" }
 
 // Binding is one entry under spring.cloud.stream.bindings.
 type Binding struct {

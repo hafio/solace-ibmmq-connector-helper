@@ -150,7 +150,6 @@ func TestDerivedObjectNames(t *testing.T) {
 		want      string
 	}{
 		{"credentials", first(referenced.CredentialsSecretName()), second(referenced.CredentialsSecretName()), "their-creds"},
-		{"stores", first(referenced.StoresSecretName()), second(referenced.StoresSecretName()), "their-tls"},
 		{"image-pull", first(referenced.ImagePullSecretName()), second(referenced.ImagePullSecretName()), "regcred"},
 	} {
 		if c.got != c.want || c.created {
@@ -161,7 +160,16 @@ func TestDerivedObjectNames(t *testing.T) {
 		t.Errorf("an existing claim is not created, got %q", got)
 	}
 
+	// The stores Secret's name is the instance's whatever the retired block
+	// says: an old existing: their-tls no longer names it.
+	if n, c := referenced.StoresSecretName(); n != "solmq-stores" || !c {
+		t.Errorf("stores with a retired existing: = %q/%v, want solmq-stores created", n, c)
+	}
+
 	none := parseKube(t, "")
+	if n, c := none.StoresSecretName(); n != "solmq-stores" || !c {
+		t.Errorf("no stores block = %q/%v, want solmq-stores: the name is reserved for the instance", n, c)
+	}
 	if n, c := none.CredentialsSecretName(); n != "" || c {
 		t.Errorf("no credentials block = %q/%v, want nothing", n, c)
 	}
@@ -192,8 +200,8 @@ func TestCreatedNames(t *testing.T) {
 	}
 
 	referenced := parseKube(t, "  secrets:\n    credentials:\n      existing: their-creds\n    image-pull:\n      name: regcred\n")
-	if got, want := referenced.CreatedNames(), []string{"solmq", "solmq-config"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("CreatedNames = %v, want %v -- a referenced object is not the tool's", got, want)
+	if got, want := referenced.CreatedNames(), []string{"solmq", "solmq-config", "solmq-stores"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("CreatedNames = %v, want %v -- a referenced object is not the tool's, the stores Secret always is", got, want)
 	}
 }
 

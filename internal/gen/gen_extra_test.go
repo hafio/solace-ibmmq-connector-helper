@@ -82,11 +82,23 @@ func TestResolveStores(t *testing.T) {
 	if sf2, _, err := resolveStores(nil, spec.TLSConfig{}, Resolver{ReadFile: func(string) ([]byte, error) { return nil, nil }}); err != nil || len(sf2) != 0 {
 		t.Fatalf("no stores: %v %v", sf2, err)
 	}
-	// A set the API server would refuse for size stops here, naming the stores.
-	big := func(string) ([]byte, error) { return make([]byte, 600_000), nil }
-	_, _, err = resolveStores(stores, spec.TLSConfig{}, Resolver{ReadFile: big})
-	if err == nil || !strings.Contains(err.Error(), "over the 1048576 bytes a Kubernetes Secret holds") || !strings.Contains(err.Error(), "mq-ca 800000 bytes") {
-		t.Errorf("want the Secret size error naming the stores, got %v", err)
+	// A set kubectl apply would refuse for size stops here, naming the stores:
+	// its last-applied annotation caps the object at 256 KiB, far below the
+	// 1 MiB a Secret may hold.
+	sized := func(n int) func(string) ([]byte, error) {
+		return func(string) ([]byte, error) { return make([]byte, n), nil }
+	}
+	_, _, err = resolveStores(stores, spec.TLSConfig{}, Resolver{ReadFile: sized(100_000)})
+	if err == nil || !strings.Contains(err.Error(), "over the 262144 bytes kubectl apply carries") || !strings.Contains(err.Error(), "mq-ca 133336 bytes") || !strings.Contains(err.Error(), "existing: {secret: {name: <name>}}") {
+		t.Errorf("want the apply size error naming the stores and the way out, got %v", err)
+	}
+	if _, _, err := resolveStores(stores, spec.TLSConfig{}, Resolver{ReadFile: sized(90_000)}); err != nil {
+		t.Errorf("two 90000-byte stores fit, got %v", err)
+	}
+	// A store kept in an operator's Secret is not the tool's to carry.
+	held := []consolidate.StoreUse{{Name: "mq-ca", File: "certs/t.jks", Secret: &spec.StoreSecret{Name: "theirs"}}}
+	if sf, _, err := resolveStores(held, spec.TLSConfig{}, Resolver{}); err != nil || sf != nil {
+		t.Errorf("a cluster-held store is never read: %v %v", sf, err)
 	}
 }
 
@@ -1059,7 +1071,7 @@ kubernetes:
 	verrs, _ := Validate(req, res)
 	for _, field := range []string{
 		"kubernetes.secrets.credentials.create.name is no longer accepted",
-		"kubernetes.secrets.stores.create.name is no longer accepted",
+		"kubernetes.secrets.stores is no longer read",
 		"libs.pvc.create.name is no longer accepted",
 	} {
 		found := false
@@ -1514,15 +1526,15 @@ func TestStoresSharingAFileNameMountApart(t *testing.T) {
 			}
 
 			k8s, errs, _ := GenerateKubernetes(req("kubernetes:\n  command: kubectl\n  deployment:\n    name: c\n    namespace: ns\n"+
-				"  secrets:\n    credentials:\n      create: true\n    stores:\n      create: true\n"), res, KubeOpts{})
+				"  secrets:\n    credentials:\n      create: true\n"), res, KubeOpts{})
 			if len(errs) > 0 {
 				t.Fatalf("kubernetes: unexpected errors: %v", errs)
 			}
 			for _, want := range []string{
 				"  ts: " + b64([]byte("STORE "+c.trust)) + "\n",
 				"  ks: " + b64([]byte("STORE "+c.key)) + "\n",
-				"- key: \"ts\"\n                path: ts\n",
-				"- key: \"ks\"\n                path: ks\n",
+				"- key: \"ts\"\n                      path: ts\n",
+				"- key: \"ks\"\n                      path: ks\n",
 			} {
 				if !strings.Contains(k8s, want) {
 					t.Errorf("kubernetes manifest missing %q:\n%s", want, k8s)
@@ -1600,11 +1612,11 @@ func TestGenerateMissingTargetSection(t *testing.T) {
 	}
 }
 
-// TestGenValidateStoresWarning covers the kubernetes credentials-secret path
-// (create.name only -- the removed source/variables/values-file fields are
-// covered by validate's own tests) together with the TLS-without-stores
-// advisory warning.
-func TestGenValidateStoresWarning(t *testing.T) {
+// TestSelectedStoreIsTheRequestOnKubernetes pins that a TLS connection
+// selecting a store needs nothing more on kubernetes, as on docker and podman:
+// with no secrets.stores block, validate reads the store and warns about
+// nothing, and generate renders the stores Secret and its volume.
+func TestSelectedStoreIsTheRequestOnKubernetes(t *testing.T) {
 	wfData := `
 source:
   solace:
@@ -1644,13 +1656,22 @@ kubernetes:
 		Env:       &File{Name: "env.yaml", Data: []byte(envData)},
 		Workflows: []File{{Name: "10.yaml", Data: []byte(wfData)}},
 	}
-	errs, warns := Validate(req, Resolver{})
-	if len(errs) > 0 {
-		t.Fatalf("unexpected errors: %v", errs)
+	read := func(p string) ([]byte, error) { return []byte("PKCS12 " + p), nil }
+	errs, warns := Validate(req, Resolver{ReadFile: read})
+	if len(errs) > 0 || len(warns) > 0 {
+		t.Fatalf("a selected store needs no stores block: errs %v, warns %v", errs, warns)
 	}
-	wantWarn := "a connection selects tls.stores but kubernetes.secrets.stores is omitted; the store files will be missing at runtime"
-	if len(warns) != 1 || warns[0].File != fileEnv || warns[0].Msg != wantWarn {
-		t.Fatalf("warns = %+v, want exactly one {%q, %q}", warns, fileEnv, wantWarn)
+	if errs, _ := Validate(req, Resolver{}); !hasIssue(errs, `cannot read tls.stores.ts.existing.pkcs12 "./certs/truststore.jks" (no file access)`) {
+		t.Errorf("validate must read the store kubernetes carries, got %v", errs)
+	}
+	out, errs, _ := GenerateKubernetes(req, Resolver{Rand: fixedStatusRand, ReadFile: read}, KubeOpts{})
+	if len(errs) > 0 {
+		t.Fatalf("generate: %v", errs)
+	}
+	for _, want := range []string{"  name: c-stores\n", "  ts: " + b64([]byte("PKCS12 ./certs/truststore.jks")) + "\n", "- secret:\n                  name: c-stores\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("manifest missing %q:\n%s", want, out)
+		}
 	}
 }
 

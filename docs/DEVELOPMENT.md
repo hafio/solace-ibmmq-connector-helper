@@ -228,7 +228,8 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
   the same way (`apply -f -`).
 - **Teardown reverses the manifest order.** `remove` pipes the document set `deploy`
   renders -- minus the Namespace document, which is handled as its own confirmed
-  step -- reversed, to `<command> delete -f -`. kubectl deletes documents
+  step, and with every Secret the tool owns reduced to kind and name, so nothing is
+  resolved -- reversed, to `<command> delete -f - --ignore-not-found`. kubectl deletes documents
   in file order and waits for each one to go, so creation order deadlocks whenever a
   `libs.pvc.create` PVC precedes the Deployment that mounts it: `kubernetes.io/pvc-protection`
   holds the claim while a pod still mounts it, and the Deployment that owns that pod

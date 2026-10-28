@@ -389,8 +389,13 @@ func WriteFile(path, content string, mode os.FileMode) error {
 }
 
 // Kubernetes applies (deploy) or deletes (remove) the manifest by running
-// `<command> apply -f -` / `<command> delete -f -` with the manifest on stdin,
-// so the manifest bytes never appear on a command line.
+// `<command> apply -f -` / `<command> delete -f - --ignore-not-found` with the
+// manifest on stdin, so the manifest bytes never appear on a command line.
+//
+// A teardown names every object the instance can own -- the stores Secret
+// always, whether or not this spec renders it -- so an object already gone
+// is the expected case, not a failure that would stop remove before the
+// namespace step.
 func Kubernetes(r Runner, command, action, manifest string, extraAllowed []string) (string, error) {
 	argv, err := ParseCommand(validate.PlatformKubernetes, command, extraAllowed)
 	if err != nil {
@@ -401,6 +406,9 @@ func Kubernetes(r Runner, command, action, manifest string, extraAllowed []strin
 		return "", err
 	}
 	argv = append(argv, verb, "-f", "-")
+	if action == ActionRemove {
+		argv = append(argv, "--ignore-not-found")
+	}
 	return r.Run(Cmd{Argv: argv, Stdin: manifest})
 }
 

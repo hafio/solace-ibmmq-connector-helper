@@ -44,10 +44,12 @@ so splitting them across connectors stays your decision.
   (`standalone` / `active_active` / `active_standby`).
 - Wires **[TLS + mTLS](docs/userguide.md#7-connector-defaults-envyaml-top-level)**
   for both Solace and MQ from named truststores and keystores that each
-  connection selects -- PKCS12 files you provide, or ones `deploy`
+  connection selects -- PKCS12 files you provide, ones `deploy`
   [builds from your certificate files](docs/userguide.md#72-created-stores-create)
-  straight into the platform's secret -- and leaves certificate-validation policy
-  to the libraries' defaults and your own `api-properties`.
+  in memory, or, on Kubernetes, ones already in a Secret you manage (cert-manager's
+  output included) -- and leaves certificate-validation policy to the libraries'
+  defaults and your own `api-properties`. Selecting a store is the whole request:
+  every platform delivers it with nothing more to configure.
 - **[One secrets model](docs/userguide.md#9-secrets-model) everywhere**: each
   credential is declared as a literal or an `-env` variable name and mounted
   as a file under `/app/external/var/secrets/` -- a Kubernetes Secret volume,

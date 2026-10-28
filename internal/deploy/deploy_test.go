@@ -34,13 +34,12 @@ func fullFixtureInput() Input {
 	k := baseKube()
 	k.Secrets = spec.Secrets{
 		Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{}},
-		Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{}},
 	}
 	return Input{
 		Kube: k, Defaults: &spec.Defaults{},
 		CredKVs:  []KV{{Key: "A", Val: `sec"ret`}},
 		Stores:   []StoreFile{{Name: "mq-ca", Base64: "QUJD"}},
-		Instance: one(k.Deployment.Name, "spring:\n  x: 1\n\n  y: 2\n", &consolidate.Model{MQTLS: true}),
+		Instance: one(k.Deployment.Name, "spring:\n  x: 1\n\n  y: 2\n", &consolidate.Model{MQTLS: true, Stores: []consolidate.StoreUse{{Name: "mq-ca", File: "./mq-ca.p12", Trusted: true}}}),
 	}
 }
 
@@ -207,8 +206,14 @@ spec:
             secretName: solmq-credentials
             defaultMode: 0400
         - name: stores
-          secret:
-            secretName: solmq-stores
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: solmq-stores
+                  items:
+                    - key: "mq-ca"
+                      path: mq-ca
 ---
 apiVersion: v1
 kind: Service
@@ -492,13 +497,13 @@ func TestCreatedSecretsTakeDerivedNames(t *testing.T) {
 		Kube: k, Defaults: &spec.Defaults{},
 		CredKVs:  []KV{{Key: "A", Val: "x"}},
 		Stores:   []StoreFile{{Name: "mq-ca", Base64: "QUJD"}},
-		Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{}),
+		Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{Stores: []consolidate.StoreUse{{Name: "mq-ca", File: "./t.p12"}}}),
 	})
 	for _, want := range []string{
 		"  name: solmq" + spec.CredentialsSecretSuffix + "\n",
 		"  name: solmq" + spec.StoresSecretSuffix + "\n",
 		"secretName: solmq" + spec.CredentialsSecretSuffix + "\n",
-		"secretName: solmq" + spec.StoresSecretSuffix + "\n",
+		"- secret:\n                  name: solmq" + spec.StoresSecretSuffix + "\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q:\n%s", want, out)
@@ -600,52 +605,59 @@ func TestRenderExistingSecrets(t *testing.T) {
 	k := baseKube()
 	k.Secrets = spec.Secrets{
 		Credentials: &spec.CredentialsSecret{Existing: "my-creds"},
-		Stores:      &spec.StoresSecret{Existing: "my-tls"},
 	}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	m := &consolidate.Model{Stores: []consolidate.StoreUse{{Name: "mq-ca", Secret: &spec.StoreSecret{Name: "my-tls"}}}}
+	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", m)})
 	if strings.Contains(out, "kind: Secret") {
 		t.Error("existing secrets must not emit Secret docs")
 	}
-	if !strings.Contains(out, "secretName: my-creds") || !strings.Contains(out, "secretName: my-tls") {
+	if !strings.Contains(out, "secretName: my-creds") || !strings.Contains(out, "- secret:\n                  name: my-tls\n") {
 		t.Errorf("existing refs missing:\n%s", out)
 	}
 }
 
-// The stores volume mounts each store a connection selects (Model.Stores)
-// under its tls.stores name, whatever the file is called: created or existing,
-// the Secret is keyed by store name. With no store selected nothing is listed,
-// so every key projects.
-func TestStoresVolumeMapsKeysToStoreNames(t *testing.T) {
-	created := &spec.StoresSecret{Create: &spec.StoreCreate{}}
-	existing := &spec.StoresSecret{Existing: "my-tls"}
-	item := func(key string) string {
-		return "              - key: \"" + key + "\"\n                path: " + key + "\n"
+// The stores volume is one projected volume mounting each store a connection
+// selects (Model.Stores) under its tls.stores name, whatever the file is
+// called: the tool's stores Secret, keyed by store name, for every store read
+// from a file or built; each operator Secret a store names, once, with the key
+// the store names (its own name by default). The tool's Secret comes first;
+// with no store selected there is no volume at all.
+func TestStoresVolumeProjectsEverySource(t *testing.T) {
+	item := func(key, path string) string {
+		return "                    - key: \"" + key + "\"\n                      path: " + path + "\n"
 	}
-	two := []consolidate.StoreUse{{Name: "mq-ca", File: "./certs/store.p12"}, {Name: "solace-client", File: "./other/store.p12", Private: true}}
+	src := func(secret string, items ...string) string {
+		return "              - secret:\n                  name: " + secret + "\n                  items:\n" + strings.Join(items, "")
+	}
+	cert := &spec.StoreSecret{Name: "broker-cert", Key: "keystore.p12"}
 	for _, c := range []struct {
-		name   string
-		stores *spec.StoresSecret
-		uses   []consolidate.StoreUse
-		items  string // the items: block under the stores volume; "" for none
+		name    string
+		uses    []consolidate.StoreUse
+		sources string // the sources: block of the stores volume; "" for no volume
 	}{
-		{"created, two stores", created, two, item("mq-ca") + item("solace-client")},
-		{"existing, two stores", existing, two, item("mq-ca") + item("solace-client")},
-		{"created, one file under two names", created, []consolidate.StoreUse{{Name: "a", File: "./c.jks"}, {Name: "b", File: "./c.jks"}}, item("a") + item("b")},
-		{"existing, no store selected", existing, nil, ""},
+		{"two host-held stores", []consolidate.StoreUse{{Name: "mq-ca", File: "./certs/store.p12"}, {Name: "solace-client", Created: true, Private: true}},
+			src("solmq-stores", item("mq-ca", "mq-ca"), item("solace-client", "solace-client"))},
+		{"one file under two names", []consolidate.StoreUse{{Name: "a", File: "./c.p12"}, {Name: "b", File: "./c.p12"}},
+			src("solmq-stores", item("a", "a"), item("b", "b"))},
+		{"two stores from one operator Secret", []consolidate.StoreUse{{Name: "cm-id", Secret: cert}, {Name: "cm-ca", Secret: &spec.StoreSecret{Name: "broker-cert", Key: "truststore.p12"}}},
+			src("broker-cert", item("keystore.p12", "cm-id"), item("truststore.p12", "cm-ca"))},
+		{"a Secret first selected after an operator one", []consolidate.StoreUse{{Name: "cm-id", Secret: cert}, {Name: "mq-ca", File: "./m.p12"}, {Name: "x", Secret: &spec.StoreSecret{Name: "other"}}},
+			src("solmq-stores", item("mq-ca", "mq-ca")) + src("broker-cert", item("keystore.p12", "cm-id")) + src("other", item("x", "x"))},
+		{"a file beside a Secret is read from the Secret", []consolidate.StoreUse{{Name: "shared-ca", File: "./s.p12", Secret: &spec.StoreSecret{Name: "shared"}}},
+			src("shared", item("shared-ca", "shared-ca"))},
+		{"no store selected", nil, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			k := baseKube()
-			k.Secrets = spec.Secrets{Stores: c.stores}
 			out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{Stores: c.uses})})
-			name, _ := k.StoresSecretName()
-			head := "        - name: stores\n          secret:\n            secretName: " + name + "\n"
-			if c.items == "" {
-				if !strings.Contains(out, head) || strings.Contains(out, "items:") {
-					t.Errorf("want the stores volume with no items:\n%s", out)
+			if c.sources == "" {
+				if strings.Contains(out, "- name: stores") {
+					t.Errorf("no store selected, no stores volume:\n%s", out)
 				}
 				return
 			}
-			if want := head + "            items:\n" + c.items; !strings.Contains(out, want) {
+			head := "        - name: stores\n          projected:\n            defaultMode: 0400\n            sources:\n"
+			if want := head + c.sources; !strings.Contains(out, want) {
 				t.Errorf("stores volume missing\n%s\nin:\n%s", want, out)
 			}
 			if !strings.Contains(out, "              mountPath: /app/external/classpath/truststores\n") {
@@ -653,11 +665,8 @@ func TestStoresVolumeMapsKeysToStoreNames(t *testing.T) {
 			}
 		})
 	}
-	// With no model at all there is no store to list.
-	k := baseKube()
-	k.Secrets = spec.Secrets{Stores: existing}
-	if got := storeItems(Input{Kube: k}); got != nil {
-		t.Errorf("storeItems with no model = %v, want nil", got)
+	if got := storeSources(Input{Kube: baseKube()}); got != nil {
+		t.Errorf("storeSources with no model = %v, want nil", got)
 	}
 }
 
@@ -907,8 +916,58 @@ func TestTeardownReversesTheDocumentOrder(t *testing.T) {
 	if strings.HasPrefix(del, "---") || strings.Contains(del, "------") {
 		t.Errorf("document separators are malformed:\n%s", del)
 	}
-	if got, want := strings.Count(del, "\n---\n"), strings.Count(apply, "\n---\n")-1; got != want {
-		t.Errorf("separator count = %d, want %d (apply minus the dropped Namespace)", got, want)
+	// Minus the dropped Namespace, plus the stores Secret a teardown always
+	// names (this apply selects no store, so it renders none).
+	if got, want := strings.Count(del, "\n---\n"), strings.Count(apply, "\n---\n"); got != want {
+		t.Errorf("separator count = %d, want %d (apply minus the Namespace, plus the stores Secret)", got, want)
+	}
+}
+
+// TestTeardownNamesSecretsOnly pins what remove hands kubectl delete for the
+// Secrets: each one the tool owns by kind and name alone -- delete needs
+// nothing else, so remove resolves no credential and opens no store -- the
+// stores Secret always, since its name is the instance's and an earlier deploy
+// may have left one, and never a Secret the operator manages.
+func TestTeardownNamesSecretsOnly(t *testing.T) {
+	nameOnly := func(name string) string {
+		return "apiVersion: v1\nkind: Secret\nmetadata:\n  name: " + name + "\n  namespace: ns\n---"
+	}
+	m := &consolidate.Model{Stores: []consolidate.StoreUse{{Name: "mq-ca", File: "./m.p12"}}}
+
+	k := baseKube()
+	k.Secrets = spec.Secrets{
+		Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{}},
+		ImagePull:   &spec.ImagePullSecret{Create: true},
+	}
+	del := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", m), Teardown: true,
+		ImagePull: &PullSecret{Name: "solmq-image-pull"}})
+	for _, want := range []string{nameOnly("solmq-credentials"), nameOnly("solmq-stores"), nameOnly("solmq-image-pull")} {
+		if !strings.Contains(del+"---", want) {
+			t.Errorf("teardown missing the name-only Secret\n%s\nin:\n%s", want, del)
+		}
+	}
+	for _, payload := range []string{"stringData:", "data:\n  mq-ca", ".dockerconfigjson", "type: Opaque"} {
+		if strings.Contains(del, payload) {
+			t.Errorf("a teardown carries no Secret payload, found %q:\n%s", payload, del)
+		}
+	}
+
+	// Secrets the operator manages are never named for delete.
+	k = baseKube()
+	k.Secrets = spec.Secrets{
+		Credentials: &spec.CredentialsSecret{Existing: "their-creds"},
+		ImagePull:   &spec.ImagePullSecret{Name: "regcred"},
+	}
+	opm := &consolidate.Model{Stores: []consolidate.StoreUse{{Name: "cm-id", Secret: &spec.StoreSecret{Name: "broker-cert"}}}}
+	del = Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", opm), Teardown: true,
+		ImagePull: &PullSecret{Name: "regcred"}})
+	for _, theirs := range []string{"  name: their-creds\n", "  name: regcred\n", "  name: broker-cert\n  namespace"} {
+		if strings.Contains(del, theirs) {
+			t.Errorf("a teardown must not name an operator Secret (%q):\n%s", theirs, del)
+		}
+	}
+	if !strings.Contains(del+"---", nameOnly("solmq-stores")) {
+		t.Errorf("the stores Secret is named even when this spec renders none:\n%s", del)
 	}
 }
 

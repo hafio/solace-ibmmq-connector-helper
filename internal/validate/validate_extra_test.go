@@ -184,14 +184,55 @@ func TestCheckKubeCredentialCreateRemovedKeys(t *testing.T) {
 	}
 }
 
-func TestCheckKubeStoresCreateNeedsASelectedStore(t *testing.T) {
-	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}, Secrets: spec.Secrets{Stores: &spec.StoresSecret{Create: &spec.StoreCreate{Name: "t"}}}}
-	want := "kubernetes.secrets.stores.create has nothing to carry: no TLS connection selects a store; select one with truststore: or keystore:, or remove secrets.stores"
-	if errs, _ := Run(Context{Workflows: wfOK(), Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true}); !hasErr(errs, want) {
-		t.Errorf("want %q, got %v", want, errs)
+// TestRetiredStoresBlockTiers pins the migration of kubernetes.secrets.stores.
+// create: in any spelling -- and an empty or create: false block -- means what
+// the tool now does unasked, so generate and deploy ignore it and validate alone
+// asks for it to go. existing: NAME moved its meaning onto the stores, so every
+// kubernetes path but a teardown refuses it, naming each selected store's
+// replacement; remove only warns, since the teardown set needs no store.
+func TestRetiredStoresBlockTiers(t *testing.T) {
+	kube := func(st *spec.StoresSecret) *spec.Kubernetes {
+		return &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}, Secrets: spec.Secrets{Stores: st}}
 	}
-	if errs, _ := Run(Context{Workflows: tlsSelectingWF(), Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true}); hasErr(errs, "has nothing to carry") {
-		t.Errorf("a selected store is something to carry: %v", errs)
+	run := func(st *spec.StoresSecret, lint, teardown bool) ([]Issue, []Issue) {
+		return Run(Context{Workflows: tlsSelectingWF(), Defaults: defsWithStores(), Image: imageOK(), Kube: kube(st), CheckKubernetes: true, Lint: lint, Teardown: teardown})
+	}
+	const gentle = "kubernetes.secrets.stores is no longer read: c-stores is rendered whenever a connection selects a store the tool holds"
+	for _, st := range []*spec.StoresSecret{{Create: &spec.StoreCreate{}}, {Create: &spec.StoreCreate{Name: "old"}}, {}} {
+		if errs, _ := run(st, false, false); hasErr(errs, "no longer read") {
+			t.Errorf("%+v: generate and deploy must ignore the gentle tier, got %v", st, errs)
+		}
+		if errs, _ := run(st, true, false); !hasErr(errs, gentle) {
+			t.Errorf("%+v: validate must ask for the block to go, got %v", st, errs)
+		}
+	}
+
+	hard := &spec.StoresSecret{Existing: "my-tls"}
+	errs, _ := run(hard, false, false)
+	for _, want := range []string{
+		"kubernetes.secrets.stores.existing is no longer read: a Secret you manage is named on each store it holds, with existing: {secret: {name: my-tls}}",
+		"tls.stores.ts: add secret: {name: my-tls} under existing:",
+		"Then remove kubernetes.secrets.stores.",
+	} {
+		if !hasErr(errs, want) {
+			t.Errorf("hard tier: want %q, got %v", want, errs)
+		}
+	}
+	if hasErr(errs, gentle) {
+		t.Errorf("existing: NAME is the hard tier only, got %v", errs)
+	}
+	errs, warns := run(hard, false, true)
+	if hasErr(errs, "no longer read") || !hasErr(warns, "kubernetes.secrets.stores.existing is no longer read") {
+		t.Errorf("a teardown warns and proceeds: errs %v, warns %v", errs, warns)
+	}
+
+	// A created store was not built while existing: NAME was set: the message
+	// offers both ways on.
+	d := defsWithStores()
+	d.TLS.Stores["ts"] = &spec.Store{PasswordEnv: "TRUSTSTORE_PASSWORD", Create: certsOf("./ca.pem")}
+	errs, _ = Run(Context{Workflows: tlsSelectingWF(), Defaults: d, Image: imageOK(), Kube: kube(hard), CheckKubernetes: true})
+	if want := "tls.stores.ts has create:, which was not built on kubernetes while existing: my-tls was set: add existing: {secret: {name: my-tls}} beside it"; !hasErr(errs, want) {
+		t.Errorf("want %q, got %v", want, errs)
 	}
 }
 
@@ -202,24 +243,51 @@ func tlsSelectingWF() []spec.Workflow {
 	return []spec.Workflow{wf("x.yaml", s, vMQ("M", spec.DestQueue, false))}
 }
 
-func TestStoresNotWiredWarning(t *testing.T) {
+// TestNoStoresWiringWarning pins that selecting a store is the whole request on
+// kubernetes, as on docker and podman: no secrets.stores block, no warning.
+func TestNoStoresWiringWarning(t *testing.T) {
 	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}}
 	_, warns := Run(Context{Workflows: tlsSelectingWF(), Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true})
-	if !hasErr(warns, "a connection selects tls.stores but kubernetes.secrets.stores is omitted; the store files will be missing at runtime") {
-		t.Errorf("want stores-omitted warning, got %v", warns)
-	}
-	// TLS that selects no store trusts the JVM default and mounts nothing.
-	_, warns = Run(Context{Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("M", spec.DestQueue, true))}, Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true})
-	if hasErr(warns, "secrets.stores is omitted") {
-		t.Errorf("no store selected, so nothing is missing: %v", warns)
+	if hasErr(warns, "secrets.stores") {
+		t.Errorf("a selected store needs no stores block: %v", warns)
 	}
 }
 
-func TestStoresWiredExistingNoWarning(t *testing.T) {
-	k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}, Secrets: spec.Secrets{Stores: &spec.StoresSecret{Existing: "my-tls"}}}
-	_, warns := Run(Context{Workflows: tlsSelectingWF(), Defaults: defsWithStores(), Image: imageOK(), Kube: k, CheckKubernetes: true})
-	if hasErr(warns, "secrets.stores is omitted") {
-		t.Errorf("stores wired via existing should not warn: %v", warns)
+// TestClusterOnlyStoreNeedsAHostSource pins that docker and podman refuse a
+// selected store kept only in a kubernetes Secret, and accept it with a file or
+// sources beside the Secret, or when no connection selects it.
+func TestClusterOnlyStoreNeedsAHostSource(t *testing.T) {
+	secret := &spec.StoreSecret{Name: "my-tls"}
+	for _, c := range []struct {
+		name string
+		st   *spec.Store
+		want bool
+	}{
+		{"secret only", &spec.Store{PasswordEnv: "PW", Existing: &spec.StoreExisting{Secret: secret}}, true},
+		{"secret and a file", &spec.Store{PasswordEnv: "PW", Existing: &spec.StoreExisting{PKCS12: "./t.p12", Secret: secret}}, false},
+		{"secret and sources", &spec.Store{PasswordEnv: "PW", Create: certsOf("./ca.pem"), Existing: &spec.StoreExisting{Secret: secret}}, false},
+	} {
+		d := defsWithStores()
+		d.TLS.Stores["ts"] = c.st
+		for _, ctx := range []Context{
+			{Workflows: tlsSelectingWF(), Defaults: d, Image: imageOK(), Docker: &spec.Docker{Command: "docker", Name: "c"}, CheckDocker: true},
+			{Workflows: tlsSelectingWF(), Defaults: d, Image: imageOK(), Podman: &spec.Podman{Command: "podman", Name: "c"}, CheckPodman: true},
+		} {
+			errs, _ := Run(ctx)
+			if got := hasErr(errs, "tls.stores.ts is held only in a kubernetes Secret (existing.secret)"); got != c.want {
+				t.Errorf("%s (docker %v): refused = %v, want %v: %v", c.name, ctx.CheckDocker, got, c.want, errs)
+			}
+		}
+		k := &spec.Kubernetes{Deployment: spec.Deployment{Name: "c", Namespace: "ns", Replicas: 1}}
+		if errs, _ := Run(Context{Workflows: tlsSelectingWF(), Defaults: d, Image: imageOK(), Kube: k, CheckKubernetes: true}); hasErr(errs, "held only in a kubernetes Secret") {
+			t.Errorf("%s: kubernetes reads the Secret: %v", c.name, errs)
+		}
+	}
+	// Not selected by any TLS side: nothing delivers it, nothing to refuse.
+	d := defsWithStores()
+	d.TLS.Stores["ts"] = &spec.Store{PasswordEnv: "PW", Existing: &spec.StoreExisting{Secret: secret}}
+	if errs, _ := Run(Context{Workflows: wfOK(), Defaults: d, Image: imageOK(), Docker: &spec.Docker{Command: "docker", Name: "c"}, CheckDocker: true}); hasErr(errs, "held only in a kubernetes Secret") {
+		t.Errorf("an unselected store is not refused: %v", errs)
 	}
 }
 
@@ -899,8 +967,8 @@ func TestSelectsStores(t *testing.T) {
 		want bool
 	}{"conn-ref leader session selecting", wfOK(), ref, true})
 	for _, c := range cases {
-		if got := selectsStores(resolveWorkflows(c.wfs, c.d), c.d); got != c.want {
-			t.Errorf("%s: selectsStores()=%v want %v", c.name, got, c.want)
+		if got := len(selectedStoreNames(resolveWorkflows(c.wfs, c.d), c.d)) > 0; got != c.want {
+			t.Errorf("%s: selectedStoreNames selects=%v want %v", c.name, got, c.want)
 		}
 	}
 }
@@ -996,7 +1064,6 @@ func TestCheckKubeSecretNames(t *testing.T) {
 		want string
 	}{
 		{"cred existing bad", spec.Secrets{Credentials: &spec.CredentialsSecret{Existing: "my secret\nfoo: bar"}}, "kubernetes.secrets.credentials.existing"},
-		{"stores existing bad", spec.Secrets{Stores: &spec.StoresSecret{Existing: "UPPER"}}, "kubernetes.secrets.stores.existing"},
 	}
 	for _, c := range cases {
 		k := &spec.Kubernetes{Deployment: base, Secrets: c.sec}
@@ -1065,10 +1132,6 @@ func TestCheckKubeSecretsCreateXorExisting(t *testing.T) {
 			"kubernetes.secrets.credentials must set exactly one of 'create' or 'existing'"},
 		{"cred neither", spec.Secrets{Credentials: &spec.CredentialsSecret{}},
 			"kubernetes.secrets.credentials must set exactly one of 'create' or 'existing'"},
-		{"stores both", spec.Secrets{Stores: &spec.StoresSecret{Create: &spec.StoreCreate{Name: "a"}, Existing: "b"}},
-			"kubernetes.secrets.stores must set exactly one of 'create' or 'existing'"},
-		{"stores neither", spec.Secrets{Stores: &spec.StoresSecret{}},
-			"kubernetes.secrets.stores must set exactly one of 'create' or 'existing'"},
 	}
 	for _, c := range cases {
 		if e := run(c.sec); !hasErr(e, c.want) {
@@ -1083,11 +1146,9 @@ func TestCheckKubeSecretsCreateXorExisting(t *testing.T) {
 	}{
 		{"create only", spec.Secrets{
 			Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{}},
-			Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{}},
 		}},
 		{"existing only", spec.Secrets{
 			Credentials: &spec.CredentialsSecret{Existing: "their-creds"},
-			Stores:      &spec.StoresSecret{Existing: "their-tls"},
 		}},
 		// Omitting the blocks entirely stays legal: that is the documented "no
 		// Secret is produced" path, not an undecided block.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -766,9 +767,54 @@ func TestRemoveKubernetesSeamHappyPath(t *testing.T) {
 	if !reflect.DeepEqual(f.calls[0].argv, wantPreflight) {
 		t.Errorf("preflight argv = %v, want %v", f.calls[0].argv, wantPreflight)
 	}
-	want := []string{"kubectl", "delete", "-f", "-"}
+	want := []string{"kubectl", "delete", "-f", "-", "--ignore-not-found"}
 	if !reflect.DeepEqual(f.calls[1].argv, want) {
 		t.Errorf("argv = %v, want %v", f.calls[1].argv, want)
+	}
+}
+
+// TestDeployKubernetesProbesOperatorSecrets pins the deploy-time check of a
+// Secret the operator manages and the pod mounts: after the preflight probe,
+// one `get secret` per Secret; a missing Secret or key stops the deploy before
+// anything is applied, a Secret the identity may not read only warns, and a
+// complete one lets the apply through. remove never probes.
+func TestDeployKubernetesProbesOperatorSecrets(t *testing.T) {
+	env := sharedEnv + "tls:\n  stores:\n    ts:\n      password: pw\n      existing:\n        secret:\n          name: broker-cert\n          key: ca.p12\n" + kubeEnv
+	notFound := errors.New("exit status 1")
+	for _, c := range []struct {
+		name      string
+		reply     queuedResp
+		wantCode  int
+		wantApply bool
+	}{
+		{"missing Secret", queuedResp{`Error from server (NotFound): secrets "broker-cert" not found`, notFound}, 1, false},
+		{"missing key", queuedResp{`{"kind":"Secret","data":{"tls.crt":"QQ=="}}`, nil}, 1, false},
+		{"not allowed to read it", queuedResp{`Error from server (Forbidden): secrets "broker-cert" is forbidden`, notFound}, 0, true},
+		{"complete", queuedResp{`{"kind":"Secret","data":{"ca.p12":"QQ=="}}`, nil}, 0, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := &queueRunner{resp: []queuedResp{{"", nil}, c.reply}}
+			dir := t.TempDir()
+			write(t, dir, "env.yaml", env)
+			write(t, dir, "10.yaml", tlsWF)
+			var code int
+			stderr := captureStderr(t, func() {
+				code = dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f)
+			})
+			if code != c.wantCode {
+				t.Fatalf("exit = %d, want %d\n%s", code, c.wantCode, stderr)
+			}
+			if want := []string{"kubectl", "get", "secret", "broker-cert", "-n", "solace-connectors", "-o", "json"}; len(f.calls) < 2 || !reflect.DeepEqual(f.calls[1].argv, want) {
+				t.Fatalf("call 1 = %+v, want %v", f.calls, want)
+			}
+			applied := len(f.calls) == 3 && reflect.DeepEqual(f.calls[2].argv, []string{"kubectl", "apply", "-f", "-"})
+			if applied != c.wantApply {
+				t.Errorf("applied = %v, want %v: %+v\n%s", applied, c.wantApply, f.calls, stderr)
+			}
+			if c.name != "complete" && !strings.Contains(stderr, "the Secret broker-cert") {
+				t.Errorf("stderr names no Secret:\n%s", stderr)
+			}
+		})
 	}
 }
 

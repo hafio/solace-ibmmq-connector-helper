@@ -276,18 +276,19 @@ const storePasswordStandIn = "validate-only-stand-in"
 // rendered connections select, on every platform env.yaml has a section for:
 // it reads each existing store a platform loads, builds each created one in
 // memory and discards it, and holds the bytes to each platform's size limit --
-// the kubernetes stores Secret (with secrets.stores.create; an existing Secret
-// is loaded by nobody here), a podman secret, docker's environment variable
-// for a created store. A docker existing store is a bind mount whose source the
-// validate verb checks on its own host. Unlike deploy it stops at no failure,
-// and it reads or builds a store once however many platforms carry it.
+// the kubernetes stores Secret (every store not kept in an operator's Secret;
+// one that is, kubernetes never opens), a podman secret, docker's environment
+// variable for a created store. A docker existing store is a bind mount whose
+// source the validate verb checks on its own host. Unlike deploy it stops at no
+// failure, and it reads or builds a store once however many platforms carry
+// it.
 //
 // Credentials are not resolved: an unset -env variable stays validate.Run's
 // warning. A created store whose password is unset is built with a stand-in,
 // so every source check still runs, unless it comes from a JKS, which opens
 // with that very password.
 func validateStores(e *spec.Env, stores []consolidate.StoreUse, res Resolver) (errs, warns []Issue) {
-	kube := e.Kubernetes != nil && e.Kubernetes.Secrets.Stores != nil && e.Kubernetes.Secrets.Stores.Create != nil
+	kube := e.Kubernetes != nil
 	docker, podman := e.Docker != nil, e.Podman != nil
 	host := res.goos()
 	fail := func(err error) { errs = append(errs, Issue{File: fileEnv, Msg: err.Error()}) }
@@ -295,7 +296,8 @@ func validateStores(e *spec.Env, stores []consolidate.StoreUse, res Resolver) (e
 	var sizes []string
 	for _, st := range stores {
 		sb := storeBuild(st, e.Defaults.TLS)
-		if !kube && !podman && (!docker || sb == nil) {
+		kubeReads := kube && !st.ClusterHeld()
+		if !kubeReads && !podman && (!docker || sb == nil) {
 			continue
 		}
 		data, w, err := validateStoreBytes(st, sb, res)
@@ -308,7 +310,7 @@ func validateStores(e *spec.Env, stores []consolidate.StoreUse, res Resolver) (e
 			continue
 		}
 		enc := base64.StdEncoding.EncodedLen(len(data))
-		if kube {
+		if kubeReads {
 			total += enc
 			sizes = append(sizes, fmt.Sprintf("%s %d bytes", st.Name, enc))
 		}
@@ -327,7 +329,7 @@ func validateStores(e *spec.Env, stores []consolidate.StoreUse, res Resolver) (e
 			}
 		}
 	}
-	if kube {
+	if total > 0 {
 		if err := kubeStoresSizeError(total, sizes); err != nil {
 			fail(err)
 		}

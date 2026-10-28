@@ -50,7 +50,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 979 test functions, 1395 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 985 test functions, 1408 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -203,8 +203,8 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestSecretsCreateSpellings | create: true / the retired mapping form / an empty mapping / create: false / create left empty / only existing | credentials and stores create: takes true, and the mapping an older env.yaml carries still means create (its name decoded only so validate can report it); false, empty and absent build nothing, and existing: survives the custom decoding |
 | TestSecretsCreateRejectsOtherShapes | a word / a list / stores, a word / a retired mapping with a list for its name (credentials, stores) / the block as a bare value (credentials, stores) | a create: value that is neither a boolean nor the retired mapping fails at parse naming the key, a wrongly-typed field inside the retired mapping is still a parse error, and a secrets block must itself be a mapping |
 | TestSecretsCreateFollowsAnAlias | - | a YAML alias (create: *on) is resolved before create: is read, so an aliased true creates the Secret |
-| TestDerivedObjectNames | - | every created Secret and the libs claim are named after deployment.name (-credentials, -stores, -image-pull, -libs) with any retired name key ignored, a referenced object keeps the operator's own name, and no block yields nothing |
-| TestCreatedNames | - | the Deployment and ConfigMap always, then exactly the Secrets and claim the config asks the tool to build -- a referenced object is not the tool's |
+| TestDerivedObjectNames | - | every created Secret and the libs claim are named after deployment.name (-credentials, -stores, -image-pull, -libs) with any retired name key ignored, a referenced object keeps the operator's own name, no block yields nothing, and the stores Secret's name is the instance's whatever the retired stores block says |
+| TestCreatedNames | - | the Deployment, ConfigMap and stores Secret always, then exactly the Secrets and claim the config asks the tool to build -- a referenced object is not the tool's |
 | TestParseWorkflowTransformHeaders | - | a top-level transform-headers block is captured verbatim -- header order and each expression's quoting intact -- and is not reported as misplaced; an absent or empty block is none |
 | TestParseWorkflowTransform | - | a top-level transform block is captured verbatim -- key order, the list of one-key mappings and each expression's quoting intact -- beside a top-level transform-headers block, and neither is reported as misplaced; an absent or empty block is none |
 | TestMisplacedWorkflowTransforms | - | a transform-header: typo, the legacy transform-payload section (either spelling), and transform or transform-headers under a side, its solace:/mq: block (also when that block is an alias and the key reaches it through a << merge), or that block's consumer:/producer: are each reported as the dotted path they were found at, in file order, while both top-level blocks still parse |
@@ -215,20 +215,25 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestStoreConfigured | existing without a path | an existing block naming no PKCS12 is not configured |
 | TestStoreConfigured | existing | an existing PKCS12 is configured, and Path is it |
 | TestStoreConfigured | created | a created store is configured, Created, and has no Path |
+| TestStoreConfigured | secret only | a store naming only a kubernetes Secret is configured, with no Path |
+| TestStoreConfigured | file and secret | a PKCS12 beside a Secret is configured, and Path is the file |
+| TestStoreConfigured | created with a secret | sources beside a Secret are configured and Created |
+| TestStoreSecretParses | - | existing.secret's name and key decode onto the store, the key defaults to the store's name, a file beside it is kept, and SecretRef / EffectiveKey are nil-safe |
 | TestTLSConfigStoreLookup | - | an empty or undefined store name is no store, and StoreNames lists the defined names sorted |
 | TestParseTLSIsStrict | retired truststore | tls.truststore is an error naming tls.stores and the per-connection selectors |
 | TestParseTLSIsStrict | retired keystore | tls.keystore is the same error |
 | TestParseTLSIsStrict | unknown key | any other key under tls: is an error |
-| TestParseTLSIsStrict | retired file | a store's file: is an error naming existing: {pkcs12: <file>} and create: |
+| TestParseTLSIsStrict | retired file | a store's file: is an error naming existing: {pkcs12: <file>}, existing: {secret: ...} and create: |
 | TestParseTLSIsStrict | retired type | so is its type: |
 | TestParseTLSIsStrict | unknown store key | a key a store does not take (passwrd-env) is an error naming tls.stores.<name>.<key> |
-| TestParseTLSIsStrict | existing not a mapping / unknown existing key | existing: must be a mapping holding only pkcs12 |
+| TestParseTLSIsStrict | existing not a mapping / unknown existing key | existing: must be a mapping holding only pkcs12 and secret |
+| TestParseTLSIsStrict | secret a scalar / unknown secret key | existing.secret must be a mapping holding only name and key |
 | TestParseTLSIsStrict | create not a mapping / unknown create key | create: must be a mapping holding only certs, keys and jks |
 | TestParseTLSIsStrict | certs a scalar | certs must be a list or a map |
 | TestParseTLSIsStrict | keys a mapping / key entry a scalar / unknown key-entry key / chain a scalar | keys is a list of mappings holding only cert, chain and key, and chain is a list |
 | TestParseTLSIsStrict | not a mapping / stores not a mapping | tls: and tls.stores as lists are errors; a valid store and one written with no block both parse |
 | TestParseCreateBlock | - | certs decode as a list (in order, unnamed) or a map (in written order, named), one key entry with its chain, a jks; a create: with nothing in it is no create block |
-| TestStoreKeyListsAreSorted | - | the store, create, key-entry and existing key lists come back sorted, for the generator page to be checked against |
+| TestStoreKeyListsAreSorted | - | the store, create, key-entry, existing and existing.secret key lists come back sorted, for the generator page to be checked against |
 
 ## internal/consolidate
 
@@ -545,12 +550,14 @@ Tests: [deploy_test.go](../internal/deploy/deploy_test.go), [imagepull_test.go](
 | TestRenderLibsDownload | emptyDir | init container wgets each jar url into /libs, mounted via emptyDir |
 | TestRenderLibsDownload | existing PVC download | download target uses claimName dl-pvc instead of emptyDir |
 | TestRenderNamespaceAlwaysFirst | - | Namespace doc is first in output and precedes ConfigMap |
-| TestRenderExistingSecrets | - | existing creds/tls secrets produce no Secret doc, referencing my-creds and secretName my-tls |
-| TestStoresVolumeMapsKeysToStoreNames | created, two stores | items map keys mq-ca and solace-client to the same names, though both files are store.p12 |
-| TestStoresVolumeMapsKeysToStoreNames | existing, two stores | an existing Secret is keyed by store name too |
-| TestStoresVolumeMapsKeysToStoreNames | created, one file under two names | one file defined under two names is two keys and two paths |
-| TestStoresVolumeMapsKeysToStoreNames | existing, no store selected | the stores volume lists no items, so every key projects |
-| TestStoresVolumeMapsKeysToStoreNames | no model | storeItems returns nil: no store to list |
+| TestRenderExistingSecrets | - | an existing credentials Secret and a store held only in an operator's Secret produce no Secret doc, referencing my-creds and projecting my-tls |
+| TestStoresVolumeProjectsEverySource | two host-held stores | one projected volume (defaultMode 0400) over the tool's stores Secret, each store keyed and mounted by its name |
+| TestStoresVolumeProjectsEverySource | one file under two names | one file defined under two names is two keys and two paths |
+| TestStoresVolumeProjectsEverySource | two stores from one operator Secret | one source for the operator's Secret, each store's key mounted under the store's name |
+| TestStoresVolumeProjectsEverySource | a Secret first selected after an operator one | the tool's Secret comes first, then each operator Secret once, in first-use order |
+| TestStoresVolumeProjectsEverySource | a file beside a Secret is read from the Secret | a store naming both is projected from the operator's Secret only |
+| TestStoresVolumeProjectsEverySource | no store selected | no stores volume at all |
+| TestStoresVolumeProjectsEverySource | no model | storeSources returns nil: no store to list |
 | TestRenderConfigMapStatusScript | - | the ConfigMap always carries the status script under its own `status` key, alongside application.yml |
 | TestRenderDeploymentNodeSelector | - | the pod spec carries nodeSelector after automountServiceAccountToken, keys sorted, a key or value YAML would misread ("2", "true", "") quoted; no selector writes none |
 | TestRenderDeploymentTolerations | - | tolerations are written in Kubernetes' shape, each field only when set, a value YAML would misread quoted, before the pod's securityContext |
@@ -573,7 +580,8 @@ Tests: [deploy_test.go](../internal/deploy/deploy_test.go), [imagepull_test.go](
 | TestRenderServicePort | host:container distinct ports | Render emits port: 8081 / targetPort: 9000 verbatim from the given spec.Port |
 | TestRenderServicePort | resolved to the default management port | Render emits port/targetPort 8090 for a Port already resolved to the connector default |
 | TestRenderServicePort | resolved to a non-default management port | Render emits port/targetPort 9500 for a Port already resolved to defaults.management.port 9500 |
-| TestTeardownReversesTheDocumentOrder | - | with a libs PVC present, apply orders the claim before the Deployment that mounts it; teardown fully reverses the set -- Deployment before the claim, Service before ConfigMap -- with separators intact and one fewer than apply's (the dropped Namespace) |
+| TestTeardownReversesTheDocumentOrder | - | with a libs PVC present, apply orders the claim before the Deployment that mounts it; teardown fully reverses the set -- Deployment before the claim, Service before ConfigMap -- with separators intact and as many as apply's (the Namespace dropped, the stores Secret named) |
+| TestTeardownNamesSecretsOnly | - | a teardown renders every Secret the tool owns by kind and name alone -- credentials and image-pull when created, the stores Secret always -- carries no Secret payload, and never names an operator's Secret |
 | TestLibsPVNameIsNamespaced | - | the same `libs.pvc.create.name` in two different namespaces derives two different PV names, each suffixed `-pv` and carrying its own namespace |
 | TestImagePullSecretStates | no block / name alone / created | imagePullSecrets is absent, rendered without a Secret, or rendered with one -- the middle case is what stops an apply overwriting a Secret the operator built |
 | TestImagePullSecretPayloadIsOpaqueToDeploy | - | deploy places the already-encoded payload verbatim and the registry password appears nowhere outside it |
@@ -677,7 +685,7 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestParseCommandExtraAllowed | sudo podman without extraAllowed | rejected, error |
 | TestParseCommandExtraAllowed | sudo podman with extraAllowed=[sudo] | accepted, argv [sudo podman] with the platform binary unmodified |
 | TestKubernetesDeployApplyOnStdin | - | deploy issues one call kubectl `--context` prod apply `-f` - with manifest on stdin |
-| TestKubernetesRemoveUsesDeleteVerb | - | the remove action issues argv [oc delete -f -] |
+| TestKubernetesRemoveUsesDeleteVerb | - | the remove action issues argv [oc delete -f - --ignore-not-found] |
 | TestKubernetesRejectsUnsafeCommand | - | unsafe command rejected, error returned, zero calls made |
 | TestKubernetesUnknownAction | - | unknown action rejected, error returned, zero calls made |
 | TestDockerUpAndDown | - | deploy runs compose up -d, remove runs compose down, correct argv each |
@@ -814,9 +822,9 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckKubeCredentialCreateRemovedKeys | source/variables/values-file set | credentials.create carrying `source`, `variables`, and `values-file` errors naming all three and telling the operator to remove them |
 | TestCheckKubeCredentialCreateRemovedKeys | source alone | credentials.create carrying only `source` errors naming it alone |
 | TestCheckKubeCredentialCreateRemovedKeys | bare name | a bare (retired) create.name trips no removed-keys error |
-| TestCheckKubeStoresCreateNeedsASelectedStore | - | kube stores.create with no TLS connection selecting a store errors that it has nothing to carry; a workflow selecting one clears it |
-| TestStoresNotWiredWarning | - | a workflow selecting a store with kube deploy and no stores wiring warns secrets.stores is omitted; TLS selecting no store mounts nothing and does not warn |
-| TestStoresWiredExistingNoWarning | - | stores wired via existing secret produces no stores-omitted warning |
+| TestRetiredStoresBlockTiers | - | kubernetes.secrets.stores create: (any spelling) or an empty block is ignored by generate/deploy and an error under Lint asking for its removal; existing: NAME is an error on every kubernetes path naming each selected store's replacement, a warning on teardown, and offers both ways on for a created store |
+| TestNoStoresWiringWarning | - | a workflow selecting a store with a kubernetes section and no stores block warns about nothing |
+| TestClusterOnlyStoreNeedsAHostSource | - | docker and podman refuse a selected store held only in a kubernetes Secret, accept it with a file or sources beside the Secret, and kubernetes and an unselected store raise nothing |
 | TestCheckCredRules | both literal and env set | errors sets both a literal value and target password-env |
 | TestCheckCredRules | env value is a ${...} reference | errors must be a bare variable name, not a ${...} reference |
 | TestCheckCredRules | env value not a valid identifier | errors is not a valid environment variable name |
@@ -956,11 +964,9 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckContainerHostPathsUnsafe | space in libs.dir | podman.libs.dir rejected |
 | TestCheckContainerHostPathsUnsafe | windows paths | `C:\certs\...` store paths and `C:\libs` accepted (backslash and colon permitted) |
 | TestCheckKubeSecretNames | cred existing bad | non-DNS-1123 credentials existing rejected |
-| TestCheckKubeSecretNames | stores existing bad | non-DNS-1123 stores existing rejected |
 | TestCheckKubeSecretNames | created Secrets | create with no name at all produces no name error -- the name is derived |
 | TestCheckKubeSecretsCreateXorExisting | credentials both set | rejected: Render would take the create branch and emit a Secret doc over the object existing names |
 | TestCheckKubeSecretsCreateXorExisting | credentials neither set | rejected: a present block must choose, or the SecretsDir mount silently disappears |
-| TestCheckKubeSecretsCreateXorExisting | stores both / neither set | same rule enforced for the stores Secret |
 | TestCheckKubeSecretsCreateXorExisting | create only / existing only / blocks omitted | all three accepted -- omitting a block stays the way to say "none" |
 | TestCheckLibsNFSFields | newline in nfs.server | rejected against the host charset |
 | TestCheckLibsNFSFields | newline in nfs.path | rejected against the host-path charset |
@@ -981,7 +987,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestNoCredentialsNoWarning | - | a config whose connections need no authentication is not warned about a Secret it does not need |
 | TestCredentialsFoundOutsideAWorkflowSide | a management account / a store password | a management account password and a store password are credentials too, and each trips the same warning as a missing binder credential |
 | TestLibsPVNameLengthIsCapped | - | a 30-char namespace and a 30-char deployment.name derive a PV name (`<namespace>-<name>-libs-pv`) that exceeds the 63-char DNS-1123 limit, which errors naming both fields; shortening both to fit is not flagged, so the check cannot simply always fire |
-| TestRetiredCreateNamesReportedOnlyByValidate | - | the four retired name keys (credentials/stores create.name, image-pull.name with create, libs.pvc.create.name) produce no error on a generate/deploy run and exactly one each under Lint, naming the derived object, the ignored value and how to remove the key |
+| TestRetiredCreateNamesReportedOnlyByValidate | - | the three retired name keys (credentials create.name, image-pull.name with create, libs.pvc.create.name) produce no error on a generate/deploy run and exactly one each under Lint, naming the derived object, the ignored value and how to remove the key |
 | TestRetiredCreateNamesNeedAKey | - | a created object with no name key, and an image-pull name without create (a reference), are not retired keys |
 | TestDerivedNamesMustFitALabel | - | the longest name derived from deployment.name that the config actually builds (here `<name>-credentials`) must fit a DNS-1123 label, naming it; a referenced Secret derives nothing |
 | TestTransformHeadersValidBlockPasses | - | a well-formed transform-headers block raises no error and no warning |
@@ -1019,9 +1025,10 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestValidatePostureSession | standalone session is not a site | an unrendered inline session reports nothing |
 | TestValidatePostureSession | session off, sides validate | the session's false warns, and its divergence from the workflow sides on its tuple warns |
 | TestValidatePostureSession | sides off, session validates | the reverse divergence warns too |
-| TestStoreDefinitions | no block / no source | a store with neither create: nor existing: is an error naming both |
-| TestStoreDefinitions | both | create: and existing: together is an error |
-| TestStoreDefinitions | existing without a path | existing.pkcs12 empty is an error |
+| TestStoreDefinitions | no block / no source | a store with neither create: nor existing: is an error naming both, and the Secret form |
+| TestStoreDefinitions | both | create: and existing.pkcs12 together is an error: one host-side source per store |
+| TestStoreDefinitions | existing naming nothing | existing: with neither pkcs12 nor secret is an error |
+| TestStoreDefinitions | a secret without a name / a secret name no Secret can have / a key no Secret can hold | existing.secret needs a DNS-1123 name and a valid data key |
 | TestStoreDefinitions | created without a password | a created store needs its own password: it is encrypted with it |
 | TestStoreDefinitions | created from nothing | a create: naming no source is an error |
 | TestStoreDefinitions | certs and a key / a jks and a key | trusted certificates and a key in one store are an error: a truststore or a keystore |
@@ -1029,7 +1036,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestStoreDefinitions | a key entry without its key | a key entry needs cert and key |
 | TestStoreDefinitions | an empty chain file / an empty certs entry / an empty named entry | an empty path is an error naming its position |
 | TestStoreDefinitions | an empty alias / an alias twice | a named map needs every alias, unique ignoring case |
-| TestStoreDefinitions | well-formed | existing, a certs list, a named map, one key entry with its chain, a jks alone and certs with a jks are all accepted |
+| TestStoreDefinitions | well-formed | existing, a certs list, a named map, one key entry with its chain, a jks alone, certs with a jks, and a Secret alone, beside a file or beside sources are all accepted |
 | TestCreatedStoreSelections | a key store as truststore | a store created from a key selected as truststore is an error |
 | TestCreatedStoreSelections | a certificate store as keystore | a store created from certificates selected as keystore is an error |
 | TestCreatedStoreSelections | a key-alias on a created keystore | key-alias on a created keystore is an error: its one key needs no alias (Java names it 1) |
@@ -1082,7 +1089,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestBuildStoreRejects | a JKS key selected as truststore / a JKS truststore selected as keystore | a jks-only store whose content does not fit the role it is selected in fails at build |
 | TestBuildStoreRejects | not a created store | an existing store has nothing to build |
 | TestCreatedStoresOnEachPlatform | kubernetes | the stores Secret carries the built truststore, and an unchanged store renders the same manifest twice |
-| TestCreatedStoresOnEachPlatform | kubernetes, existing Secret | an existing stores Secret builds nothing: no source is read |
+| TestCreatedStoresOnEachPlatform | kubernetes, operator Secret | a created store also held in an operator's Secret is not built on kubernetes: nothing is read, no tool stores Secret rendered, the operator's projected |
 | TestCreatedStoresOnEachPlatform | podman | the plan carries a trusted build with no source, and ResolvePodmanFiles builds the secret |
 | TestCreatedStoresOnEachPlatform | docker | the plan carries the store as a trusted docker store with no bind mount, the compose mounts its secret, and ResolveDockerStores returns its base64 -- the built truststore -- and a 64-hex digest that does not change while the store does not |
 | TestCreatedStoresOnEachPlatform | config | generate config references the created store at its mount path and reads nothing |
@@ -1099,12 +1106,15 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestValidateReadsWhatDeployReads | a created store that does not build | the build's error is reported |
 | TestValidateReadsWhatDeployReads | unset password | the store is still built with a stand-in, so a bad source is reported, beside the unset-variable warning |
 | TestValidateReadsWhatDeployReads | unset password, a JKS | not opened: only the unset-variable warning |
-| TestValidateReadsWhatDeployReads | an existing kubernetes Secret | nothing is read or built |
+| TestValidateReadsWhatDeployReads | a store in an operator's Secret | not read or built on kubernetes |
+| TestValidateReadsWhatDeployReads | a store in an operator's Secret, podman | still read for podman, which needs its file |
 | TestValidateReadsWhatDeployReads | an expiring certificate | warned once across kubernetes, podman and docker |
 | TestValidateReadsWhatDeployReads | over the kubernetes Secret / a podman secret / a windows environment variable | each platform's size error; the same docker store fits on linux |
 | TestValidateReadsWhatDeployReads | every case | a store nothing selects is never read |
 | TestValidateStoreBytesWithoutAccess | no file access | an existing store is reported unread, never passed |
 | TestValidateStoreBytesWithoutAccess | no environment access / a literal password | a created store is built with the stand-in, or with its literal as written |
+| TestKubernetesTeardownResolvesNothing | - | a kubernetes teardown reads no credential and opens no store, names the credentials and stores Secrets alone, warns about a retired stores existing: that deploy refuses |
+| TestKubernetesSecretProbes | - | the probes are each operator Secret a selected store names, with every key the volume lists, then an existing credentials Secret with every mount name |
 | TestDockerStorePlaceholders | - | remove's placeholders cover each created store's secret, named _GEN_TLS_<STORE>_STORE, and the digest -- never an existing store -- and a plan without created stores needs none |
 | TestTargetMounts | selected stores + libs | 2 store mounts at MountDir/<store name> -- a created store, having no host file, is skipped --, each named tls.stores.<name>.existing.pkcs12, the keystore Private (carried into HostMount), and a libs mount whose source is the resolved abs host dir and whose target is the fixed default libs path |
 | TestTargetMounts | no stores, no libs | yields nil,nil -- no selected store is the only way to get no store mounts |
@@ -1150,7 +1160,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestGenerateMissingTargetSection | kubernetes | error contains kubernetes target requires a 'kubernetes:' section in env.yaml |
 | TestGenerateMissingTargetSection | docker | error contains docker target requires a 'docker:' section in env.yaml |
 | TestGenerateMissingTargetSection | podman | error contains podman target requires a 'podman:' section in env.yaml |
-| TestGenValidateStoresWarning | - | a workflow selecting a store plus kubernetes credentials.create (name-only) and no stores wiring yields no errors and exactly one stores-omitted advisory warning |
+| TestSelectedStoreIsTheRequestOnKubernetes | - | a workflow selecting a store with no stores block validates clean, validate reads the store kubernetes carries, and generate renders the stores Secret and its projected source |
 | TestGeneratorPageGoldenInSync | - | the golden embedded in solmq-conn-util-generator.html matches testdata/golden/application.yml (regenerate with -update-html-golden) |
 | TestGeneratorPageFindingsGoldenInSync | - | the findings embedded in solmq-conn-util-generator.html (id="golden-findings") match what gen.Validate reports for testdata/golden/specs, CRLF and trailing newlines normalized (regenerate with -update-html-golden) |
 | TestGeneratorPageKnownKeysInSync | SOLACE_KEYS / MQ_KEYS / SOLACE_MANAGED / MQ_MANAGED / SOLACE_CREDS / MQ_CREDS | the page's hand-copied key lists equal spec.KnownKeys, ToolManagedKeys and CredentialKeys per system, so the validate port cannot drift from the CLI when a key is added |
@@ -1158,7 +1168,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestGoldenConfig | - | generated config output matches testdata/golden/application.yml byte-for-byte, one instance |
 | TestGoldenKubernetesCreate | - | generated kubernetes manifests (namespace, configmap incl. status script, secret, stores keyed truststore/keystore and mapped by items, pv, pvc, deployment with secrets-volume/stores/syslog/libs mounts and le-mode/role labels, service) match golden fixture byte-for-byte |
 | TestConfigIsWhatDeployShips | - | generate config's application.yml is byte for byte what podman mounts from its secret store and what the compose file inlines (indented, every $ doubled); the kubernetes goldens embed the same file |
-| TestGoldenKubernetesNoSecrets | - | generated manifests without secrets/syslog/libs (namespace, configmap incl. status script, deployment, service) match golden fixture byte-for-byte |
+| TestGoldenKubernetesNoSecrets | - | generated manifests without a secrets block, syslog or libs (namespace, configmap incl. status script, stores Secret, deployment with the stores volume, service) match golden fixture byte-for-byte |
 | TestDockerConfigJSON | private registry / docker hub fallback | the payload is an auths map keyed by registry carrying the account plus the base64 user:password the engines send |
 | TestDockerConfigJSONEscapesAwkwardValues | - | a password carrying quotes, a backslash or JSON of its own round-trips as data rather than reshaping the document -- which is why it is marshalled, not concatenated |
 | TestResolvePullSecret | reference only | resolves to the given name alone and never reads the registry password |
@@ -1170,7 +1180,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestGenerateKubernetesImagePull | no block / reference / create / create with a retired name | the wiring from config to rendered manifest: nothing, an imagePullSecrets entry alone, or the entry plus a dockerconfigjson Secret named `<deployment>-image-pull` -- with a retired name alongside create ignored rather than rejected -- the integration point TestResolvePullSecret skips |
 | TestGenerateKubernetesImagePull | payload and leak check | the rendered payload decodes to the real account, and the registry password appears nowhere else in the manifest |
 | TestGenerateKubernetesImagePull | variable unset | create fails the generate with an issue naming the variable |
-| TestRetiredCreateNamesDeployButDoNotValidate | - | an env.yaml still naming its credentials/stores Secrets and libs claim generates cleanly under the derived names, the old names nowhere in the manifest, while Validate reports each old key |
+| TestRetiredCreateNamesDeployButDoNotValidate | - | an env.yaml still naming its credentials Secret and libs claim, with a retired stores create: block, generates cleanly under the derived names, the old names nowhere in the manifest, while Validate reports each old key and the retired block |
 | TestConfigRendersTransformHeadersUnderItsWorkflow | - | the second workflow file's transform-headers renders verbatim under solace.connector.workflows.1 and nowhere under 0, and a misspelt transform-header: fails the render instead of being dropped |
 | TestConfigRendersTransformUnderItsWorkflow | - | the second workflow file's transform renders verbatim under solace.connector.workflows.1 and nowhere under 0, a ${...} inside an expression is left as written with no warning, and the transform-headers shape under transform, a transform under a side, and both sections in one file each fail the render |
 | TestTransformHeadersDeprecationIsLintOnly | - | Validate warns that transform-headers is deprecated while Config renders the same file with no such warning |
@@ -1306,7 +1316,7 @@ Tests: [statusreport_test.go](../internal/statusreport/statusreport_test.go), [p
 | TestSortInstancesGroupsByNamespaceThenName | - | a repeated run prints the same order however the engine listed them, grouped by namespace for a cluster-wide report |
 | TestExitCodeText | - | a container that has not terminated carries no exit code |
 | TestParsePodsReadsBothHalvesOfARealPair | - | one `get pods -o json` yields identity, state, readiness, restarts, digest, node and limits; the container's own running-since stamp wins over the pod's startTime, and a CrashLoopBackOff reads as restarting with the last termination's exit code (137, OOMKilled) |
-| TestParsePodsComponentsComeFromWhatThePodReferences | - | components are read from the pod spec (volumes, envFrom, imagePullSecrets) rather than from env.yaml, an emptyDir is not a component, a mounted volume carries its path, and parsing claims no status -- that is a separate probe |
+| TestParsePodsComponentsComeFromWhatThePodReferences | - | components are read from the pod spec (volumes, each source of a projected volume, envFrom, imagePullSecrets) rather than from env.yaml, an emptyDir is not a component, a mounted volume carries its path, and parsing claims no status -- that is a separate probe |
 | TestParsePodsSingleObjectDocument | - | `get pod <name> -o json` answers the object itself with no items array; both shapes parse, since status uses both |
 | TestParsePodsPendingAndTerminatedStates | pending, no container status / waiting on an image pull / terminated | a pod with no container status yet still reports a state from its phase, and each waiting/terminated reason reaches the report |
 | TestParsePodsReadinessIsOnlyAVerdictWhenAProbeExists | - | without a readiness probe the column reads n/a, since kubernetes would otherwise report ready as soon as the container runs |
@@ -1316,6 +1326,7 @@ Tests: [statusreport_test.go](../internal/statusreport/statusreport_test.go), [p
 | TestParsePodsErrorsAndSkips | empty / undecodable / one bad item in a list | an unreadable response is an error, but one unreadable item is skipped so the rest of the report survives |
 | TestParseDeploymentAndService | - | replica counts, `replicas` omitted defaulting to the API's 1, service ports with the omitted protocol defaulting to TCP, a service merged without losing the deployment counts, a service-only workload, and an undecodable service |
 | TestObjectExists | secret / bound claim / pending claim / not a document / empty | a live object reports "present", a volume claim reports its own phase (the only status here that can be bad while the object exists) |
+| TestSecretDataKeys | - | the data keys of a Secret document are read without their values; a Secret with no data has none, and anything else is not a Secret |
 | TestApplyTop | - | the connector's row wins over a sidecar's, a percentage appears only where a limit was read, and a pod the metrics API said nothing about keeps no usage |
 | TestParseInspectDocker | - | docker's leading slash stripped from the name, the compose project read off the container's own label in the same call, the configured image reference rather than the local id, the nanocpu/memory ceilings, the age, and mounts/networks as attached components |
 | TestParseInspectStatesAndHealthSpellings | exited / oom killed / restarting / paused / created / podman stopped cleanly / unknown status / podman Healthcheck key / podman Health key with a log / unhealthy / empty status / no healthcheck | every engine status normalised, a clean stop reporting no exit code (a zero exit adds nothing to the state), both spellings of podman's healthcheck block (including the current one, nesting a Log beside the status, which is what a quadlet HealthCmd produces), an unhealthy verdict passed through as the engine spells it, and n/a both where the block is absent and where it carries an empty status |
@@ -1388,7 +1399,9 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestLoadEnvWorkflowsDirRelativeToEnvFile | - | workflows.dir resolved relative to env file not cwd; exit 0 and stdout has spring: |
 | TestLoadEnvExcludesEnvFileFromWorkflowSet | - | env.yaml excluded from its own workflow scan; exit code 0 |
 | TestDeployKubernetesSeamHappyPath | - | exit 0, 2 runner calls (preflight then apply) with argv [kubectl apply -f -], stdin contains kind: Deployment |
-| TestRemoveKubernetesSeamHappyPath | - | exit 0, 2 runner calls (preflight then delete) with argv [kubectl delete -f -] |
+| TestRemoveKubernetesSeamHappyPath | - | exit 0, runner calls preflight then delete with argv [kubectl delete -f - --ignore-not-found] |
+| TestDeployKubernetesProbesOperatorSecrets | missing Secret / missing key | after the preflight, a get secret per operator Secret; a missing Secret or key stops the deploy before apply, naming the Secret |
+| TestDeployKubernetesProbesOperatorSecrets | not allowed to read it / complete | a Secret the identity may not read only warns, and a complete one lets the apply through |
 | TestDeployKubernetesSeamRejectsUnsafeCommand | - | unsafe kubernetes.command yields exit 1 and zero runner calls |
 | TestAllowCommandFlagBadValueExitsUsageError | path value | `--allow-command` /usr/bin/sudo exits 2, zero runner calls |
 | TestAllowCommandFlagBadValueExitsUsageError | unsafe character | `--allow-command` sudo;rm exits 2, zero runner calls |

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -182,8 +183,24 @@ const statusPasswordPlaceholder = "validate-only-placeholder"
 type KubeOpts struct {
 	// Teardown renders the set for `delete -f -`: no Namespace document, and the
 	// manifest carrying a Namespace, piped to `kubectl delete -f -`, takes the
-	// namespace and everything else living in it.
+	// namespace and everything else living in it. Nothing is resolved for it:
+	// every Secret is rendered by name alone (deploy.Input.Teardown), so remove
+	// needs no exported credential and no store source.
 	Teardown bool
+	// Probes, when non-nil, receives the Secrets the rendered pod reads but the
+	// tool does not write -- each operator Secret a store names
+	// (existing.secret) and an existing credentials Secret -- with the keys the
+	// pod needs from each, for deploy to check on the cluster before applying.
+	Probes *[]SecretProbe
+}
+
+// SecretProbe is one Secret the operator manages that the pod mounts, and the
+// data keys the pod reads from it.
+type SecretProbe struct {
+	Name string
+	Keys []string
+	// Field is the env.yaml position that names the Secret, for messages.
+	Field string
 }
 
 func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...string) (out string, errs, warns []Issue) {
@@ -200,6 +217,7 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		JavaOptions:     e.JavaOptions,
 		Kube:            k,
 		CheckKubernetes: true,
+		Teardown:        opts.Teardown,
 		Env:             res.Env,
 		AllowCommands:   extraAllowed,
 	})
@@ -224,27 +242,36 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		return "", rerrs, warns
 	}
 	in := deploy.Input{Kube: k, Defaults: &e.Defaults, Syslog: e.Defaults.Syslog, Teardown: opts.Teardown}
-	if c := k.Secrets.Credentials; c != nil && c.Create != nil {
-		kvs, err := ResolveCredentials(b.model.Secrets, res)
-		if err != nil {
-			return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+	switch {
+	case opts.Teardown:
+		// Delete needs names only: no credential is resolved, no store opened.
+		if name, _ := k.ImagePullSecretName(); name != "" {
+			in.ImagePull = &deploy.PullSecret{Name: name}
 		}
-		in.CredKVs = kvs
-	}
-	if s := k.Secrets.Stores; s != nil && s.Create != nil {
+	default:
+		if c := k.Secrets.Credentials; c != nil && c.Create != nil {
+			kvs, err := ResolveCredentials(b.model.Secrets, res)
+			if err != nil {
+				return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+			}
+			in.CredKVs = kvs
+		}
 		files, sw, err := resolveStores(b.model.Stores, e.Defaults.TLS, res)
 		warns = append(warns, sw...)
 		if err != nil {
 			return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 		}
 		in.Stores = files
-	}
-	if name, created := k.ImagePullSecretName(); name != "" {
-		ps, err := resolvePullSecret(name, created, e.Image, res)
-		if err != nil {
-			return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+		if name, created := k.ImagePullSecretName(); name != "" {
+			ps, err := resolvePullSecret(name, created, e.Image, res)
+			if err != nil {
+				return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+			}
+			in.ImagePull = ps
 		}
-		in.ImagePull = ps
+	}
+	if opts.Probes != nil {
+		*opts.Probes = secretProbes(k, b.model)
 	}
 	in.Instance = deploy.Instance{
 		Name:         k.Deployment.Name,
@@ -257,6 +284,38 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		RunAs:        runAs,
 	}
 	return deploy.Render(in), nil, warns
+}
+
+// secretProbes lists the operator-managed Secrets the rendered pod mounts and
+// the keys it reads from each: every Secret a selected store names, in
+// first-use order, then an existing credentials Secret with every credential's
+// mount name.
+func secretProbes(k *spec.Kubernetes, m *consolidate.Model) []SecretProbe {
+	var out []SecretProbe
+	at := map[string]int{}
+	for _, st := range m.Stores {
+		if !st.ClusterHeld() {
+			continue
+		}
+		key := st.Secret.EffectiveKey(st.Name)
+		i, ok := at[st.Secret.Name]
+		if !ok {
+			i = len(out)
+			at[st.Secret.Name] = i
+			out = append(out, SecretProbe{Name: st.Secret.Name, Field: "tls.stores." + st.Name + ".existing.secret"})
+		}
+		if !slices.Contains(out[i].Keys, key) {
+			out[i].Keys = append(out[i].Keys, key)
+		}
+	}
+	if name, created := k.CredentialsSecretName(); name != "" && !created && len(m.Secrets) > 0 {
+		keys := make([]string, 0, len(m.Secrets))
+		for _, r := range m.Secrets {
+			keys = append(keys, r.Stable)
+		}
+		out = append(out, SecretProbe{Name: name, Keys: keys, Field: "kubernetes.secrets.credentials.existing"})
+	}
+	return out
 }
 
 // DockerPlan is the rendered compose plus the secret references it declares.
@@ -799,8 +858,10 @@ type mount struct {
 // neither referenced nor mounted. libs stays opt-in -- it has a host dir to name.
 func targetMounts(stores []consolidate.StoreUse, libs *spec.LibsMount, res Resolver) (sm []mount, lm *mount) {
 	for _, st := range stores {
-		if st.Created {
-			continue // no host file: a created store travels as a secret
+		if st.Created || st.File == "" {
+			// No host file: a created store travels as a secret, and one held
+			// only in a kubernetes Secret is refused for docker by validate.
+			continue
 		}
 		sm = append(sm, mount{Field: StoreField(st.Name), Source: res.abs(st.File), Target: tls.MountPath(st.Name), Private: st.Private})
 	}
@@ -908,26 +969,44 @@ func parse(r Request, res Resolver) (wfs []spec.Workflow, e *spec.Env, issues, w
 
 // ---- secret resolution -------------------------------------------------------
 
-// kubeSecretMax is the most data one Kubernetes Secret holds (1 MiB).
-const kubeSecretMax = 1 << 20
+// kubeApplyMax is the most one object can carry through kubectl's client-side
+// `apply`, which is how deploy applies the manifest: apply records the whole
+// object in its last-applied-configuration annotation, and the API server caps
+// an object's annotations at 256 KiB -- well under the 1 MiB a Secret may hold.
+const kubeApplyMax = 256 << 10
 
-// kubeStoresSizeError refuses a stores Secret the API server would reject for
+// kubeApplyAllowance is what the rest of the object -- its metadata, the keys,
+// and the annotation's JSON re-encoding -- is allowed beside the base64 data.
+const kubeApplyAllowance = 4096
+
+// kubeStoresSizeError refuses a stores Secret kubectl apply would reject for
 // size: total is its base64-encoded data, sizes each store's share of it.
 func kubeStoresSizeError(total int, sizes []string) error {
-	if total <= kubeSecretMax {
+	if total+kubeApplyAllowance <= kubeApplyMax {
 		return nil
 	}
-	return fmt.Errorf("the stores Secret would hold %d bytes once base64-encoded (%s), over the %d bytes a Kubernetes Secret holds; trim the stores to the certificates these connections need, or reference an existing Secret with kubernetes.secrets.stores.existing", total, strings.Join(sizes, ", "), kubeSecretMax)
+	return fmt.Errorf("the stores Secret would hold %d bytes once base64-encoded (%s); with %d bytes for the rest of the object that is over the %d bytes kubectl apply carries in its last-applied-configuration annotation. Trim the stores to the certificates these connections need, or load a large store into a Secret yourself (kubectl create secret generic <name> --from-file=...) and name it on the store with existing: {secret: {name: <name>}}", total, strings.Join(sizes, ", "), kubeApplyAllowance, kubeApplyMax)
 }
 
 // resolveStores reads the files of the existing stores the rendered
 // connections select, and builds the created ones (BuildStore), so the
-// kubernetes stores Secret can carry their bytes. Unlike credentials, these
+// kubernetes stores Secret can carry their bytes. A store kept in an
+// operator's Secret (existing.secret) is skipped: the pod reads it from there,
+// and its file, if it names one, is never opened. Unlike credentials, these
 // are files the cluster must hold verbatim, so they are base64-embedded rather
 // than named. Each is keyed by its tls.stores name, the name it is mounted
-// under, whatever the file is called. A set the API server would refuse for
-// size stops here, naming the stores, rather than at kubectl apply.
+// under, whatever the file is called. A set kubectl would refuse for size
+// stops here, naming the stores, rather than at kubectl apply.
 func resolveStores(stores []consolidate.StoreUse, defs spec.TLSConfig, res Resolver) ([]deploy.StoreFile, []Issue, error) {
+	var own []consolidate.StoreUse
+	for _, st := range stores {
+		if !st.ClusterHeld() {
+			own = append(own, st)
+		}
+	}
+	if len(own) == 0 {
+		return nil, nil, nil
+	}
 	if res.ReadFile == nil {
 		return nil, nil, fmt.Errorf("cannot read store files (no file access)")
 	}
@@ -935,7 +1014,7 @@ func resolveStores(stores []consolidate.StoreUse, defs spec.TLSConfig, res Resol
 	var warns []Issue
 	total := 0
 	var sizes []string
-	for _, st := range stores {
+	for _, st := range own {
 		var b []byte
 		if sb := storeBuild(st, defs); sb != nil {
 			built, w, err := BuildStore(*sb, res)

@@ -222,10 +222,13 @@ func TestGoldenKubernetesNoSecrets(t *testing.T) {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	appYAML := norm(string(mustRead(t, "../../testdata/golden/application.yml")))
+	// No secrets block, and still the stores: a selected store the tool holds
+	// is delivered with nothing to configure, as on docker and podman.
 	want := norm(strings.Join([]string{
 		namespaceDoc,
 		configMapDoc(appYAML, false),
-		deploymentDoc(false, false, false, false), // no envFrom, stores, syslog, or libs
+		storesDoc,
+		deploymentDoc(false, true, false, false), // stores; no envFrom, syslog, or libs
 		serviceDoc,
 	}, "---\n"))
 	if norm(out) != want {
@@ -490,11 +493,12 @@ spec:
 		b.WriteString("        - name: secrets\n          secret:\n            secretName: solmq-connector-credentials\n            defaultMode: 0400\n")
 	}
 	if stores {
-		b.WriteString("        - name: stores\n          secret:\n            secretName: solmq-connector-stores\n" +
-			"            items:\n              - key: \"mq-ca\"\n                path: mq-ca\n" +
-			"              - key: \"mq-client\"\n                path: mq-client\n" +
-			"              - key: \"solace-ca\"\n                path: solace-ca\n" +
-			"              - key: \"solace-client\"\n                path: solace-client\n")
+		b.WriteString("        - name: stores\n          projected:\n            defaultMode: 0400\n            sources:\n" +
+			"              - secret:\n                  name: solmq-connector-stores\n                  items:\n" +
+			"                    - key: \"mq-ca\"\n                      path: mq-ca\n" +
+			"                    - key: \"mq-client\"\n                      path: mq-client\n" +
+			"                    - key: \"solace-ca\"\n                      path: solace-ca\n" +
+			"                    - key: \"solace-client\"\n                      path: solace-client\n")
 	}
 	if libs {
 		b.WriteString(`        - name: libs

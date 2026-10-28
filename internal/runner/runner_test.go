@@ -286,7 +286,7 @@ func TestKubernetesRemoveUsesDeleteVerb(t *testing.T) {
 	if _, err := Kubernetes(f, "oc", ActionRemove, "x", nil); err != nil {
 		t.Fatal(err)
 	}
-	wantArgv := []string{"oc", "delete", "-f", "-"}
+	wantArgv := []string{"oc", "delete", "-f", "-", "--ignore-not-found"}
 	if !reflect.DeepEqual(f.calls[0].argv, wantArgv) {
 		t.Errorf("argv = %v, want %v", f.calls[0].argv, wantArgv)
 	}

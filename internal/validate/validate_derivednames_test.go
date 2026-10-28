@@ -14,7 +14,6 @@ func retiredNamesKube() *spec.Kubernetes {
 		Deployment: spec.Deployment{Name: "solmq", Namespace: "ns", Replicas: 1},
 		Secrets: spec.Secrets{
 			Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "solmq-credentials"}},
-			Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{Name: "solmq-tls"}},
 			ImagePull:   &spec.ImagePullSecret{Name: "regcred", Create: true},
 		},
 		Libs: &spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{
@@ -55,7 +54,6 @@ func TestRetiredCreateNamesReportedOnlyByValidate(t *testing.T) {
 		field, derived, ignored, fix string
 	}{
 		{"kubernetes.secrets.credentials.create.name", "solmq-credentials", "solmq-credentials", "Replace the create: block with create: true"},
-		{"kubernetes.secrets.stores.create.name", "solmq-stores", "solmq-tls", "Replace the create: block with create: true"},
 		{"kubernetes.secrets.image-pull.name", "solmq-image-pull", "regcred", "remove create instead"},
 		{"libs.pvc.create.name", "solmq-libs", "jar-libs-pvc", "Remove the name key"},
 	} {
@@ -84,7 +82,6 @@ func TestRetiredCreateNamesReportedOnlyByValidate(t *testing.T) {
 func TestRetiredCreateNamesNeedAKey(t *testing.T) {
 	k := retiredNamesKube()
 	k.Secrets.Credentials.Create.Name = ""
-	k.Secrets.Stores.Create.Name = ""
 	k.Secrets.ImagePull = &spec.ImagePullSecret{Name: "regcred"}
 	k.Libs.PVC.Create.Name = ""
 	errs, _ := Run(Context{

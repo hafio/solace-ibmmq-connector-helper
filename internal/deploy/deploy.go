@@ -1,7 +1,7 @@
 // Package deploy renders the Kubernetes manifests for a consolidated connector:
 // ConfigMap (embedding application.yml) + optional Secrets + Deployment +
-// optional Service. It is pure: secret values and .jks bytes are resolved by the
-// caller (CLI from env/file) and passed in, so this package stays pure.
+// optional Service. It is pure: secret values and TLS store bytes are resolved
+// by the caller (CLI from env/file) and passed in, so this package stays pure.
 package deploy
 
 import (
@@ -36,24 +36,52 @@ type StoreFile struct {
 	Base64 string // base64 of the file bytes
 }
 
-// storeItem maps one key of the stores Secret to the file name the pod mounts
-// it under.
+// storeItem maps one key of a Secret to the file name the pod mounts it under.
 type storeItem struct{ key, path string }
 
-// storeItems is what the stores volume projects: each store a rendered
-// connection selects (Model.Stores), keyed in the Secret by its tls.stores name
-// and mounted under that same name (tls.MountPath), which is where
-// application.yml points. One rule serves a Secret the tool creates and an
-// existing one: its keys are the store names. Listing the keys also makes a key
-// the Secret lacks fail the pod at start rather than the connector at its first
-// TLS handshake. Nil when no store is selected, which projects every key.
-func storeItems(in Input) []storeItem {
+// storeSource is one Secret the stores volume projects, with the items it
+// takes from it.
+type storeSource struct {
+	secret string
+	items  []storeItem
+}
+
+// storeSources is what the stores volume projects, in the order the stores are
+// first selected (Model.Stores): the tool's own stores Secret, holding every
+// selected store that is not kept in an operator's Secret, keyed by its
+// tls.stores name; then each operator Secret a store names
+// (existing.secret), once per distinct Secret, with the data key the store
+// names. Every item is mounted under the store's name (tls.MountPath), which is
+// where application.yml points, whatever Secret it comes from. Listing the
+// keys makes a key a Secret lacks fail the pod at start rather than the
+// connector at its first TLS handshake. Nil when no store is selected.
+func storeSources(in Input) []storeSource {
 	if in.Instance.Model == nil {
 		return nil
 	}
-	var out []storeItem
+	own, _ := in.Kube.StoresSecretName()
+	var out []storeSource
+	at := map[string]int{}
+	add := func(secret string, it storeItem) {
+		i, ok := at[secret]
+		if !ok {
+			i = len(out)
+			at[secret] = i
+			out = append(out, storeSource{secret: secret})
+		}
+		out[i].items = append(out[i].items, it)
+	}
+	// The tool's own Secret comes first whenever it is projected, so its
+	// position does not move as operator Secrets are added or dropped.
 	for _, st := range in.Instance.Model.Stores {
-		out = append(out, storeItem{key: st.Name, path: st.Name})
+		if !st.ClusterHeld() {
+			add(own, storeItem{key: st.Name, path: st.Name})
+		}
+	}
+	for _, st := range in.Instance.Model.Stores {
+		if st.ClusterHeld() {
+			add(st.Secret.Name, storeItem{key: st.Secret.EffectiveKey(st.Name), path: st.Name})
+		}
 	}
 	return out
 }
@@ -96,7 +124,7 @@ type Input struct {
 	// kubernetes key: the same value drives the docker and podman renderers.
 	Syslog *spec.Syslog
 	// Teardown renders the set for `kubectl delete -f -` rather than `apply -f -`,
-	// which changes two things.
+	// which changes three things.
 	//
 	// The Namespace document is dropped. Piping one to delete removes the
 	// namespace and cascades to everything inside it, including workloads this
@@ -111,9 +139,17 @@ type Input struct {
 	// kubernetes.io/pvc-protection holds it while a pod still mounts it, and the
 	// Deployment that owns that pod is never reached. Reversed, the workload goes
 	// first and everything it holds is free by the time its turn comes.
-	Teardown  bool
-	CredKVs   []KV        // resolved credential values (only when credentials.create)
-	Stores    []StoreFile // resolved .jks files (only when stores.create)
+	//
+	// And every Secret the tool owns is rendered by name alone -- delete needs
+	// nothing else -- so remove resolves no credential and opens no store. The
+	// stores Secret is always among them: its name belongs to the instance, so
+	// one an earlier deploy left is removed even when this spec renders none.
+	Teardown bool
+	CredKVs  []KV // resolved credential values (only when credentials.create)
+	// Stores are the bytes of the tool's stores Secret, base64: every selected
+	// store not kept in an operator's Secret, an existing one's PKCS12 read, a
+	// created one built. Empty renders no stores Secret.
+	Stores    []StoreFile
 	ImagePull *PullSecret // nil when no image-pull block is configured
 	Instance  Instance
 }
@@ -272,8 +308,9 @@ func Render(in Input) string {
 	// deployment.name, never after a key in env.yaml, so two instances in one
 	// namespace cannot render -- and later delete -- the same object.
 	credRef, emitCred := in.Kube.CredentialsSecretName()
-	storeRef, emitStores := in.Kube.StoresSecretName()
-	hasStores := storeRef != ""
+	storeRef, _ := in.Kube.StoresSecretName()
+	emitStores := len(in.Stores) > 0
+	hasStores := in.Instance.Model != nil && len(in.Instance.Model.Stores) > 0
 	mgmtPort := ManagementPort(in)
 
 	// Each document is rendered into its own buffer rather than appended to one
@@ -305,8 +342,22 @@ func Render(in Input) string {
 	sep()
 	renderConfigMap(w, in.Instance.Name+"-config", ns, in.Instance.AppYAML, in.Instance.StatusScript, in.Syslog)
 
+	// 2-3c. The Secrets, by name alone for a teardown (see Input.Teardown).
+	if in.Teardown {
+		if emitCred {
+			sep()
+			nameOnlySecret(w, credRef, ns)
+		}
+		sep()
+		nameOnlySecret(w, storeRef, ns)
+		if name, created := in.Kube.ImagePullSecretName(); created {
+			sep()
+			nameOnlySecret(w, name, ns)
+		}
+	}
+
 	// 2. credentials Secret (stringData).
-	if emitCred {
+	if emitCred && !in.Teardown {
 		sep()
 		w.Line(0, "apiVersion: v1")
 		w.Line(0, "kind: Secret")
@@ -320,8 +371,8 @@ func Render(in Input) string {
 		}
 	}
 
-	// 3. stores Secret (base64 data).
-	if emitStores {
+	// 3. stores Secret (base64 data): the selected stores the tool holds.
+	if emitStores && !in.Teardown {
 		sep()
 		w.Line(0, "apiVersion: v1")
 		w.Line(0, "kind: Secret")
@@ -338,7 +389,7 @@ func Render(in Input) string {
 	// 3c. image-pull Secret, only when the tool was asked to build one. A
 	// reference-only block renders no Secret here, so a Secret the operator
 	// created and manages is never overwritten by an apply.
-	if ip := in.ImagePull; ip != nil && ip.DockerConfigJSON != "" {
+	if ip := in.ImagePull; ip != nil && ip.DockerConfigJSON != "" && !in.Teardown {
 		sep()
 		w.Line(0, "apiVersion: v1")
 		w.Line(0, "kind: Secret")
@@ -393,7 +444,7 @@ func Render(in Input) string {
 
 	// 4. Deployment.
 	sep()
-	renderDeployment(w, in, in.Instance, ns, credRef, storeRef, hasStores, mgmtPort)
+	renderDeployment(w, in, in.Instance, ns, credRef, hasStores, mgmtPort)
 
 	// 5. Service (when enabled). spec already defaults an unset service.port to
 	// mgmtPort:mgmtPort (applyKubeDefaults), so there is no fallback to redo here.
@@ -409,6 +460,17 @@ func Render(in Input) string {
 		}
 	}
 	return strings.Join(docs, "---\n")
+}
+
+// nameOnlySecret emits a Secret by kind and name alone: what a teardown hands
+// `kubectl delete`, which needs nothing else, so remove never resolves the
+// values a Secret holds.
+func nameOnlySecret(w *yw, name, ns string) {
+	w.Line(0, "apiVersion: v1")
+	w.Line(0, "kind: Secret")
+	w.Line(0, "metadata:")
+	w.Line(2, "name: "+name)
+	w.Line(2, "namespace: "+ns)
 }
 
 // renderConfigMap emits the ConfigMap embedding the application.yml, the
@@ -450,7 +512,7 @@ func renderConfigMap(w *yw, cmName, ns, appYAML, statusScript string, sys *spec.
 	}
 }
 
-func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef string, hasStores bool, mgmtPort int) {
+func renderDeployment(w *yw, in Input, inst Instance, ns, credRef string, hasStores bool, mgmtPort int) {
 	dep := in.Kube.Deployment
 	name := inst.Name
 	cmName := inst.Name + "-config"
@@ -641,15 +703,22 @@ func renderDeployment(w *yw, in Input, inst Instance, ns, credRef, storeRef stri
 		w.Line(12, "secretName: "+credRef)
 		w.Line(12, "defaultMode: 0400")
 	}
+	// The stores: one projected volume over the tool's stores Secret and every
+	// operator Secret a store names, each item mounted under the store's name.
+	// defaultMode 0400 as the credentials volume: fsGroup (the run-as gid)
+	// makes each file 0440 and readable by the connector.
 	if hasStores {
 		w.Line(8, "- name: stores")
-		w.Line(10, "secret:")
-		w.Line(12, "secretName: "+storeRef)
-		if items := storeItems(in); len(items) > 0 {
-			w.Line(12, "items:")
-			for _, it := range items {
-				w.Line(14, "- key: "+strconv.Quote(it.key))
-				w.Line(16, "path: "+it.path)
+		w.Line(10, "projected:")
+		w.Line(12, "defaultMode: 0400")
+		w.Line(12, "sources:")
+		for _, src := range storeSources(in) {
+			w.Line(14, "- secret:")
+			w.Line(18, "name: "+src.secret)
+			w.Line(18, "items:")
+			for _, it := range src.items {
+				w.Line(20, "- key: "+strconv.Quote(it.key))
+				w.Line(22, "path: "+it.path)
 			}
 		}
 	}

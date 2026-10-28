@@ -20,12 +20,17 @@ const (
 // to one.
 const StoreFormat = "PKCS12"
 
-// Store is one named truststore or keystore: built by the tool from
-// certificate files or a JKS (Create), or a PKCS12 file the operator provides
-// (Existing) -- exactly one, which validate enforces. The password encrypts a
-// created store and opens an existing one, and the connection is wired with it
-// either way. The tags are explicit because `password-env` cannot be reached by
-// yaml.v3's default lowercase-the-field-name mapping.
+// Store is one named truststore or keystore. It has at most one host-side
+// source -- built by the tool from certificate files or a JKS (Create), or a
+// PKCS12 file the operator provides (Existing.PKCS12) -- and optionally a
+// cluster location, a kubernetes Secret the operator manages
+// (Existing.Secret). Kubernetes reads a store from its Secret whenever it names
+// one and never opens the file or builds the store; docker and podman ignore
+// the Secret and need the host-side source. validate enforces the shape. The
+// password encrypts a created store and opens an existing one, and the
+// connection is wired with it either way. The tags are explicit because
+// `password-env` cannot be reached by yaml.v3's default
+// lowercase-the-field-name mapping.
 type Store struct {
 	Password    string         `yaml:"password" expand:"no"`     // credential: out of scope (rule 5)
 	PasswordEnv string         `yaml:"password-env" expand:"no"` // names a host var; expanding it would defeat the -env indirection
@@ -93,9 +98,32 @@ type KeySource struct {
 	Key   string   `yaml:"key"`
 }
 
-// StoreExisting is a PKCS12 file the operator provides.
+// StoreExisting is a store the operator provides: a PKCS12 file on the deploy
+// host, a kubernetes Secret holding it, or both -- the Secret for kubernetes,
+// the file for docker and podman, so one env.yaml serves every platform.
 type StoreExisting struct {
-	PKCS12 string `yaml:"pkcs12"`
+	PKCS12 string       `yaml:"pkcs12"`
+	Secret *StoreSecret `yaml:"secret"`
+}
+
+// StoreSecret locates a store in a kubernetes Secret the operator manages:
+// the Secret's name and the data key holding the PKCS12. Key defaults to the
+// store's own name (EffectiveKey), which is the key the tool's own stores
+// Secret uses. A cert-manager Certificate with keystores.pkcs12 writes its
+// stores under keystore.p12 and truststore.p12, so two stores can name one
+// Secret with a key each.
+type StoreSecret struct {
+	Name string `yaml:"name"`
+	Key  string `yaml:"key"`
+}
+
+// EffectiveKey is the Secret data key the store is read from: Key, or the
+// store's name when Key is unset.
+func (s *StoreSecret) EffectiveKey(store string) string {
+	if s == nil || s.Key == "" {
+		return store
+	}
+	return s.Key
 }
 
 // Secret is the store's password credential.
@@ -119,12 +147,22 @@ func (s *Store) Path() string {
 	return s.Existing.PKCS12
 }
 
-// Configured reports whether the store can be wired: created, or naming its
-// PKCS12. It is the one definition every reader shares -- the Solace
-// api-properties, the MQ SSL bundle, validate and every platform's mount -- so
-// a store validate refuses can never be wired by one and skipped by another.
+// SecretRef is the kubernetes Secret an existing store names, or nil.
+func (s *Store) SecretRef() *StoreSecret {
+	if s == nil || s.Existing == nil {
+		return nil
+	}
+	return s.Existing.Secret
+}
+
+// Configured reports whether the store can be wired: created, naming its
+// PKCS12, or naming the kubernetes Secret that holds it. It is the one
+// definition every reader shares -- the Solace api-properties, the MQ SSL
+// bundle, validate and every platform's mount -- so a store validate refuses
+// can never be wired by one and skipped by another. Every source is mounted at
+// the same path, so the rendered config does not depend on which one it is.
 // Nil-safe: a store name nothing defines is not configured.
-func (s *Store) Configured() bool { return s.Created() || s.Path() != "" }
+func (s *Store) Configured() bool { return s.Created() || s.Path() != "" || s.SecretRef() != nil }
 
 // TLSConfig is the tls: block of env.yaml: any number of named stores. A store
 // has no role of its own -- it is a truststore, a keystore or both according to
@@ -327,7 +365,8 @@ var (
 	storeKeys    = map[string]bool{"password": true, "password-env": true, "create": true, "existing": true}
 	createKeys   = map[string]bool{"certs": true, "keys": true, "jks": true}
 	keyEntryKeys = map[string]bool{"cert": true, "chain": true, "key": true}
-	existingKeys = map[string]bool{"pkcs12": true}
+	existingKeys = map[string]bool{"pkcs12": true, "secret": true}
+	secretKeys   = map[string]bool{"name": true, "key": true}
 )
 
 // StoreKeys lists the keys of a tls.stores.<name> block, sorted -- like the
@@ -342,6 +381,9 @@ func StoreKeyEntryKeys() []string { return sortedKeys(keyEntryKeys) }
 
 // StoreExistingKeys lists the keys of an existing: block, sorted.
 func StoreExistingKeys() []string { return sortedKeys(existingKeys) }
+
+// StoreSecretKeys lists the keys of an existing.secret block, sorted.
+func StoreSecretKeys() []string { return sortedKeys(secretKeys) }
 
 func sortedKeys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
@@ -369,7 +411,7 @@ func (r *rawTLS) UnmarshalYAML(node *yaml.Node) error {
 		case "truststore", "keystore":
 			return fmt.Errorf("tls.%s is no longer read: define each store under tls.stores.<name> and select it on the connection with truststore: <name> or keystore: <name>", k.Value)
 		default:
-			return fmt.Errorf("tls.%s is not a key: tls takes only stores:, a mapping of store names to {password | password-env, create | existing}", k.Value)
+			return fmt.Errorf("tls.%s is not a key: tls takes only stores:, a mapping of store names to {password | password-env, create and/or existing}", k.Value)
 		}
 		if isNull(v) {
 			continue
@@ -400,22 +442,43 @@ func checkStoreBlock(name string, block *yaml.Node) error {
 		key, val := block.Content[n].Value, deref(block.Content[n+1])
 		switch {
 		case key == "file" || key == "type":
-			return fmt.Errorf("tls.stores.%s.%s is no longer read: name a PKCS12 you provide with existing: {pkcs12: <file>}, or have the tool build one with create:", name, key)
+			return fmt.Errorf("tls.stores.%s.%s is no longer read: name a PKCS12 you provide with existing: {pkcs12: <file>}, or one a kubernetes Secret holds with existing: {secret: {name: <Secret>}}, or have the tool build one with create:", name, key)
 		case !storeKeys[key]:
-			return fmt.Errorf("tls.stores.%s.%s is not a store key: a store takes password or password-env, and create: or existing:", name, key)
+			return fmt.Errorf("tls.stores.%s.%s is not a store key: a store takes password or password-env, and create: and/or existing:", name, key)
 		case isNull(val):
 		case key == "create":
 			if err := checkCreateBlock(name, val); err != nil {
 				return err
 			}
 		case key == "existing":
-			if val.Kind != yaml.MappingNode {
-				return fmt.Errorf("tls.stores.%s.existing must be a mapping holding pkcs12: <file>, got a %s", name, YAMLKind(val))
+			if err := checkExistingBlock(name, val); err != nil {
+				return err
 			}
-			for e := 0; e+1 < len(val.Content); e += 2 {
-				if k := val.Content[e].Value; !existingKeys[k] {
-					return fmt.Errorf("tls.stores.%s.existing.%s is not an existing key: existing takes only pkcs12, the PKCS12 file you provide", name, k)
-				}
+		}
+	}
+	return nil
+}
+
+// checkExistingBlock holds an existing: block to pkcs12 and secret, and its
+// secret: block to name and key.
+func checkExistingBlock(name string, block *yaml.Node) error {
+	if block.Kind != yaml.MappingNode {
+		return fmt.Errorf("tls.stores.%s.existing must be a mapping holding pkcs12: <file> and/or secret: {name, key}, got a %s", name, YAMLKind(block))
+	}
+	for e := 0; e+1 < len(block.Content); e += 2 {
+		k, v := block.Content[e].Value, deref(block.Content[e+1])
+		if !existingKeys[k] {
+			return fmt.Errorf("tls.stores.%s.existing.%s is not an existing key: existing takes pkcs12 (a PKCS12 file you provide) and secret (a kubernetes Secret you manage that holds it)", name, k)
+		}
+		if k != "secret" || isNull(v) {
+			continue
+		}
+		if v.Kind != yaml.MappingNode {
+			return fmt.Errorf("tls.stores.%s.existing.secret must be a mapping holding name: <Secret> and optionally key: <data key>, got a %s", name, YAMLKind(v))
+		}
+		for s := 0; s+1 < len(v.Content); s += 2 {
+			if sk := v.Content[s].Value; !secretKeys[sk] {
+				return fmt.Errorf("tls.stores.%s.existing.secret.%s is not a secret key: secret takes name (the kubernetes Secret) and key (its data key, by default the store name)", name, sk)
 			}
 		}
 	}
