@@ -51,7 +51,7 @@ The second (or third) word of a command, after the verb.
 
 Accepted as a `--platform` value, alongside the canonical names, by:
 
-`generate`/`deploy`/`remove`/`status`/`logs`/`cli`.
+`generate`/`deploy`/`remove`/`start`/`stop`/`restart`/`status`/`logs`/`cli`.
 
 | Short | Stands for |
 |-------|------------|

@@ -927,7 +927,7 @@ func TestPreflightExtraAllowedThreadsThrough(t *testing.T) {
 
 func TestPreflightUnknownAction(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", "restart", "", nil); err == nil {
+	if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", "rollback", "", nil); err == nil {
 		t.Fatal("unknown action must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -2164,5 +2164,75 @@ func TestDockerImagePull(t *testing.T) {
 	unsafe := &fakeRunner{}
 	if _, err := DockerImagePull(unsafe, "docker; rm -rf /", "img:1", nil); err == nil || len(unsafe.calls) != 0 {
 		t.Errorf("an unsafe command must be rejected before running: err=%v calls=%d", err, len(unsafe.calls))
+	}
+}
+
+// The lifecycle helpers act on what deploy created, in place, through the
+// configured command: kubernetes scales the Deployment to 0 and back to its
+// replicas, or rolls it; docker starts, stops or restarts the container;
+// podman does the same to the unit through systemctl, in the unit's scope.
+func TestLifecycleArgv(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		run  func(r Runner) (string, error)
+		want []string
+	}{
+		{"kubernetes stop", func(r Runner) (string, error) {
+			return KubernetesLifecycle(r, "kubectl", ActionStop, "ns", "c", 3, nil)
+		}, []string{"kubectl", "--namespace", "ns", "scale", "deployment/c", "--replicas=0"}},
+		{"kubernetes start", func(r Runner) (string, error) {
+			return KubernetesLifecycle(r, "oc", ActionStart, "ns", "c", 3, nil)
+		}, []string{"oc", "--namespace", "ns", "scale", "deployment/c", "--replicas=3"}},
+		{"kubernetes restart, current namespace", func(r Runner) (string, error) {
+			return KubernetesLifecycle(r, "kubectl", ActionRestart, "", "c", 1, nil)
+		}, []string{"kubectl", "rollout", "restart", "deployment/c"}},
+		{"docker stop", func(r Runner) (string, error) {
+			return DockerLifecycle(r, "docker --context prod", ActionStop, "connector", nil)
+		}, []string{"docker", "--context", "prod", "stop", "connector"}},
+		{"docker restart", func(r Runner) (string, error) {
+			return DockerLifecycle(r, "docker", ActionRestart, "connector", nil)
+		}, []string{"docker", "restart", "connector"}},
+		{"podman start, user unit", func(r Runner) (string, error) {
+			return PodmanLifecycle(r, QuadletScope{UserMode: true}, ActionStart, "connector.service")
+		}, []string{"systemctl", "--user", "start", "connector.service"}},
+		{"podman stop, system unit", func(r Runner) (string, error) {
+			return PodmanLifecycle(r, QuadletScope{}, ActionStop, "connector.service")
+		}, []string{"systemctl", "stop", "connector.service"}},
+	} {
+		f := &fakeRunner{}
+		if _, err := c.run(f); err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, c.want) {
+			t.Errorf("%s: argv = %+v, want %v", c.name, f.calls, c.want)
+		}
+	}
+	for _, bad := range []func(r Runner) (string, error){
+		func(r Runner) (string, error) {
+			return KubernetesLifecycle(r, "kubectl", ActionDeploy, "ns", "c", 1, nil)
+		},
+		func(r Runner) (string, error) { return DockerLifecycle(r, "docker", "kill", "c", nil) },
+		func(r Runner) (string, error) { return PodmanLifecycle(r, QuadletScope{}, ActionRemove, "c.service") },
+		func(r Runner) (string, error) { return DockerLifecycle(r, "docker; rm -rf /", ActionStop, "c", nil) },
+	} {
+		f := &fakeRunner{}
+		if _, err := bad(f); err == nil || len(f.calls) != 0 {
+			t.Errorf("an unknown action or unsafe command must fail before running: err %v, calls %+v", err, f.calls)
+		}
+	}
+}
+
+// The lifecycle verbs' kubernetes preflight asks to patch the Deployment,
+// which scale and rollout restart both do.
+func TestPreflightKubernetesLifecycleAsksToPatch(t *testing.T) {
+	for _, action := range []string{ActionStart, ActionStop, ActionRestart} {
+		f := &fakeRunner{}
+		if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", action, "ns", nil); err != nil {
+			t.Fatalf("%s: %v", action, err)
+		}
+		if want := []string{"kubectl", "auth", "can-i", "patch", "deployment", "--namespace", "ns"}; !reflect.DeepEqual(f.calls[0].argv, want) {
+			t.Errorf("%s: argv = %v, want %v", action, f.calls[0].argv, want)
+		}
 	}
 }

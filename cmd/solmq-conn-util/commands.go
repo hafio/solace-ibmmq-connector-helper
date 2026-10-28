@@ -262,11 +262,11 @@ var cliFlags = []cliFlag{
 	// argName, not argFile: the value must be a bare, PATH-resolved binary name
 	// (allowCommandValue rejects a path), so offering filenames would suggest
 	// exactly what the flag refuses.
-	{Short: allowCommandFlagName, Long: allowCommandFlagName, AppliesTo: bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "approve an extra command binary beyond the " + cmdFieldSpan + " allowlist; repeatable", Arg: argName, Usage: "approve an extra command binary beyond the platform allowlist (repeatable)"},
+	{Short: allowCommandFlagName, Long: allowCommandFlagName, AppliesTo: bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "start" + bt + "/" + bt + "stop" + bt + "/" + bt + "restart" + bt + "/" + bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "approve an extra command binary beyond the " + cmdFieldSpan + " allowlist; repeatable", Arg: argName, Usage: "approve an extra command binary beyond the platform allowlist (repeatable)"},
 	// argName: the model has no enumerated-value kind (only argNone/argFile/
 	// argName), so this value offers no shell suggestions even though it is one
 	// of three fixed words. Adding a kind means teaching all four renderers.
-	{Short: platformFlagName, Long: platformFlagName, AppliesTo: bt + "generate" + bt + "/" + bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "the platform: " + bt + "kubernetes" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " (short: " + bt + "kube" + bt + ", " + bt + "dk" + bt + ", " + bt + "pm" + bt + "; default: resolved from env.yaml, or an interactive menu -- see [Platform resolution](commands.md#platform-resolution))", Arg: argName, Usage: "kubernetes, docker, or podman (short: kube, dk, pm; default: from env.yaml, or a menu)"},
+	{Short: platformFlagName, Long: platformFlagName, AppliesTo: bt + "generate" + bt + "/" + bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "start" + bt + "/" + bt + "stop" + bt + "/" + bt + "restart" + bt + "/" + bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "the platform: " + bt + "kubernetes" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " (short: " + bt + "kube" + bt + ", " + bt + "dk" + bt + ", " + bt + "pm" + bt + "; default: resolved from env.yaml, or an interactive menu -- see [Platform resolution](commands.md#platform-resolution))", Arg: argName, Usage: "kubernetes, docker, or podman (short: kube, dk, pm; default: from env.yaml, or a menu)"},
 	// argName, not argFile: a URL is not a filesystem path, so offering file
 	// suggestions would suggest exactly the wrong kind of value.
 	{Short: urlFlagName, Long: urlFlagName, AppliesTo: bt + "download" + bt, Meaning: "exact URL to download instead of Maven resolution; repeatable; when given, no resolution happens at all", Arg: argName, Usage: "exact URL to download instead of Maven resolution (repeatable)"},
@@ -332,6 +332,36 @@ var cliVerbs = []cliVerb{
 			"On kubernetes the namespace is handled separately, and never as part of the manifest delete: deleting a Namespace cascades to every object inside it, including workloads this tool never deployed. " +
 			"So once the teardown succeeds, " + bt + "remove" + bt + " looks at what is left in the namespace. Anything this release does not own -- another deployment, a stateful set, a volume claim, a secret -- is listed and the namespace is kept. Only a namespace with nothing else in it is offered for removal, as its own separate question.\n\n" +
 			"That is an invariant rather than a default: no flag removes a namespace that still holds someone else's work. The cluster namespaces (" + bt + "default" + bt + ", " + bt + "kube-system" + bt + ", " + bt + "kube-public" + bt + ", " + bt + "kube-node-lease" + bt + ") are never removed either, and a check that cannot run leaves the namespace alone rather than assuming it is empty.",
+	},
+	{
+		Name: "start", Args: platformArgBracket + " [-e env.yaml] [" + allowCommandFlagName + " name]",
+		Flags: []string{platformFlagName, "-e", allowCommandFlagName}, PosArg: posNone,
+		Synopsis:   "start [flags]",
+		Summary:    "Start the instance deploy created, as it stands",
+		Example:    "solmq-conn-util start --platform docker -e env.yaml",
+		TreeSuffix: bt + platformArgBracket + bt,
+		Detail: "Starts the instance " + bt + "deploy" + bt + " created for the platform, in place: on kubernetes the Deployment is scaled back to " + bt + "deployment.replicas" + bt + "; on docker the container is started (" + bt + "docker start" + bt + "), decoding any created store again; on podman the unit is started (" + bt + "systemctl [--user] start" + bt + "), which creates the container from it. " + platformResolutionPointer + "\n\n" +
+			"It reads " + bt + "env.yaml" + bt + " for the platform section's names and " + cmdFieldSpan + " only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no " + bt + "-env" + bt + " variable exported. It shells out through the same binary allowlist and " + allowCommandSpan + ", after the same read-only preflight probe, as " + bt + "deploy" + bt + "; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another.",
+	},
+	{
+		Name: "stop", Args: platformArgBracket + " [-e env.yaml] [" + allowCommandFlagName + " name]",
+		Flags: []string{platformFlagName, "-e", allowCommandFlagName}, PosArg: posNone,
+		Synopsis:   "stop [flags]",
+		Summary:    "Stop the instance deploy created, keeping it to start again",
+		Example:    "solmq-conn-util stop --platform kubernetes -e env.yaml",
+		TreeSuffix: bt + platformArgBracket + bt,
+		Detail: "Stops the instance " + bt + "deploy" + bt + " created for the platform, keeping everything it needs to start again: on kubernetes the Deployment is scaled to 0 replicas (its ConfigMap and Secrets stay; a later " + bt + "deploy" + bt + " or " + bt + "start" + bt + " scales it back); on docker the container is stopped, and its restart policy leaves it stopped; on podman the unit is stopped, which removes its container. " + platformResolutionPointer + "\n\n" +
+			"It reads " + bt + "env.yaml" + bt + " for the platform section's names and " + cmdFieldSpan + " only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no " + bt + "-env" + bt + " variable exported. It shells out through the same binary allowlist and " + allowCommandSpan + ", after the same read-only preflight probe, as " + bt + "deploy" + bt + "; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another.",
+	},
+	{
+		Name: "restart", Args: platformArgBracket + " [-e env.yaml] [" + allowCommandFlagName + " name]",
+		Flags: []string{platformFlagName, "-e", allowCommandFlagName}, PosArg: posNone,
+		Synopsis:   "restart [flags]",
+		Summary:    "Restart the instance, so it reloads its config and TLS stores",
+		Example:    "solmq-conn-util restart --platform kubernetes -e env.yaml",
+		TreeSuffix: bt + platformArgBracket + bt,
+		Detail: "Restarts the instance " + bt + "deploy" + bt + " created for the platform -- what makes the connector load a rotated TLS store or a changed " + bt + "application.yml" + bt + " where " + bt + "deploy" + bt + " does not restart it: on kubernetes it is " + bt + "kubectl rollout restart" + bt + ", which replaces the pods one at a time; on docker the container is restarted, decoding any created store again (a store a docker " + bt + "deploy" + bt + " changed has already recreated it); on podman the unit is restarted, which creates its container again from the unit. " + platformResolutionPointer + "\n\n" +
+			"It reads " + bt + "env.yaml" + bt + " for the platform section's names and " + cmdFieldSpan + " only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no " + bt + "-env" + bt + " variable exported. It shells out through the same binary allowlist and " + allowCommandSpan + ", after the same read-only preflight probe, as " + bt + "deploy" + bt + "; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another.",
 	},
 	{
 		Name: "status", Args: statusTargetArgBracket + " " + statusFlagArgs, TargetArgs: statusFlagArgs,

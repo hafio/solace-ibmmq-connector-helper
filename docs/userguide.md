@@ -225,7 +225,7 @@ reference verbatim and says so ([section 5.1](#51-variable-expansion-var)).
 
 The first argument is a **verb**. `generate` takes an optional second argument,
 `config` (short `cfg`), which emits `application.yml`. The platform for
-`generate`/`deploy`/`remove`/`status`/`logs`/`cli` comes from `--platform`,
+`generate`/`deploy`/`remove`/`start`/`stop`/`restart`/`status`/`logs`/`cli` comes from `--platform`,
 resolved in this order:
 
 1. `--platform`, if given -- it must name a section actually present in
@@ -250,6 +250,8 @@ solmq-conn-util deploy (dp)    [--platform kubernetes|docker|podman] [-e env.yam
                                                                    Generate for the resolved platform, then apply it
 solmq-conn-util remove (rm)    [--platform kubernetes|docker|podman] [--no-prompt] [-e env.yaml] [--allow-command name]
                                                                    Tear down what deploy created for the resolved platform
+solmq-conn-util start|stop|restart [--platform kubernetes|docker|podman] [-e env.yaml] [--allow-command name]
+                                                                   Start, stop or restart the instance deploy created, in place
 solmq-conn-util status (sts)   <container|application|all> [-d] [-w] [--all] [--output table|json] [--install] [--platform kubernetes|docker|podman] [-e env.yaml] [--pod name] [--container name] [--namespace ns] [--management-port port] [--user name] [--command name] [--allow-command name]
                                                                    Report each instance: the engine's view (container), the connector's own (application), or both (all)
 solmq-conn-util logs (lg)      [--follow] [--previous] [--tail N] [--since d] [--timestamps] [--platform kubernetes|docker|podman] [-e env.yaml] [--pod name|index] [--container name|index] [--namespace ns] [--command name] [--allow-command name]
@@ -386,6 +388,16 @@ it -- see [section 12.9](#129-what-the-exit-code-means-and-what-each-view-costs)
   the one check `validate` cannot make, since the Secret lives only in the cluster.
   A kubernetes `remove` resolves nothing: it names every Secret the tool owns
   for deletion and needs no exported credential and no store file.
+- **`start`**, **`stop`** and **`restart`** act on the instance `deploy`
+  created, in place: on kubernetes `stop` scales the Deployment to 0 and `start`
+  back to `deployment.replicas`, and `restart` is `kubectl rollout restart`; on
+  docker they are `docker stop`/`start`/`restart` on the container; on podman
+  `systemctl [--user] stop`/`start`/`restart` on its unit. They read `env.yaml`
+  for the section's names and `command:` only -- nothing is rendered, no
+  credential resolved, no store opened -- and run the same preflight probe as
+  `deploy`. `restart` is how the connector picks up a rotated TLS store or a
+  changed `application.yml` where `deploy` does not restart it (kubernetes, or a
+  Secret you manage).
 - **`status`** reports the state of each instance of the resolved platform. Its
   target word picks which half: `container` reads the engine from outside
   (state, restarts, age, image), `application` runs the generated script inside
@@ -1258,9 +1270,9 @@ source, or an existing store's PKCS12 -- and run `deploy`. The connector reads i
 stores only when it starts, so it has to restart to pick the new store up: a
 podman `deploy` restarts the unit itself, and a docker `deploy` recreates the
 container whenever any selected store changed, created or existing. Kubernetes
-pods are not restarted by `deploy`: follow it with `kubectl rollout restart
-deployment/<name>`, and do the same after updating a Secret you manage
-(`existing.secret`).
+pods are not restarted by `deploy`: follow it with `solmq-conn-util restart`
+(`kubectl rollout restart deployment/<name>` underneath), and do the same after
+updating a Secret you manage (`existing.secret`).
 
 Why build instead of `openssl pkcs12 -export`: a truststore made with
 `openssl pkcs12 -export -nokeys` loads in Java as an **empty** store, because Java
@@ -1538,8 +1550,10 @@ to `<command> delete -f -`.
 > and run. Follow such a deploy with:
 >
 > ```sh
-> kubectl rollout restart deployment/<name>
+> solmq-conn-util restart --platform kubernetes -e env.yaml
 > ```
+>
+> which runs `kubectl rollout restart deployment/<name>`.
 
 ```yaml
 kubernetes:
@@ -1665,9 +1679,8 @@ The volume's files are mode `0400`, made readable by the pod's `fsGroup` (the
 run-as gid) exactly as the credentials are -- so under `run-as: image` the
 cluster must assign an `fsGroup`, as OpenShift's SCCs do
 ([section 8.4](#84-run-as-and-container-hardening)). The connector reads its stores
-only when it starts: after a rotated store, run `kubectl rollout restart
-deployment/<name>`, whether `deploy` updated `<name>-stores` or you updated your own
-Secret.
+only when it starts: after a rotated store, run `solmq-conn-util restart`,
+whether `deploy` updated `<name>-stores` or you updated your own Secret.
 
 **Everything the tool creates is named after `deployment.name`.** The ConfigMap is
 `<name>-config`, the Secrets `<name>-credentials`, `<name>-stores` and

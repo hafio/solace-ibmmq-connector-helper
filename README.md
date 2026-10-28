@@ -168,6 +168,9 @@ specs/env.yaml` then applies it by piping the manifest to `kubectl`/`oc`.
 | `generate` | `gen` | Render application.yml, or the deploy artifacts for the resolved platform |
 | `deploy` | `dp` | Generate for a platform, then apply it |
 | `remove` | `rm` | Tear down what deploy created for a platform |
+| `start` | _(none)_ | Start the instance deploy created, as it stands |
+| `stop` | _(none)_ | Stop the instance deploy created, keeping it to start again |
+| `restart` | _(none)_ | Restart the instance, so it reloads its config and TLS stores |
 | `status` | `sts` | Report each instance: container (engine), application (connector), or all |
 | `logs` | `lg` | Print one instance log, where status says what but not why |
 | `cli` | _(none)_ | Open a shell inside one instance, or run one command in it |
@@ -188,7 +191,7 @@ output is buffered so a failed run never leaves a half-written `-o` file;
 `generate` and `deploy` would stop at on the TLS store files before they reach a
 platform.
 
-`deploy`, `remove`, `status`, `logs`, and `cli` all run the platform CLI named
+`deploy`, `remove`, `start`, `stop`, `restart`, `status`, `logs`, and `cli` all run the platform CLI named
 by each section's `command:` through an argv slice -- never a shell. Every
 token is checked against a safe charset, `argv[0]` is checked against a
 per-platform binary allowlist (escape hatch: `--allow-command`), and a

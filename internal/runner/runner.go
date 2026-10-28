@@ -49,6 +49,12 @@ var preflightHints = map[string]string{
 const (
 	ActionDeploy = "deploy"
 	ActionRemove = "remove"
+
+	// The lifecycle actions act on an instance deploy already created, in
+	// place: nothing is rendered or applied, and nothing deploy made is removed.
+	ActionStart   = "start"
+	ActionStop    = "stop"
+	ActionRestart = "restart"
 )
 
 // Cmd is one process invocation. Argv[0] is the program and Argv[1:] its
@@ -448,6 +454,60 @@ func Docker(r Runner, command, action, composeFile string, env []string, extraAl
 	return r.Run(Cmd{Argv: argv, Env: env})
 }
 
+// KubernetesLifecycle stops, starts or restarts a Deployment in place: stop
+// scales it to 0, start scales it back to replicas (the env.yaml value), and
+// restart is `rollout restart`, which replaces the pods one by one as a
+// rollout does.
+func KubernetesLifecycle(r Runner, command, action, namespace, name string, replicas int, extraAllowed []string) (string, error) {
+	argv, err := ParseCommand(validate.PlatformKubernetes, command, extraAllowed)
+	if err != nil {
+		return "", err
+	}
+	if namespace != "" {
+		argv = append(argv, "--namespace", namespace)
+	}
+	switch action {
+	case ActionStop:
+		argv = append(argv, "scale", "deployment/"+name, "--replicas=0")
+	case ActionStart:
+		argv = append(argv, "scale", "deployment/"+name, "--replicas="+strconv.Itoa(replicas))
+	case ActionRestart:
+		argv = append(argv, "rollout", "restart", "deployment/"+name)
+	default:
+		return "", fmt.Errorf("unknown lifecycle action %q", action)
+	}
+	return r.Run(Cmd{Argv: argv})
+}
+
+// DockerLifecycle runs `<command> start|stop|restart <container>` on the
+// container a deploy created.
+func DockerLifecycle(r Runner, command, action, container string, extraAllowed []string) (string, error) {
+	argv, err := ParseCommand(validate.PlatformDocker, command, extraAllowed)
+	if err != nil {
+		return "", err
+	}
+	switch action {
+	case ActionStart, ActionStop, ActionRestart:
+	default:
+		return "", fmt.Errorf("unknown lifecycle action %q", action)
+	}
+	return r.Run(Cmd{Argv: append(argv, action, container)})
+}
+
+// PodmanLifecycle runs `systemctl [--user] start|stop|restart <service>` on
+// the quadlet unit a deploy installed: under quadlet, systemd owns the
+// container, so a podman stop would only be undone by the unit's restart
+// policy, and a stopped unit's container is removed and created again from the
+// unit on start.
+func PodmanLifecycle(r Runner, sc QuadletScope, action, service string) (string, error) {
+	switch action {
+	case ActionStart, ActionStop, ActionRestart:
+	default:
+		return "", fmt.Errorf("unknown lifecycle action %q", action)
+	}
+	return r.Run(Cmd{Argv: sc.systemctlArgs(action, service)})
+}
+
 // DockerImageCommand reads an image's ENTRYPOINT and CMD from the local engine
 // (`<command> image inspect`), for a deploy that overrides the entrypoint to
 // check that it hands over to the command the image really runs. found is
@@ -536,6 +596,9 @@ func canIVerb(action string) (string, error) {
 		return "create", nil
 	case ActionRemove:
 		return "delete", nil
+	case ActionStart, ActionStop, ActionRestart:
+		// scale and rollout restart both patch the Deployment.
+		return "patch", nil
 	default:
 		return "", fmt.Errorf("unknown action %q (want %q or %q)", action, ActionDeploy, ActionRemove)
 	}

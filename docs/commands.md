@@ -16,7 +16,7 @@ TestCommandsDocInSync fails the build if this file drifts from the model. -->
 The full `solmq-conn-util` command tree. The first argument is a **verb**.
 `generate` takes an optional second argument, `config`, to render
 `application.yml` instead of a platform's artifacts.
-`generate`/`deploy`/`remove`/`status`/`logs`/`cli` all accept
+`generate`/`deploy`/`remove`/`start`/`stop`/`restart`/`status`/`logs`/`cli` all accept
 `--platform` to pick a **platform**
 (`kubernetes`, `docker`, or `podman`) instead of resolving it from
 `env.yaml`. Every short spelling in here is also listed on its own, keyed
@@ -30,6 +30,9 @@ command model in
 - `generate` (`gen`) `[config]` `[--platform kubernetes|docker|podman]`
 - `deploy` (`dp`) `[--platform kubernetes|docker|podman]`
 - `remove` (`rm`) `[--platform kubernetes|docker|podman]` `[--no-prompt]`
+- `start` `[--platform kubernetes|docker|podman]`
+- `stop` `[--platform kubernetes|docker|podman]`
+- `restart` `[--platform kubernetes|docker|podman]`
 - `status` (`sts`) `<container|application|all>` `[--details]` `[--platform kubernetes|docker|podman]`
 - `logs` (`lg`) `[--follow]` `[--previous]` `[--platform kubernetes|docker|podman]`
 - `cli` `[-- command ...]` `[--platform kubernetes|docker|podman]`
@@ -48,6 +51,9 @@ command model in
 | `solmq-conn-util generate [--platform kubernetes\|docker\|podman] [-e env.yaml] [-o out]` | Render the artifacts for the resolved platform to stdout or a file |
 | `solmq-conn-util deploy [--platform kubernetes\|docker\|podman] [-e env.yaml] [--allow-command name]` | Generate for a platform, then apply it |
 | `solmq-conn-util remove [--platform kubernetes\|docker\|podman] [--no-prompt] [-e env.yaml] [--allow-command name]` | Tear down what deploy created for a platform |
+| `solmq-conn-util start [--platform kubernetes\|docker\|podman] [-e env.yaml] [--allow-command name]` | Start the instance deploy created, as it stands |
+| `solmq-conn-util stop [--platform kubernetes\|docker\|podman] [-e env.yaml] [--allow-command name]` | Stop the instance deploy created, keeping it to start again |
+| `solmq-conn-util restart [--platform kubernetes\|docker\|podman] [-e env.yaml] [--allow-command name]` | Restart the instance, so it reloads its config and TLS stores |
 | `solmq-conn-util status container [--details] [--watch] [--verbose] [--all] [--output table\|json] [--install] [--platform kubernetes\|docker\|podman] [-e env.yaml] [--pod name] [--container name] [--namespace ns] [--management-port port] [--user name] [--command name] [--allow-command name]` | Report what the engine knows: state, restarts, age and image per instance |
 | `solmq-conn-util status application [--details] [--watch] [--verbose] [--all] [--output table\|json] [--install] [--platform kubernetes\|docker\|podman] [-e env.yaml] [--pod name] [--container name] [--namespace ns] [--management-port port] [--user name] [--command name] [--allow-command name]` | Report what the connector knows: leader-election state, health and workflows |
 | `solmq-conn-util status all [--details] [--watch] [--verbose] [--all] [--output table\|json] [--install] [--platform kubernetes\|docker\|podman] [-e env.yaml] [--pod name] [--container name] [--namespace ns] [--management-port port] [--user name] [--command name] [--allow-command name]` | Report both halves: the container table, then the application block per instance |
@@ -71,8 +77,8 @@ command model in
 | `-e`, `--env` | all except `examples`/`version`/`auto-complete`/`help` | config file, relative or absolute path (default: `env.yaml`) |
 | `-o`, `--out` | `generate` | write output to a file (default: stdout) |
 | `-f`, `--force` | `examples`/`download` | overwrite existing files |
-| `--allow-command` | `deploy`/`remove`/`status`/`logs`/`cli` | approve an extra command binary beyond the `command:` allowlist; repeatable |
-| `--platform` | `generate`/`deploy`/`remove`/`status`/`logs`/`cli` | the platform: `kubernetes`, `docker`, or `podman` (short: `kube`, `dk`, `pm`; default: resolved from env.yaml, or an interactive menu -- see [Platform resolution](commands.md#platform-resolution)) |
+| `--allow-command` | `deploy`/`remove`/`start`/`stop`/`restart`/`status`/`logs`/`cli` | approve an extra command binary beyond the `command:` allowlist; repeatable |
+| `--platform` | `generate`/`deploy`/`remove`/`start`/`stop`/`restart`/`status`/`logs`/`cli` | the platform: `kubernetes`, `docker`, or `podman` (short: `kube`, `dk`, `pm`; default: resolved from env.yaml, or an interactive menu -- see [Platform resolution](commands.md#platform-resolution)) |
 | `--url` | `download` | exact URL to download instead of Maven resolution; repeatable; when given, no resolution happens at all |
 | `--version` | `download` | pin the seed release (the IBM MQ client jar, or the syslog encoder jar) instead of resolving it; empty means latest stable -- for the syslog encoder, the newest release that fits the Jackson generation the connector ships |
 | `--omit-lib-file` | `download` | a jar list that replaces (never merges with) the built-in list the omission rule compares against; an empty file omits nothing |
@@ -169,6 +175,42 @@ Flags: `--no-prompt`; `--platform`; `-e`, `--env`; `--allow-command`.
 
 ```sh
 solmq-conn-util remove --platform kubernetes -e env.yaml
+```
+
+### start
+
+Starts the instance `deploy` created for the platform, in place: on kubernetes the Deployment is scaled back to `deployment.replicas`; on docker the container is started (`docker start`), decoding any created store again; on podman the unit is started (`systemctl [--user] start`), which creates the container from it. For how the platform is picked, see [Platform resolution](#platform-resolution).
+
+It reads `env.yaml` for the platform section's names and `command:` only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no `-env` variable exported. It shells out through the same binary allowlist and `--allow-command`, after the same read-only preflight probe, as `deploy`; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another.
+
+Flags: `--platform`; `-e`, `--env`; `--allow-command`.
+
+```sh
+solmq-conn-util start --platform docker -e env.yaml
+```
+
+### stop
+
+Stops the instance `deploy` created for the platform, keeping everything it needs to start again: on kubernetes the Deployment is scaled to 0 replicas (its ConfigMap and Secrets stay; a later `deploy` or `start` scales it back); on docker the container is stopped, and its restart policy leaves it stopped; on podman the unit is stopped, which removes its container. For how the platform is picked, see [Platform resolution](#platform-resolution).
+
+It reads `env.yaml` for the platform section's names and `command:` only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no `-env` variable exported. It shells out through the same binary allowlist and `--allow-command`, after the same read-only preflight probe, as `deploy`; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another.
+
+Flags: `--platform`; `-e`, `--env`; `--allow-command`.
+
+```sh
+solmq-conn-util stop --platform kubernetes -e env.yaml
+```
+
+### restart
+
+Restarts the instance `deploy` created for the platform -- what makes the connector load a rotated TLS store or a changed `application.yml` where `deploy` does not restart it: on kubernetes it is `kubectl rollout restart`, which replaces the pods one at a time; on docker the container is restarted, decoding any created store again (a store a docker `deploy` changed has already recreated it); on podman the unit is restarted, which creates its container again from the unit. For how the platform is picked, see [Platform resolution](#platform-resolution).
+
+It reads `env.yaml` for the platform section's names and `command:` only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no `-env` variable exported. It shells out through the same binary allowlist and `--allow-command`, after the same read-only preflight probe, as `deploy`; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another.
+
+Flags: `--platform`; `-e`, `--env`; `--allow-command`.
+
+```sh
+solmq-conn-util restart --platform kubernetes -e env.yaml
 ```
 
 ### status
