@@ -321,7 +321,7 @@ details[open]>summary::before{content:"- "}
         <option value="">(none)</option>
         <option value="create">create</option>
         <option value="existing">existing</option>
-      </select><div class="h">Keys come from the credential fields above -- each *-env name is its own key. <b>create</b> builds the Secret and fills those keys from your environment; <b>existing</b> leaves your Secret alone, so it must already carry them.</div></div>
+      </select><div class="h">Keys come from the credential fields above -- each *-env name is its own key. <b>create</b> builds the Secret and fills those keys from your environment; <b>existing</b> leaves your Secret alone, so it must already carry them. Required once any credential field is set: without it nothing is mounted and every ${...} stays unresolved.</div></div>
       <div class="opt-fields" id="k8s-cred-c">
         <div class="h">The Secret is named &lt;deployment name&gt;-credentials, so two instances in one namespace never share it.</div>
       </div>
@@ -1789,6 +1789,14 @@ function validateModel(m){
   if(m.kube){
     checkKube(add, warn, m);
     checkRunAs(add, warn, 'kubernetes', m.kube.runAs);
+    // Mirrors validate.checkTargets: without the credentials Secret nothing is
+    // mounted, so every ${...} the config carries stays unresolved at runtime.
+    // An error, as on validate, generate and deploy (only remove, which the page
+    // never runs, lets it pass as a warning).
+    const cred = m.kube.cred;
+    if(usesCredentials(resolved, m) && !(cred && (cred.create || cred.existing))){
+      add(ENV_FILE, `credentials are referenced but kubernetes.secrets.credentials is omitted, so nothing would be mounted at ${SECRETS_MOUNT} and every \${...} in the generated config would stay unresolved at runtime: add kubernetes.secrets.credentials with create: true (the tool builds ${m.kube.deployment.name}-credentials from the literals and -env variables the config names) or existing: <Secret> (a Secret you manage, keyed by those names)`);
+    }
   }
   if(m.docker){
     checkContainerTarget(add, warn, m, m.docker);
@@ -2796,6 +2804,30 @@ function selectedStoreNames(resolved, m){
     if(c) take(c.side);
   }
   return out;
+}
+// usesCredentials mirrors validate.usesCredentials: whether anything resolves
+// to a mounted credential -- both sides of every resolved workflow, the
+// rendered leader-election session, inline or conn-ref (the form sets neither
+// under standalone, which renders none), the management accounts, and the
+// passwords of the stores a connection selects.
+function usesCredentials(resolved, m){
+  const sides = [];
+  resolved.forEach(wf => { sides.push(wf.source, wf.target); });
+  const le = m.leader;
+  if(le.session) sides.push(le.session);
+  if(le.connRef){
+    const c = m.connections.find(x => x.name === le.connRef);
+    if(c) sides.push(c.side);
+  }
+  const held = s => s && (s.system === 'mq'
+    ? !credEmpty(s.user) || !credEmpty(s.password)
+    : !credEmpty(s.clientUser) || !credEmpty(s.clientPass));
+  if(sides.some(held)) return true;
+  if((m.security.users || []).some(u => !credEmpty(u.password))) return true;
+  return selectedStoreNames(resolved, m).some(name => {
+    const st = storeByName(m, name);
+    return !!st && !credEmpty(st.password);
+  });
 }
 // checkClusterOnlyStores mirrors validate.checkClusterOnlyStores: docker and
 // podman cannot mount a selected store held only in a kubernetes Secret.

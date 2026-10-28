@@ -251,14 +251,19 @@ func checkTargets(add, warn func(string, string, ...any), ctx Context, resolved 
 	if ctx.CheckKubernetes && ctx.Kube != nil {
 		checkKube(add, warn, ctx)
 		checkRunAs(add, warn, PlatformKubernetes, ctx.Kube.RunAs)
-		// Warn: credentials are referenced but the credentials Secret is not
-		// wired. Without the block there is no volume and no mount, so every
-		// ${...} the config carries stays unresolved -- and because the
-		// configtree import is optional, the connector starts anyway and fails
-		// later against whatever it could not authenticate to. Nothing else
-		// says so, which is the whole reason this warning exists.
+		// Credentials are referenced but the credentials Secret is not wired.
+		// Without the block there is no volume and no mount, so every ${...}
+		// the config carries stays unresolved -- and because the configtree
+		// import is optional, the connector starts anyway and fails later
+		// against whatever it could not authenticate to. So it is an error,
+		// except on a teardown, which needs no credential and must not be
+		// held up by one.
 		if usesCredentials(resolved, ctx.Defaults) && !credentialsWired(ctx.Kube) {
-			warn(fileEnv, "credentials are referenced but kubernetes.secrets.credentials is omitted; they will not be mounted at "+secretsMountPath+" and every ${...} in the generated config will stay unresolved at runtime")
+			report := add
+			if ctx.Teardown {
+				report = warn
+			}
+			report(fileEnv, "credentials are referenced but kubernetes.secrets.credentials is omitted, so nothing would be mounted at %s and every ${...} in the generated config would stay unresolved at runtime: add kubernetes.secrets.credentials with create: true (the tool builds %s from the literals and -env variables the config names) or existing: <Secret> (a Secret you manage, keyed by those names)", secretsMountPath, ctx.Kube.Deployment.Name+spec.CredentialsSecretSuffix)
 		}
 	}
 	// No platform carries a "stores not wired" check: every store a connection
@@ -1210,32 +1215,42 @@ func credentialsWired(k *spec.Kubernetes) bool {
 // than a choice.
 //
 // It walks the same positions consolidate collects from -- both sides of every
-// workflow, the management session, the management accounts, and the store
-// passwords -- because a name that reaches the config as ${...} has to be
-// readable from the mount, wherever in the spec it was written.
+// workflow, the leader-election session consolidate renders (inline or
+// conn-ref), the management accounts, and the passwords of the stores a
+// connection selects (an unselected store's never reaches the config) --
+// because a name that reaches the config as ${...} has to be readable from the
+// mount, wherever in the spec it was written. A session that is not rendered
+// (standalone) is not counted: the error must not fire on what never deploys.
 func usesCredentials(wfs []spec.Workflow, d *spec.Defaults) bool {
+	sides := make([]spec.Side, 0, 2*len(wfs)+1)
 	for _, wf := range wfs {
-		for _, s := range []spec.Side{wf.Source, wf.Target} {
-			if !s.Username().Empty() || !s.Secret().Empty() {
-				return true
+		sides = append(sides, wf.Source, wf.Target)
+	}
+	if d != nil {
+		if sess := inlineSession(d); sess != nil {
+			sides = append(sides, *sess)
+		}
+		if name := leaderConnRef(d); name != "" {
+			if c, ok := d.Connections[name]; ok {
+				sides = append(sides, c)
 			}
+		}
+	}
+	for _, s := range sides {
+		if !s.Username().Empty() || !s.Secret().Empty() {
+			return true
 		}
 	}
 	if d == nil {
 		return false
-	}
-	if s := d.LeaderElection.Session; s != nil {
-		if !s.Username().Empty() || !s.Secret().Empty() {
-			return true
-		}
 	}
 	for _, u := range d.Security.Users {
 		if !u.Secret().Empty() {
 			return true
 		}
 	}
-	for _, st := range d.TLS.Stores {
-		if !st.Secret().Empty() {
+	for _, name := range selectedStoreNames(wfs, d) {
+		if !d.TLS.Store(name).Secret().Empty() {
 			return true
 		}
 	}

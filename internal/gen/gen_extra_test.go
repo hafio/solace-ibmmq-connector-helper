@@ -1097,7 +1097,7 @@ func TestGenerateJavaOptionsReachEveryPlatform(t *testing.T) {
 	const (
 		base   = "image:\n  name: img\n  tag: v1\n"
 		block  = "java-options:\n  tool: >-\n    -Xms512m\n    -Xmx${HEAP:768m}\n  jdk: -Dregion=${REGION}\n"
-		kube   = "kubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n"
+		kube   = "kubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n  secrets:\n    credentials:\n      existing: their-creds\n"
 		docker = "docker:\n  command: docker\n  name: solmq\n"
 		podman = "podman:\n  command: podman\n  name: solmq\n"
 	)
@@ -1316,7 +1316,7 @@ func TestConfigStatusPasswordRandErrorNoOutput(t *testing.T) {
 // the reserved account and the port GenerateKubernetes itself resolved (the
 // same fallback chain deploy.ManagementPort implements).
 func TestGenerateKubernetesCarriesStatusScript(t *testing.T) {
-	envData := "image:\n  name: img\n  tag: v1\nkubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n"
+	envData := "image:\n  name: img\n  tag: v1\nkubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n  secrets:\n    credentials:\n      existing: their-creds\n"
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
 	out, errs, _ := GenerateKubernetes(req, Resolver{Rand: fixedStatusRand}, KubeOpts{})
 	if len(errs) > 0 {

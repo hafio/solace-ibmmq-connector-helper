@@ -1745,11 +1745,21 @@ delete the volume and deploy again to change either setting.
 Omit a `secrets` block and that credentials Secret is not produced and nothing is
 mounted at `/app/external/var/secrets`.
 Omitting a block is the way to say "none" -- a block that is present must choose
-`create` or `existing`, and one that sets neither (or both) is rejected. Omitting
-`credentials` stays legal even when the config still references one: `validate`
-then warns that credentials are referenced but `kubernetes.secrets.credentials` is
-omitted, so they will not be mounted at `/app/external/var/secrets` and every
-`${...}` in the generated config will stay unresolved at runtime.
+`create` or `existing`, and one that sets neither (or both) is rejected. "None" is
+only an answer when nothing needs a credential: once any credential field is set
+-- a username or password on a connection or the leader-election session, a
+management account's password, or the password of a store a connection selects --
+omitting `credentials` is an error on `validate`, `generate` and `deploy`, since
+nothing would be mounted at `/app/external/var/secrets` and every `${...}` in the
+generated config would stay unresolved at runtime. The connector would still
+start (the import of that directory is optional) and fail later against whatever
+it could not authenticate to. `remove` only warns: a teardown needs no credential.
+
+> [!NOTE]
+> **Upgrading an env.yaml that omits `credentials`.** Earlier releases only warned
+> here. Add `credentials: {create: true}` to have the tool build the Secret from
+> the values you already export, or `credentials: {existing: <Secret>}` if you
+> created it yourself.
 
 ### 8.2 docker
 
@@ -2262,6 +2272,9 @@ names until deploying to a platform does.
   `run-as: image` no `fsGroup` is written; OpenShift's restricted SCCs assign one,
   but a platform that runs an arbitrary uid without one leaves the credentials
   unreadable -- the volume mounts and the connector still cannot read them.
+  This is the one platform where credentials need a line of configuration: once
+  any credential is set, omitting `kubernetes.secrets.credentials` is an error
+  ([section 8.1](#81-kubernetes)).
 
   `create` and `existing` are mutually exclusive, and exactly one is required once
   the block is present (omit the whole block and no Secret is wired at all).

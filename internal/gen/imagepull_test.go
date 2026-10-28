@@ -208,15 +208,16 @@ func kubeEnvWithPull(mode string, creds bool) []byte {
 		env += "  user: svc\n  pass-env: REGISTRY_PASSWORD\n"
 	}
 	env += "kubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n"
+	env += "  secrets:\n    credentials:\n      existing: their-creds\n"
 	switch mode {
 	case "reference":
-		env += "  secrets:\n    image-pull:\n      name: regcred\n"
+		env += "    image-pull:\n      name: regcred\n"
 	case "create":
-		env += "  secrets:\n    image-pull:\n      create: true\n"
+		env += "    image-pull:\n      create: true\n"
 	case "create-with-retired-name":
 		// What an env.yaml written before the Secret name was derived still
 		// carries: name is ignored, and only validate reports it.
-		env += "  secrets:\n    image-pull:\n      name: regcred\n      create: true\n"
+		env += "    image-pull:\n      name: regcred\n      create: true\n"
 	}
 	return []byte(env)
 }

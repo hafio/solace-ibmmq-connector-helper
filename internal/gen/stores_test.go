@@ -388,7 +388,7 @@ func validateEnv(stores string, sections ...string) Request {
 // a docker bind mount (the verb checks those on its host) are never read.
 func TestValidateReadsWhatDeployReads(t *testing.T) {
 	const (
-		kube   = "kubernetes:\n  command: kubectl\n  deployment:\n    name: c\n    namespace: ns\n"
+		kube   = "kubernetes:\n  command: kubectl\n  deployment:\n    name: c\n    namespace: ns\n  secrets:\n    credentials:\n      existing: their-creds\n"
 		podman = "podman:\n  command: podman\n  name: c\n"
 		docker = "docker:\n  command: docker\n  name: c\n"
 	)

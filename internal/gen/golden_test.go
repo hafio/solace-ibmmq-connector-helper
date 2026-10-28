@@ -239,7 +239,7 @@ func TestGoldenKubernetesCreate(t *testing.T) {
 		storesDoc(t),
 		pvDoc,
 		pvcDoc,
-		deploymentDoc(true, true, true, true), // envFrom + stores + syslog + libs
+		deploymentDoc("solmq-connector-credentials", true, true, true), // credentials + stores + syslog + libs
 		serviceDoc,
 	}, "---\n"))
 	if norm(out) != want {
@@ -250,20 +250,22 @@ func TestGoldenKubernetesCreate(t *testing.T) {
 func TestGoldenKubernetesNoSecrets(t *testing.T) {
 	setGoldenCredEnv(t)
 	req := loadSpecs(t)
-	// Swap in a secrets/syslog/libs-free kubernetes: section (defaults unchanged).
+	// Swap in a syslog/libs-free kubernetes: section that creates no Secret but
+	// the stores (defaults unchanged).
 	req.Env = &gen.File{Name: "env.yaml", Data: envWithKubeNoSyslog(t, kubeNoSecrets)}
 	out, errs, _ := gen.GenerateKubernetes(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()}, gen.KubeOpts{})
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	appYAML := norm(string(mustRead(t, "../../testdata/golden/application.yml")))
-	// No secrets block, and still the stores: a selected store the tool holds
-	// is delivered with nothing to configure, as on docker and podman.
+	// No Secret but the stores is created: the credentials are the operator's,
+	// and a selected store the tool holds is delivered with nothing to
+	// configure, as on docker and podman.
 	want := norm(strings.Join([]string{
 		namespaceDoc,
 		configMapDoc(appYAML, false),
 		storesDoc(t),
-		deploymentDoc(false, true, false, false), // stores; no envFrom, syslog, or libs
+		deploymentDoc("their-creds", true, false, false), // their credentials + stores; no syslog or libs
 		serviceDoc,
 	}, "---\n"))
 	if norm(out) != want {
@@ -419,15 +421,15 @@ spec:
       targetPort: 8090
 `
 
-// deploymentDoc builds the expected Deployment manifest. hasCreds controls
-// the credentials Secret's volume + mount: no envFrom exists any more --
+// deploymentDoc builds the expected Deployment manifest. credsSecret names the
+// Secret behind the credentials volume + mount ("" for none): no envFrom exists any more --
 // credentials are mounted as files under deploy.SecretsMountPath (one of the
 // two directories the connector's spring.config.import configtree names, S3: no secret in an env var a
 // child process or crash dump could see) -- and automountServiceAccountToken
-// is always false regardless of hasCreds (the connector never calls the
+// is always false regardless of credsSecret (the connector never calls the
 // Kubernetes API). The pod runs as the default non-root run-as with the
 // posture every pod carries.
-func deploymentDoc(hasCreds, stores, syslog, libs bool) string {
+func deploymentDoc(credsSecret string, stores, syslog, libs bool) string {
 	var b strings.Builder
 	b.WriteString(`apiVersion: apps/v1
 kind: Deployment
@@ -481,7 +483,7 @@ spec:
 `)
 	}
 	b.WriteString("          volumeMounts:\n")
-	if hasCreds {
+	if credsSecret != "" {
 		b.WriteString("            - name: secrets\n              mountPath: " + deploy.SecretsMountPath + "\n              readOnly: true\n")
 	}
 	b.WriteString(`            - name: config
@@ -532,8 +534,8 @@ spec:
           configMap:
             name: solmq-connector-config
 `)
-	if hasCreds {
-		b.WriteString("        - name: secrets\n          secret:\n            secretName: solmq-connector-credentials\n            defaultMode: 0400\n")
+	if credsSecret != "" {
+		b.WriteString("        - name: secrets\n          secret:\n            secretName: " + credsSecret + "\n            defaultMode: 0400\n")
 	}
 	if stores {
 		b.WriteString("        - name: stores\n          projected:\n            defaultMode: 0400\n            sources:\n" +
@@ -552,7 +554,9 @@ spec:
 	return b.String()
 }
 
-// kubeNoSecrets is a full kubernetes: section with no secrets, syslog, or libs.
+// kubeNoSecrets is a full kubernetes: section with no syslog or libs, and no
+// Secret the tool creates: the credentials Secret, which the config's ${...}
+// references require, is the operator's own.
 const kubeNoSecrets = `kubernetes:
   command: kubectl
   deployment:
@@ -565,6 +569,9 @@ const kubeNoSecrets = `kubernetes:
   service:
     enabled: true
     port: 8090
+  secrets:
+    credentials:
+      existing: their-creds
 `
 
 // lineDiff returns a compact first-divergence report for two multi-line strings.

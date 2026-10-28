@@ -15,7 +15,14 @@ func kubeWithImage() *spec.Kubernetes {
 		Deployment: baseKubeDeploy(),
 		Command:    spec.DefaultKubeCommand,
 		Service:    baseKubeService(),
+		Secrets:    credsCreated(),
 	}
+}
+
+// credsCreated is the secrets block wfOK's credentials need on kubernetes: the
+// tool builds the Secret, so no other check is disturbed by it.
+func credsCreated() spec.Secrets {
+	return spec.Secrets{Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{}}}
 }
 
 // TestRetiredPerPlatformImageRejected pins the loud failure for each of the
@@ -100,7 +107,7 @@ func TestImageNotRequiredWithoutAPlatform(t *testing.T) {
 func TestImagePullSecretChecks(t *testing.T) {
 	run := func(ip *spec.ImagePullSecret, img *spec.Image, env func(string) (string, bool)) ([]Issue, []Issue) {
 		k := kubeWithImage()
-		k.Secrets = spec.Secrets{ImagePull: ip}
+		k.Secrets.ImagePull = ip
 		return Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: img, Kube: k, CheckKubernetes: true, Env: env})
 	}
 

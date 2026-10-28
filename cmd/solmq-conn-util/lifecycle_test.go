@@ -21,7 +21,7 @@ func TestLifecycleVerbsActInPlace(t *testing.T) {
 		write(t, dir, "10.yaml", tlsWF)
 		return filepath.Join(dir, "env.yaml")
 	}
-	kube := kubeEnv + "    replicas: 2\n"
+	kube := strings.Replace(kubeEnv, "namespace: solace-connectors\n", "namespace: solace-connectors\n    replicas: 2\n", 1)
 	for _, c := range []struct {
 		verb, platform, section string
 		want                    [][]string

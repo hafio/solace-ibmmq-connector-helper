@@ -112,14 +112,17 @@ timezone: UTC
 `
 
 // kubeEnv is a minimal-but-valid kubernetes: section for the deploy/remove/
-// platform-resolution seam tests -- a safe command, and the fields checkKube
-// requires.
+// platform-resolution seam tests -- a safe command, the fields checkKube
+// requires, and the credentials Secret any referenced credential needs.
 const kubeEnv = `
 kubernetes:
   command: kubectl
   deployment:
     name: solmq-connector
     namespace: solace-connectors
+  secrets:
+    credentials:
+      create: true
 `
 
 // kubeEnvUnsafeCommand mirrors kubeEnv but with a command containing a shell
