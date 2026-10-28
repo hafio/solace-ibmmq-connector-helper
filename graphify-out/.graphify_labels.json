@@ -1,6 +1,5 @@
 {
   "5": "Cred",
-  "7": "Internal Package Test Catalog",
   "8": "Bash Dev Script Tasks",
   "9": "PowerShell Dev Script Tasks",
   "12": "completion.go",
@@ -21,7 +20,6 @@
   "41": "Validate Package",
   "42": "Golden Application YAML",
   "46": "libs_test.go",
-  "47": "Project Documentation Files",
   "49": "Command Reference Details",
   "50": "Golden Bash Completion",
   "51": "Model",
@@ -39,14 +37,10 @@
   "73": "Status Command User Guide",
   "76": "Writer",
   "83": "maven.go",
-  "85": "Command Abbreviation Reference",
-  "86": "Auto Complete Command Reference",
   "87": "libs.go",
   "94": "Expand",
   "97": "repeatableName",
   "99": "tailFlag",
-  "102": "Command Reference Overview",
-  "103": "Project Overview And Quick Start",
   "108": "yw",
   "111": "Support Notice Wording"
 }
