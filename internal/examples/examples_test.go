@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/certfixture"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/scan"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -173,18 +174,29 @@ func TestEnvExtraKeysExampleValidWhenUncommented(t *testing.T) {
 // "# broker-ca:" to the end of the tls.stores block loses its "# " -- the set
 // still validates with no error, and every example store is read: the one
 // finding about each is that no connection selects it. validate reads each
-// store a platform loads, as deploy does, and the examples ship none, so
-// stand-ins sit where env.yaml names the selected ones.
+// store a platform loads, as deploy does, and opens it with its password, and
+// the examples ship none, so real stores sit where env.yaml names the selected
+// ones, opened by the passwords their -env variables are set to here.
 func TestEnvCreatedStoreExamplesValidWhenUncommented(t *testing.T) {
 	dir := t.TempDir()
 	req := shippedExamplesRequest(t, dir)
 	if err := os.MkdirAll(filepath.Join(dir, "certs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"solace-ca", "solace-client", "mq-ca", "mq-client"} {
-		if err := os.WriteFile(filepath.Join(dir, "certs", name+".p12"), []byte("P12"), 0o600); err != nil {
+	ca := certfixture.CA(t, "Example Root")
+	client := certfixture.Issue(t, ca, "example-client")
+	for name, store := range map[string][]byte{
+		"solace-ca":     certfixture.TrustStorePKCS12(t, "example-pw", ca),
+		"solace-client": certfixture.KeyStorePKCS12(t, "example-pw", client, ca),
+		"mq-ca":         certfixture.TrustStorePKCS12(t, "example-pw", ca),
+		"mq-client":     certfixture.KeyStorePKCS12(t, "example-pw", client, ca),
+	} {
+		if err := os.WriteFile(filepath.Join(dir, "certs", name+".p12"), store, 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	for _, v := range []string{"SOLACE_TRUSTSTORE_PASSWORD", "SOLACE_KEYSTORE_PASSWORD", "MQ_TRUSTSTORE_PASSWORD", "MQ_KEYSTORE_PASSWORD"} {
+		t.Setenv(v, "example-pw")
 	}
 	lines := strings.Split(string(req.Env.Data), "\n")
 	start := -1
@@ -204,7 +216,7 @@ func TestEnvCreatedStoreExamplesValidWhenUncommented(t *testing.T) {
 	if len(errs) != 0 {
 		t.Fatalf("the uncommented examples must validate, got: %v", errs)
 	}
-	for _, name := range []string{"broker-ca", "partner-ca", "client-id", "legacy-ca"} {
+	for _, name := range []string{"broker-ca", "partner-ca", "client-id", "legacy-ca", "broker-id"} {
 		found := false
 		for _, w := range warns {
 			found = found || strings.Contains(w.Msg, `tls.stores "`+name+`" is not selected by any connection`)

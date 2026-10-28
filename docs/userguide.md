@@ -402,12 +402,16 @@ it -- see [section 12.9](#129-what-the-exit-code-means-and-what-each-view-costs)
   all findings (non-zero exit if any errors). Use it as a linter. It reports every
   error `generate` and `deploy` would stop at before they reach a platform, all in
   one run: once the spec itself validates, it also reads each TLS store a present
-  platform loads, builds each created one in memory (and discards it), holds them
-  to each platform's size limit, and checks docker's bind-mount sources on this
-  host. An unset `-env` variable is a warning, so it runs without the production
-  secrets exported; a created store whose password is unset is still built, with
-  a stand-in, unless it comes from a JKS, which opens with that password. Logins,
-  the image, and the cluster or engine itself are left to `deploy`.
+  platform loads and opens each existing PKCS12 with its password, builds each
+  created one in memory (and discards it), holds them -- and the kubernetes
+  ConfigMap -- to each platform's size limit, and checks docker's bind-mount
+  sources on this host. An unset `-env` variable is a warning, so it runs without
+  the production secrets exported: an existing store is then only held to being
+  a PKCS12, and a created store is still built, with a stand-in password -- one
+  from a JKS has its sources read and its format checked, and only opening the
+  JKS waits for the password. A variable set but empty is the error `deploy`
+  would give. Logins, the image, and the cluster or engine itself are left to
+  `deploy`.
 - **`auto-complete <shell>`** prints a completion script for `bash`, `zsh`, `fish` or
   `powershell` on stdout -- see [section 1.1](#11-shell-completion). It reads no
   `env.yaml` and touches nothing on disk.
@@ -1051,7 +1055,7 @@ mq-defaults:                     # optional; merged into every MQ binder's ibm.m
 | Section | Option | Notes |
 |---------|--------|-------|
 | `connections.<name>` | `solace:`/`mq:` block | a reusable connection tuple (no destination); referenced by `conn-ref` ([section 6.6](#66-reusable-connections-conn-ref)) |
-| `tls.stores.<name>` | `password` (or `password-env`), and `existing` and/or `create` | a named PKCS12 store; any number. A connection selects one as its `truststore:` and/or `keystore:` ([section 6.4](#64-destinations-durable-names-passthrough)); one store may serve several connections. `existing: {pkcs12: <file>}` names a PKCS12 you provide on the deploy host -- it may serve both roles; `create:` has `deploy` build one from certificate files or a JKS ([section 7.2](#72-created-stores-create)); `existing: {secret: {name, key}}` names a kubernetes Secret you manage that holds the store ([section 8.1](#81-kubernetes)). A store has one host-side source at most -- `create:` or `existing.pkcs12` -- and may name a Secret beside it: kubernetes then reads the Secret and never opens the file or builds the store, while docker and podman use the host-side source. A store naming only a Secret is kubernetes-only, and a `docker:` or `podman:` section that selects one is an error. The password opens an existing store and encrypts a created one, and the connection is wired with it either way. Every store is PKCS12, so the tool always writes that type. The name is lowercase letters and digits joined by single hyphens, at most 63 characters (it names the mounted file, the Kubernetes Secret key and the podman secret). Any other key under `tls:` or a store is an error -- the retired `tls.truststore` / `tls.keystore` and a store's retired `file` / `type` included. A store no connection selects is neither mounted nor built, and warns |
+| `tls.stores.<name>` | `password` (or `password-env`), and `existing` and/or `create` | a named PKCS12 store; any number. A connection selects one as its `truststore:` and/or `keystore:` ([section 6.4](#64-destinations-durable-names-passthrough)); one store may serve several connections. `existing: {pkcs12: <file>}` names a PKCS12 you provide on the deploy host -- it may serve both roles; `create:` has `deploy` build one from certificate files or a JKS ([section 7.2](#72-created-stores-create)); `existing: {secret: {name, key}}` names a kubernetes Secret you manage that holds the store ([section 8.1](#81-kubernetes)). A store has one host-side source at most -- `create:` or `existing.pkcs12` -- and may name a Secret beside it: kubernetes then reads the Secret and never opens the file or builds the store, while docker and podman use the host-side source. A store naming only a Secret is kubernetes-only, and a `docker:` or `podman:` section that selects one is an error. The password opens an existing store and encrypts a created one, and the connection is wired with it either way: every verb that reads an existing PKCS12 -- `validate`, kubernetes `generate`/`deploy`, podman and docker `deploy` -- opens it with that password first, refusing a file that is not a PKCS12 (a JKS renamed `.p12`, a PEM) or that the password does not open, and warning about a truststore without Java's trusted-certificate attribute (an `openssl pkcs12 -export -nokeys` truststore made without `-jdktrust`), which Java loads as empty. Every store is PKCS12, so the tool always writes that type. The name is lowercase letters and digits joined by single hyphens, at most 63 characters (it names the mounted file, the Kubernetes Secret key and the podman secret). Any other key under `tls:` or a store is an error -- the retired `tls.truststore` / `tls.keystore` and a store's retired `file` / `type` included. A store no connection selects is neither mounted nor built, and warns |
 | `logging.level` | `<logger>: <level>` | verbatim, order preserved -> `logging.level` |
 | `logging.syslog` | `host`, `port`, `protocol` | optional; ships log lines to syslog **on every platform**, in addition to the console. Emits a `logback-spring.xml` (a ConfigMap key on kubernetes, an inlined compose config on docker, a podman secret on podman) plus `LOGGING_SYSLOG_*` env vars, appname = the instance name. `protocol` is `udp` (default) or `tcp` -- **tcp requires the `logstash-logback-encoder` jar on the connector classpath** (provide it via `libs`; fetch it with `solmq-conn-util download jar syslog`, [section 10](#10-download-jar)) |
 | `management` | `port` | -> `management.server.port`; always emitted, default `8090`. The docker/podman published port and the kubernetes `service.port` ([section 8](#8-platform-sections-kubernetes-docker-podman)) default to it |
@@ -1211,7 +1215,8 @@ What the build checks, and when:
   `password-env` variable exported and non-empty, and every file readable.
   **`validate`** builds the store too, for every platform section present, and
   reports what the build reports; with the password unset it builds with a
-  stand-in (a JKS source, which opens with the password, waits for it).
+  stand-in (a JKS source is read and held to the JKS format, and only opening
+  it waits for the password). A `password-env` set but empty is an error.
   `generate config` never opens them.
 - **Errors**: a file holding no certificate, an encrypted private key (decrypt it
   to a file only you can read, for example `openssl pkey -in key.pem -out

@@ -259,7 +259,7 @@ Alias: `vld`.
 
 Runs every check across the whole `env.yaml` (including any `kubernetes:`/`docker:`/`podman:` sections) and its workflows, printing all findings. Non-zero exit if any errors. Use it as a linter.
 
-It reports every error `generate` and `deploy` would stop at before they reach a platform: once the spec itself validates, it reads each TLS store a present platform loads, builds each created one in memory and discards it, holds them to each platform's size limit, and checks docker's bind-mount sources on this host. An unset `-env` variable is a warning. Logins, the image, and the cluster or engine itself are left to `deploy`.
+It reports every error `generate` and `deploy` would stop at before they reach a platform: once the spec itself validates, it reads each TLS store a present platform loads and opens each existing PKCS12 with its password, builds each created one in memory and discards it, holds them and the kubernetes ConfigMap to each platform's size limit, and checks docker's bind-mount sources on this host. An unset `-env` variable is a warning. Logins, the image, and the cluster or engine itself are left to `deploy`.
 
 Flags: `-e`, `--env`.
 

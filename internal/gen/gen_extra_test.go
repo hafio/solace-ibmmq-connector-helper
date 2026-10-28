@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/certfixture"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/podmangen"
@@ -68,7 +69,7 @@ target:
 
 func TestResolveStores(t *testing.T) {
 	stores := []consolidate.StoreUse{{Name: "mq-ca", File: "certs/t.jks"}, {Name: "mq-client", File: "certs/k.jks", Private: true}}
-	sf, _, err := resolveStores(stores, spec.TLSConfig{}, Resolver{ReadFile: func(string) ([]byte, error) { return []byte("BYTES"), nil }})
+	sf, _, err := resolveStores(stores, spec.TLSConfig{}, Resolver{ReadFile: func(string) ([]byte, error) { return pfxShell(t, 64), nil }})
 	if err != nil || len(sf) != 2 || sf[0].Name != "mq-ca" || sf[1].Name != "mq-client" {
 		t.Fatalf("sf=%+v err=%v", sf, err)
 	}
@@ -86,7 +87,8 @@ func TestResolveStores(t *testing.T) {
 	// its last-applied annotation caps the object at 256 KiB, far below the
 	// 1 MiB a Secret may hold.
 	sized := func(n int) func(string) ([]byte, error) {
-		return func(string) ([]byte, error) { return make([]byte, n), nil }
+		b := pfxShell(t, n)
+		return func(string) ([]byte, error) { return b, nil }
 	}
 	_, _, err = resolveStores(stores, spec.TLSConfig{}, Resolver{ReadFile: sized(100_000)})
 	if err == nil || !strings.Contains(err.Error(), "over the 262144 bytes kubectl apply carries") || !strings.Contains(err.Error(), "mq-ca 133336 bytes") || !strings.Contains(err.Error(), "existing: {secret: {name: <name>}}") {
@@ -1048,7 +1050,7 @@ kubernetes:
           path: /libs
 `
 	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthTLSWorkflowFiles(1, "ts", "")}
-	res := Resolver{Rand: fixedStatusRand, ReadFile: func(string) ([]byte, error) { return []byte("JKS"), nil }}
+	res := Resolver{Rand: fixedStatusRand, ReadFile: func(string) ([]byte, error) { return pfxShellOf(t, []byte("JKS")), nil }}
 
 	out, errs, _ := GenerateKubernetes(req, res, KubeOpts{})
 	if len(errs) > 0 {
@@ -1469,8 +1471,17 @@ podman:
 		{StoreName: "c-tls-ts", Source: "./certs/trust.p12", Field: "tls.stores.ts.existing.pkcs12"},
 		{StoreName: "c-tls-ks", Source: "./certs/key.p12", Field: "tls.stores.ks.existing.pkcs12"},
 	}
-	if len(plan.Files) < 3 || !slices.Equal(plan.Files[1:3], want) {
+	// Only where each store comes from: Use and Password ride along for deploy's
+	// check of the PKCS12 and are pinned by TestResolvePodmanFilesOpensExistingStores.
+	var got []PodmanFile
+	for _, f := range plan.Files {
+		got = append(got, PodmanFile{StoreName: f.StoreName, Source: f.Source, Field: f.Field})
+	}
+	if len(got) < 3 || !slices.Equal(got[1:3], want) {
 		t.Errorf("store files = %+v, want %+v after application.yml", plan.Files, want)
+	}
+	if u := plan.Files[1].Use; u.Name != "ts" || u.File != "./certs/trust.p12" {
+		t.Errorf("the existing store carries its use for deploy's check, got %+v", u)
 	}
 	for _, line := range []string{
 		"Secret=c-tls-ts,type=mount,target=" + spec.DefaultStoresMountPath + "/ts\n",
@@ -1500,7 +1511,7 @@ func TestStoresSharingAFileNameMountApart(t *testing.T) {
 			req := func(section string) Request {
 				return Request{Env: &File{Name: "env.yaml", Data: []byte("image:\n  name: img\n  tag: v1\n" + stores + section)}, Workflows: synthTLSWorkflowFiles(1, "ts", "ks")}
 			}
-			res := Resolver{Rand: fixedStatusRand, Env: func(string) (string, bool) { return "v", true }, ReadFile: func(p string) ([]byte, error) { return []byte("STORE " + p), nil }}
+			res := Resolver{Rand: fixedStatusRand, Env: func(string) (string, bool) { return "v", true }, ReadFile: func(p string) ([]byte, error) { return pfxShellOf(t, []byte("STORE "+p)), nil }}
 
 			dp, errs, _ := GenerateDocker(req("docker:\n  command: docker\n  name: c\n"), res)
 			if len(errs) > 0 {
@@ -1531,8 +1542,8 @@ func TestStoresSharingAFileNameMountApart(t *testing.T) {
 				t.Fatalf("kubernetes: unexpected errors: %v", errs)
 			}
 			for _, want := range []string{
-				"  ts: " + b64([]byte("STORE "+c.trust)) + "\n",
-				"  ks: " + b64([]byte("STORE "+c.key)) + "\n",
+				"  ts: " + b64(pfxShellOf(t, []byte("STORE "+c.trust))) + "\n",
+				"  ks: " + b64(pfxShellOf(t, []byte("STORE "+c.key))) + "\n",
 				"- key: \"ts\"\n                      path: ts\n",
 				"- key: \"ks\"\n                      path: ks\n",
 			} {
@@ -1656,7 +1667,8 @@ kubernetes:
 		Env:       &File{Name: "env.yaml", Data: []byte(envData)},
 		Workflows: []File{{Name: "10.yaml", Data: []byte(wfData)}},
 	}
-	read := func(p string) ([]byte, error) { return []byte("PKCS12 " + p), nil }
+	store := certfixture.TrustStorePKCS12(t, "ts", certfixture.CA(t, "Root"))
+	read := func(string) ([]byte, error) { return store, nil }
 	errs, warns := Validate(req, Resolver{ReadFile: read})
 	if len(errs) > 0 || len(warns) > 0 {
 		t.Fatalf("a selected store needs no stores block: errs %v, warns %v", errs, warns)
@@ -1668,7 +1680,7 @@ kubernetes:
 	if len(errs) > 0 {
 		t.Fatalf("generate: %v", errs)
 	}
-	for _, want := range []string{"  name: c-stores\n", "  ts: " + b64([]byte("PKCS12 ./certs/truststore.jks")) + "\n", "- secret:\n                  name: c-stores\n"} {
+	for _, want := range []string{"  name: c-stores\n", "  ts: " + b64(store) + "\n", "- secret:\n                  name: c-stores\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("manifest missing %q:\n%s", want, out)
 		}

@@ -2,8 +2,11 @@ package gen
 
 import (
 	"crypto/sha256"
+	"encoding/asn1"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -11,6 +14,8 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/dockergen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/storebuild"
+
+	pkcs12 "software.sslmate.com/src/go-pkcs12"
 )
 
 // StoreBuild is a created store (create:) that deploy builds as it loads the
@@ -158,6 +163,81 @@ func storePassword(name string, c spec.Cred, res Resolver) (string, error) {
 		return "", fmt.Errorf("tls.stores.%s.password-env names %s, which is set but empty; a created store is encrypted with it", name, c.EnvVar)
 	}
 	return v, nil
+}
+
+// existingPKCS12 is the outer shape of a PKCS#12 file (RFC 7292 PFX), read
+// here rather than through go-pkcs12 so "this is not a PKCS12 at all" is
+// decided by structure, never by a library's error text.
+type existingPKCS12 struct {
+	Version  int
+	AuthSafe struct {
+		ContentType asn1.ObjectIdentifier
+		Content     asn1.RawValue `asn1:"tag:0,explicit,optional"`
+	}
+	MacData asn1.RawValue `asn1:"optional"`
+}
+
+// storePasswordValue is the store password a check can open the store with: a
+// literal, or a set and non-empty -env variable. ok is false when there is none
+// to use -- validate's unset-variable warning covers that case.
+func storePasswordValue(c spec.Cred, res Resolver) (string, bool) {
+	if c.Literal != "" {
+		return c.Literal, true
+	}
+	if c.EnvVar == "" || res.Env == nil {
+		return "", false
+	}
+	v, ok := res.Env(c.EnvVar)
+	return v, ok && v != ""
+}
+
+// checkExistingStore is what the tool can tell about an existing store's
+// PKCS12 before the connector opens it, run wherever a platform reads one:
+// validate, kubernetes generate and deploy, podman deploy, docker deploy.
+// Every store is PKCS12, so a JKS or JCEKS keystore, or a file that is not a
+// PKCS12 at all (a PEM, a certificate renamed .p12), is an error with or
+// without the password. With the password, a store it does not open is an
+// error; a store it opens but whose contents this tool cannot read is only a
+// warning -- Java may still accept it -- and so is a truststore holding a
+// certificate without Java's trusted-certificate attribute, which Java loads
+// as an empty truststore.
+func checkExistingStore(st consolidate.StoreUse, data []byte, pw spec.Cred, res Resolver) ([]Issue, error) {
+	where := fmt.Sprintf("%s %q", StoreField(st.Name), st.File)
+	if len(data) >= 4 {
+		switch binary.BigEndian.Uint32(data) {
+		case 0xFEEDFEED:
+			return nil, fmt.Errorf("%s is a JKS keystore, not a PKCS12: convert it (keytool -importkeystore -srcstoretype JKS -deststoretype PKCS12), or have the tool build the store from it with create: {jks: <file>}", where)
+		case 0xCECECECE:
+			return nil, fmt.Errorf("%s is a JCEKS keystore, not a PKCS12: convert it with keytool -importkeystore -srcstoretype JCEKS -deststoretype PKCS12", where)
+		}
+	}
+	var pfx existingPKCS12
+	if rest, err := asn1.Unmarshal(data, &pfx); err != nil || len(rest) != 0 || pfx.Version != 3 {
+		return nil, fmt.Errorf("%s is not a PKCS12 file: every store is PKCS12 -- name a PKCS12 here, or have the tool build the store from certificate files with create:", where)
+	}
+	password, ok := storePasswordValue(pw, res)
+	if !ok {
+		return nil, nil
+	}
+	var err error
+	if st.Private {
+		_, _, _, err = pkcs12.DecodeChain(data, password)
+	} else {
+		_, err = pkcs12.DecodeTrustStore(data, password)
+	}
+	switch {
+	case err == nil:
+		return nil, nil
+	case errors.Is(err, pkcs12.ErrIncorrectPassword) || errors.Is(err, pkcs12.ErrDecryption):
+		field := "tls.stores." + st.Name + ".password"
+		if pw.EnvVar != "" {
+			field = "the value of " + pw.EnvVar + " (tls.stores." + st.Name + ".password-env)"
+		}
+		return nil, fmt.Errorf("%s does not open with %s; the connector would fail to load it", where, field)
+	case strings.Contains(err.Error(), "not marked as trusted"):
+		return []Issue{{File: fileEnv, Msg: fmt.Sprintf("%s holds a certificate without Java's trusted-certificate attribute, as a truststore made with openssl pkcs12 -export -nokeys before OpenSSL 3.2 (or without -jdktrust) does: Java loads such a store as empty, and the connection fails with \"the trustAnchors parameter must be non-empty\". Build it from the CA certificates with create: {certs: [...]} instead", where)}}, nil
+	}
+	return []Issue{{File: fileEnv, Msg: fmt.Sprintf("%s opens with its password, but this tool cannot read its contents (%v); Java may still accept it, so it is not refused", where, err)}}, nil
 }
 
 // DockerStore is a created store a compose file carries: its build, and the
@@ -309,6 +389,14 @@ func validateStores(e *spec.Env, stores []consolidate.StoreUse, res Resolver) (e
 		case data == nil:
 			continue
 		}
+		if sb == nil {
+			cw, cerr := checkExistingStore(st, data, e.Defaults.TLS.Store(st.Name).Secret(), res)
+			warns = append(warns, cw...)
+			if cerr != nil {
+				fail(cerr)
+				continue
+			}
+		}
 		enc := base64.StdEncoding.EncodedLen(len(data))
 		if kubeReads {
 			total += enc
@@ -338,8 +426,11 @@ func validateStores(e *spec.Env, stores []consolidate.StoreUse, res Resolver) (e
 }
 
 // validateStoreBytes reads an existing store, or builds a created one (sb),
-// for validateStores. It returns no bytes and no error for a store it cannot
-// build without its password: one from a JKS whose password is unset.
+// for validateStores. A created store whose password variable is set but empty
+// is deploy's error. With the password unset the store is built with a
+// stand-in, so every source check still runs -- except a JKS's, which opens
+// with that very password: then every check that needs no password runs
+// (validateJKSWithoutPassword), and no bytes come back.
 func validateStoreBytes(st consolidate.StoreUse, sb *StoreBuild, res Resolver) ([]byte, []Issue, error) {
 	if sb == nil {
 		if res.ReadFile == nil {
@@ -351,14 +442,49 @@ func validateStoreBytes(st consolidate.StoreUse, sb *StoreBuild, res Resolver) (
 		}
 		return b, nil, nil
 	}
-	if c := sb.Store.Secret(); c.Literal == "" && !envSet(res, c.EnvVar) {
-		if sb.Store.Create.JKS != "" {
-			return nil, nil, nil
+	c := sb.Store.Secret()
+	if c.Literal == "" && c.EnvVar != "" && res.Env != nil {
+		if v, ok := res.Env(c.EnvVar); ok && v == "" {
+			_, err := storePassword(sb.Name, c, res)
+			return nil, nil, err
 		}
+	}
+	if c.Literal == "" && !envSet(res, c.EnvVar) {
 		// The store's password is the one variable a build reads.
 		res.Env = func(string) (string, bool) { return storePasswordStandIn, true }
+		if sb.Store.Create.JKS != "" {
+			return validateJKSWithoutPassword(*sb, res)
+		}
 	}
 	return BuildStore(*sb, res)
+}
+
+// validateJKSWithoutPassword checks a store created from a JKS while its
+// password is unset: it reads every source, holds the JKS to the format a
+// created store can read (storebuild.SniffJKS), and builds the store from its
+// certs alone when it lists any. Only the JKS's integrity check and its
+// entries wait for the password; with no bytes, no size is checked either.
+func validateJKSWithoutPassword(sb StoreBuild, res Resolver) ([]byte, []Issue, error) {
+	in, err := storeInput(sb, res)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := storebuild.SniffJKS(*in.JKS, sb.Name); err != nil {
+		return nil, nil, err
+	}
+	if len(in.Certs) == 0 {
+		return nil, nil, nil
+	}
+	in.JKS = nil
+	built, err := storebuild.Build(in)
+	if err != nil {
+		return nil, nil, err
+	}
+	var warns []Issue
+	for _, w := range built.Warnings {
+		warns = append(warns, Issue{File: fileEnv, Msg: w})
+	}
+	return nil, warns, nil
 }
 
 // envSet reports whether the environment variable name holds a value.

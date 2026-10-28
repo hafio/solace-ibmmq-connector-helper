@@ -50,7 +50,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 985 test functions, 1408 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 990 test functions, 1423 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -1057,7 +1057,7 @@ Tests: [examples_test.go](../internal/examples/examples_test.go)
 | TestWriteMkdirError | - | Write returns error when target dir path is under a regular file |
 | TestShippedExamplesGenerateConfig | - | embedded example set written to disk generates config via gen.Config with no errors and at least one non-empty rendered application.yml |
 | TestEnvExtraKeysExampleValidWhenUncommented | - | uncommenting the other-key examples shipped in env.yaml (two connection lines and the mq-defaults block) still generates with no finding about them, and each key lands under its binder |
-| TestEnvCreatedStoreExamplesValidWhenUncommented | - | uncommenting the created-store examples shipped in env.yaml (a certs list, a certs map, a key entry, a jks) still validates with no error (stand-in files sit where the selected stores are named, since validate reads them as deploy does), each store read and reported only as not selected |
+| TestEnvCreatedStoreExamplesValidWhenUncommented | - | uncommenting the store examples shipped in env.yaml (a certs list, a certs map, a key entry, a jks, a file beside a kubernetes Secret) still validates with no error (real PKCS12 stores sit where the selected stores are named, their passwords set, since validate reads and opens them as deploy does), each store read and reported only as not selected |
 | TestWorkflow0TransformExampleValidWhenUncommented | - | uncommenting the transform example shipped in workflow-0.yaml still generates, with no transform finding and the block rendered under workflow 0, so the example a new user copies cannot rot |
 | TestWorkflowExamplesMatchGoldenSpecs | workflow-0..3 | the four workflow files are byte-identical to testdata/golden/specs (go:embed cannot share one copy); env.yaml is excluded, it diverges on purpose |
 
@@ -1074,7 +1074,8 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestResolveStores | no ReadFile provided | missing ReadFile returns error |
 | TestResolveStores | ReadFile returns error | read error propagates, naming tls.stores.<name>.existing.pkcs12 and the path |
 | TestResolveStores | no stores selected | nil stores yields 0, no error |
-| TestResolveStores | over the Secret limit | a set over the 1 MiB a Kubernetes Secret holds, once base64-encoded, is an error naming each store's size |
+| TestResolveStores | over the apply limit | a set over the 256 KiB kubectl apply carries, once base64-encoded, is an error naming each store's size and existing.secret as the way out; a set under it passes |
+| TestResolveStores | a cluster-held store | a store kept in an operator's Secret is never read |
 | TestToIssues | - | toIssues wraps each string into an Issue carrying it as Msg |
 | TestPodmanFileSecretNames | - | the three document secrets an instance can own (application.yml, status-script, logback-spring.xml) and the store secret name <name>-tls-<store>, none of whose suffixes could also be a credential's stable name |
 | TestPodmanUnitStoreSecrets | - | the store secrets a previous unit mounts are its own Secret= lines with the container's store prefix -- not a credential, a document, an empty store name or another instance's store; no unit gives none |
@@ -1105,7 +1106,11 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestValidateReadsWhatDeployReads | a docker existing store | not read: a bind mount, which the validate verb checks on its host |
 | TestValidateReadsWhatDeployReads | a created store that does not build | the build's error is reported |
 | TestValidateReadsWhatDeployReads | unset password | the store is still built with a stand-in, so a bad source is reported, beside the unset-variable warning |
-| TestValidateReadsWhatDeployReads | unset password, a JKS | not opened: only the unset-variable warning |
+| TestValidateReadsWhatDeployReads | unset password, a JKS | not opened, but read: a missing JKS file is reported beside the unset-variable warning |
+| TestValidateReadsWhatDeployReads | unset password, a JKS that is not one | a PKCS12 named as create.jks is reported without the password |
+| TestValidateReadsWhatDeployReads | unset password, a JKS beside certs | the certs are still built, so a bad one is reported |
+| TestValidateReadsWhatDeployReads | a password variable set but empty | deploy's set-but-empty error |
+| TestValidateReadsWhatDeployReads | a JKS named as a PKCS12 / a store its password does not open | an existing store is opened with its password: each is an error |
 | TestValidateReadsWhatDeployReads | a store in an operator's Secret | not read or built on kubernetes |
 | TestValidateReadsWhatDeployReads | a store in an operator's Secret, podman | still read for podman, which needs its file |
 | TestValidateReadsWhatDeployReads | an expiring certificate | warned once across kubernetes, podman and docker |
@@ -1115,6 +1120,15 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestValidateStoreBytesWithoutAccess | no environment access / a literal password | a created store is built with the stand-in, or with its literal as written |
 | TestKubernetesTeardownResolvesNothing | - | a kubernetes teardown reads no credential and opens no store, names the credentials and stores Secrets alone, warns about a retired stores existing: that deploy refuses |
 | TestKubernetesSecretProbes | - | the probes are each operator Secret a selected store names, with every key the volume lists, then an existing credentials Secret with every mount name |
+| TestKubeConfigMapSizeError | - | the ConfigMap is held to the 256 KiB kubectl apply carries, counting application.yml, the status script and the logback config; a set that fits passes |
+| TestCheckExistingStore | a truststore / a keystore / a store used both ways | each opens with its password: no finding |
+| TestCheckExistingStore | the wrong password / the wrong literal | an error naming the store, its file and the password field |
+| TestCheckExistingStore | a JKS / a JKS, no password / a JCEKS | an error with the conversion, with or without the password |
+| TestCheckExistingStore | a PEM / a certificate renamed .p12 | not a PKCS12: an error, with or without the password |
+| TestCheckExistingStore | no password to open it / an empty password variable | only the shape is checked: no finding |
+| TestCheckExistingStore | a keystore read as a truststore | opens, but its contents are unreadable here: a warning, not an error |
+| TestCheckExistingStoreFromOpenSSL | - | where openssl is on PATH: its keystore opens with no finding; its -nokeys truststore warns that it lacks Java's trusted-certificate attribute |
+| TestResolvePodmanFilesOpensExistingStores | - | podman deploy opens an existing store before loading it: a good one loads, one its password does not open stops the deploy |
 | TestDockerStorePlaceholders | - | remove's placeholders cover each created store's secret, named _GEN_TLS_<STORE>_STORE, and the digest -- never an existing store -- and a plan without created stores needs none |
 | TestTargetMounts | selected stores + libs | 2 store mounts at MountDir/<store name> -- a created store, having no host file, is skipped --, each named tls.stores.<name>.existing.pkcs12, the keystore Private (carried into HostMount), and a libs mount whose source is the resolved abs host dir and whose target is the fixed default libs path |
 | TestTargetMounts | no stores, no libs | yields nil,nil -- no selected store is the only way to get no store mounts |
@@ -1166,7 +1180,8 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestGeneratorPageKnownKeysInSync | SOLACE_KEYS / MQ_KEYS / SOLACE_MANAGED / MQ_MANAGED / SOLACE_CREDS / MQ_CREDS | the page's hand-copied key lists equal spec.KnownKeys, ToolManagedKeys and CredentialKeys per system, so the validate port cannot drift from the CLI when a key is added |
 | TestGeneratorPageSelfTestNormalizesEmptyFindings | - | the page's Self-test normalizes its own findings output the way it normalizes the golden block (trailing newlines trimmed, exactly one added), pinned by matching the normalization pattern in the page source, so the check needs no JS engine -- without the normalization the zero-findings case diffs a bare newline against an empty string and Self-test fails on the page's own fixture |
 | TestGoldenConfig | - | generated config output matches testdata/golden/application.yml byte-for-byte, one instance |
-| TestGoldenKubernetesCreate | - | generated kubernetes manifests (namespace, configmap incl. status script, secret, stores keyed truststore/keystore and mapped by items, pv, pvc, deployment with secrets-volume/stores/syslog/libs mounts and le-mode/role labels, service) match golden fixture byte-for-byte |
+| TestGoldenStoreFixtures | - | the golden spec's PKCS12 fixtures open with the passwords the spec gives them, so validate finds nothing about them; -update-fixtures rewrites them from fresh certificates |
+| TestGoldenKubernetesCreate | - | generated kubernetes manifests (namespace, configmap incl. status script, secret, stores keyed by store name holding the committed fixtures and projected by items, pv, pvc, deployment with secrets-volume/stores/syslog/libs mounts and le-mode/role labels, service) match golden fixture byte-for-byte |
 | TestConfigIsWhatDeployShips | - | generate config's application.yml is byte for byte what podman mounts from its secret store and what the compose file inlines (indented, every $ doubled); the kubernetes goldens embed the same file |
 | TestGoldenKubernetesNoSecrets | - | generated manifests without a secrets block, syslog or libs (namespace, configmap incl. status script, stores Secret, deployment with the stores volume, service) match golden fixture byte-for-byte |
 | TestDockerConfigJSON | private registry / docker hub fallback | the payload is an auths map keyed by registry carrying the account plus the base64 user:password the engines send |

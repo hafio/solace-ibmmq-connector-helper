@@ -163,6 +163,12 @@ func Validate(r Request, res Resolver) (errs, warns []Issue) {
 		}
 		serrs, swarns := validateStores(e, b.model.Stores, res)
 		errs, warns = append(errs, serrs...), append(warns, swarns...)
+		if k := e.Kubernetes; k != nil {
+			status := statusscript.Render(e.Defaults.EffectiveManagementPort(), spec.StatusUserName)
+			if err := kubeConfigMapSizeError(k.Deployment.Name+spec.ConfigMapSuffix, b.appYAML, status, syslogXML(&e.Defaults)); err != nil {
+				errs = append(errs, Issue{File: fileEnv, Msg: err.Error()})
+			}
+		}
 	}
 	return errs, warns
 }
@@ -282,6 +288,11 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		Model:        b.model,
 		JavaOptions:  e.JavaOptions,
 		RunAs:        runAs,
+	}
+	if !opts.Teardown {
+		if err := kubeConfigMapSizeError(k.Deployment.Name+spec.ConfigMapSuffix, b.appYAML, in.Instance.StatusScript, syslogXML(&e.Defaults)); err != nil {
+			return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+		}
 	}
 	return deploy.Render(in), nil, warns
 }
@@ -492,6 +503,10 @@ type PodmanFile struct {
 	Source    string      // an existing store's PKCS12 as written in env.yaml; empty otherwise
 	Field     string      // a store's env.yaml key, e.g. tls.stores.mq-ca.existing.pkcs12, for errors
 	Build     *StoreBuild // a created store, built when deploy loads it; nil otherwise
+	// Use and Password let deploy open an existing store with its password
+	// before loading it (checkExistingStore); zero for anything else.
+	Use      consolidate.StoreUse
+	Password spec.Cred
 }
 
 // PodmanPlan carries the rendered quadlet unit plus everything a deploy loads
@@ -611,6 +626,13 @@ func ResolvePodmanFiles(files []PodmanFile, res Resolver) ([]KV, []Issue, error)
 			if err != nil {
 				return nil, nil, fmt.Errorf("reading %s for podman's secret store: %w", what, err)
 			}
+			if f.Use.Name != "" {
+				w, err := checkExistingStore(f.Use, b, f.Password, res)
+				if err != nil {
+					return nil, nil, err
+				}
+				warns = append(warns, w...)
+			}
 			data = string(b)
 		}
 		if err := podmanSecretSizeError(what, len(data)); err != nil {
@@ -669,7 +691,11 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 	var stores []podmangen.FileSecret
 	for _, st := range b.model.Stores {
 		name := PodmanStoreSecretName(p.Name, st.Name)
-		plan.Files = append(plan.Files, PodmanFile{StoreName: name, Source: st.File, Field: storeField(st), Build: storeBuild(st, e.Defaults.TLS)})
+		pf := PodmanFile{StoreName: name, Source: st.File, Field: storeField(st), Build: storeBuild(st, e.Defaults.TLS)}
+		if pf.Build == nil {
+			pf.Use, pf.Password = st, e.Defaults.TLS.Store(st.Name).Secret()
+		}
+		plan.Files = append(plan.Files, pf)
 		stores = append(stores, podmangen.FileSecret{StoreName: name, Target: tls.MountPath(st.Name)})
 	}
 	statusSecret := PodmanSecretStoreName(p.Name, podmanStatusSuffix)
@@ -988,6 +1014,25 @@ func kubeStoresSizeError(total int, sizes []string) error {
 	return fmt.Errorf("the stores Secret would hold %d bytes once base64-encoded (%s); with %d bytes for the rest of the object that is over the %d bytes kubectl apply carries in its last-applied-configuration annotation. Trim the stores to the certificates these connections need, or load a large store into a Secret yourself (kubectl create secret generic <name> --from-file=...) and name it on the store with existing: {secret: {name: <name>}}", total, strings.Join(sizes, ", "), kubeApplyAllowance, kubeApplyMax)
 }
 
+// kubeConfigMapSizeError refuses a ConfigMap kubectl apply would reject for
+// size, the same 256 KiB as the stores Secret: what it carries is the rendered
+// application.yml, the status script and, with syslog, the logback config.
+func kubeConfigMapSizeError(name, appYAML, statusScript, logbackXML string) error {
+	total := len(appYAML) + len(statusScript) + len(logbackXML)
+	if total+kubeApplyAllowance <= kubeApplyMax {
+		return nil
+	}
+	return fmt.Errorf("the ConfigMap %s would hold %d bytes (application.yml %d, status script %d, logback config %d); with %d bytes for the rest of the object that is over the %d bytes kubectl apply carries in its last-applied-configuration annotation. Split these workflows across instances, or move long passthrough blocks out of the connections", name, total, len(appYAML), len(statusScript), len(logbackXML), kubeApplyAllowance, kubeApplyMax)
+}
+
+// syslogXML is the logback config a spec with logging.syslog ships, "" without.
+func syslogXML(d *spec.Defaults) string {
+	if d.Syslog == nil {
+		return ""
+	}
+	return logback.XML(d.Syslog.Protocol)
+}
+
 // resolveStores reads the files of the existing stores the rendered
 // connections select, and builds the created ones (BuildStore), so the
 // kubernetes stores Secret can carry their bytes. A store kept in an
@@ -1028,6 +1073,11 @@ func resolveStores(stores []consolidate.StoreUse, defs spec.TLSConfig, res Resol
 			if err != nil {
 				return nil, nil, fmt.Errorf("reading %s %q: %v", StoreField(st.Name), st.File, err)
 			}
+			w, err := checkExistingStore(st, read, defs.Store(st.Name).Secret(), res)
+			if err != nil {
+				return nil, nil, err
+			}
+			warns = append(warns, w...)
 			b = read
 		}
 		enc := b64(b)

@@ -2,11 +2,14 @@ package gen_test
 
 import (
 	"bytes"
+	"encoding/base64"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/certfixture"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
@@ -22,6 +25,38 @@ import (
 const goldenStatusPassword = "0123456789abcdef0123456789abcdef"
 
 const specsDir = "../../testdata/golden/specs"
+
+// updateFixtures rewrites the golden spec's PKCS12 fixtures --
+// certs/truststore.p12 (opened with TRUSTSTORE_PASSWORD's ts-pw) and
+// certs/keystore.p12 (KEYSTORE_PASSWORD's ks-pw) -- from freshly minted
+// certificates. They are real stores because every verb that reads an existing
+// store opens it with its password; the manifests embed whatever bytes are
+// committed, so a rewrite needs no other change.
+var updateFixtures = flag.Bool("update-fixtures", false, "rewrite testdata/golden/specs/certs/*.p12")
+
+// TestGoldenStoreFixtures checks the committed fixtures open with the
+// passwords the golden spec gives them, and rewrites them with -update-fixtures.
+func TestGoldenStoreFixtures(t *testing.T) {
+	trust, key := filepath.Join(specsDir, "certs", "truststore.p12"), filepath.Join(specsDir, "certs", "keystore.p12")
+	if *updateFixtures {
+		ca := certfixture.CA(t, "Golden Root")
+		for path, data := range map[string][]byte{
+			trust: certfixture.TrustStorePKCS12(t, "ts-pw", ca),
+			key:   certfixture.KeyStorePKCS12(t, "ks-pw", certfixture.Issue(t, ca, "golden-client"), ca),
+		} {
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	setGoldenCredEnv(t)
+	errs, warns := gen.Validate(loadSpecs(t), gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()})
+	for _, i := range append(errs, warns...) {
+		if strings.Contains(i.Msg, "certs/") {
+			t.Errorf("a golden store fixture is not a store its password opens: %s (rewrite them with -update-fixtures)", i.Msg)
+		}
+	}
+}
 
 // loadSpecs reads the golden spec folder into a gen.Request (mirrors the CLI):
 // env.yaml is the config, every other *.yaml/*.yml is a workflow.
@@ -201,7 +236,7 @@ func TestGoldenKubernetesCreate(t *testing.T) {
 		namespaceDoc, // deploy always emits the Namespace first
 		configMapDoc(appYAML, true),
 		credDoc,
-		storesDoc,
+		storesDoc(t),
 		pvDoc,
 		pvcDoc,
 		deploymentDoc(true, true, true, true), // envFrom + stores + syslog + libs
@@ -227,7 +262,7 @@ func TestGoldenKubernetesNoSecrets(t *testing.T) {
 	want := norm(strings.Join([]string{
 		namespaceDoc,
 		configMapDoc(appYAML, false),
-		storesDoc,
+		storesDoc(t),
 		deploymentDoc(false, true, false, false), // stores; no envFrom, syslog, or libs
 		serviceDoc,
 	}, "---\n"))
@@ -318,18 +353,26 @@ stringData:
   EDGE_SOL_PASSWORD: "edge-pw"
 `
 
-const storesDoc = `apiVersion: v1
+// storesDoc is the stores Secret the golden spec renders: each selected store
+// keyed by its name, holding the committed fixture it names, base64-encoded.
+func storesDoc(t *testing.T) string {
+	t.Helper()
+	enc := func(file string) string {
+		return base64.StdEncoding.EncodeToString(mustRead(t, filepath.Join(specsDir, "certs", file)))
+	}
+	return `apiVersion: v1
 kind: Secret
 metadata:
   name: solmq-connector-stores
   namespace: solace-connectors
 type: Opaque
 data:
-  mq-ca: VFJVU1RTVE9SRQo=
-  mq-client: S0VZU1RPUkUK
-  solace-ca: VFJVU1RTVE9SRQo=
-  solace-client: S0VZU1RPUkUK
+  mq-ca: ` + enc("truststore.p12") + `
+  mq-client: ` + enc("keystore.p12") + `
+  solace-ca: ` + enc("truststore.p12") + `
+  solace-client: ` + enc("keystore.p12") + `
 `
+}
 
 const pvDoc = `apiVersion: v1
 kind: PersistentVolume

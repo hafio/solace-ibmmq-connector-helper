@@ -418,7 +418,7 @@ var cliVerbs = []cliVerb{
 		Synopsis: "validate [flags]",
 		Summary:  "Lint the whole env.yaml + workflows", Example: "solmq-conn-util validate -e env.yaml",
 		Detail: "Runs every check across the whole " + bt + "env.yaml" + bt + " (including any " + bt + "kubernetes:" + bt + "/" + bt + "docker:" + bt + "/" + bt + "podman:" + bt + " sections) and its workflows, printing all findings. Non-zero exit if any errors. Use it as a linter.\n\n" +
-			"It reports every error " + bt + "generate" + bt + " and " + bt + "deploy" + bt + " would stop at before they reach a platform: once the spec itself validates, it reads each TLS store a present platform loads, builds each created one in memory and discards it, holds them to each platform's size limit, and checks docker's bind-mount sources on this host. An unset " + bt + "-env" + bt + " variable is a warning. Logins, the image, and the cluster or engine itself are left to " + bt + "deploy" + bt + ".",
+			"It reports every error " + bt + "generate" + bt + " and " + bt + "deploy" + bt + " would stop at before they reach a platform: once the spec itself validates, it reads each TLS store a present platform loads and opens each existing PKCS12 with its password, builds each created one in memory and discards it, holds them and the kubernetes ConfigMap to each platform's size limit, and checks docker's bind-mount sources on this host. An unset " + bt + "-env" + bt + " variable is a warning. Logins, the image, and the cluster or engine itself are left to " + bt + "deploy" + bt + ".",
 	},
 	{
 		Name: "examples", Args: "[dir] [-f]", Flags: []string{"-f"}, TreeSuffix: bt + "[dir]" + bt, PosArg: posDir, Aliases: []string{"eg"},

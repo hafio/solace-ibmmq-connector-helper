@@ -1632,7 +1632,12 @@ func TestValidateWarnsAboutHostMountsTheConnectorCannotRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	truststore := filepath.Join(dir, "certs", "truststore.p12")
-	writeMode(t, truststore, 0o600)
+	// A real store its password opens: validate opens every store podman
+	// loads, and this test is about the mode, not the content.
+	write(t, filepath.Join(dir, "certs"), "truststore.p12", string(certfixture.TrustStorePKCS12(t, "ts", certfixture.CA(t, "Root"))))
+	if err := os.Chmod(truststore, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	libs := filepath.Join(dir, "libs")
 	if err := os.Mkdir(libs, 0o700); err != nil {
 		t.Fatal(err)
@@ -2800,19 +2805,20 @@ func TestDeployPodmanSeamWritesUnitsAndStarts(t *testing.T) {
 	quadletDir := podmanQuadletHome(t)
 	legacyDir := filepath.Join(t.TempDir(), "old-base-dir")
 	dir := t.TempDir()
-	// A binary truststore, to show the bytes reach podman unchanged, and a
-	// leftover base-dir, to show it is ignored.
-	const truststore = "\xfe\xed\xfe\xed\x00\x00\x00\x02\r\n\xff"
+	// A binary truststore -- a real PKCS12, which deploy opens with its
+	// password before loading it -- to show the bytes reach podman unchanged,
+	// and a leftover base-dir, to show it is ignored.
+	truststore := string(certfixture.TrustStorePKCS12(t, "ts", certfixture.CA(t, "Root")))
 	if err := os.MkdirAll(filepath.Join(dir, "certs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	write(t, filepath.Join(dir, "certs"), "truststore.jks", truststore)
+	write(t, filepath.Join(dir, "certs"), "truststore.p12", truststore)
 	write(t, dir, "env.yaml", sharedEnv+`
 tls:
   stores:
     ts:
       existing:
-        pkcs12: ./certs/truststore.jks
+        pkcs12: ./certs/truststore.p12
       password: ts
 `+podmanEnv()+"  base-dir: "+filepath.ToSlash(legacyDir)+"\n")
 	write(t, dir, "10.yaml", tlsWF)
