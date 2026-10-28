@@ -541,16 +541,61 @@ func canIVerb(action string) (string, error) {
 	}
 }
 
-// PodmanSecretCreate stores one credential in podman's secret store, replacing
-// any previous entry of that name.
-//
-// The value crosses on stdin, never in argv. It is a remove-then-create rather
-// than `create --replace` because --replace needs podman 4.7 and the rest of the
-// quadlet secret wiring only needs 4.5.
-func PodmanSecretCreate(r Runner, command, name, value string, extraAllowed []string) (string, error) {
+// PodmanVersion is the podman client's version, as `podman version --format
+// {{.Client.Version}}` prints it (5.8.2), read from stdout alone.
+func PodmanVersion(r Runner, command string, extraAllowed []string) (string, error) {
 	argv, err := ParseCommand(validate.PlatformPodman, command, extraAllowed)
 	if err != nil {
 		return "", err
+	}
+	out, err := runParsed(r, Cmd{Argv: append(argv, "version", "--format", "{{.Client.Version}}")})
+	if err != nil {
+		return "", fmt.Errorf("podman version: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// PodmanSupportsReplace reports whether a podman version is 4.7 or newer,
+// where `secret create --replace` exists. A version that does not parse is
+// not, so the caller keeps to remove-then-create.
+func PodmanSupportsReplace(version string) bool {
+	num := func(s string) (int, bool) {
+		end := 0
+		for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+			end++
+		}
+		n, err := strconv.Atoi(s[:end])
+		return n, err == nil
+	}
+	parts := strings.SplitN(strings.TrimPrefix(version, "v"), ".", 3)
+	if len(parts) < 2 {
+		return false
+	}
+	major, ok1 := num(parts[0])
+	minor, ok2 := num(parts[1])
+	return ok1 && ok2 && (major > 4 || major == 4 && minor >= 7)
+}
+
+// PodmanSecretCreate stores one credential in podman's secret store, replacing
+// any previous entry of that name.
+//
+// The value crosses on stdin, never in argv. With replace -- podman 4.7 and
+// newer, PodmanSupportsReplace -- it is one `secret create --replace`, so a
+// failed create leaves the previous secret, and the unit still mounting it,
+// intact. Below 4.7, where the rest of the quadlet wiring still works, it is a
+// remove-then-create: a create that fails then leaves the installed unit
+// naming a secret that is gone until deploy is run again.
+func PodmanSecretCreate(r Runner, command, name, value string, replace bool, extraAllowed []string) (string, error) {
+	argv, err := ParseCommand(validate.PlatformPodman, command, extraAllowed)
+	if err != nil {
+		return "", err
+	}
+	if replace {
+		out, err := r.Run(Cmd{Argv: append(append([]string(nil), argv...), "secret", "create", "--replace", name, "-"), Stdin: value})
+		if err != nil {
+			return out, fmt.Errorf("podman secret create --replace %s: %w", name, err)
+		}
+		return out, nil
 	}
 	out, err := r.Run(Cmd{Argv: append(append([]string(nil), argv...), "secret", "rm", "--ignore", name)})
 	if err != nil {

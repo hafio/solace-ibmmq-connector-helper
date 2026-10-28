@@ -235,8 +235,8 @@ type Podman struct {
 	Mode    string `yaml:"mode"`    // removed; non-empty is a validation error
 	// BaseDir is ignored. It named the host directory deploy wrote the rendered
 	// application.yml, status script and logback config to; those now go into
-	// podman's secret store with the credentials and the TLS stores, so a podman
-	// deployment keeps nothing on the host but its unit and libs.dir. The key
+	// podman's secret store with the credentials and the TLS stores, so deploy
+	// writes nothing of a podman deployment to the host but its unit. The key
 	// still parses so an older env.yaml keeps working: validate notes it and
 	// names the files earlier deploys left there. Nothing reads its value, so it
 	// is never expanded either.

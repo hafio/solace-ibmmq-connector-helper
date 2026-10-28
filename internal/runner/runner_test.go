@@ -530,7 +530,7 @@ func TestPodmanSecretCreateRemovesThenCreatesValueOnStdin(t *testing.T) {
 	f := &fakeRunner{}
 	const name = "mq-conn-1-password"
 	const value = "s3cr3t"
-	if _, err := PodmanSecretCreate(f, "podman", name, value, nil); err != nil {
+	if _, err := PodmanSecretCreate(f, "podman", name, value, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.calls) != 2 {
@@ -559,9 +559,43 @@ func TestPodmanSecretCreateRemovesThenCreatesValueOnStdin(t *testing.T) {
 	}
 }
 
+// With replace (podman 4.7+) a secret is replaced in one create --replace,
+// the value on stdin, so a failed create leaves the previous one in place.
+func TestPodmanSecretCreateReplacesInOneCall(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := PodmanSecretCreate(f, "podman", "c-tls-ts", "bytes", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"podman", "secret", "create", "--replace", "c-tls-ts", "-"}; len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) || f.calls[0].stdin != "bytes" {
+		t.Errorf("calls = %+v, want one %v with the value on stdin", f.calls, want)
+	}
+	failing := &fakeRunner{err: fmt.Errorf("boom")}
+	if _, err := PodmanSecretCreate(failing, "podman", "c-tls-ts", "bytes", true, nil); err == nil || !strings.Contains(err.Error(), "podman secret create --replace c-tls-ts") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// PodmanVersion reads the client version from stdout alone, and
+// PodmanSupportsReplace holds it to 4.7.
+func TestPodmanVersion(t *testing.T) {
+	r := &splitRunner{stdout: "5.8.2\n", stderr: "WARN[0000] a warning\n"}
+	v, err := PodmanVersion(r, "podman", nil)
+	if err != nil || v != "5.8.2" {
+		t.Fatalf("v=%q err=%v", v, err)
+	}
+	if want := []string{"podman", "version", "--format", "{{.Client.Version}}"}; !reflect.DeepEqual(r.calls[0].argv, want) {
+		t.Errorf("argv = %v, want %v", r.calls[0].argv, want)
+	}
+	for v, want := range map[string]bool{"5.8.2": true, "4.7.0": true, "4.9.4-rhel": true, "v4.7.1": true, "4.6.2": false, "4.5": false, "3.4.4": false, "": false, "out": false, "4": false} {
+		if got := PodmanSupportsReplace(v); got != want {
+			t.Errorf("PodmanSupportsReplace(%q) = %v, want %v", v, got, want)
+		}
+	}
+}
+
 func TestPodmanSecretCreateSkipsCreateWhenRmFails(t *testing.T) {
 	f := &fakeRunner{err: fmt.Errorf("boom")}
-	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t", nil)
+	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t", false, nil)
 	if err == nil {
 		t.Fatal("a failed rm must surface as an error")
 	}
@@ -575,7 +609,7 @@ func TestPodmanSecretCreateSkipsCreateWhenRmFails(t *testing.T) {
 
 func TestPodmanSecretCreateReportsCreateFailure(t *testing.T) {
 	f := &fakeRunner{errByCall: map[int]error{1: fmt.Errorf("boom")}}
-	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t", nil)
+	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t", false, nil)
 	if err == nil {
 		t.Fatal("a failed create must surface as an error")
 	}
@@ -589,7 +623,7 @@ func TestPodmanSecretCreateReportsCreateFailure(t *testing.T) {
 
 func TestPodmanSecretCreateRejectsUnsafeCommand(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := PodmanSecretCreate(f, "podman; rm -rf /", "name", "value", nil); err == nil {
+	if _, err := PodmanSecretCreate(f, "podman; rm -rf /", "name", "value", false, nil); err == nil {
 		t.Fatal("unsafe command must be rejected")
 	}
 	if len(f.calls) != 0 {

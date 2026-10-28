@@ -1143,7 +1143,8 @@ block yourself, and in every leader-election mode.
   password is **readable by anyone who can read the artifact it lands in**: the
   Kubernetes ConfigMap, the Docker Compose file (which inlines
   `application.yml`), or the Podman secret store entry `<name>-application.yml`
-  ([section 8.3](#83-podman)), which never touches the host disk.
+  ([section 8.3](#83-podman)), which `deploy` writes nowhere but podman's secret
+  store -- by default a file under the deploying user's container storage.
 - **The account is GET-only** against the actuator endpoints it needs
   (`health`, `leaderelection`, `workflows`); it cannot mutate anything on the
   connector.
@@ -1898,8 +1899,12 @@ configured) and every `tls.stores` entry a connection selects -- an existing
 store's PKCS12, or a created store built from its sources
 ([section 7.2](#72-created-stores-create)) -- into the store, values
 on stdin, never in argv -- and the unit mounts every one back in with a `Secret=`
-line. A podman deployment keeps **nothing on the host but the unit itself and your
-`libs.dir`**, the one `Volume=` the unit can carry. `generate` writes nothing, so
+line. Nothing is written beside `env.yaml` or into the quadlet directory but the
+unit itself, and nothing is read from the host at run time but your `libs.dir`,
+the one `Volume=` the unit can carry. The values live in podman's secret store:
+with its default `file` driver, a file under the deploying user's container
+storage (`~/.local/share/containers/storage/secrets/` rootless,
+`/var/lib/containers/storage/secrets/` as root), protected by its file modes. `generate` writes nothing, so
 its unit is a preview: it names secrets that only `deploy` creates, and it is not
 meant to be installed by hand.
 
@@ -1967,7 +1972,10 @@ rejected outright: `validate` reports an error naming whichever key was set.
 `deploy --platform podman` first resolves everything the unit mounts -- every
 credential, every document and every selected store, which it reads from its
 `file` -- so a missing variable or an unreadable or oversized store stops it before
-anything is created. It then loads each into the secret store, deletes the file
+anything is created. It then loads each into the secret store -- with `podman
+secret create --replace` on podman 4.7 and newer, so a load that fails leaves the
+previous secret, and the unit mounting it, intact; below 4.7 as a remove then a
+create -- deletes the file
 secrets this spec no longer mounts (syslog dropped, or a store no connection
 selects any more -- found from the `Secret=` lines of the unit the last deploy
 wrote, since a store's secret is named after a store the spec may no longer
@@ -2787,7 +2795,8 @@ quadlet unit**; because it cannot inline file content, the rendered
 `application.yml`, the status script, **and** the logback config when syslog is
 configured are mounted from podman's secret store rather than embedded, and
 **`deploy`** is what loads them there ([section 8.3](#83-podman)), beside the
-credentials and the stores -- nothing is written to the host but the unit (see
+credentials and the stores -- `deploy` writes nothing beside `env.yaml` but the
+unit, the values living in podman's secret store (see
 [section 9](#9-secrets-model)) -- with the same labels applied via `Label=`.
 
 ---

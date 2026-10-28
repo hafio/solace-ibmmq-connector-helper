@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -2573,10 +2574,10 @@ func TestDeployPodmanFailureStopsBeforeSystemctl(t *testing.T) {
 		want      string
 		wantCalls int
 	}{
-		{"credential", 1, false, "podman secret rm solmq-conn-_GEN_MQ_CONN_1_USER: boom", 2},
-		{"document", 9, false, "podman secret rm solmq-conn-application.yml: boom", 10},
-		{"unmounted file secret", 13, false, "podman secret rm: boom", 14},
-		{"unit write", -1, true, "creating ", 14},
+		{"credential", 2, false, "podman secret rm solmq-conn-_GEN_MQ_CONN_1_USER: boom", 3},
+		{"document", 10, false, "podman secret rm solmq-conn-application.yml: boom", 11},
+		{"unmounted file secret", 14, false, "podman secret rm: boom", 15},
+		{"unit write", -1, true, "creating ", 15},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := useFakeRunner(t)
@@ -2870,6 +2871,7 @@ tls:
 	// probe, which runs before any of that.
 	wantCalls := [][]string{
 		{"podman", "info"},
+		{"podman", "version", "--format", "{{.Client.Version}}"},
 		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_MQ_CONN_1_USER"},
 		{"podman", "secret", "create", "solmq-conn-_GEN_MQ_CONN_1_USER", "-"},
 		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_MQ_CONN_1_PASSWORD"},
@@ -2901,10 +2903,10 @@ tls:
 	}
 	// The values travel on stdin, never argv: the rendered application.yml, and
 	// the truststore byte for byte.
-	if app := f.calls[12].stdin; !strings.Contains(app, "solace:") || !strings.Contains(app, "conn-name: mqhost(1414)") {
+	if app := f.calls[13].stdin; !strings.Contains(app, "solace:") || !strings.Contains(app, "conn-name: mqhost(1414)") {
 		t.Errorf("application.yml secret should carry the rendered document, got %q", app)
 	}
-	if got := f.calls[14].stdin; got != truststore {
+	if got := f.calls[15].stdin; got != truststore {
 		t.Errorf("truststore secret = %q, want the file's bytes %q", got, truststore)
 	}
 }
@@ -6803,6 +6805,33 @@ func TestRemoveDockerNeedsNoCreatedStoreSources(t *testing.T) {
 	}
 	if v, _ := envValue(down.env, "_GEN_TLS_STORES_SHA256"); v != "-" {
 		t.Errorf("_GEN_TLS_STORES_SHA256 = %q, want the placeholder", v)
+	}
+}
+
+// podman remove deletes a created store's secret even when the unit that
+// mounted it is already gone -- a deploy that failed before writing it, or a
+// unit deleted by hand -- and needs no store source to do so.
+func TestRemovePodmanDeletesACreatedStoreSecretWithoutTheUnit(t *testing.T) {
+	f := useFakeRunner(t)
+	podmanQuadletHome(t) // no unit written: the fallback is what is tested
+	withPromptAnswer(t, "y")
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+`
+tls:
+  stores:
+    ts:
+      password-env: SOLMQ_TEST_TS_PW
+      create:
+        certs:
+          - ./gone.pem
+`+podmanEnv())
+	write(t, dir, "10.yaml", tlsWF)
+	if code := dispatch([]string{"remove", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	rm := f.calls[len(f.calls)-1].argv
+	if !slices.Contains(rm, "solmq-conn-tls-ts") || rm[1] != "secret" || rm[2] != "rm" {
+		t.Errorf("last call = %v, want a secret rm naming solmq-conn-tls-ts", rm)
 	}
 }
 

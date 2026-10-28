@@ -265,7 +265,7 @@ What the gates cannot check, before tagging:
   0400 credentials Secret readable to a non-root uid. With every capability dropped
   even uid 0 has no `CAP_DAC_OVERRIDE`, so deploy's mount check
   (`cmd/solmq-conn-util/runas.go`) judges root by the mode bits like any uid.
-- **Podman keeps nothing on the host but the unit.** The rendered `application.yml`,
+- **Podman deploy writes nothing on the host but the unit.** The rendered `application.yml`,
   status script and logback config, the TLS stores and the credentials all go into
   podman's secret store (`gen.ResolvePodmanFiles` / `gen.ResolveCredentials`, read
   before anything is created) and come back as `Secret=...,type=mount,target=<abs>`

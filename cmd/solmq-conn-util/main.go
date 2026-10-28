@@ -734,8 +734,12 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	}
 	// Read before the new unit replaces it: the stores the last deploy mounted.
 	previous := previousStoreSecrets(sc, plan, p)
+	// podman 4.7 replaces a secret in one step; an older one, or a version that
+	// cannot be read, keeps to remove-then-create (runner.PodmanSecretCreate).
+	version, _ := runner.PodmanVersion(r, p.Command, extraAllowed)
+	replace := runner.PodmanSupportsReplace(version)
 	for _, kv := range kvs {
-		out, err := runner.PodmanSecretCreate(r, p.Command, gen.PodmanSecretStoreName(p.Name, kv.Key), kv.Val, extraAllowed)
+		out, err := runner.PodmanSecretCreate(r, p.Command, gen.PodmanSecretStoreName(p.Name, kv.Key), kv.Val, replace, extraAllowed)
 		if err != nil {
 			return report(runner.ActionDeploy, tgtPodman, out, err)
 		}
@@ -744,12 +748,13 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	// password, read back out of this same file by the status script at run
 	// time -- see statusscript.Render) and the stores are key material, so the
 	// documents and stores travel like the credentials, on stdin into podman's
-	// secret store, and never touch the host disk. Only the unit is written, to
-	// the quadlet directory, the one place systemd scans.
+	// secret store, and deploy writes none of them to a file of its own. Only
+	// the unit is written, to the quadlet directory, the one place systemd
+	// scans; where podman keeps the secrets is its secret driver's business.
 	mounted := make(map[string]bool, len(files))
 	for _, kv := range files {
 		mounted[kv.Key] = true
-		out, err := runner.PodmanSecretCreate(r, p.Command, kv.Key, kv.Val, extraAllowed)
+		out, err := runner.PodmanSecretCreate(r, p.Command, kv.Key, kv.Val, replace, extraAllowed)
 		if err != nil {
 			return report(runner.ActionDeploy, tgtPodman, out, err)
 		}
@@ -778,7 +783,9 @@ func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	// the ones this spec mounts, in case the unit is already gone.
 	stores := previousStoreSecrets(sc, plan, p)
 	for _, f := range plan.Files {
-		if f.Source != "" && !contains(stores, f.StoreName) {
+		// Every store file, existing or created: a created store's secret is
+		// the instance's to remove as much as an existing one's.
+		if (f.Source != "" || f.Build != nil) && !contains(stores, f.StoreName) {
 			stores = append(stores, f.StoreName)
 		}
 	}

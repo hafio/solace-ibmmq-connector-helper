@@ -55,7 +55,9 @@ so splitting them across connectors stays your decision.
   as a file under `/app/external/var/secrets/` -- a Kubernetes Secret volume,
   a compose environment-provider secret, or a podman secret (podman's
   secret store also carries the rendered config and the TLS stores), never an
-  environment variable and never written to disk as a value. The one
+  environment variable and never written by the tool beside your config -- the
+  one exception being `generate --platform kubernetes`, whose manifest embeds
+  them. The one
   exception is the tool's own reserved `solmq-status` account, whose password
   is rendered as a literal by design
   ([section 7.1](docs/userguide.md#71-the-reserved-status-account-solmq-status)).
