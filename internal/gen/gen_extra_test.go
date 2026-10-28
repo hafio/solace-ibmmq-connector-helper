@@ -1311,6 +1311,23 @@ func TestConfigStatusPasswordRandErrorNoOutput(t *testing.T) {
 	}
 }
 
+// TestGenerateKubernetesRefusesAnInjectedQuantity is CR-0001 end to end: a
+// memory value carrying newlines is a legal YAML double-quoted scalar, and
+// before the quantity check it reached the Deployment as keys of its own.
+func TestGenerateKubernetesRefusesAnInjectedQuantity(t *testing.T) {
+	envData := "image:\n  name: img\n  tag: v1\nkubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n" +
+		"    resources:\n      memory: \"1Gi\\n          injected: true\"\n" +
+		"  secrets:\n    credentials:\n      existing: their-creds\n"
+	req := Request{Env: &File{Name: "env.yaml", Data: []byte(envData)}, Workflows: synthWorkflowFiles(1)}
+	out, errs, _ := GenerateKubernetes(req, Resolver{Rand: fixedStatusRand}, KubeOpts{})
+	if !hasIssue(errs, "kubernetes.deployment.resources.memory") || !hasIssue(errs, "is not a Kubernetes quantity") {
+		t.Fatalf("an injected memory value must be refused, got %v", errs)
+	}
+	if strings.Contains(out, "injected: true") {
+		t.Errorf("the injected key reached the manifest:\n%s", out)
+	}
+}
+
 // TestGenerateKubernetesCarriesStatusScript pins the k8s wiring: the
 // ConfigMap gets a "status: |" key carrying the rendered script, addressed to
 // the reserved account and the port GenerateKubernetes itself resolved (the

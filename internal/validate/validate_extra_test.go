@@ -1181,6 +1181,67 @@ func TestCheckLibsNFSFields(t *testing.T) {
 	}
 }
 
+// TestKubeQuantitiesAndDownloadImage covers the four kubernetes values the
+// manifest writes unquoted (CR-0001): cpu, memory and the libs claim size are
+// held to the quantity grammar the API server parses, and the download image
+// to the unsafe-character rule. Each injection would otherwise add keys to a
+// document piped to kubectl apply; each valid spelling must still pass.
+func TestKubeQuantitiesAndDownloadImage(t *testing.T) {
+	const inject = "1Gi\n    securityContext:\n      privileged: true"
+	fields := []struct {
+		field string
+		kube  func(v string) *spec.Kubernetes
+	}{
+		{"kubernetes.deployment.resources.cpu", func(v string) *spec.Kubernetes {
+			k := kubeWithImage()
+			k.Deployment.Resources.CPU = v
+			return k
+		}},
+		{"kubernetes.deployment.resources.memory", func(v string) *spec.Kubernetes {
+			k := kubeWithImage()
+			k.Deployment.Resources.Memory = v
+			return k
+		}},
+		{"libs.pvc.create.storage", func(v string) *spec.Kubernetes {
+			k := kubeWithImage()
+			k.Libs = &spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{Storage: v, NFS: spec.NFS{Server: "nfs1", Path: "/libs"}}}}
+			return k
+		}},
+	}
+	run := func(k *spec.Kubernetes) []Issue {
+		errs, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Kube: k, CheckKubernetes: true})
+		return errs
+	}
+	for _, f := range fields {
+		for _, v := range []string{"1", "500m", "0.5", ".5", "1.", "512Mi", "1Gi", "2Ti", "100k", "1e3", "5E-1"} {
+			if errs := run(f.kube(v)); hasErr(errs, "is not a Kubernetes quantity") {
+				t.Errorf("%s %q is a valid quantity, got %v", f.field, v, errs)
+			}
+		}
+		for _, v := range []string{inject, "1 Gi", "1GB", "-1", "+1", "Gi", "1Gi;", "${MEMORY}"} {
+			if errs := run(f.kube(v)); !hasErr(errs, f.field+" "+strconv.Quote(v)+" is not a Kubernetes quantity") {
+				t.Errorf("%s %q must be refused as a quantity, got %v", f.field, v, errs)
+			}
+		}
+	}
+
+	download := func(img string) *spec.Kubernetes {
+		k := kubeWithImage()
+		k.Libs = &spec.Libs{Download: &spec.LibsDownload{URLs: []string{"https://x/a.jar"}, Image: img}}
+		return k
+	}
+	for _, img := range []string{"busybox:1.37", "registry.local:5000/tools/busybox@sha256:0123abcd"} {
+		if errs := run(download(img)); hasErr(errs, "libs.download.image") {
+			t.Errorf("download image %q is valid, got %v", img, errs)
+		}
+	}
+	for _, img := range []string{"busybox:1.37\n        securityContext:\n          privileged: true", "busybox 1.37", "busybox;id"} {
+		if errs := run(download(img)); !hasErr(errs, "libs.download.image "+strconv.Quote(img)+" contains an unsafe character") {
+			t.Errorf("download image %q must be refused, got %v", img, errs)
+		}
+	}
+}
+
 func TestPasswordConflictOnSameBinder(t *testing.T) {
 	// Two files declaring the same connection tuple with different passwords
 	// collapse into one binder, so only the first password would survive. That is

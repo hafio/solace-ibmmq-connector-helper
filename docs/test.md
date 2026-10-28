@@ -50,7 +50,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 1000 test functions, 1439 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 1002 test functions, 1442 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -980,6 +980,8 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckLibsNFSFields | newline in nfs.server | rejected against the host charset |
 | TestCheckLibsNFSFields | newline in nfs.path | rejected against the host-path charset |
 | TestCheckLibsNFSFields | valid server and path | nfs1.corp.example and /solace-libs accepted |
+| TestKubeQuantitiesAndDownloadImage | resources.cpu / resources.memory / libs.pvc.create.storage | 1, 500m, 0.5, .5, 1., 512Mi, 1Gi, 2Ti, 100k, 1e3 and 5E-1 pass; a newline injection, "1 Gi", "1GB", a sign, a bare unit, a trailing ';' and an unexpanded ${MEMORY} are each refused as not a Kubernetes quantity |
+| TestKubeQuantitiesAndDownloadImage | libs.download.image | busybox:1.37 and a registry:port/path@sha256 reference pass; a newline injection, a space and a ';' are refused as unsafe characters |
 | TestPasswordConflictOnSameBinder | differing passwords | same MQ tuple with two passwords errors conflicting password for the same binder |
 | TestPasswordConflictOnSameBinder | identical passwords | same tuple sharing one password passes |
 | TestPasswordConflictOnSameBinder | distinct tuples | different queue-manager means different binders, so passwords may differ |
@@ -1173,6 +1175,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestResolveStatusPasswordEmptyEnvFallsBackToRand | - | an empty override is treated as unset, falling back to Rand rather than returning "" |
 | TestResolveStatusPasswordRandError | - | a Rand failure surfaces as an actionable error naming the underlying cause, never a predictable fallback password |
 | TestConfigStatusPasswordRandErrorNoOutput | - | the same Rand failure through Config is a hard error with no output |
+| TestGenerateKubernetesRefusesAnInjectedQuantity | memory with a newline | generate refuses it as not a Kubernetes quantity and the injected key never reaches the manifest |
 | TestGenerateKubernetesCarriesStatusScript | - | the ConfigMap gets a "status: \|" key carrying the rendered script, addressed to spec.StatusUserName on the resolved management port |
 | TestGenerateDockerCarriesStatusScript | - | compose gets a second top-level config (`<name>-status`) inlining the rendered script, mounted at statusscript.ContainerPath |
 | TestGeneratePodmanCarriesStatusScript | - | the plan carries `<name>-application.yml` and `<name>-status-script` with their rendered content, the unit mounts each from podman's secret store at its fixed path, and no Volume= appears without libs |

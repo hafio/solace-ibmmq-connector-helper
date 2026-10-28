@@ -909,6 +909,10 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 	if dep.Timezone != "" {
 		add(fileEnv, "kubernetes.deployment.timezone is no longer configured here: the container timezone moved to the top-level timezone: key so one declaration serves every platform. Remove kubernetes.deployment.timezone")
 	}
+	// Both land unquoted in the Deployment piped to kubectl, so a newline would
+	// add keys the spec never declared.
+	checkQuantity(add, "kubernetes.deployment.resources.cpu", dep.Resources.CPU)
+	checkQuantity(add, "kubernetes.deployment.resources.memory", dep.Resources.Memory)
 	checkNodeSelector(add, dep.NodeSelector)
 	checkTolerations(add, dep.Tolerations)
 	checkSpreadAndAffinity(add, dep.Spread, &dep.Affinity)
@@ -933,8 +937,9 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 	if c := ctx.Kube.Secrets.Credentials; c != nil {
 		// create and existing are mutually exclusive: Render takes the create
 		// branch when both are set, which would emit a Secret doc over the very
-		// object 'existing' names. Omitting the whole credentials block stays
-		// legal -- it is a present-but-undecided block that is rejected here.
+		// object 'existing' names. An omitted block is checkTargets' concern
+		// (an error once anything references a credential); a present but
+		// undecided block is rejected here.
 		if (c.Create != nil) == (c.Existing != "") {
 			add(fileEnv, "kubernetes.secrets.credentials must set exactly one of 'create' or 'existing'")
 		}
@@ -1029,6 +1034,7 @@ func checkLibs(add func(string, string, ...any), k *spec.Kubernetes) {
 			if pv := spec.LibsPVName(k.Deployment.Namespace, k.LibsPVCName()); len(pv) > 63 {
 				add(fileEnv, "libs.pvc.create derives the PersistentVolume name %q, which exceeds the 63-char DNS-1123 limit: shorten deployment.name or deployment.namespace", pv)
 			}
+			checkQuantity(add, "libs.pvc.create.storage", c.Storage)
 			if c.NFS.Server == "" || c.NFS.Path == "" {
 				add(fileEnv, "libs.pvc.create requires nfs.server and nfs.path")
 			} else {
@@ -1055,6 +1061,25 @@ func checkLibs(add func(string, string, ...any), k *spec.Kubernetes) {
 		if d.PVC != "" && !isDNS1123(d.PVC) {
 			add(fileEnv, "libs.download.pvc %q is not a valid DNS-1123 label", d.PVC)
 		}
+		// The initContainer's image: line is written unquoted.
+		if d.Image != "" && !SafeToken(d.Image) {
+			add(fileEnv, "libs.download.image %q contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)", d.Image)
+		}
+	}
+}
+
+// quantityRE is a Kubernetes resource quantity as the API server parses one:
+// a number (1, 0.5, .5, 1.) with an optional binary (Ki..Ei) or decimal
+// (n, u, m, k..E) suffix, or a decimal exponent (1e3). A sign is not accepted:
+// no request, limit or claim size is negative.
+var quantityRE = regexp.MustCompile(`^([0-9]+(\.[0-9]*)?|\.[0-9]+)([KMGTPE]i|[numkMGTPE]|[eE][-+]?[0-9]+)?$`)
+
+// checkQuantity holds a value written unquoted into the manifest as a resource
+// quantity to the quantity grammar, so it can neither inject a key nor fail
+// the apply. Empty means unset.
+func checkQuantity(add func(string, string, ...any), field, v string) {
+	if v != "" && !quantityRE.MatchString(v) {
+		add(fileEnv, "%s %q is not a Kubernetes quantity: a number with an optional unit, such as 500m, 1, 0.5, 512Mi or 1Gi", field, v)
 	}
 }
 

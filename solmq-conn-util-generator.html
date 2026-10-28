@@ -2513,6 +2513,8 @@ function checkKube(add, warn, m){
   else if(!isDNS1123(d.namespace)) add(ENV_FILE, `deployment.namespace "${d.namespace}" is not a valid DNS-1123 label`);
   checkExpansion(warn, ENV_FILE, 'deployment.namespace', d.namespace);
   checkNodeSelector(add, warn, d.nodeSelector || []);
+  checkQuantity(add, warn, 'kubernetes.deployment.resources.cpu', d.cpu);
+  checkQuantity(add, warn, 'kubernetes.deployment.resources.memory', d.memory);
   if(k.imagePull && !k.imagePull.create){
     if(!k.imagePull.name) add(ENV_FILE, 'kubernetes.secrets.image-pull.name is required');
     else if(!isDNS1123(k.imagePull.name)) add(ENV_FILE, `kubernetes.secrets.image-pull.name "${k.imagePull.name}" is not a valid DNS-1123 label`);
@@ -2586,7 +2588,7 @@ function checkLibs(add, warn, lb){
       if(!safeHostPath(lb.nfsPath)) add(ENV_FILE, `libs.pvc.create nfs.path "${lb.nfsPath}" contains an unsafe character (no whitespace, quotes, control chars, or shell metacharacters)`);
       checkExpansion(warn, ENV_FILE, 'libs.pvc.create.nfs.path', lb.nfsPath);
     }
-    checkExpansion(warn, ENV_FILE, 'kubernetes.libs.pvc.create.storage', lb.storage);
+    checkQuantity(add, warn, 'libs.pvc.create.storage', lb.storage);
   }
   if(lb.kind === 'download'){
     if(!lb.urls.length) add(ENV_FILE, "libs.download requires a non-empty 'urls' list");
@@ -2595,8 +2597,23 @@ function checkLibs(add, warn, lb){
       checkExpansion(warn, ENV_FILE, 'libs.download url', u);
     });
     if(lb.pvc && !isDNS1123(lb.pvc)) add(ENV_FILE, `libs.download.pvc "${lb.pvc}" is not a valid DNS-1123 label`);
+    // Mirrors validate.checkLibs; a ${...} is left to the CLI, which checks
+    // the value it expands to.
+    if(lb.image && lb.image.indexOf('${') < 0 && !safeToken(lb.image)){
+      add(ENV_FILE, `libs.download.image "${lb.image}" contains an unsafe character (no spaces, quotes, backslash, control chars, or shell metacharacters)`);
+    }
     checkExpansion(warn, ENV_FILE, 'kubernetes.libs.download.image', lb.image);
   }
+}
+// checkQuantity mirrors validate.checkQuantity: cpu, memory and the libs
+// claim size are written unquoted into the manifest, so each is held to the
+// Kubernetes quantity grammar. A ${...} is left to the CLI, which expands it
+// before checking; the page can only say that it will.
+const RE_QUANTITY = /^([0-9]+(\.[0-9]*)?|\.[0-9]+)([KMGTPE]i|[numkMGTPE]|[eE][-+]?[0-9]+)?$/;
+function checkQuantity(add, warn, field, v){
+  if(!v) return;
+  if(v.indexOf('${') >= 0){ checkExpansion(warn, ENV_FILE, field, v); return; }
+  if(!RE_QUANTITY.test(v)) add(ENV_FILE, `${field} "${v}" is not a Kubernetes quantity: a number with an optional unit, such as 500m, 1, 0.5, 512Mi or 1Gi`);
 }
 function safeShellChars(s){
   for(let i = 0; i < s.length; i++){
