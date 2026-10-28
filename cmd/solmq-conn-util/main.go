@@ -1523,7 +1523,9 @@ func resolver(envDir string) gen.Resolver {
 	return gen.Resolver{Env: os.LookupEnv, ReadFile: fileReader(envDir), Abs: absResolver(envDir)}
 }
 
-// fileReader resolves values-file / .jks paths relative to the env file's dir.
+// fileReader reads the files env.yaml names -- an existing store's PKCS12, a
+// created store's sources -- resolving a relative path against the env file's
+// dir.
 func fileReader(dir string) func(string) ([]byte, error) {
 	return func(p string) ([]byte, error) { return os.ReadFile(absPath(dir, p)) }
 }

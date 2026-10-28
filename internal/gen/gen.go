@@ -48,7 +48,8 @@ type Request struct {
 type Resolver struct {
 	// Env looks up an environment variable (CLI: os.LookupEnv; nil skips checks).
 	Env func(string) (string, bool)
-	// ReadFile reads a values-file or .jks referenced by config (nil = no access).
+	// ReadFile reads a file env.yaml names -- an existing store's PKCS12, a
+	// created store's sources -- resolved against env.yaml (nil = no access).
 	ReadFile func(string) ([]byte, error)
 	// Abs resolves a config-relative path (store/libs dir) to a host path for
 	// bind mounts. Nil leaves the path unchanged.

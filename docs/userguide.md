@@ -2083,9 +2083,9 @@ config map or secret store is readable by any uid: the ConfigMap files on
 kubernetes, compose `configs:` and `secrets:` on docker, and every podman secret
 (mode 0444). The rest:
 
-- **kubernetes**: the credentials Secret is mounted 0400 and owned by root, so it
-  is `fsGroup` that makes it readable -- the kubelet hands each file to that group
-  as 0440. `fsGroup` also makes a `libs` PVC writable for the `libs.download` init
+- **kubernetes**: the credentials Secret and the TLS stores are mounted 0400 and
+  owned by root, so it is `fsGroup` that makes them readable -- the kubelet hands
+  each file to that group as 0440. `fsGroup` also makes a `libs` PVC writable for the `libs.download` init
   container, which runs as the same identity. An **NFS** volume ignores `fsGroup`:
   an NFS export behind `libs` (including `libs.pvc.create.nfs`) has to be
   readable -- and, for `libs.download`, writable -- by the run-as uid or gid.
@@ -3708,6 +3708,11 @@ container is called something else, is not reachable with `cli` -- reach it with
   with every capability dropped. `deploy` warns about each one it finds on
   Linux, and a rootless podman deploy also warns when your subordinate ranges
   cannot map the run-as ids ([section 8.4](#84-run-as-and-container-hardening)).
+- **Upgrading a kubernetes deployment retires `secrets.stores`.** A selected
+  store now reaches the pod with no stores block, and one kept in a Secret you
+  manage names it on the store (`existing.secret`); an `existing:` block stops
+  `generate` and `deploy` until it is replaced, and the first deploy rolls the
+  pods once. See the upgrade note in [section 8.1](#81-kubernetes).
 - **Upgrading a podman deployment moves its files into the secret store.** The
   first `deploy` with this release loads `application.yml`, the status script, the
   logback config and the stores into podman's secret store and restarts the running
