@@ -12,8 +12,8 @@
     "semantic_hash": ""
   },
   "internal/consolidate/consolidate.go": {
-    "mtime": 1793172333.672759,
-    "seen": 1793174077.5750818,
+    "mtime": 1793180918.8895257,
+    "seen": 1793183201.5527556,
     "ast_hash": "ec9772b1f8c9282ed90fb71e579a9a0f",
     "semantic_hash": ""
   },
@@ -30,8 +30,8 @@
     "semantic_hash": ""
   },
   "internal/consolidate/model.go": {
-    "mtime": 1793172333.673214,
-    "seen": 1793174077.575088,
+    "mtime": 1793180918.8905258,
+    "seen": 1793183201.5527608,
     "ast_hash": "654250ab641e7adb21d45cc0aebc51f1",
     "semantic_hash": ""
   },
@@ -48,14 +48,14 @@
     "semantic_hash": ""
   },
   "internal/deploy/deploy.go": {
-    "mtime": 1793172333.673359,
-    "seen": 1793174077.575095,
+    "mtime": 1793180918.8905258,
+    "seen": 1793183201.552767,
     "ast_hash": "82028f8129d6f02df16d2a09cdf4d43d",
     "semantic_hash": ""
   },
   "internal/deploy/deploy_test.go": {
-    "mtime": 1793172333.673532,
-    "seen": 1793174077.5750961,
+    "mtime": 1793180918.8905258,
+    "seen": 1793183201.552768,
     "ast_hash": "09acebace48b44cc1f681a90540f9b60",
     "semantic_hash": ""
   },
@@ -66,26 +66,26 @@
     "semantic_hash": ""
   },
   "internal/examples/examples_test.go": {
-    "mtime": 1793172863.1135929,
-    "seen": 1793174077.5751035,
+    "mtime": 1793180918.8905258,
+    "seen": 1793183201.5527744,
     "ast_hash": "38af50eea6c644dd95de2cedafa49de0",
     "semantic_hash": ""
   },
   "internal/gen/gen.go": {
-    "mtime": 1793174035.3583298,
-    "seen": 1793174077.5751061,
+    "mtime": 1793180918.8915257,
+    "seen": 1793183201.5527763,
     "ast_hash": "3db8d4f9a7e1ce6f749fffe881adedbe",
     "semantic_hash": ""
   },
   "internal/gen/gen_extra_test.go": {
-    "mtime": 1793177687.0762475,
-    "seen": 1793177970.8411722,
-    "ast_hash": "3eecdf8361f83b700aa752b46c778310",
+    "mtime": 1793182867.5860517,
+    "seen": 1793183201.5527775,
+    "ast_hash": "e4ed3af251c35e6aeb961585642ff889",
     "semantic_hash": ""
   },
   "internal/gen/golden_test.go": {
-    "mtime": 1793177713.1480038,
-    "seen": 1793177970.8411748,
+    "mtime": 1793180918.8925257,
+    "seen": 1793183201.5527794,
     "ast_hash": "179b8da4ba1b5d838abfe1f36ef1e88e",
     "semantic_hash": ""
   },
@@ -114,14 +114,14 @@
     "semantic_hash": ""
   },
   "internal/spec/defaults.go": {
-    "mtime": 1793173326.8033814,
-    "seen": 1793174077.5751562,
+    "mtime": 1793180918.8935258,
+    "seen": 1793183201.5528047,
     "ast_hash": "ab0268e7f2dfaa66fad2e22ef7e2689e",
     "semantic_hash": ""
   },
   "internal/spec/kubernetes.go": {
-    "mtime": 1793172333.6805232,
-    "seen": 1793174077.5751736,
+    "mtime": 1793180918.8935258,
+    "seen": 1793183201.5528185,
     "ast_hash": "bee0283327085c20983c8958a0dcc03b",
     "semantic_hash": ""
   },
@@ -150,20 +150,20 @@
     "semantic_hash": ""
   },
   "internal/validate/validate.go": {
-    "mtime": 1793177786.1976898,
-    "seen": 1793177970.8412597,
-    "ast_hash": "d1a984259ab7215f05581fdabc936e84",
+    "mtime": 1793182834.7036269,
+    "seen": 1793183201.5528512,
+    "ast_hash": "9d19674f24296293d9f6549de65398bf",
     "semantic_hash": ""
   },
   "internal/validate/validate_extra_test.go": {
-    "mtime": 1793177816.0325446,
-    "seen": 1793177970.8412647,
-    "ast_hash": "232223b9c430d825939fbdd0e42ec780",
+    "mtime": 1793182884.2729526,
+    "seen": 1793183201.5528553,
+    "ast_hash": "af1f63f146cc0fba69784dbbba28c6d5",
     "semantic_hash": ""
   },
   "internal/validate/validate_test.go": {
-    "mtime": 1793172333.6819797,
-    "seen": 1793174077.5752254,
+    "mtime": 1793180918.8955257,
+    "seen": 1793183201.5528612,
     "ast_hash": "0da9f4cb8c7b70d676a0a91dc9c0ec95",
     "semantic_hash": ""
   },
@@ -186,8 +186,8 @@
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1793173930.90223,
-    "seen": 1793174077.5752378,
+    "mtime": 1793180918.8775256,
+    "seen": 1793183201.5528724,
     "ast_hash": "0e9fd09a2eb7000c578695012fd85805",
     "semantic_hash": ""
   },
@@ -246,8 +246,8 @@
     "semantic_hash": ""
   },
   "docs/DEVELOPMENT.md": {
-    "mtime": 1793173615.4572754,
-    "seen": 1793174077.575239,
+    "mtime": 1793180918.8795257,
+    "seen": 1793183201.5528731,
     "ast_hash": "184a7a573e2de4b568222084976918ab",
     "semantic_hash": ""
   },
@@ -270,14 +270,14 @@
     "semantic_hash": ""
   },
   "internal/dockergen/dockergen.go": {
-    "mtime": 1793173190.9733582,
-    "seen": 1793174077.5750997,
+    "mtime": 1793180918.8905258,
+    "seen": 1793183201.552771,
     "ast_hash": "ddfd279cbe660a7103cab8d0a077117e",
     "semantic_hash": ""
   },
   "internal/dockergen/dockergen_test.go": {
-    "mtime": 1793173273.2382512,
-    "seen": 1793174077.575101,
+    "mtime": 1793180918.8905258,
+    "seen": 1793183201.552772,
     "ast_hash": "07d8b8bbe0722ee1f888a17e3a6fbaa3",
     "semantic_hash": ""
   },
@@ -288,21 +288,21 @@
     "semantic_hash": ""
   },
   "internal/podmangen/podmangen_test.go": {
-    "mtime": 1791689249.5796373,
-    "seen": 1791689960.1856518,
-    "ast_hash": "b23ddfe399a111c6c613caa0d9659ae2",
+    "mtime": 1793182867.5868003,
+    "seen": 1793183201.5527964,
+    "ast_hash": "5164780ae8050a11acc71a9b748a7ef4",
     "semantic_hash": ""
   },
   "internal/runner/runner.go": {
-    "mtime": 1793173828.9923284,
-    "seen": 1793174077.5751495,
-    "ast_hash": "94e298c2798b7325149ad4d4c90794b6",
+    "mtime": 1793183091.622504,
+    "seen": 1793183201.5527995,
+    "ast_hash": "8cf88f1dfcda8e5245df849f62ad2f17",
     "semantic_hash": ""
   },
   "internal/runner/runner_test.go": {
-    "mtime": 1793173961.631596,
-    "seen": 1793174077.5751517,
-    "ast_hash": "f243159355d02b9a6935a34a9fcd53b7",
+    "mtime": 1793183061.0806987,
+    "seen": 1793183201.5528004,
+    "ast_hash": "5b118c75022fc6ff4dda344a49f9aaa4",
     "semantic_hash": ""
   },
   "internal/spec/env.go": {
@@ -312,21 +312,21 @@
     "semantic_hash": ""
   },
   "internal/spec/targets.go": {
-    "mtime": 1793174035.358032,
-    "seen": 1793174077.5751846,
-    "ast_hash": "b0406bfaa20ef0c76573a3eee95b8600",
+    "mtime": 1793182834.7019205,
+    "seen": 1793183201.5528262,
+    "ast_hash": "12932903891ba1f0f756795b26d24cee",
     "semantic_hash": ""
   },
   "internal/examples/files/env.yaml": {
-    "mtime": 1793177919.6663494,
-    "seen": 1793177970.8412907,
-    "ast_hash": "81ebe63a0e164c5b35d5b855a7b5d355",
+    "mtime": 1793182867.5853605,
+    "seen": 1793183201.5528781,
+    "ast_hash": "3d7e3bda76593a1216f1a417a17150bc",
     "semantic_hash": ""
   },
   "testdata/golden/specs/env.yaml": {
-    "mtime": 1793172333.682821,
-    "seen": 1793174077.5752537,
-    "ast_hash": "989935b9947ff083b01bbc057deafade",
+    "mtime": 1793182867.58552,
+    "seen": 1793183201.552886,
+    "ast_hash": "897de86b4deb1c59ca93e3c37928e97c",
     "semantic_hash": ""
   },
   "internal/spec/env_test.go": {
@@ -336,21 +336,21 @@
     "semantic_hash": ""
   },
   "internal/spec/targets_test.go": {
-    "mtime": 1791625535.4701908,
-    "seen": 1791680312.1250808,
-    "ast_hash": "3ab135101326bdfe64e6e3fc8edeb3a2",
+    "mtime": 1793182867.5857017,
+    "seen": 1793183201.5528271,
+    "ast_hash": "40758143524a8d9ba2f36ddc24648ecf",
     "semantic_hash": ""
   },
   "docs/test.md": {
-    "mtime": 1793177942.8401904,
-    "seen": 1793177970.8412886,
-    "ast_hash": "139987e854e6b46bd114f9d988ef8adc",
+    "mtime": 1793183117.5686588,
+    "seen": 1793183201.5528762,
+    "ast_hash": "dacf0f629b5d8064e7886bb15507ff82",
     "semantic_hash": ""
   },
   "docs/commands.md": {
-    "mtime": 1793177952.272296,
-    "seen": 1793177970.8412874,
-    "ast_hash": "4e6cca680bbbafe8252324a2703b578c",
+    "mtime": 1793183119.1531713,
+    "seen": 1793183201.5528753,
+    "ast_hash": "dced4fe79c23356f25db01630ebd3679",
     "semantic_hash": ""
   },
   "internal/consolidate/names.go": {
@@ -402,9 +402,9 @@
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/commands.go": {
-    "mtime": 1793173850.8617997,
-    "seen": 1793174077.5750315,
-    "ast_hash": "415f8f569473d6e6e9433e3fc1e50a69",
+    "mtime": 1793182759.5562346,
+    "seen": 1793183201.552718,
+    "ast_hash": "e219a1409b37321111f5fe12b8aeaa8f",
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/commands_doc_test.go": {
@@ -426,38 +426,38 @@
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/main.go": {
-    "mtime": 1793174035.3585901,
-    "seen": 1793174077.5750494,
-    "ast_hash": "00790f0e560e29930b9eb11609bb9d01",
+    "mtime": 1793183004.2501476,
+    "seen": 1793183201.55273,
+    "ast_hash": "b84d825e27f607b7d602e15a5deccad3",
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/main_test.go": {
-    "mtime": 1793177637.6817722,
-    "seen": 1793177970.8411112,
-    "ast_hash": "b56d4ac1c23dbbc16197809aff2c4a4f",
+    "mtime": 1793183085.377261,
+    "seen": 1793183201.5527318,
+    "ast_hash": "09e4f6c0c862f18e4082d1474e6bc9e4",
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/testdata/completions/solmq-conn-util.bash": {
-    "mtime": 1793177952.277296,
-    "seen": 1793177970.8411334,
+    "mtime": 1793183119.1561713,
+    "seen": 1793183201.5527477,
     "ast_hash": "ea586459d5e800c2ff3ee9feb0ff5e38",
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/testdata/completions/solmq-conn-util.ps1": {
-    "mtime": 1793177952.278296,
-    "seen": 1793177970.841135,
+    "mtime": 1793183119.1571712,
+    "seen": 1793183201.5527492,
     "ast_hash": "8cc3b6352b8befd55e94a54922810048",
     "semantic_hash": ""
   },
   "solmq-conn-util-generator.html": {
-    "mtime": 1793177919.6672416,
-    "seen": 1793177970.8412974,
-    "ast_hash": "2e4084f80ae72f98b43342a4cb702ec7",
+    "mtime": 1793182915.0308702,
+    "seen": 1793183201.5528836,
+    "ast_hash": "b505201bef2ffb5ac1cd87f3ae5dc41f",
     "semantic_hash": ""
   },
   "internal/spec/defaults_test.go": {
-    "mtime": 1793172333.6803782,
-    "seen": 1793174077.5751576,
+    "mtime": 1793180918.8935258,
+    "seen": 1793183201.5528057,
     "ast_hash": "30b62bd190f565d5e6173b3d7fe1c3ee",
     "semantic_hash": ""
   },
@@ -480,8 +480,8 @@
     "semantic_hash": ""
   },
   "internal/gen/imagepull_test.go": {
-    "mtime": 1793177687.073613,
-    "seen": 1793177970.8411772,
+    "mtime": 1793180918.8925257,
+    "seen": 1793183201.5527818,
     "ast_hash": "3bcdc4e4a11fc4ee89d9b32b31f68770",
     "semantic_hash": ""
   },
@@ -498,8 +498,8 @@
     "semantic_hash": ""
   },
   "internal/validate/validate_image_test.go": {
-    "mtime": 1793177658.3614721,
-    "seen": 1793177970.8412669,
+    "mtime": 1793180918.8955257,
+    "seen": 1793183201.5528576,
     "ast_hash": "7b019a7292127207dd67aa5447c8cc9d",
     "semantic_hash": ""
   },
@@ -540,9 +540,9 @@
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/status.go": {
-    "mtime": 1789522119.0955167,
-    "seen": 1789536500.62231,
-    "ast_hash": "5e4f8fc290eb085cf72cce790a71c1cb",
+    "mtime": 1793182991.7622457,
+    "seen": 1793183201.552743,
+    "ast_hash": "ee35c124f6c0de906ad60221aad01000",
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/vt_other.go": {
@@ -558,14 +558,14 @@
     "semantic_hash": ""
   },
   "internal/statusreport/parse.go": {
-    "mtime": 1793172333.6807826,
-    "seen": 1793174077.5751898,
+    "mtime": 1793180918.8945258,
+    "seen": 1793183201.5528305,
     "ast_hash": "ecbf9c859ade6433d807c99c473d9a14",
     "semantic_hash": ""
   },
   "internal/statusreport/parse_test.go": {
-    "mtime": 1793172333.680939,
-    "seen": 1793174077.575191,
+    "mtime": 1793180918.8945258,
+    "seen": 1793183201.5528314,
     "ast_hash": "6cd8258a985a8a34f60743930f3f7a55",
     "semantic_hash": ""
   },
@@ -606,8 +606,8 @@
     "semantic_hash": ""
   },
   "docs/abbreviation.md": {
-    "mtime": 1793177952.272296,
-    "seen": 1793177970.8412864,
+    "mtime": 1793183119.1531713,
+    "seen": 1793183201.5528743,
     "ast_hash": "1a6b0e72b5cad36639e01ba29375900a",
     "semantic_hash": ""
   },
@@ -618,9 +618,9 @@
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/logs.go": {
-    "mtime": 1789522119.0935311,
-    "seen": 1789536500.6223023,
-    "ast_hash": "249f9ff6b5850939846b157e814ee829",
+    "mtime": 1793182628.9314435,
+    "seen": 1793183201.5527291,
+    "ast_hash": "f8c47078887e625bc2db01e67e63eb4c",
     "semantic_hash": ""
   },
   "internal/logback/logback.go": {
@@ -648,15 +648,15 @@
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/shell.go": {
-    "mtime": 1789522119.0955167,
-    "seen": 1789536500.6223085,
-    "ast_hash": "a27e76032578669097ae07727d760be8",
+    "mtime": 1793182628.9316695,
+    "seen": 1793183201.5527415,
+    "ast_hash": "0c00504aa8adc6dbad2c38c1f474d9c7",
     "semantic_hash": ""
   },
   "docs/userguide.md": {
-    "mtime": 1793177908.9894435,
-    "seen": 1793177970.8412898,
-    "ast_hash": "ac28fd139e6146b367c6110c5fc04c9c",
+    "mtime": 1793183109.598473,
+    "seen": 1793183201.5528774,
+    "ast_hash": "dd0e4fe76e11ebcee4af80e6b0f75745",
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/testcatalog_test.go": {
@@ -702,14 +702,14 @@
     "semantic_hash": ""
   },
   "internal/spec/kubernetes_test.go": {
-    "mtime": 1793172333.6806462,
-    "seen": 1793174077.5751758,
+    "mtime": 1793180918.8935258,
+    "seen": 1793183201.5528195,
     "ast_hash": "a3da9958b5f8decd773d859f5a276604",
     "semantic_hash": ""
   },
   "internal/validate/validate_derivednames_test.go": {
-    "mtime": 1793172333.681553,
-    "seen": 1793174077.5752182,
+    "mtime": 1793180918.8955257,
+    "seen": 1793183201.5528543,
     "ast_hash": "72e94de77059de68406d6bfcaa36bb3a",
     "semantic_hash": ""
   },
@@ -792,8 +792,8 @@
     "semantic_hash": ""
   },
   "internal/gen/gen_runas_test.go": {
-    "mtime": 1793177687.0737915,
-    "seen": 1793177970.8411734,
+    "mtime": 1793180918.8915257,
+    "seen": 1793183201.5527787,
     "ast_hash": "4d0170c440b035d6c69b9287e73ad2e3",
     "semantic_hash": ""
   },
@@ -828,14 +828,14 @@
     "semantic_hash": ""
   },
   "internal/certfixture/certfixture.go": {
-    "mtime": 1793172683.3909853,
-    "seen": 1793174077.5750802,
+    "mtime": 1793180918.8895257,
+    "seen": 1793183201.5527544,
     "ast_hash": "bd85913874156eddad7c106baa63e0f1",
     "semantic_hash": ""
   },
   "internal/storebuild/jks.go": {
-    "mtime": 1793172520.5528564,
-    "seen": 1793174077.5751998,
+    "mtime": 1793180918.8945258,
+    "seen": 1793183201.5528388,
     "ast_hash": "9cc0434e22ad23059c83ce440a767a51",
     "semantic_hash": ""
   },
@@ -852,20 +852,20 @@
     "semantic_hash": ""
   },
   "internal/gen/stores.go": {
-    "mtime": 1793173203.7032344,
-    "seen": 1793174077.575116,
+    "mtime": 1793180918.8925257,
+    "seen": 1793183201.5527842,
     "ast_hash": "fb9181ab0497a4ac00f842141ae329fc",
     "semantic_hash": ""
   },
   "internal/gen/stores_test.go": {
-    "mtime": 1793177687.0764933,
-    "seen": 1793177970.8411815,
+    "mtime": 1793180918.8925257,
+    "seen": 1793183201.5527854,
     "ast_hash": "c7976e1dd677e98daaa88ab0f3c299bc",
     "semantic_hash": ""
   },
   "internal/validate/stores.go": {
-    "mtime": 1793172333.6811163,
-    "seen": 1793174077.5752118,
+    "mtime": 1793180918.8945258,
+    "seen": 1793183201.552849,
     "ast_hash": "c4ef6c0ed5b9d9f98a1de83b858929c3",
     "semantic_hash": ""
   },
@@ -882,32 +882,32 @@
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/lifecycle.go": {
-    "mtime": 1793173828.9941103,
-    "seen": 1793174077.575043,
+    "mtime": 1793180918.8775256,
+    "seen": 1793183201.5527263,
     "ast_hash": "cccd89fe3cc4ff411b819c41838d7192",
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/lifecycle_test.go": {
-    "mtime": 1793177632.8902135,
-    "seen": 1793177970.8411043,
-    "ast_hash": "2cad304fb61ef5739f9892f6e84820b0",
+    "mtime": 1793183004.25039,
+    "seen": 1793183201.5527277,
+    "ast_hash": "d402c4f7ad86e3d70a4c8a2861e75fe5",
     "semantic_hash": ""
   },
   "cmd/solmq-conn-util/secretprobe.go": {
-    "mtime": 1793172013.631776,
-    "seen": 1793174077.5750625,
+    "mtime": 1793180918.8785255,
+    "seen": 1793183201.5527406,
     "ast_hash": "e8182d47caafa5986aa5e8d1f1d772d5",
     "semantic_hash": ""
   },
   "internal/gen/existingstore_test.go": {
-    "mtime": 1793172776.6534388,
-    "seen": 1793174077.5751045,
+    "mtime": 1793180918.8915257,
+    "seen": 1793183201.5527754,
     "ast_hash": "289705cf523d95f70fc927325f1b9766",
     "semantic_hash": ""
   },
   "internal/gen/pkcs12fixture_test.go": {
-    "mtime": 1793172731.3648157,
-    "seen": 1793174077.5751143,
+    "mtime": 1793180918.8925257,
+    "seen": 1793183201.552783,
     "ast_hash": "4029fe043e673227edb02cb2ad65520e",
     "semantic_hash": ""
   }
