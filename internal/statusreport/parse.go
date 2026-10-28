@@ -49,6 +49,16 @@ type kubePod struct {
 			PVC *struct {
 				ClaimName string `json:"claimName"`
 			} `json:"persistentVolumeClaim"`
+			Projected *struct {
+				Sources []struct {
+					Secret *struct {
+						Name string `json:"name"`
+					} `json:"secret"`
+					ConfigMap *struct {
+						Name string `json:"name"`
+					} `json:"configMap"`
+				} `json:"sources"`
+			} `json:"projected"`
 		} `json:"volumes"`
 		ImagePullSecrets []struct {
 			Name string `json:"name"`
@@ -337,8 +347,21 @@ func podComponents(p kubePod, sc kubeContainer) []Component {
 			comp.Kind, comp.Name = "secret", v.Secret.SecretName
 		case v.PVC != nil:
 			comp.Kind, comp.Name = "persistentvolumeclaim", v.PVC.ClaimName
+		case v.Projected != nil:
+			// A projected volume -- the stores, over the tool's Secret and any
+			// the operator manages -- is each of its sources, all mounted at
+			// the volume's path.
+			for _, src := range v.Projected.Sources {
+				switch {
+				case src.Secret != nil:
+					out = append(out, Component{Kind: "secret", Name: src.Secret.Name, Detail: comp.Detail})
+				case src.ConfigMap != nil:
+					out = append(out, Component{Kind: "configmap", Name: src.ConfigMap.Name, Detail: comp.Detail})
+				}
+			}
+			continue
 		default:
-			// An emptyDir or projected volume has no object to check.
+			// An emptyDir has no object to check.
 			continue
 		}
 		out = append(out, comp)
@@ -445,6 +468,24 @@ func ObjectExists(doc string) (bool, string) {
 		return true, o.Status.Phase
 	}
 	return true, "present"
+}
+
+// SecretDataKeys reads the data keys of a Secret from `kubectl get secret
+// <name> -o json`; ok is false when the document is not a Secret. Values are
+// never decoded or kept: only which keys exist matters to the caller.
+func SecretDataKeys(doc string) (keys map[string]bool, ok bool) {
+	var o struct {
+		Kind string                     `json:"kind"`
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(doc)), &o); err != nil || o.Kind != "Secret" {
+		return nil, false
+	}
+	keys = make(map[string]bool, len(o.Data))
+	for k := range o.Data {
+		keys[k] = true
+	}
+	return keys, true
 }
 
 // ApplyTop fills the used side of the CPU/memory resources from

@@ -201,6 +201,22 @@ Binaries-only: with no Dockerfile the image job self-skips. Cross-compilation re
 the same way. Actions are SHA-pinned and tracked by [`.github/dependabot.yml`](../.github/dependabot.yml);
 Go module pins (including govulncheck and the toolchain) move deliberately, gates re-run.
 
+### Release checklist
+
+What the gates cannot check, before tagging:
+
+- **The connector image still starts the way the docker created-store path assumes.** For
+  each connector tag the docs name as supported, compare `docker image inspect --format
+  '{{json .Config.Entrypoint}} {{json .Config.Cmd}}' solace/solace-pubsub-connector-ibmmq:<tag>`
+  with `storescript.ImageEntrypoint` / `storescript.ImageCmd`
+  ([`internal/storescript/storescript.go`](../internal/storescript/storescript.go)). `deploy`
+  refuses an image that starts otherwise, so a mismatch is a docker deploy with a created
+  store that stops until the constants follow.
+- **A changed store path was run on a real engine.** The store delivery of each platform is
+  unit-tested only; after a change to it, run one deploy with a created and an existing store
+  on that platform and open each store inside the container (`keytool -list -storetype PKCS12`,
+  which the image ships).
+
 ## Design notes
 
 - **Byte-for-byte output.** `application.yml` and the manifests use a deterministic ordered
@@ -228,7 +244,8 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
   the same way (`apply -f -`).
 - **Teardown reverses the manifest order.** `remove` pipes the document set `deploy`
   renders -- minus the Namespace document, which is handled as its own confirmed
-  step -- reversed, to `<command> delete -f -`. kubectl deletes documents
+  step, and with every Secret the tool owns reduced to kind and name, so nothing is
+  resolved -- reversed, to `<command> delete -f - --ignore-not-found`. kubectl deletes documents
   in file order and waits for each one to go, so creation order deadlocks whenever a
   `libs.pvc.create` PVC precedes the Deployment that mounts it: `kubernetes.io/pvc-protection`
   holds the claim while a pod still mounts it, and the Deployment that owns that pod
@@ -248,7 +265,7 @@ Go module pins (including govulncheck and the toolchain) move deliberately, gate
   0400 credentials Secret readable to a non-root uid. With every capability dropped
   even uid 0 has no `CAP_DAC_OVERRIDE`, so deploy's mount check
   (`cmd/solmq-conn-util/runas.go`) judges root by the mode bits like any uid.
-- **Podman keeps nothing on the host but the unit.** The rendered `application.yml`,
+- **Podman deploy writes nothing on the host but the unit.** The rendered `application.yml`,
   status script and logback config, the TLS stores and the credentials all go into
   podman's secret store (`gen.ResolvePodmanFiles` / `gen.ResolveCredentials`, read
   before anything is created) and come back as `Secret=...,type=mount,target=<abs>`

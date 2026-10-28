@@ -26,9 +26,10 @@ func TestLeaderElectionEffectiveMode(t *testing.T) {
 	}
 }
 
-// Configured is the one definition of a usable store: created, or naming its
-// PKCS12. Nil, an empty block and an existing block without a path are not;
-// Path is the existing PKCS12, empty for a created store.
+// Configured is the one definition of a usable store: created, naming its
+// PKCS12, or naming the kubernetes Secret that holds it. Nil, an empty block
+// and an existing block naming neither are not; Path is the existing PKCS12,
+// empty for a created or Secret-only store.
 func TestStoreConfigured(t *testing.T) {
 	for _, c := range []struct {
 		name    string
@@ -42,6 +43,9 @@ func TestStoreConfigured(t *testing.T) {
 		{"existing without a path", &Store{Existing: &StoreExisting{}}, false, false, ""},
 		{"existing", &Store{Existing: &StoreExisting{PKCS12: "./t.p12"}}, true, false, "./t.p12"},
 		{"created", &Store{Create: &StoreSources{JKS: "./old.jks"}}, true, true, ""},
+		{"secret only", &Store{Existing: &StoreExisting{Secret: &StoreSecret{Name: "my-tls"}}}, true, false, ""},
+		{"file and secret", &Store{Existing: &StoreExisting{PKCS12: "./t.p12", Secret: &StoreSecret{Name: "my-tls"}}}, true, false, "./t.p12"},
+		{"created with a secret", &Store{Create: &StoreSources{JKS: "./old.jks"}, Existing: &StoreExisting{Secret: &StoreSecret{Name: "my-tls"}}}, true, true, ""},
 	} {
 		if got := c.s.Configured(); got != c.want {
 			t.Errorf("%s: Configured() = %v, want %v", c.name, got, c.want)
@@ -49,6 +53,26 @@ func TestStoreConfigured(t *testing.T) {
 		if c.s.Created() != c.created || c.s.Path() != c.path {
 			t.Errorf("%s: Created() = %v, Path() = %q; want %v, %q", c.name, c.s.Created(), c.s.Path(), c.created, c.path)
 		}
+	}
+}
+
+// TestStoreSecretParses pins existing.secret: name and key decode onto the
+// store, key defaults to the store's name, and SecretRef is nil-safe.
+func TestStoreSecretParses(t *testing.T) {
+	d, err := ParseDefaults([]byte("tls:\n  stores:\n    cm-id:\n      password-env: PW\n      existing:\n        secret:\n          name: broker-cert\n          key: keystore.p12\n    cm-ca:\n      password-env: PW\n      existing:\n        pkcs12: ./ca.p12\n        secret:\n          name: broker-cert\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, ca := d.TLS.Store("cm-id"), d.TLS.Store("cm-ca")
+	if ref := id.SecretRef(); ref == nil || ref.Name != "broker-cert" || ref.EffectiveKey("cm-id") != "keystore.p12" {
+		t.Errorf("cm-id secret = %+v", ref)
+	}
+	if ref := ca.SecretRef(); ref == nil || ref.EffectiveKey("cm-ca") != "cm-ca" || ca.Path() != "./ca.p12" {
+		t.Errorf("cm-ca = %+v, want the store name as key and the file kept", ca.Existing)
+	}
+	var none *Store
+	if none.SecretRef() != nil || (&Store{}).SecretRef() != nil || (*StoreSecret)(nil).EffectiveKey("x") != "x" {
+		t.Error("SecretRef / EffectiveKey must be nil-safe")
 	}
 }
 
@@ -78,11 +102,13 @@ func TestParseTLSIsStrict(t *testing.T) {
 		{"retired truststore", "tls:\n  truststore:\n    file: t.jks\n", "tls.truststore is no longer read"},
 		{"retired keystore", "tls:\n  keystore:\n    file: k.jks\n", "tls.keystore is no longer read"},
 		{"unknown key", "tls:\n  storez: {}\n", "tls.storez is not a key"},
-		{"retired file", "tls:\n  stores:\n    mq-ca:\n      file: t.jks\n", "tls.stores.mq-ca.file is no longer read: name a PKCS12 you provide with existing: {pkcs12: <file>}, or have the tool build one with create:"},
+		{"retired file", "tls:\n  stores:\n    mq-ca:\n      file: t.jks\n", "tls.stores.mq-ca.file is no longer read: name a PKCS12 you provide with existing: {pkcs12: <file>}, or one a kubernetes Secret holds with existing: {secret: {name: <Secret>}}, or have the tool build one with create:"},
 		{"retired type", "tls:\n  stores:\n    mq-ca:\n      type: JKS\n", "tls.stores.mq-ca.type is no longer read"},
-		{"unknown store key", "tls:\n  stores:\n    mq-ca:\n      passwrd-env: X\n", "tls.stores.mq-ca.passwrd-env is not a store key: a store takes password or password-env, and create: or existing:"},
-		{"existing not a mapping", "tls:\n  stores:\n    mq-ca:\n      existing: ./t.p12\n", "tls.stores.mq-ca.existing must be a mapping holding pkcs12: <file>, got a scalar"},
+		{"unknown store key", "tls:\n  stores:\n    mq-ca:\n      passwrd-env: X\n", "tls.stores.mq-ca.passwrd-env is not a store key: a store takes password or password-env, and create: and/or existing:"},
+		{"existing not a mapping", "tls:\n  stores:\n    mq-ca:\n      existing: ./t.p12\n", "tls.stores.mq-ca.existing must be a mapping holding pkcs12: <file> and/or secret: {name, key}, got a scalar"},
 		{"unknown existing key", "tls:\n  stores:\n    mq-ca:\n      existing:\n        file: ./t.p12\n", "tls.stores.mq-ca.existing.file is not an existing key"},
+		{"secret a scalar", "tls:\n  stores:\n    mq-ca:\n      existing:\n        secret: my-tls\n", "tls.stores.mq-ca.existing.secret must be a mapping holding name: <Secret> and optionally key: <data key>, got a scalar"},
+		{"unknown secret key", "tls:\n  stores:\n    mq-ca:\n      existing:\n        secret:\n          secretName: my-tls\n", "tls.stores.mq-ca.existing.secret.secretName is not a secret key"},
 		{"create not a mapping", "tls:\n  stores:\n    mq-ca:\n      create: [a]\n", "tls.stores.mq-ca.create must be a mapping holding certs, keys or jks, got a list"},
 		{"unknown create key", "tls:\n  stores:\n    mq-ca:\n      create:\n        cert: a.pem\n", "tls.stores.mq-ca.create.cert is not a create key: create takes certs, keys and jks"},
 		{"certs a scalar", "tls:\n  stores:\n    mq-ca:\n      create:\n        certs: a.pem\n", "tls.stores.mq-ca.create.certs must be a list of files or a mapping of alias: file, got a scalar"},
@@ -170,7 +196,8 @@ func TestStoreKeyListsAreSorted(t *testing.T) {
 		{StoreKeys(), "create,existing,password,password-env"},
 		{StoreCreateKeys(), "certs,jks,keys"},
 		{StoreKeyEntryKeys(), "cert,chain,key"},
-		{StoreExistingKeys(), "pkcs12"},
+		{StoreExistingKeys(), "pkcs12,secret"},
+		{StoreSecretKeys(), "key,name"},
 	} {
 		if got := strings.Join(c.got, ","); got != c.want {
 			t.Errorf("keys = %s, want %s", got, c.want)

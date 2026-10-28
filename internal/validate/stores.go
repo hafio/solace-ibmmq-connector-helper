@@ -2,28 +2,45 @@ package validate
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
-// checkStoreDefinition checks one tls.stores entry's shape: create: or
-// existing:, exactly one, and for create: sources the PKCS12 writer can turn
-// into one store. Nothing here opens a file -- a source that is missing,
-// unreadable or not a certificate is reported when the validate verb or deploy
-// builds the store (gen.Validate, gen.BuildStore).
+// secretDataKeyRE is what a Secret data key may look like (the API server's own
+// rule for a ConfigMap or Secret key).
+var secretDataKeyRE = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
+
+// checkStoreDefinition checks one tls.stores entry's shape: at most one
+// host-side source -- create: or existing.pkcs12 -- and optionally a
+// kubernetes Secret holding the store (existing.secret), at least one of the
+// three; and for create: sources the PKCS12 writer can turn into one store.
+// Nothing here opens a file -- a source that is missing, unreadable or not a
+// certificate is reported when the validate verb or deploy builds the store
+// (gen.Validate, gen.BuildStore).
 func checkStoreDefinition(add func(string, string, ...any), name string, st *spec.Store) {
-	switch {
-	case st == nil || (st.Create == nil && st.Existing == nil):
-		add(fileEnv, "tls.stores.%s needs create: (the tool builds it) or existing: (a PKCS12 you provide)", name)
+	if st == nil || (st.Create == nil && st.Existing == nil) {
+		add(fileEnv, "tls.stores.%s needs create: (the tool builds it) or existing: (a PKCS12 you provide, or a kubernetes Secret holding one)", name)
 		return
-	case st.Create != nil && st.Existing != nil:
-		add(fileEnv, "tls.stores.%s takes create: or existing:, not both", name)
-		return
-	case st.Existing != nil:
-		if st.Existing.PKCS12 == "" {
-			add(fileEnv, "tls.stores.%s.existing.pkcs12 is empty: name the PKCS12 file", name)
+	}
+	if ex := st.Existing; ex != nil {
+		switch {
+		case st.Create != nil && ex.PKCS12 != "":
+			add(fileEnv, "tls.stores.%s takes create: or existing.pkcs12, not both: one host-side source per store (create: may sit beside existing.secret, which kubernetes reads instead)", name)
+			return
+		case ex.PKCS12 == "" && ex.Secret == nil && st.Create == nil:
+			add(fileEnv, "tls.stores.%s.existing names neither pkcs12 nor secret: name the PKCS12 you hold on this host (pkcs12: <file>), the kubernetes Secret holding it (secret: {name: <Secret>}), or both", name)
+			return
 		}
+		if sec := ex.Secret; sec != nil {
+			checkSecretName(add, "tls.stores."+name+".existing.secret.name", sec.Name)
+			if k := sec.Key; k != "" && (len(k) > 253 || !secretDataKeyRE.MatchString(k)) {
+				add(fileEnv, "tls.stores.%s.existing.secret.key %q is not a valid Secret data key: letters, digits, '-', '_' and '.', at most 253 characters", name, k)
+			}
+		}
+	}
+	if st.Create == nil {
 		return
 	}
 	c := st.Create

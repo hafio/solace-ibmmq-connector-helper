@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,6 +24,7 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusreport"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/storescript"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
 
@@ -109,14 +112,17 @@ timezone: UTC
 `
 
 // kubeEnv is a minimal-but-valid kubernetes: section for the deploy/remove/
-// platform-resolution seam tests -- a safe command, and the fields checkKube
-// requires.
+// platform-resolution seam tests -- a safe command, the fields checkKube
+// requires, and the credentials Secret any referenced credential needs.
 const kubeEnv = `
 kubernetes:
   command: kubectl
   deployment:
     name: solmq-connector
     namespace: solace-connectors
+  secrets:
+    credentials:
+      create: true
 `
 
 // kubeEnvUnsafeCommand mirrors kubeEnv but with a command containing a shell
@@ -766,9 +772,54 @@ func TestRemoveKubernetesSeamHappyPath(t *testing.T) {
 	if !reflect.DeepEqual(f.calls[0].argv, wantPreflight) {
 		t.Errorf("preflight argv = %v, want %v", f.calls[0].argv, wantPreflight)
 	}
-	want := []string{"kubectl", "delete", "-f", "-"}
+	want := []string{"kubectl", "delete", "-f", "-", "--ignore-not-found"}
 	if !reflect.DeepEqual(f.calls[1].argv, want) {
 		t.Errorf("argv = %v, want %v", f.calls[1].argv, want)
+	}
+}
+
+// TestDeployKubernetesProbesOperatorSecrets pins the deploy-time check of a
+// Secret the operator manages and the pod mounts: after the preflight probe,
+// one `get secret` per Secret; a missing Secret or key stops the deploy before
+// anything is applied, a Secret the identity may not read only warns, and a
+// complete one lets the apply through. remove never probes.
+func TestDeployKubernetesProbesOperatorSecrets(t *testing.T) {
+	env := sharedEnv + "tls:\n  stores:\n    ts:\n      password: pw\n      existing:\n        secret:\n          name: broker-cert\n          key: ca.p12\n" + kubeEnv
+	notFound := errors.New("exit status 1")
+	for _, c := range []struct {
+		name      string
+		reply     queuedResp
+		wantCode  int
+		wantApply bool
+	}{
+		{"missing Secret", queuedResp{`Error from server (NotFound): secrets "broker-cert" not found`, notFound}, 1, false},
+		{"missing key", queuedResp{`{"kind":"Secret","data":{"tls.crt":"QQ=="}}`, nil}, 1, false},
+		{"not allowed to read it", queuedResp{`Error from server (Forbidden): secrets "broker-cert" is forbidden`, notFound}, 0, true},
+		{"complete", queuedResp{`{"kind":"Secret","data":{"ca.p12":"QQ=="}}`, nil}, 0, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := &queueRunner{resp: []queuedResp{{"", nil}, c.reply}}
+			dir := t.TempDir()
+			write(t, dir, "env.yaml", env)
+			write(t, dir, "10.yaml", tlsWF)
+			var code int
+			stderr := captureStderr(t, func() {
+				code = dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f)
+			})
+			if code != c.wantCode {
+				t.Fatalf("exit = %d, want %d\n%s", code, c.wantCode, stderr)
+			}
+			if want := []string{"kubectl", "get", "secret", "broker-cert", "-n", "solace-connectors", "-o", "json"}; len(f.calls) < 2 || !reflect.DeepEqual(f.calls[1].argv, want) {
+				t.Fatalf("call 1 = %+v, want %v", f.calls, want)
+			}
+			applied := len(f.calls) == 3 && reflect.DeepEqual(f.calls[2].argv, []string{"kubectl", "apply", "-f", "-"})
+			if applied != c.wantApply {
+				t.Errorf("applied = %v, want %v: %+v\n%s", applied, c.wantApply, f.calls, stderr)
+			}
+			if c.name != "complete" && !strings.Contains(stderr, "the Secret broker-cert") {
+				t.Errorf("stderr names no Secret:\n%s", stderr)
+			}
+		})
 	}
 }
 
@@ -1586,7 +1637,12 @@ func TestValidateWarnsAboutHostMountsTheConnectorCannotRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	truststore := filepath.Join(dir, "certs", "truststore.p12")
-	writeMode(t, truststore, 0o600)
+	// A real store its password opens: validate opens every store podman
+	// loads, and this test is about the mode, not the content.
+	write(t, filepath.Join(dir, "certs"), "truststore.p12", string(certfixture.TrustStorePKCS12(t, "ts", certfixture.CA(t, "Root"))))
+	if err := os.Chmod(truststore, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	libs := filepath.Join(dir, "libs")
 	if err := os.Mkdir(libs, 0o700); err != nil {
 		t.Fatal(err)
@@ -2521,10 +2577,10 @@ func TestDeployPodmanFailureStopsBeforeSystemctl(t *testing.T) {
 		want      string
 		wantCalls int
 	}{
-		{"credential", 1, false, "podman secret rm solmq-conn-_GEN_MQ_CONN_1_USER: boom", 2},
-		{"document", 9, false, "podman secret rm solmq-conn-application.yml: boom", 10},
-		{"unmounted file secret", 13, false, "podman secret rm: boom", 14},
-		{"unit write", -1, true, "creating ", 14},
+		{"credential", 2, false, "podman secret rm solmq-conn-_GEN_MQ_CONN_1_USER: boom", 3},
+		{"document", 10, false, "podman secret rm solmq-conn-application.yml: boom", 11},
+		{"unmounted file secret", 14, false, "podman secret rm: boom", 15},
+		{"unit write", -1, true, "creating ", 15},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := useFakeRunner(t)
@@ -2687,7 +2743,12 @@ func TestDeployDockerWarnsAboutMountsTheConnectorCannotRead(t *testing.T) {
 		}
 	}
 	truststore := filepath.Join(dir, "certs", "truststore.jks")
-	writeMode(t, truststore, 0o600)
+	// A real store its password opens, since deploy opens it before the
+	// digest; the mode is what this test is about.
+	write(t, filepath.Join(dir, "certs"), "truststore.jks", string(certfixture.TrustStorePKCS12(t, "ts", certfixture.CA(t, "Root"))))
+	if err := os.Chmod(truststore, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	jar := filepath.Join(libs, "com.ibm.mq.jakarta.client.jar")
 	writeMode(t, jar, 0o600)
 	runAs := fmt.Sprintf("%d:%d", os.Getuid()+1, os.Getgid()+1)
@@ -2754,19 +2815,20 @@ func TestDeployPodmanSeamWritesUnitsAndStarts(t *testing.T) {
 	quadletDir := podmanQuadletHome(t)
 	legacyDir := filepath.Join(t.TempDir(), "old-base-dir")
 	dir := t.TempDir()
-	// A binary truststore, to show the bytes reach podman unchanged, and a
-	// leftover base-dir, to show it is ignored.
-	const truststore = "\xfe\xed\xfe\xed\x00\x00\x00\x02\r\n\xff"
+	// A binary truststore -- a real PKCS12, which deploy opens with its
+	// password before loading it -- to show the bytes reach podman unchanged,
+	// and a leftover base-dir, to show it is ignored.
+	truststore := string(certfixture.TrustStorePKCS12(t, "ts", certfixture.CA(t, "Root")))
 	if err := os.MkdirAll(filepath.Join(dir, "certs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	write(t, filepath.Join(dir, "certs"), "truststore.jks", truststore)
+	write(t, filepath.Join(dir, "certs"), "truststore.p12", truststore)
 	write(t, dir, "env.yaml", sharedEnv+`
 tls:
   stores:
     ts:
       existing:
-        pkcs12: ./certs/truststore.jks
+        pkcs12: ./certs/truststore.p12
       password: ts
 `+podmanEnv()+"  base-dir: "+filepath.ToSlash(legacyDir)+"\n")
 	write(t, dir, "10.yaml", tlsWF)
@@ -2812,6 +2874,7 @@ tls:
 	// probe, which runs before any of that.
 	wantCalls := [][]string{
 		{"podman", "info"},
+		{"podman", "version", "--format", "{{.Client.Version}}"},
 		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_MQ_CONN_1_USER"},
 		{"podman", "secret", "create", "solmq-conn-_GEN_MQ_CONN_1_USER", "-"},
 		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_MQ_CONN_1_PASSWORD"},
@@ -2843,10 +2906,10 @@ tls:
 	}
 	// The values travel on stdin, never argv: the rendered application.yml, and
 	// the truststore byte for byte.
-	if app := f.calls[12].stdin; !strings.Contains(app, "solace:") || !strings.Contains(app, "conn-name: mqhost(1414)") {
+	if app := f.calls[13].stdin; !strings.Contains(app, "solace:") || !strings.Contains(app, "conn-name: mqhost(1414)") {
 		t.Errorf("application.yml secret should carry the rendered document, got %q", app)
 	}
-	if got := f.calls[14].stdin; got != truststore {
+	if got := f.calls[15].stdin; got != truststore {
 		t.Errorf("truststore secret = %q, want the file's bytes %q", got, truststore)
 	}
 }
@@ -6606,13 +6669,27 @@ func envValue(env []string, key string) (string, bool) {
 	return "", false
 }
 
+// imageStartReply is what `image inspect` prints for an image that starts the
+// way storescript records: its entrypoint, then its command, as JSON lines.
+func imageStartReply(t *testing.T) string {
+	t.Helper()
+	ep, err := json.Marshal(storescript.ImageEntrypoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := json.Marshal(storescript.ImageCmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(ep) + "\n" + string(cmd) + "\n"
+}
+
 // A docker deploy carrying a created store builds it and hands it to compose
 // in the child environment -- base64-encoded under its secret's name, with the
 // digest the stores label is filled from -- never in argv. The image is
-// inspected first; the fake engine's answer does not parse, which is an image
-// it does not have yet, so there is nothing to compare.
+// inspected first and starts the way the storescript hands over to.
 func TestDeployDockerCarriesCreatedStores(t *testing.T) {
-	f := useFakeRunner(t)
+	f := &queueRunner{resp: []queuedResp{{out: "ok"}, {out: imageStartReply(t)}}}
 	dir := t.TempDir()
 	createdStoreDockerSpec(t, dir)
 	t.Setenv("SOLMQ_TEST_TS_PW", "store-pass-123")
@@ -6641,6 +6718,48 @@ func TestDeployDockerCarriesCreatedStores(t *testing.T) {
 		if strings.Contains(a, enc[:16]) {
 			t.Errorf("store bytes reached argv: %q", a)
 		}
+	}
+}
+
+// An image the engine does not have yet is pulled and then inspected, so the
+// check always compares something; one it still cannot describe after the
+// pull stops the deploy before anything is written.
+func TestDeployDockerPullsAnImageItCannotInspect(t *testing.T) {
+	noImage := queuedResp{out: "Error: No such image: img:1", err: errors.New("exit status 1")}
+	for _, c := range []struct {
+		name  string
+		resp  []queuedResp
+		code  int
+		calls []string // the verb after "docker" in each call
+	}{
+		{"pulled, then it starts as expected", []queuedResp{{out: "ok"}, noImage, {out: "pulled"}, {out: imageStartReply(t)}}, 0, []string{"info", "image", "image", "image", "compose"}},
+		{"pulled, still not described", []queuedResp{{out: "ok"}, noImage, {out: "pulled"}, noImage}, 1, []string{"info", "image", "image", "image"}},
+		{"the pull fails", []queuedResp{{out: "ok"}, noImage, {out: "denied", err: errors.New("exit status 1")}}, 1, []string{"info", "image", "image"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			q := &queueRunner{resp: c.resp}
+			dir := t.TempDir()
+			createdStoreDockerSpec(t, dir)
+			t.Setenv("SOLMQ_TEST_TS_PW", "store-pass-123")
+			var code int
+			stderr := captureStderr(t, func() {
+				code = dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, q)
+			})
+			if code != c.code {
+				t.Fatalf("exit=%d, want %d:\n%s", code, c.code, stderr)
+			}
+			if len(q.calls) != len(c.calls) {
+				t.Fatalf("calls = %+v, want %v", q.calls, c.calls)
+			}
+			for i, v := range c.calls {
+				if q.calls[i].argv[1] != v {
+					t.Errorf("call %d = %v, want docker %s ...", i, q.calls[i].argv, v)
+				}
+			}
+			if len(q.calls) > 2 && !reflect.DeepEqual(q.calls[2].argv, []string{"docker", "image", "pull", "img:1"}) {
+				t.Errorf("call 2 = %v, want the pull", q.calls[2].argv)
+			}
+		})
 	}
 }
 
@@ -6689,6 +6808,33 @@ func TestRemoveDockerNeedsNoCreatedStoreSources(t *testing.T) {
 	}
 	if v, _ := envValue(down.env, "_GEN_TLS_STORES_SHA256"); v != "-" {
 		t.Errorf("_GEN_TLS_STORES_SHA256 = %q, want the placeholder", v)
+	}
+}
+
+// podman remove deletes a created store's secret even when the unit that
+// mounted it is already gone -- a deploy that failed before writing it, or a
+// unit deleted by hand -- and needs no store source to do so.
+func TestRemovePodmanDeletesACreatedStoreSecretWithoutTheUnit(t *testing.T) {
+	f := useFakeRunner(t)
+	podmanQuadletHome(t) // no unit written: the fallback is what is tested
+	withPromptAnswer(t, "y")
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+`
+tls:
+  stores:
+    ts:
+      password-env: SOLMQ_TEST_TS_PW
+      create:
+        certs:
+          - ./gone.pem
+`+podmanEnv())
+	write(t, dir, "10.yaml", tlsWF)
+	if code := dispatch([]string{"remove", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	rm := f.calls[len(f.calls)-1].argv
+	if !slices.Contains(rm, "solmq-conn-tls-ts") || rm[1] != "secret" || rm[2] != "rm" {
+		t.Errorf("last call = %v, want a secret rm naming solmq-conn-tls-ts", rm)
 	}
 }
 

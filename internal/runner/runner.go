@@ -49,6 +49,12 @@ var preflightHints = map[string]string{
 const (
 	ActionDeploy = "deploy"
 	ActionRemove = "remove"
+
+	// The lifecycle actions act on an instance deploy already created, in
+	// place: nothing is rendered or applied, and nothing deploy made is removed.
+	ActionStart   = "start"
+	ActionStop    = "stop"
+	ActionRestart = "restart"
 )
 
 // Cmd is one process invocation. Argv[0] is the program and Argv[1:] its
@@ -389,8 +395,13 @@ func WriteFile(path, content string, mode os.FileMode) error {
 }
 
 // Kubernetes applies (deploy) or deletes (remove) the manifest by running
-// `<command> apply -f -` / `<command> delete -f -` with the manifest on stdin,
-// so the manifest bytes never appear on a command line.
+// `<command> apply -f -` / `<command> delete -f - --ignore-not-found` with the
+// manifest on stdin, so the manifest bytes never appear on a command line.
+//
+// A teardown names every object the instance can own -- the stores Secret
+// always, whether or not this spec renders it -- so an object already gone
+// is the expected case, not a failure that would stop remove before the
+// namespace step.
 func Kubernetes(r Runner, command, action, manifest string, extraAllowed []string) (string, error) {
 	argv, err := ParseCommand(validate.PlatformKubernetes, command, extraAllowed)
 	if err != nil {
@@ -401,6 +412,9 @@ func Kubernetes(r Runner, command, action, manifest string, extraAllowed []strin
 		return "", err
 	}
 	argv = append(argv, verb, "-f", "-")
+	if action == ActionRemove {
+		argv = append(argv, "--ignore-not-found")
+	}
 	return r.Run(Cmd{Argv: argv, Stdin: manifest})
 }
 
@@ -440,19 +454,74 @@ func Docker(r Runner, command, action, composeFile string, env []string, extraAl
 	return r.Run(Cmd{Argv: argv, Env: env})
 }
 
+// KubernetesLifecycle stops, starts or restarts a Deployment in place: stop
+// scales it to 0, start scales it back to replicas (the env.yaml value), and
+// restart is `rollout restart`, which replaces the pods one by one as a
+// rollout does.
+func KubernetesLifecycle(r Runner, command, action, namespace, name string, replicas int, extraAllowed []string) (string, error) {
+	argv, err := ParseCommand(validate.PlatformKubernetes, command, extraAllowed)
+	if err != nil {
+		return "", err
+	}
+	if namespace != "" {
+		argv = append(argv, "--namespace", namespace)
+	}
+	switch action {
+	case ActionStop:
+		argv = append(argv, "scale", "deployment/"+name, "--replicas=0")
+	case ActionStart:
+		argv = append(argv, "scale", "deployment/"+name, "--replicas="+strconv.Itoa(replicas))
+	case ActionRestart:
+		argv = append(argv, "rollout", "restart", "deployment/"+name)
+	default:
+		return "", fmt.Errorf("unknown lifecycle action %q", action)
+	}
+	return r.Run(Cmd{Argv: argv})
+}
+
+// DockerLifecycle runs `<command> start|stop|restart <container>` on the
+// container a deploy created.
+func DockerLifecycle(r Runner, command, action, container string, extraAllowed []string) (string, error) {
+	argv, err := ParseCommand(validate.PlatformDocker, command, extraAllowed)
+	if err != nil {
+		return "", err
+	}
+	switch action {
+	case ActionStart, ActionStop, ActionRestart:
+	default:
+		return "", fmt.Errorf("unknown lifecycle action %q", action)
+	}
+	return r.Run(Cmd{Argv: append(argv, action, container)})
+}
+
+// PodmanLifecycle runs `systemctl [--user] start|stop|restart <service>` on
+// the quadlet unit a deploy installed: under quadlet, systemd owns the
+// container, so a podman stop would only be undone by the unit's restart
+// policy, and a stopped unit's container is removed and created again from the
+// unit on start.
+func PodmanLifecycle(r Runner, sc QuadletScope, action, service string) (string, error) {
+	switch action {
+	case ActionStart, ActionStop, ActionRestart:
+	default:
+		return "", fmt.Errorf("unknown lifecycle action %q", action)
+	}
+	return r.Run(Cmd{Argv: sc.systemctlArgs(action, service)})
+}
+
 // DockerImageCommand reads an image's ENTRYPOINT and CMD from the local engine
 // (`<command> image inspect`), for a deploy that overrides the entrypoint to
 // check that it hands over to the command the image really runs. found is
 // false when the engine cannot answer -- above all when it does not have the
-// image yet, which `compose up` then pulls -- so there is nothing to compare;
-// only a command the engine reports can fail the check.
+// image yet -- so the caller pulls it and asks again (DockerImagePull). The
+// answer is read from stdout alone (runParsed): a warning the CLI prints on
+// stderr must not turn a reply into "no answer".
 func DockerImageCommand(r Runner, command, image string, extraAllowed []string) (entrypoint, cmd []string, found bool, err error) {
 	argv, err := ParseCommand(validate.PlatformDocker, command, extraAllowed)
 	if err != nil {
 		return nil, nil, false, err
 	}
 	argv = append(argv, "image", "inspect", "--format", "{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}", image)
-	out, rerr := r.Run(Cmd{Argv: argv})
+	out, rerr := runParsed(r, Cmd{Argv: argv})
 	if rerr != nil {
 		return nil, nil, false, nil
 	}
@@ -461,6 +530,18 @@ func DockerImageCommand(r Runner, command, image string, extraAllowed []string) 
 		return nil, nil, false, nil
 	}
 	return entrypoint, cmd, true, nil
+}
+
+// DockerImagePull pulls image through the engine (`<command> image pull`), for
+// a deploy that has to see how an image starts before compose runs it. The
+// pull prints its progress on both streams, so it runs through Run and its
+// output is reported, never parsed.
+func DockerImagePull(r Runner, command, image string, extraAllowed []string) (string, error) {
+	argv, err := ParseCommand(validate.PlatformDocker, command, extraAllowed)
+	if err != nil {
+		return "", err
+	}
+	return r.Run(Cmd{Argv: append(argv, "image", "pull", image)})
 }
 
 // Preflight runs a cheap, read-only probe before any generated file is written
@@ -515,21 +596,69 @@ func canIVerb(action string) (string, error) {
 		return "create", nil
 	case ActionRemove:
 		return "delete", nil
+	case ActionStart, ActionStop, ActionRestart:
+		// scale and rollout restart both patch the Deployment.
+		return "patch", nil
 	default:
 		return "", fmt.Errorf("unknown action %q (want %q or %q)", action, ActionDeploy, ActionRemove)
 	}
 }
 
-// PodmanSecretCreate stores one credential in podman's secret store, replacing
-// any previous entry of that name.
-//
-// The value crosses on stdin, never in argv. It is a remove-then-create rather
-// than `create --replace` because --replace needs podman 4.7 and the rest of the
-// quadlet secret wiring only needs 4.5.
-func PodmanSecretCreate(r Runner, command, name, value string, extraAllowed []string) (string, error) {
+// PodmanVersion is the podman client's version, as `podman version --format
+// {{.Client.Version}}` prints it (5.8.2), read from stdout alone.
+func PodmanVersion(r Runner, command string, extraAllowed []string) (string, error) {
 	argv, err := ParseCommand(validate.PlatformPodman, command, extraAllowed)
 	if err != nil {
 		return "", err
+	}
+	out, err := runParsed(r, Cmd{Argv: append(argv, "version", "--format", "{{.Client.Version}}")})
+	if err != nil {
+		return "", fmt.Errorf("podman version: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// PodmanSupportsReplace reports whether a podman version is 4.7 or newer,
+// where `secret create --replace` exists. A version that does not parse is
+// not, so the caller keeps to remove-then-create.
+func PodmanSupportsReplace(version string) bool {
+	num := func(s string) (int, bool) {
+		end := 0
+		for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+			end++
+		}
+		n, err := strconv.Atoi(s[:end])
+		return n, err == nil
+	}
+	parts := strings.SplitN(strings.TrimPrefix(version, "v"), ".", 3)
+	if len(parts) < 2 {
+		return false
+	}
+	major, ok1 := num(parts[0])
+	minor, ok2 := num(parts[1])
+	return ok1 && ok2 && (major > 4 || major == 4 && minor >= 7)
+}
+
+// PodmanSecretCreate stores one credential in podman's secret store, replacing
+// any previous entry of that name.
+//
+// The value crosses on stdin, never in argv. With replace -- podman 4.7 and
+// newer, PodmanSupportsReplace -- it is one `secret create --replace`, so a
+// failed create leaves the previous secret, and the unit still mounting it,
+// intact. Below 4.7, where the rest of the quadlet wiring still works, it is a
+// remove-then-create: a create that fails then leaves the installed unit
+// naming a secret that is gone until deploy is run again.
+func PodmanSecretCreate(r Runner, command, name, value string, replace bool, extraAllowed []string) (string, error) {
+	argv, err := ParseCommand(validate.PlatformPodman, command, extraAllowed)
+	if err != nil {
+		return "", err
+	}
+	if replace {
+		out, err := r.Run(Cmd{Argv: append(append([]string(nil), argv...), "secret", "create", "--replace", name, "-"), Stdin: value})
+		if err != nil {
+			return out, fmt.Errorf("podman secret create --replace %s: %w", name, err)
+		}
+		return out, nil
 	}
 	out, err := r.Run(Cmd{Argv: append(append([]string(nil), argv...), "secret", "rm", "--ignore", name)})
 	if err != nil {

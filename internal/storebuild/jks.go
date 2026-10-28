@@ -82,20 +82,32 @@ func (b *builder) fromJKS() ([]byte, error) {
 	}
 }
 
+// SniffJKS checks, without opening it, that src is a JKS keystore a created
+// store can read: not a JCEKS, not a file that is already PKCS12, not something
+// else entirely. It is every check on a create.jks source that does not need
+// the store's password, so validate can make them while the password is
+// unset; Build makes the same checks first.
+func SniffJKS(src Source, store string) error {
+	where := src.where(store)
+	switch sniff(src.Data) {
+	case formatJKS:
+		return nil
+	case formatJCEKS:
+		return fmt.Errorf("%s is a JCEKS keystore, which cannot be read here: convert it with keytool -importkeystore -srcstoretype JCEKS -deststoretype PKCS12 and name the result with existing: {pkcs12: <file>}", where)
+	case formatPKCS12:
+		return fmt.Errorf("%s is already a PKCS12 file, not a JKS: name it with existing: {pkcs12: <file>} instead of create.jks", where)
+	}
+	return fmt.Errorf("%s is not a JKS keystore", where)
+}
+
 // readJKS opens src with the store's password and returns its trusted
 // certificates and private keys, in alias order. The password opens both the
 // keystore and its keys: keytool gives a key the store's password unless told
 // otherwise, and a created store has one password.
 func readJKS(src Source, store, password string) (ts []trusted, keys []jksKey, err error) {
 	where := src.where(store)
-	switch sniff(src.Data) {
-	case formatJKS:
-	case formatJCEKS:
-		return nil, nil, fmt.Errorf("%s is a JCEKS keystore, which cannot be read here: convert it with keytool -importkeystore -srcstoretype JCEKS -deststoretype PKCS12 and name the result with existing: {pkcs12: <file>}", where)
-	case formatPKCS12:
-		return nil, nil, fmt.Errorf("%s is already a PKCS12 file, not a JKS: name it with existing: {pkcs12: <file>} instead of create.jks", where)
-	default:
-		return nil, nil, fmt.Errorf("%s is not a JKS keystore", where)
+	if err := SniffJKS(src, store); err != nil {
+		return nil, nil, err
 	}
 	ks := keystore.New(keystore.WithCaseExactAliases(), keystore.WithOrderedAliases())
 	if err := ks.Load(bytes.NewReader(src.Data), []byte(password)); err != nil {

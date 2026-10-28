@@ -16,6 +16,7 @@ func renderAll(t *testing.T, runAs string) map[string]string {
 	}
 	const base = "image:\n  name: img\n  tag: v1\n"
 	kube := "kubernetes:\n  command: kubectl\n  deployment:\n    name: solmq\n    namespace: ns\n" + line +
+		"  secrets:\n    credentials:\n      existing: their-creds\n" +
 		"  libs:\n    download:\n      urls:\n        - https://repo1.maven.org/maven2/a/b/1/b-1.jar\n      pvc: libs\n"
 	docker := "docker:\n  command: docker\n  name: solmq\n" + line
 	podman := "podman:\n  command: podman\n  name: solmq\n" + line

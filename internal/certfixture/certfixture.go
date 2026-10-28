@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/pavlo-v-chernykh/keystore-go/v4"
+	pkcs12 "software.sslmate.com/src/go-pkcs12"
 )
 
 // Cert is a certificate and the key it was issued for.
@@ -241,4 +242,31 @@ func JKS(t testing.TB, password string, trusted []Trusted, keys []Key) []byte {
 	var buf bytes.Buffer
 	must(t, ks.Store(&buf, []byte(password)), "JKS store")
 	return buf.Bytes()
+}
+
+// TrustStorePKCS12 is a PKCS#12 truststore of certs, each marked with the
+// attribute Java needs to treat it as a trust anchor, encrypted with password
+// -- the shape a created truststore and keytool's both have.
+func TrustStorePKCS12(t testing.TB, password string, certs ...Cert) []byte {
+	t.Helper()
+	entries := make([]pkcs12.TrustStoreEntry, 0, len(certs))
+	for _, c := range certs {
+		entries = append(entries, pkcs12.TrustStoreEntry{Cert: c.Cert, FriendlyName: c.Cert.Subject.CommonName})
+	}
+	data, err := pkcs12.Modern2023.EncodeTrustStoreEntries(entries, password)
+	must(t, err, "PKCS#12 truststore")
+	return data
+}
+
+// KeyStorePKCS12 is a PKCS#12 keystore holding leaf's key, leaf and chain,
+// encrypted with password.
+func KeyStorePKCS12(t testing.TB, password string, leaf Cert, chain ...Cert) []byte {
+	t.Helper()
+	cas := make([]*x509.Certificate, 0, len(chain))
+	for _, c := range chain {
+		cas = append(cas, c.Cert)
+	}
+	data, err := pkcs12.Modern2023.Encode(leaf.Key, leaf.Cert, cas, password)
+	must(t, err, "PKCS#12 keystore")
+	return data
 }

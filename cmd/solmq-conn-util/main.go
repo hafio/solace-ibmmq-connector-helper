@@ -130,6 +130,9 @@ var verbHandlers = map[string]func(args []string, r runner.Runner) int{
 	"generate":      func(args []string, r runner.Runner) int { return runGenerate(args) },
 	"deploy":        func(args []string, r runner.Runner) int { return runAction(runner.ActionDeploy, args, r) },
 	"remove":        func(args []string, r runner.Runner) int { return runAction(runner.ActionRemove, args, r) },
+	"start":         func(args []string, r runner.Runner) int { return runLifecycle(runner.ActionStart, args, r) },
+	"stop":          func(args []string, r runner.Runner) int { return runLifecycle(runner.ActionStop, args, r) },
+	"restart":       func(args []string, r runner.Runner) int { return runLifecycle(runner.ActionRestart, args, r) },
 	"status":        func(args []string, r runner.Runner) int { return runStatus(args, r) },
 	"logs":          func(args []string, r runner.Runner) int { return runLogs(args, r) },
 	"cli":           func(args []string, r runner.Runner) int { return runShell(args, r) },
@@ -533,17 +536,28 @@ func actKubernetes(o actionOpts, r runner.Runner) int {
 	if e.Kubernetes == nil {
 		return errExit(fmt.Errorf("env.yaml has no kubernetes: section to %s", action))
 	}
-	// A teardown renders differently in two ways -- no Namespace document, and
+	// A teardown renders differently in three ways -- no Namespace document,
 	// the documents reversed so kubectl does not block deleting a PVC a running
-	// pod still holds. See deploy.Input.Teardown.
+	// pod still holds, and every Secret by name alone, so nothing is resolved.
+	// See deploy.Input.Teardown.
+	var probes []gen.SecretProbe
 	manifest, errs, warns := gen.GenerateKubernetes(req, resolver(envDir),
-		gen.KubeOpts{Teardown: action == runner.ActionRemove}, extraAllowed...)
+		gen.KubeOpts{Teardown: action == runner.ActionRemove, Probes: &probes}, extraAllowed...)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
 	}
 	if code, ok := preflight(r, action, validate.PlatformKubernetes, e.Kubernetes.Command, e.Kubernetes.Deployment.Namespace, extraAllowed); !ok {
 		return code
+	}
+	if action == runner.ActionDeploy && len(probes) > 0 {
+		perrs, pwarns := probeOperatorSecrets(r, e.Kubernetes, probes, extraAllowed)
+		for _, w := range pwarns {
+			fmt.Fprintln(os.Stderr, "warning:", w)
+		}
+		if len(perrs) > 0 {
+			return failAll(perrs)
+		}
 	}
 	out, rerr := runner.Kubernetes(r, e.Kubernetes.Command, action, manifest, extraAllowed)
 	warnIfPVUnchanged(action, out)
@@ -579,9 +593,24 @@ func actDocker(o actionOpts, r runner.Runner) int {
 	if cerr != nil {
 		return errExit(cerr)
 	}
+	if action == runner.ActionDeploy {
+		// docker bind-mounts the TLS stores and the libs jars, which the
+		// connector reads as its run-as identity with the host's own ids. The
+		// paths are the plan's, as the compose file mounts them: expanded and
+		// absolute. Checked before the stores are read below, so a missing
+		// store is reported here, with its remedy.
+		herrs, hwarns := dockerHostChecks(plan)
+		if len(herrs) > 0 {
+			return failAll(herrs)
+		}
+		for _, w := range hwarns {
+			fmt.Fprintln(os.Stderr, "warning:", w)
+		}
+	}
 	// The created stores travel in the same environment, built and encoded by
-	// deploy; down resolves the secrets the file declares but never reads them,
-	// so remove passes placeholders and needs no store's sources.
+	// deploy, beside the digest of every selected store; down resolves the
+	// secrets the file declares but never reads them, so remove passes
+	// placeholders and needs no store's sources.
 	storeKVs := gen.DockerStorePlaceholders(plan)
 	if action == runner.ActionDeploy {
 		skvs, swarns, serr := gen.ResolveDockerStores(plan, res, gen.EnvVarMax(runtime.GOOS), runtime.GOOS)
@@ -590,19 +619,6 @@ func actDocker(o actionOpts, r runner.Runner) int {
 			return errExit(serr)
 		}
 		storeKVs = skvs
-	}
-	if action == runner.ActionDeploy {
-		// docker bind-mounts the TLS stores and the libs jars, which the
-		// connector reads as its run-as identity with the host's own ids. The
-		// paths are the plan's, as the compose file mounts them: expanded and
-		// absolute.
-		herrs, hwarns := dockerHostChecks(plan)
-		if len(herrs) > 0 {
-			return failAll(herrs)
-		}
-		for _, w := range hwarns {
-			fmt.Fprintln(os.Stderr, "warning:", w)
-		}
 	}
 	if code, ok := preflight(r, action, validate.PlatformDocker, e.Docker.Command, "", extraAllowed); !ok {
 		return code
@@ -630,11 +646,23 @@ func actDocker(o actionOpts, r runner.Runner) int {
 // image it runs: the service's entrypoint decodes the stores and then execs
 // the command recorded in storescript, so an image the engine reports starting
 // any other way fails the deploy before anything is written. An image the
-// engine does not have yet is not checked; compose pulls it.
+// engine does not have yet is pulled first and then inspected, so the check
+// never passes without comparing anything.
 func checkImageCommand(r runner.Runner, command, image string, extraAllowed []string) error {
 	entrypoint, cmd, found, err := runner.DockerImageCommand(r, command, image, extraAllowed)
-	if err != nil || !found {
+	if err != nil {
 		return err
+	}
+	if !found {
+		if out, perr := runner.DockerImagePull(r, command, image, extraAllowed); perr != nil {
+			return fmt.Errorf("pulling %s to check how it starts before deploying a created store: %w\n%s", image, perr, strings.TrimSpace(out))
+		}
+		if entrypoint, cmd, found, err = runner.DockerImageCommand(r, command, image, extraAllowed); err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("%s was pulled, but `%s image inspect %s` still does not say how it starts, which a docker service carrying a created store relies on; select existing: stores on docker, or check the engine", image, command, image)
+		}
 	}
 	if !slices.Equal(entrypoint, storescript.ImageEntrypoint) || !slices.Equal(cmd, storescript.ImageCmd) {
 		return fmt.Errorf("the image %s starts with entrypoint %q and command %q, not the %q and %q the docker service hands over to after decoding its created stores; select existing: stores on docker, or report the image's new command", image, entrypoint, cmd, storescript.ImageEntrypoint, storescript.ImageCmd)
@@ -709,8 +737,12 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	}
 	// Read before the new unit replaces it: the stores the last deploy mounted.
 	previous := previousStoreSecrets(sc, plan, p)
+	// podman 4.7 replaces a secret in one step; an older one, or a version that
+	// cannot be read, keeps to remove-then-create (runner.PodmanSecretCreate).
+	version, _ := runner.PodmanVersion(r, p.Command, extraAllowed)
+	replace := runner.PodmanSupportsReplace(version)
 	for _, kv := range kvs {
-		out, err := runner.PodmanSecretCreate(r, p.Command, gen.PodmanSecretStoreName(p.Name, kv.Key), kv.Val, extraAllowed)
+		out, err := runner.PodmanSecretCreate(r, p.Command, gen.PodmanSecretStoreName(p.Name, kv.Key), kv.Val, replace, extraAllowed)
 		if err != nil {
 			return report(runner.ActionDeploy, tgtPodman, out, err)
 		}
@@ -719,12 +751,13 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	// password, read back out of this same file by the status script at run
 	// time -- see statusscript.Render) and the stores are key material, so the
 	// documents and stores travel like the credentials, on stdin into podman's
-	// secret store, and never touch the host disk. Only the unit is written, to
-	// the quadlet directory, the one place systemd scans.
+	// secret store, and deploy writes none of them to a file of its own. Only
+	// the unit is written, to the quadlet directory, the one place systemd
+	// scans; where podman keeps the secrets is its secret driver's business.
 	mounted := make(map[string]bool, len(files))
 	for _, kv := range files {
 		mounted[kv.Key] = true
-		out, err := runner.PodmanSecretCreate(r, p.Command, kv.Key, kv.Val, extraAllowed)
+		out, err := runner.PodmanSecretCreate(r, p.Command, kv.Key, kv.Val, replace, extraAllowed)
 		if err != nil {
 			return report(runner.ActionDeploy, tgtPodman, out, err)
 		}
@@ -753,7 +786,9 @@ func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	// the ones this spec mounts, in case the unit is already gone.
 	stores := previousStoreSecrets(sc, plan, p)
 	for _, f := range plan.Files {
-		if f.Source != "" && !contains(stores, f.StoreName) {
+		// Every store file, existing or created: a created store's secret is
+		// the instance's to remove as much as an existing one's.
+		if (f.Source != "" || f.Build != nil) && !contains(stores, f.StoreName) {
 			stores = append(stores, f.StoreName)
 		}
 	}
@@ -1488,7 +1523,9 @@ func resolver(envDir string) gen.Resolver {
 	return gen.Resolver{Env: os.LookupEnv, ReadFile: fileReader(envDir), Abs: absResolver(envDir)}
 }
 
-// fileReader resolves values-file / .jks paths relative to the env file's dir.
+// fileReader reads the files env.yaml names -- an existing store's PKCS12, a
+// created store's sources -- resolving a relative path against the env file's
+// dir.
 func fileReader(dir string) func(string) ([]byte, error) {
 	return func(p string) ([]byte, error) { return os.ReadFile(absPath(dir, p)) }
 }

@@ -161,7 +161,7 @@ details[open]>summary::before{content:"- "}
 
   <!-- TLS stores -->
   <div class="sec" id="s-tls"><h3>TLS Stores</h3>
-    <div class="h" style="margin-bottom:.5rem;font-size:.7rem;color:var(--tm);font-style:italic">Named stores (tls.stores). Each connection selects its own truststore and keystore by name, so Solace and MQ can trust different CAs and present different client certificates. Name: lowercase letters and digits joined by single hyphens. Every store is PKCS12: existing names one you provide; create has deploy build one into the platform's secret from certificate files or a JKS -- certs make a truststore, one key entry a keystore.</div>
+    <div class="h" style="margin-bottom:.5rem;font-size:.7rem;color:var(--tm);font-style:italic">Named stores (tls.stores). Each connection selects its own truststore and keystore by name, so Solace and MQ can trust different CAs and present different client certificates. Name: lowercase letters and digits joined by single hyphens. Every store is PKCS12: existing names one you provide on the deploy host, a kubernetes Secret you manage that holds one, or both (the Secret for kubernetes, the file for docker and podman); create has deploy build one from certificate files or a JKS -- certs make a truststore, one key entry a keystore -- and may sit beside a kubernetes Secret, which kubernetes then reads instead.</div>
     <div id="stores-list"></div>
     <datalist id="store-names"></datalist>
     <button type="button" class="add" onclick="addStore();gen()">+ Add store</button>
@@ -321,18 +321,12 @@ details[open]>summary::before{content:"- "}
         <option value="">(none)</option>
         <option value="create">create</option>
         <option value="existing">existing</option>
-      </select><div class="h">Keys come from the credential fields above -- each *-env name is its own key. <b>create</b> builds the Secret and fills those keys from your environment; <b>existing</b> leaves your Secret alone, so it must already carry them.</div></div>
+      </select><div class="h">Keys come from the credential fields above -- each *-env name is its own key. <b>create</b> builds the Secret and fills those keys from your environment; <b>existing</b> leaves your Secret alone, so it must already carry them. Required once any credential field is set: without it nothing is mounted and every ${...} stays unresolved.</div></div>
       <div class="opt-fields" id="k8s-cred-c">
         <div class="h">The Secret is named &lt;deployment name&gt;-credentials, so two instances in one namespace never share it.</div>
       </div>
       <div class="opt-fields" id="k8s-cred-e"><div class="f"><label>Existing Secret</label><input id="i-k8s-cred-existing" placeholder="my-credentials"></div></div>
-      <div class="f"><label>Stores Secret</label><select id="i-k8s-stores" onchange="syncK8s()">
-        <option value="">(none)</option>
-        <option value="create">create</option>
-        <option value="existing">existing</option>
-      </select></div>
-      <div class="opt-fields" id="k8s-stores-c"><div class="h">The Secret is named &lt;deployment name&gt;-stores. It carries every selected store: an existing one's PKCS12, a created one built at deploy.</div></div>
-      <div class="opt-fields" id="k8s-stores-e"><div class="f"><label>Existing Secret</label><input id="i-k8s-stores-existing" placeholder="my-tls"><div class="h">Its keys must be the names of the stores the connections select (mq-ca, ...); the pod mounts each under that name, which is what the rendered config points at. The tool writes no Secret here, so a created store is not built: this Secret must already hold it.</div></div></div>
+      <div class="h">The TLS stores need nothing here: &lt;deployment name&gt;-stores carries every selected store the tool holds -- an existing one's PKCS12, a created one built at deploy -- and a store kept in a Secret you manage names that Secret on the store itself.</div>
       <div class="f"><label>Image Pull Secret</label><select id="i-k8s-ipull" onchange="syncK8s()">
         <option value="">(none)</option>
         <option value="reference">reference an existing Secret</option>
@@ -361,7 +355,7 @@ details[open]>summary::before{content:"- "}
       <div class="sub-h">Credentials</div>
       <div class="h">Derived automatically from the connection fields above and mounted at /app/external/var/secrets; nothing to configure here.</div>
       <div class="sub-h">Mounts</div>
-      <div class="h">Every existing store a connection selects is bind-mounted at /app/external/classpath/truststores/&lt;store name&gt;, whatever its file is called; a created store travels base64-encoded in deploy's environment as a compose secret, decoded there by a startup script on every start. Nothing to configure here.</div>
+      <div class="h">Every existing store a connection selects is bind-mounted at /app/external/classpath/truststores/&lt;store name&gt;, whatever its file is called; a created store travels base64-encoded in deploy's environment as a compose secret, decoded there by a startup script on every start, so a compose file carrying one is a preview only deploy can bring up. A store held only in a kubernetes Secret cannot be mounted here. Nothing to configure.</div>
       <div class="tgl"><input type="checkbox" id="i-dk-libs-on" onchange="togOpt('i-dk-libs-on','dk-libs-f')"><label for="i-dk-libs-on">Bind-mount an IBM MQ jar directory</label></div>
       <div class="opt-fields" id="dk-libs-f"><div class="f"><label>Host Directory</label><input id="i-dk-libs-dir" placeholder="./libs"></div></div>
     </div>
@@ -375,7 +369,7 @@ details[open]>summary::before{content:"- "}
         <div class="f"><label>Deploy Command</label><input id="i-pd-cmd" value="podman"></div>
         <div class="f"><label>Container Name</label><input id="i-pd-name" value="connector"></div>
       </div>
-      <div class="h">Nothing here names a host directory: deploy loads application.yml, the status script, the logback config and the TLS stores into podman's secret store, and the .container unit goes to the directory systemd loads for whoever runs the tool -- root system-wide, anyone else their own home.</div>
+      <div class="h">Nothing here names a host directory: deploy loads application.yml, the status script, the logback config and the TLS stores into podman's secret store (by default a file under the deploying user's container storage), and the .container unit goes to the directory systemd loads for whoever runs the tool -- root system-wide, anyone else their own home.</div>
       <div class="fr">
         <div class="f"><label>Restart Policy</label><input id="i-pd-restart" value="unless-stopped"></div>
       </div>
@@ -386,7 +380,7 @@ details[open]>summary::before{content:"- "}
       <div class="sub-h">Credentials</div>
       <div class="h">Derived automatically from the connection fields above and mounted at /app/external/var/secrets; nothing to configure here.</div>
       <div class="sub-h">Mounts</div>
-      <div class="h">Every store a connection selects -- an existing one's PKCS12, a created one built at deploy -- is loaded into podman's secret store and mounted at /app/external/classpath/truststores/&lt;store name&gt;; nothing to configure here. The jar directory below is the one host path the unit mounts.</div>
+      <div class="h">Every store a connection selects -- an existing one's PKCS12, a created one built at deploy -- is loaded into podman's secret store and mounted at /app/external/classpath/truststores/&lt;store name&gt;; a store held only in a kubernetes Secret cannot be. Nothing to configure here. The jar directory below is the one host path the unit mounts.</div>
       <div class="tgl"><input type="checkbox" id="i-pd-libs-on" onchange="togOpt('i-pd-libs-on','pd-libs-f')"><label for="i-pd-libs-on">Bind-mount an IBM MQ jar directory</label></div>
       <div class="opt-fields" id="pd-libs-f"><div class="f"><label>Host Directory</label><input id="i-pd-libs-dir" placeholder="./libs"></div></div>
     </div>
@@ -901,7 +895,8 @@ function addWf(w){
 // password (an env var name or a literal), and where the store comes from --
 // existing, a PKCS12 you provide; or create, built at deploy from certs (one
 // file per line, or alias: file per line when named), one key entry (cert,
-// chain, key) and a JKS opened with the store's password.
+// chain, key) and a JKS opened with the store's password. Either may also name
+// a kubernetes Secret holding the store, which kubernetes reads instead.
 function addStore(st){
   const r = document.createElement('div');
   r.className = 'pr';
@@ -911,6 +906,7 @@ function addStore(st){
     + `<select class="st-mode" style="flex:0 0 6.5rem" onchange="syncStoreRow(this.closest('.pr'))"><option value="existing">existing</option><option value="create">create</option></select>`
     + `<input class="st-pkcs12 grow" placeholder="./certs/mq-ca.p12">`
     + `<button type="button" class="rm" title="Remove" onclick="this.parentElement.remove();refreshStoreNames();gen()">x</button>`
+    + `<div class="f" style="flex:1 0 100%;display:flex;gap:.4rem;align-items:center"><label style="white-space:nowrap;font-size:.68rem;color:var(--tm)">kubernetes Secret</label><input class="st-secret-name grow" placeholder="broker-cert (optional)"><input class="st-secret-key grow" placeholder="key (default: the store name)"></div>`
     + `<div class="st-create f" style="flex:1 0 100%;display:none">`
     + `<label style="display:flex;align-items:center;gap:.3rem">certs<input type="checkbox" class="st-certs-named" style="width:auto">named (alias: file per line)</label>`
     + `<textarea class="st-certs" rows="2" placeholder="./pem/root.pem"></textarea>`
@@ -920,7 +916,7 @@ function addStore(st){
     + `<input class="st-kkey" placeholder="./pem/client.key">`
     + `<label>jks (opened with this store's password)</label>`
     + `<input class="st-jks" placeholder="./legacy/truststore.jks">`
-    + `<div class="h">Built at deploy straight into the platform's secret, never written to disk. Certs, and a JKS's trusted entries, make a truststore; one key entry, or a JKS holding one key, makes a keystore -- its key needs no key-alias.</div>`
+    + `<div class="h">Built in memory at deploy and delivered with the platform's secrets, never written beside env.yaml. Certs, and a JKS's trusted entries, make a truststore; one key entry, or a JKS holding one key, makes a keystore -- its key needs no key-alias.</div>`
     + `</div>`;
   $('stores-list').appendChild(r);
   if(st){
@@ -930,6 +926,10 @@ function addStore(st){
     r.querySelector('.st-pass').value = p.literal || p.env || '';
     r.querySelector('.st-mode').value = st.create ? 'create' : 'existing';
     r.querySelector('.st-pkcs12').value = st.pkcs12 || '';
+    if(st.secret){
+      r.querySelector('.st-secret-name').value = st.secret.name || '';
+      r.querySelector('.st-secret-key').value = st.secret.key || '';
+    }
     if(st.create){
       const c = st.create, k = c.keys[0];
       r.querySelector('.st-certs-named').checked = !!c.certs.named;
@@ -957,9 +957,13 @@ function syncStoreRow(r){
 // readStore reads one tls.stores row into the shape emitEnv and validateModel
 // share: create holds certs ({named, items: [{name, file}]}), keys (the one
 // entry the row edits, when any part is set) and jks; an existing store holds
-// pkcs12. A row in existing mode with no path is neither, as env.yaml would be.
+// pkcs12; either may hold secret ({name, key}), a kubernetes Secret, when the
+// row names one. A row in existing mode with neither is nothing, as env.yaml
+// would be.
 function readStore(r){
-  const st = { name: r.querySelector('.st-name').value.trim(), password: readCredPair(r, 'st-pass'), pkcs12: '', create: null };
+  const st = { name: r.querySelector('.st-name').value.trim(), password: readCredPair(r, 'st-pass'), pkcs12: '', create: null, secret: null };
+  const secName = r.querySelector('.st-secret-name').value.trim(), secKey = r.querySelector('.st-secret-key').value.trim();
+  if(secName || secKey) st.secret = { name: secName, key: secKey };
   if(r.querySelector('.st-mode').value !== 'create'){
     st.pkcs12 = r.querySelector('.st-pkcs12').value.trim();
     return st;
@@ -1075,9 +1079,6 @@ function syncK8s(){
   show('k8s-cred-e', cr === 'existing');
   show('k8s-cred-vars', V('i-k8s-cred-src') === 'env');
   show('k8s-cred-vf', V('i-k8s-cred-src') === 'file');
-  const st = V('i-k8s-stores');
-  show('k8s-stores-c', st === 'create');
-  show('k8s-stores-e', st === 'existing');
   // Only a reference needs a name: a created pull secret is named after the
   // deployment.
   show('k8s-ipull-f', V('i-k8s-ipull') === 'reference');
@@ -1234,7 +1235,7 @@ function readModel(){
   }).sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0);
 
   m.tls = {
-    stores: Array.from(document.querySelectorAll('#stores-list > .pr')).map(readStore).filter(st => st.name || st.pkcs12 || st.create)
+    stores: Array.from(document.querySelectorAll('#stores-list > .pr')).map(readStore).filter(st => st.name || st.pkcs12 || st.create || st.secret)
   };
   m.loggingLevel = parseProps(V('i-log'));
   m.syslog = C('i-sl-on') ? { host: V('i-sl-host'), port: parseInt(V('i-sl-port') || '0', 10), protocol: V('i-sl-proto') } : null;
@@ -1299,8 +1300,6 @@ function readModel(){
     runAs: V('i-k8s-runas'),
     libs: readLibs(),
     cred: readCred('k8s'),
-    stores: V('i-k8s-stores') === 'create' ? { create: true }
-          : V('i-k8s-stores') === 'existing' ? { existing: V('i-k8s-stores-existing') } : null,
     imagePull: V('i-k8s-ipull') === 'create' ? { name: '', create: true }
              : V('i-k8s-ipull') === 'reference' ? { name: V('i-k8s-ipull-name'), create: false } : null
   } : null;
@@ -1394,7 +1393,10 @@ function emitEnv(m){
     named.forEach(st => {
       y += `    ${st.name}:\n` + kcred('password', st.password, '      ');
       if(st.create) y += emitCreate(st.create, '      ');
-      else if(st.pkcs12) y += '      existing:\n' + kv('pkcs12', st.pkcs12, '        ');
+      if(st.pkcs12 || st.secret){
+        y += '      existing:\n' + kv('pkcs12', st.pkcs12, '        ');
+        if(st.secret) y += '        secret:\n' + kv('name', st.secret.name, '          ') + kv('key', st.secret.key, '          ');
+      }
     });
   }
 
@@ -1498,11 +1500,6 @@ function emitKube(k){
     }
   }
   let sb = emitCred(k.cred, '    ');
-  if(k.stores){
-    sb += '    stores:\n' + (k.stores.create
-      ? '      create: true\n'
-      : kv('existing', k.stores.existing, '      '));
-  }
   if(k.imagePull){
     // A reference names the operator's Secret; create takes no name, because
     // the tool names what it builds after the deployment.
@@ -1528,9 +1525,11 @@ function emitCtr(c){
   y += klist('ports', c.ports, '  ');
   // No secrets: block at all -- credentials are derived from the connection's
   // own client-username/-password (or user/password) fields and mounted at
-  // SECRETS_MOUNT by the deploy step. No stores: block either: the tls.*.file
-  // stores are mounted whenever they are set (bind mounts on docker, podman's
-  // secret store on podman).
+  // SECRETS_MOUNT by the deploy step. No stores: block either: every store a
+  // connection selects is delivered whenever it is selected -- an existing
+  // store's PKCS12 bind-mounted on docker and loaded into podman's secret store,
+  // a created one decoded from a compose secret on docker and built into the
+  // secret store on podman.
   if(c.libsDir) y += '  libs:\n' + kv('dir', c.libsDir, '    ');
   return y;
 }
@@ -1621,6 +1620,7 @@ function collectVars(m){
 // ===== Validation (port of internal/validate) =====
 const RE_CONNNAME = /^[^()\s,]+\(\d+\)(,[^()\s,]+\(\d+\))*$/;
 const RE_DNS1123 = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+const RE_SECRET_DATA_KEY = /^[-._a-zA-Z0-9]+$/; // mirrors validate.secretDataKeyRE
 const RE_HOST = /^[A-Za-z0-9._:-]+$/;
 const MAX_WF_PER_INSTANCE = 20;
 const ENV_FILE = 'env.yaml';
@@ -1789,6 +1789,14 @@ function validateModel(m){
   if(m.kube){
     checkKube(add, warn, m);
     checkRunAs(add, warn, 'kubernetes', m.kube.runAs);
+    // Mirrors validate.checkTargets: without the credentials Secret nothing is
+    // mounted, so every ${...} the config carries stays unresolved at runtime.
+    // An error, as on validate, generate and deploy (only remove, which the page
+    // never runs, lets it pass as a warning).
+    const cred = m.kube.cred;
+    if(usesCredentials(resolved, m) && !(cred && (cred.create || cred.existing))){
+      add(ENV_FILE, `credentials are referenced but kubernetes.secrets.credentials is omitted, so nothing would be mounted at ${SECRETS_MOUNT} and every \${...} in the generated config would stay unresolved at runtime: add kubernetes.secrets.credentials with create: true (the tool builds ${m.kube.deployment.name}-credentials from the literals and -env variables the config names) or existing: <Secret> (a Secret you manage, keyed by those names)`);
+    }
   }
   if(m.docker){
     checkContainerTarget(add, warn, m, m.docker);
@@ -1806,13 +1814,11 @@ function validateModel(m){
     checkRunAs(add, warn, 'podman', m.podman.runAs);
     checkRootlessRange(warn, m.podman.runAs); // validate (Lint) only in Go; the page mirrors validate
   }
-  if(m.kube && selectsStores(resolved, m) && !m.kube.stores){
-    warn(ENV_FILE, 'a connection selects tls.stores but kubernetes.secrets.stores is omitted; the store files will be missing at runtime');
-  }
-  // docker/podman carry no equivalent warning: their store files are mounted
-  // whenever a connection selects a store (bind mounts on docker, podman's secret store on
-  // podman), so "TLS configured but nothing mounted" cannot arise. Kubernetes
-  // still has to be told to build the Secret.
+  // No platform carries a "stores not wired" warning: every store a
+  // connection selects is delivered with nothing to configure. What docker and
+  // podman cannot deliver is a store kept only in a kubernetes Secret.
+  if(m.docker) checkClusterOnlyStores(add, 'docker', resolved, m);
+  if(m.podman) checkClusterOnlyStores(add, 'podman', resolved, m);
 
   // checkStatusUser: management security is always on, so this always runs --
   // no author-configured user may claim the reserved status account's name, as
@@ -1940,8 +1946,9 @@ function checkCreatedSelection(add, file, where, s, m){
   const ks = storeByName(m, s.keystore);
   if(s.keyAlias && ks && ks.create) add(file, `${where}: remove key-alias ${goQuote(s.keyAlias)}: tls.stores.${s.keystore} is created with exactly one key, which needs no alias (Java names it "1")`);
 }
-// storeConfigured mirrors spec.Store.Configured: created, or naming its PKCS12.
-function storeConfigured(st){ return !!(st && (st.create || st.pkcs12)); }
+// storeConfigured mirrors spec.Store.Configured: created, naming its PKCS12,
+// or naming the kubernetes Secret that holds it.
+function storeConfigured(st){ return !!(st && (st.create || st.pkcs12 || (st.secret && (st.secret.name || st.secret.key)))); }
 
 // checkCred ports Go's validate.checkCred: the literal and -env forms of one
 // credential position are mutually exclusive, an -env value must be a bare
@@ -2003,14 +2010,21 @@ function checkStoreFiles(add, m){
     checkStoreDefinition(add, name, storeByName(m, name));
   });
 }
-// checkStoreDefinition mirrors Go's checkStoreDefinition: create: or
-// existing:, and create: sources the PKCS12 writer can build one store from.
-// A row is in one mode at a time and edits one key entry, so neither "both"
-// nor a second keys entry can arise here.
+// checkStoreDefinition mirrors Go's checkStoreDefinition: at most one
+// host-side source (create: or existing.pkcs12), optionally a kubernetes
+// Secret, at least one of the three, and create: sources the PKCS12 writer can
+// build one store from. A row is in one mode at a time and edits one key
+// entry, so neither create: beside pkcs12 nor a second keys entry can arise
+// here.
 function checkStoreDefinition(add, name, st){
-  if(!st.create && !st.pkcs12){
-    add(ENV_FILE, `tls.stores.${name} needs create: (the tool builds it) or existing: (a PKCS12 you provide)`);
+  if(!st.create && !st.pkcs12 && !st.secret){
+    add(ENV_FILE, `tls.stores.${name} needs create: (the tool builds it) or existing: (a PKCS12 you provide, or a kubernetes Secret holding one)`);
     return;
+  }
+  if(st.secret){
+    checkSecretName(add, `tls.stores.${name}.existing.secret.name`, st.secret.name);
+    const k = st.secret.key;
+    if(k && (k.length > 253 || !RE_SECRET_DATA_KEY.test(k))) add(ENV_FILE, `tls.stores.${name}.existing.secret.key ${goQuote(k)} is not a valid Secret data key: letters, digits, '-', '_' and '.', at most 253 characters`);
   }
   if(!st.create) return;
   const c = st.create;
@@ -2154,6 +2168,10 @@ function checkDefaultsCredentials(add, warn, m){
 function checkStore(add, warn, label, st){
   checkCred(add, warn, ENV_FILE, `${label}.password`, st.password);
   checkExpansion(warn, ENV_FILE, `${label}.existing.pkcs12`, st.pkcs12);
+  if(st.secret){
+    checkExpansion(warn, ENV_FILE, `${label}.existing.secret.name`, st.secret.name);
+    checkExpansion(warn, ENV_FILE, `${label}.existing.secret.key`, st.secret.key);
+  }
   if(!st.create) return;
   const c = st.create;
   c.certs.items.forEach((cs, i) => checkExpansion(warn, ENV_FILE, c.certs.named ? `${label}.create.certs.${cs.name}` : `${label}.create.certs[${i}]`, cs.file));
@@ -2484,7 +2502,7 @@ function checkKube(add, warn, m){
     // named after deployment.name, so the longest one it builds must fit.
     const derived = [d.name, d.name + '-config'];
     if(k.cred && k.cred.create) derived.push(d.name + '-credentials');
-    if(k.stores && k.stores.create) derived.push(d.name + '-stores');
+    derived.push(d.name + '-stores'); // reserved for the instance, as spec.Kubernetes.StoresSecretName
     if(k.imagePull && k.imagePull.create) derived.push(d.name + '-image-pull');
     if(k.libs && k.libs.kind === 'pvc-create') derived.push(d.name + '-libs');
     const tooLong = derived.find(n => n.length > 63);
@@ -2531,21 +2549,6 @@ function checkKube(add, warn, m){
       checkSecretName(add, 'kubernetes.secrets.credentials.existing', k.cred.existing);
     }
   }
-  if(k.stores){
-    if(!!k.stores.create === !!k.stores.existing){
-      add(ENV_FILE, "kubernetes.secrets.stores must set exactly one of 'create' or 'existing'");
-    }
-    if(k.stores.create){
-      const resolvedWfs = m.wfs.map(wf => ({ file: wf.file, source: resolveSide(m, wf.source), target: resolveSide(m, wf.target) }));
-      if(!selectsStores(resolvedWfs, m)) add(ENV_FILE, 'kubernetes.secrets.stores.create has nothing to carry: no TLS connection selects a store; select one with truststore: or keystore:, or remove secrets.stores');
-    }
-    if(k.stores.existing){
-      // Its keys are the store names, which checkStoreFiles already holds to a
-      // grammar every Secret key accepts.
-      checkSecretName(add, 'kubernetes.secrets.stores.existing', k.stores.existing);
-    }
-  }
-
   checkLibs(add, warn, k.libs);
   // Mirrors validate.checkLibs: the claim is named after the deployment, and
   // its cluster-scoped PV carries the namespace on top -- still one label.
@@ -2784,18 +2787,56 @@ function checkRootlessRange(warn, raw){
     warn(ENV_FILE, `podman.run-as ${goQuote(v)} names an id above ${ROOTLESS_ID_RANGE}: deployed rootless, podman maps container ids 1 and up into the invoking user's subordinate uid and gid ranges, which useradd makes ${ROOTLESS_ID_RANGE} ids wide, so a larger id is unmapped and the unit will not start. Widen the ranges (usermod --add-subuids / --add-subgids, then podman system migrate), deploy as root, or pick a smaller id; deploy checks the actual ranges when it runs rootless`);
   }
 }
-// selectsStores mirrors validate.selectsStores: something rendered mounts a
-// store when a TLS side, or the rendered leader-election session, selects one.
-function selectsStores(resolved, m){
-  const selects = s => !!s && ((s.system === 'solace' && isTCPS(s.host)) || (s.system === 'mq' && s.tls)) && !!(s.truststore || s.keystore);
-  if(resolved.some(wf => selects(wf.source) || selects(wf.target))) return true;
+// selectedStoreNames mirrors validate.selectedStoreNames: the stores a TLS
+// side of a resolved workflow, or the rendered leader-election session,
+// selects, without repeats, in order of first use.
+function selectedStoreNames(resolved, m){
+  const out = [], seen = {};
+  const take = s => {
+    if(!s || !((s.system === 'solace' && isTCPS(s.host)) || (s.system === 'mq' && s.tls))) return;
+    [s.truststore, s.keystore].forEach(n => { if(n && !seen[n]){ seen[n] = true; out.push(n); } });
+  };
+  resolved.forEach(wf => { take(wf.source); take(wf.target); });
   const le = m.leader;
-  if(le.session && selects(le.session)) return true;
+  if(le.session) take(le.session);
   if(le.connRef){
     const c = m.connections.find(x => x.name === le.connRef);
-    if(c && selects(c.side)) return true;
+    if(c) take(c.side);
   }
-  return false;
+  return out;
+}
+// usesCredentials mirrors validate.usesCredentials: whether anything resolves
+// to a mounted credential -- both sides of every resolved workflow, the
+// rendered leader-election session, inline or conn-ref (the form sets neither
+// under standalone, which renders none), the management accounts, and the
+// passwords of the stores a connection selects.
+function usesCredentials(resolved, m){
+  const sides = [];
+  resolved.forEach(wf => { sides.push(wf.source, wf.target); });
+  const le = m.leader;
+  if(le.session) sides.push(le.session);
+  if(le.connRef){
+    const c = m.connections.find(x => x.name === le.connRef);
+    if(c) sides.push(c.side);
+  }
+  const held = s => s && (s.system === 'mq'
+    ? !credEmpty(s.user) || !credEmpty(s.password)
+    : !credEmpty(s.clientUser) || !credEmpty(s.clientPass));
+  if(sides.some(held)) return true;
+  if((m.security.users || []).some(u => !credEmpty(u.password))) return true;
+  return selectedStoreNames(resolved, m).some(name => {
+    const st = storeByName(m, name);
+    return !!st && !credEmpty(st.password);
+  });
+}
+// checkClusterOnlyStores mirrors validate.checkClusterOnlyStores: docker and
+// podman cannot mount a selected store held only in a kubernetes Secret.
+function checkClusterOnlyStores(add, section, resolved, m){
+  selectedStoreNames(resolved, m).forEach(name => {
+    const st = storeByName(m, name);
+    if(!st || !st.secret || st.create || st.pkcs12) return;
+    add(ENV_FILE, `tls.stores.${name} is held only in a kubernetes Secret (existing.secret), which the ${section} section cannot mount: add existing.pkcs12 or create: beside it for ${section}, or remove the ${section} section`);
+  });
 }
 
 // ===== Consolidation (port of internal/consolidate) =====
@@ -3965,7 +4006,7 @@ function sampleModel(){
                     replicas: 2, cpu: '1', memory: '1Gi', nodeSelector: [], spread: '', tolerations: '', affinity: '' },
       service: { enabled: true, port: '8090' },
       runAs: '',
-      libs: null, cred: cred, stores: { create: true }, imagePull: null
+      libs: null, cred: cred, imagePull: null
     },
     docker: {
       section: 'docker', command: 'docker', name: 'connector',
@@ -4061,7 +4102,7 @@ function clearForm(){
    'i-img-repo', 'i-img-name', 'i-img-tag', 'i-img-user', 'i-img-pass', 'i-tz', 'i-jto', 'i-jjo',
    'i-le-host', 'i-le-vpn', 'i-le-user', 'i-le-pass', 'i-le-ts', 'i-le-ks', 'i-le-alias'].forEach(id => setV(id, ''));
   setV('i-wf-dir', '.'); setV('i-wf-pat', '*');
-  setV('i-le-mode', ''); setV('i-k8s-libs', ''); setV('i-k8s-cred', ''); setV('i-k8s-stores', '');
+  setV('i-le-mode', ''); setV('i-k8s-libs', ''); setV('i-k8s-cred', '');
   setV('i-dk-cred', ''); setV('i-pd-cred', ''); setV('i-k8s-rep', '1');
   applyAllToggles();
 }
@@ -4125,7 +4166,6 @@ function loadSample(){
   setV('i-k8s-runas', k.runAs || '');
   setC('i-k8s-svc', k.service.enabled); setV('i-k8s-svcport', k.service.port);
   setV('i-k8s-cred', 'create');
-  setV('i-k8s-stores', 'create');
   if(k.imagePull){
     setV('i-k8s-ipull', k.imagePull.create ? 'create' : 'reference');
     setV('i-k8s-ipull-name', k.imagePull.name);

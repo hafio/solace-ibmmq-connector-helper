@@ -511,10 +511,13 @@ func TestStoreDefinitions(t *testing.T) {
 		st   *spec.Store
 		want string
 	}{
-		{"no block", nil, "env.yaml: tls.stores.s needs create: (the tool builds it) or existing: (a PKCS12 you provide)"},
-		{"no source", &spec.Store{PasswordEnv: "PW"}, "tls.stores.s needs create: (the tool builds it) or existing: (a PKCS12 you provide)"},
-		{"both", &spec.Store{PasswordEnv: "PW", Create: certsOf("./a.pem"), Existing: &spec.StoreExisting{PKCS12: "./t.p12"}}, "tls.stores.s takes create: or existing:, not both"},
-		{"existing without a path", &spec.Store{PasswordEnv: "PW", Existing: &spec.StoreExisting{}}, "tls.stores.s.existing.pkcs12 is empty: name the PKCS12 file"},
+		{"no block", nil, "env.yaml: tls.stores.s needs create: (the tool builds it) or existing: (a PKCS12 you provide, or a kubernetes Secret holding one)"},
+		{"no source", &spec.Store{PasswordEnv: "PW"}, "tls.stores.s needs create: (the tool builds it) or existing: (a PKCS12 you provide, or a kubernetes Secret holding one)"},
+		{"both", &spec.Store{PasswordEnv: "PW", Create: certsOf("./a.pem"), Existing: &spec.StoreExisting{PKCS12: "./t.p12"}}, "tls.stores.s takes create: or existing.pkcs12, not both: one host-side source per store"},
+		{"existing naming nothing", &spec.Store{PasswordEnv: "PW", Existing: &spec.StoreExisting{}}, "tls.stores.s.existing names neither pkcs12 nor secret"},
+		{"a secret without a name", &spec.Store{PasswordEnv: "PW", Existing: &spec.StoreExisting{Secret: &spec.StoreSecret{}}}, "tls.stores.s.existing.secret.name is required"},
+		{"a secret name no Secret can have", &spec.Store{PasswordEnv: "PW", Existing: &spec.StoreExisting{Secret: &spec.StoreSecret{Name: "My_TLS"}}}, `tls.stores.s.existing.secret.name "My_TLS" is not a valid DNS-1123 label`},
+		{"a key no Secret can hold", &spec.Store{PasswordEnv: "PW", Existing: &spec.StoreExisting{Secret: &spec.StoreSecret{Name: "my-tls", Key: "a/b"}}}, `tls.stores.s.existing.secret.key "a/b" is not a valid Secret data key`},
 		{"created without a password", &spec.Store{Create: certsOf("./a.pem")}, "tls.stores.s is created and encrypted with its own password, but sets none; add password-env"},
 		{"created from nothing", &spec.Store{PasswordEnv: "PW", Create: &spec.StoreSources{}}, "tls.stores.s.create names no source: list certs, give one keys entry, or name a jks"},
 		{"certs and a key", &spec.Store{PasswordEnv: "PW", Create: &spec.StoreSources{Certs: certsOf("./a.pem").Certs, Keys: []spec.KeySource{key}}}, "tls.stores.s.create mixes trusted certificates and a key: a store is a truststore or a keystore -- define a second store for the other"},
@@ -544,6 +547,10 @@ func TestStoreDefinitions(t *testing.T) {
 		"key":   {Password: "pw", Create: &spec.StoreSources{Keys: []spec.KeySource{{Cert: "./c.pem", Chain: []string{"./i.pem"}, Key: "./c.key"}}}},
 		"jks":   {PasswordEnv: "PW", Create: &spec.StoreSources{JKS: "./old.jks"}},
 		"both":  {PasswordEnv: "PW", Create: &spec.StoreSources{Certs: certsOf("./a.pem").Certs, JKS: "./old.jks"}},
+		// A kubernetes Secret, alone, beside a file, or beside sources.
+		"secret":         {PasswordEnv: "PW", Existing: &spec.StoreExisting{Secret: &spec.StoreSecret{Name: "my-tls", Key: "keystore.p12"}}},
+		"file-secret":    {PasswordEnv: "PW", Existing: &spec.StoreExisting{PKCS12: "./t.p12", Secret: &spec.StoreSecret{Name: "my-tls"}}},
+		"sources-secret": {PasswordEnv: "PW", Create: certsOf("./a.pem"), Existing: &spec.StoreExisting{Secret: &spec.StoreSecret{Name: "my-tls"}}},
 	}}}
 	if errs, _ := Run(Context{Workflows: []spec.Workflow{wf("10.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("MQ", spec.DestQueue, false))}, Defaults: ok}); hasErr(errs, "tls.stores.") {
 		t.Errorf("well-formed stores refused: %v", errs)

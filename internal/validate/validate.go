@@ -88,6 +88,12 @@ type Context struct {
 	CheckDocker     bool // docker checks
 	CheckPodman     bool // podman checks
 
+	// Teardown is set when the run renders the kubernetes set for remove. A
+	// retired key whose new spelling the teardown does not depend on is then
+	// reported as a warning, so an old env.yaml can still be torn down before
+	// it is edited.
+	Teardown bool
+
 	// Env, when non-nil, looks up a host environment variable so a `-env`
 	// credential reference can be checked for presence at validate time (the CLI
 	// supplies os.LookupEnv; nil skips the check).
@@ -245,32 +251,35 @@ func checkTargets(add, warn func(string, string, ...any), ctx Context, resolved 
 	if ctx.CheckKubernetes && ctx.Kube != nil {
 		checkKube(add, warn, ctx)
 		checkRunAs(add, warn, PlatformKubernetes, ctx.Kube.RunAs)
-		// Warn: credentials are referenced but the credentials Secret is not
-		// wired. Without the block there is no volume and no mount, so every
-		// ${...} the config carries stays unresolved -- and because the
-		// configtree import is optional, the connector starts anyway and fails
-		// later against whatever it could not authenticate to. Nothing else
-		// says so, which is the whole reason this warning exists.
+		// Credentials are referenced but the credentials Secret is not wired.
+		// Without the block there is no volume and no mount, so every ${...}
+		// the config carries stays unresolved -- and because the configtree
+		// import is optional, the connector starts anyway and fails later
+		// against whatever it could not authenticate to. So it is an error,
+		// except on a teardown, which needs no credential and must not be
+		// held up by one.
 		if usesCredentials(resolved, ctx.Defaults) && !credentialsWired(ctx.Kube) {
-			warn(fileEnv, "credentials are referenced but kubernetes.secrets.credentials is omitted; they will not be mounted at "+secretsMountPath+" and every ${...} in the generated config will stay unresolved at runtime")
-		}
-		// Warn: a connection selects stores but the stores Secret is not wired.
-		if selectsStores(resolved, ctx.Defaults) && !storesWired(ctx.Kube) {
-			warn(fileEnv, "a connection selects tls.stores but kubernetes.secrets.stores is omitted; the store files will be missing at runtime")
+			report := add
+			if ctx.Teardown {
+				report = warn
+			}
+			report(fileEnv, "credentials are referenced but kubernetes.secrets.credentials is omitted, so nothing would be mounted at %s and every ${...} in the generated config would stay unresolved at runtime: add kubernetes.secrets.credentials with create: true (the tool builds %s from the literals and -env variables the config names) or existing: <Secret> (a Secret you manage, keyed by those names)", secretsMountPath, ctx.Kube.Deployment.Name+spec.CredentialsSecretSuffix)
 		}
 	}
-	// docker and podman carry no stores warning: every store a connection
-	// selects is mounted (bind mounts on docker, podman's secret store on
-	// podman), so "TLS configured but nothing mounted" cannot arise. The
-	// kubernetes one above stays -- it embeds store content in a Secret, which is
-	// still something the operator has to wire up.
+	// No platform carries a "stores not wired" check: every store a connection
+	// selects is delivered with nothing to configure -- the tool's stores Secret
+	// or an operator's Secret on kubernetes, a bind mount or a decoded compose
+	// secret on docker, podman's secret store on podman. What docker and podman
+	// cannot deliver is a store kept only in a kubernetes Secret.
 	if ctx.CheckDocker && ctx.Docker != nil {
 		checkDocker(add, ctx)
 		checkRunAs(add, warn, PlatformDocker, ctx.Docker.RunAs)
+		checkClusterOnlyStores(add, PlatformDocker, resolved, ctx.Defaults)
 	}
 	if ctx.CheckPodman && ctx.Podman != nil {
 		checkPodman(add, warn, ctx)
 		checkRunAs(add, warn, PlatformPodman, ctx.Podman.RunAs)
+		checkClusterOnlyStores(add, PlatformPodman, resolved, ctx.Defaults)
 		if ctx.Lint {
 			checkRootlessRange(warn, ctx.Podman.RunAs)
 		}
@@ -938,18 +947,15 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 			checkSecretName(add, "kubernetes.secrets.credentials.existing", c.Existing)
 		}
 	}
-	if s := ctx.Kube.Secrets.Stores; s != nil {
-		if (s.Create != nil) == (s.Existing != "") {
-			add(fileEnv, "kubernetes.secrets.stores must set exactly one of 'create' or 'existing'")
+	if s := ctx.Kube.Secrets.Stores; s != nil && s.Existing != "" {
+		// The hard tier of the retired stores block: existing: NAME meant "the
+		// stores are already in Secret NAME", which is now said on each store.
+		// A teardown does not depend on it, so remove only warns.
+		report := add
+		if ctx.Teardown {
+			report = warn
 		}
-		if s.Create != nil && !selectsStores(resolveWorkflows(ctx.Workflows, ctx.Defaults), ctx.Defaults) {
-			add(fileEnv, "kubernetes.secrets.stores.create has nothing to carry: no TLS connection selects a store; select one with truststore: or keystore:, or remove secrets.stores")
-		}
-		if s.Existing != "" {
-			// Its keys are the store names, which checkStoreFiles already holds
-			// to a grammar every Secret key accepts.
-			checkSecretName(add, "kubernetes.secrets.stores.existing", s.Existing)
-		}
+		report(fileEnv, "%s", retiredStoresExisting(s.Existing, resolveWorkflows(ctx.Workflows, ctx.Defaults), ctx.Defaults, ctx.Kube))
 	}
 	checkImagePull(add, warn, ctx)
 	if ctx.Lint {
@@ -1122,35 +1128,75 @@ func resolveWorkflows(wfs []spec.Workflow, d *spec.Defaults) []spec.Workflow {
 	return out
 }
 
-// selectsStores reports whether anything consolidate renders mounts a store:
-// a TLS side (tcps:// Solace, tls: true MQ) of a resolved workflow, or the
-// rendered leader-election session, selecting a truststore or keystore.
-func selectsStores(resolved []spec.Workflow, d *spec.Defaults) bool {
-	selects := func(s spec.Side) bool {
+// selectedStoreNames lists, without repeats and in order of first use, the
+// tls.stores entries anything consolidate renders selects: a TLS side (tcps://
+// Solace, tls: true MQ) of a resolved workflow, or the rendered
+// leader-election session, naming a truststore or keystore. These are exactly
+// the stores every platform delivers (consolidate.Model.Stores); a store only
+// an unreferenced connection or a plaintext side names is not among them.
+func selectedStoreNames(resolved []spec.Workflow, d *spec.Defaults) []string {
+	var out []string
+	seen := map[string]bool{}
+	take := func(s spec.Side) {
 		tls := (s.System == spec.SystemSolace && strings.HasPrefix(s.Host, "tcps://")) || (s.System == spec.SystemMQ && s.TLS)
-		return tls && (s.Truststore != "" || s.Keystore != "")
+		if !tls {
+			return
+		}
+		for _, n := range []string{s.Truststore, s.Keystore} {
+			if n != "" && !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
 	}
 	for _, wf := range resolved {
-		if selects(wf.Source) || selects(wf.Target) {
-			return true
-		}
+		take(wf.Source)
+		take(wf.Target)
 	}
-	if sess := inlineSession(d); sess != nil && selects(*sess) {
-		return true
+	if sess := inlineSession(d); sess != nil {
+		take(*sess)
 	}
 	if name := leaderConnRef(d); name != "" {
-		if c, ok := d.Connections[name]; ok && selects(c) {
-			return true
+		if c, ok := d.Connections[name]; ok {
+			take(c)
 		}
 	}
-	return false
+	return out
 }
 
-func storesWired(k *spec.Kubernetes) bool {
-	if k == nil || k.Secrets.Stores == nil {
-		return false
+// checkClusterOnlyStores refuses, for a docker or podman section, a selected
+// store kept only in a kubernetes Secret: neither engine can reach it, and the
+// store has no file or sources for them to deliver instead.
+func checkClusterOnlyStores(add func(string, string, ...any), section string, resolved []spec.Workflow, d *spec.Defaults) {
+	for _, name := range selectedStoreNames(resolved, d) {
+		st := d.TLS.Store(name)
+		if st.SecretRef() == nil || st.Created() || st.Path() != "" {
+			continue
+		}
+		add(fileEnv, "tls.stores.%s is held only in a kubernetes Secret (existing.secret), which the %s section cannot mount: add existing.pkcs12 or create: beside it for %s, or remove the %s section", name, section, section, section)
 	}
-	return k.Secrets.Stores.Create != nil || k.Secrets.Stores.Existing != ""
+}
+
+// retiredStoresExisting is the message for the retired
+// kubernetes.secrets.stores.existing: NAME, with the replacement for every
+// store a connection selects: name NAME on the store itself. A store with
+// create: was not built on kubernetes while NAME was set, so its message
+// offers both ways on.
+func retiredStoresExisting(secret string, resolved []spec.Workflow, d *spec.Defaults, k *spec.Kubernetes) string {
+	own, _ := k.StoresSecretName()
+	msg := "kubernetes.secrets.stores.existing is no longer read: a Secret you manage is named on each store it holds, with existing: {secret: {name: " + secret + "}} -- the key defaults to the store's name, the key " + secret + " already holds it under."
+	for _, name := range selectedStoreNames(resolved, d) {
+		st := d.TLS.Store(name)
+		switch {
+		case st == nil || st.SecretRef() != nil:
+			continue
+		case st.Created():
+			msg += " tls.stores." + name + " has create:, which was not built on kubernetes while existing: " + secret + " was set: add existing: {secret: {name: " + secret + "}} beside it to keep reading " + secret + " on kubernetes while docker and podman build it, or leave it as it is to have kubernetes build it into " + own + "."
+		default:
+			msg += " tls.stores." + name + ": add secret: {name: " + secret + "} under existing: (keep pkcs12 beside it when a docker: or podman: section reads the file)."
+		}
+	}
+	return msg + " Then remove kubernetes.secrets.stores."
 }
 
 // credentialsWired reports whether the kubernetes section actually asks for a
@@ -1169,32 +1215,42 @@ func credentialsWired(k *spec.Kubernetes) bool {
 // than a choice.
 //
 // It walks the same positions consolidate collects from -- both sides of every
-// workflow, the management session, the management accounts, and the store
-// passwords -- because a name that reaches the config as ${...} has to be
-// readable from the mount, wherever in the spec it was written.
+// workflow, the leader-election session consolidate renders (inline or
+// conn-ref), the management accounts, and the passwords of the stores a
+// connection selects (an unselected store's never reaches the config) --
+// because a name that reaches the config as ${...} has to be readable from the
+// mount, wherever in the spec it was written. A session that is not rendered
+// (standalone) is not counted: the error must not fire on what never deploys.
 func usesCredentials(wfs []spec.Workflow, d *spec.Defaults) bool {
+	sides := make([]spec.Side, 0, 2*len(wfs)+1)
 	for _, wf := range wfs {
-		for _, s := range []spec.Side{wf.Source, wf.Target} {
-			if !s.Username().Empty() || !s.Secret().Empty() {
-				return true
+		sides = append(sides, wf.Source, wf.Target)
+	}
+	if d != nil {
+		if sess := inlineSession(d); sess != nil {
+			sides = append(sides, *sess)
+		}
+		if name := leaderConnRef(d); name != "" {
+			if c, ok := d.Connections[name]; ok {
+				sides = append(sides, c)
 			}
+		}
+	}
+	for _, s := range sides {
+		if !s.Username().Empty() || !s.Secret().Empty() {
+			return true
 		}
 	}
 	if d == nil {
 		return false
-	}
-	if s := d.LeaderElection.Session; s != nil {
-		if !s.Username().Empty() || !s.Secret().Empty() {
-			return true
-		}
 	}
 	for _, u := range d.Security.Users {
 		if !u.Secret().Empty() {
 			return true
 		}
 	}
-	for _, st := range d.TLS.Stores {
-		if !st.Secret().Empty() {
+	for _, name := range selectedStoreNames(wfs, d) {
+		if !d.TLS.Store(name).Secret().Empty() {
 			return true
 		}
 	}
@@ -1482,9 +1538,14 @@ func checkRetiredCreateNames(add func(string, string, ...any), k *spec.Kubernete
 		n, _ := k.CredentialsSecretName()
 		add(fileEnv, "kubernetes.secrets.credentials.create.name is no longer accepted: "+why+". Replace the create: block with create: true", n, c.Create.Name)
 	}
-	if s := k.Secrets.Stores; s != nil && s.Create != nil && s.Create.Name != "" {
+	if s := k.Secrets.Stores; s != nil && s.Existing == "" {
+		// The gentle tier of the retired stores block: create: (any spelling,
+		// its retired name: included), create: false and an empty block all
+		// mean what the tool now does unasked, so generate and deploy ignore
+		// them and only validate asks for the block to go. existing: NAME is
+		// the hard tier, in checkKube.
 		n, _ := k.StoresSecretName()
-		add(fileEnv, "kubernetes.secrets.stores.create.name is no longer accepted: "+why+". Replace the create: block with create: true", n, s.Create.Name)
+		add(fileEnv, "kubernetes.secrets.stores is no longer read: %s is rendered whenever a connection selects a store the tool holds (existing.pkcs12 or create:), as docker and podman already deliver every selected store without a switch, and a store kept in a Secret you manage names it on the store (existing.secret). Remove the block; nothing else changes", n)
 	}
 	if ip := k.Secrets.ImagePull; ip != nil && ip.Create && ip.Name != "" {
 		n, _ := k.ImagePullSecretName()

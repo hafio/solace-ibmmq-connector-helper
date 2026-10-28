@@ -219,7 +219,7 @@ func Build(wfs []spec.Workflow, d *spec.Defaults, opts Opts) (*Model, []string) 
 			if !ok {
 				i = len(m.Stores)
 				storeAt[u.name] = i
-				m.Stores = append(m.Stores, StoreUse{Name: u.name, File: st.Path(), Created: st.Created()})
+				m.Stores = append(m.Stores, StoreUse{Name: u.name, File: st.Path(), Created: st.Created(), Secret: st.SecretRef()})
 			}
 			if u.private {
 				m.Stores[i].Private = true

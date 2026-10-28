@@ -44,16 +44,20 @@ so splitting them across connectors stays your decision.
   (`standalone` / `active_active` / `active_standby`).
 - Wires **[TLS + mTLS](docs/userguide.md#7-connector-defaults-envyaml-top-level)**
   for both Solace and MQ from named truststores and keystores that each
-  connection selects -- PKCS12 files you provide, or ones `deploy`
+  connection selects -- PKCS12 files you provide, ones `deploy`
   [builds from your certificate files](docs/userguide.md#72-created-stores-create)
-  straight into the platform's secret -- and leaves certificate-validation policy
-  to the libraries' defaults and your own `api-properties`.
+  in memory, or, on Kubernetes, ones already in a Secret you manage (cert-manager's
+  output included) -- and leaves certificate-validation policy to the libraries'
+  defaults and your own `api-properties`. Selecting a store is the whole request:
+  every platform delivers it with nothing more to configure.
 - **[One secrets model](docs/userguide.md#9-secrets-model) everywhere**: each
   credential is declared as a literal or an `-env` variable name and mounted
   as a file under `/app/external/var/secrets/` -- a Kubernetes Secret volume,
   a compose environment-provider secret, or a podman secret (podman's
   secret store also carries the rendered config and the TLS stores), never an
-  environment variable and never written to disk as a value. The one
+  environment variable and never written by the tool beside your config -- the
+  one exception being `generate --platform kubernetes`, whose manifest embeds
+  them. The one
   exception is the tool's own reserved `solmq-status` account, whose password
   is rendered as a literal by design
   ([section 7.1](docs/userguide.md#71-the-reserved-status-account-solmq-status)).
@@ -164,6 +168,9 @@ specs/env.yaml` then applies it by piping the manifest to `kubectl`/`oc`.
 | `generate` | `gen` | Render application.yml, or the deploy artifacts for the resolved platform |
 | `deploy` | `dp` | Generate for a platform, then apply it |
 | `remove` | `rm` | Tear down what deploy created for a platform |
+| `start` | _(none)_ | Start the instance deploy created, as it stands |
+| `stop` | _(none)_ | Stop the instance deploy created, keeping it to start again |
+| `restart` | _(none)_ | Restart the instance, so it reloads its config and TLS stores |
 | `status` | `sts` | Report each instance: container (engine), application (connector), or all |
 | `logs` | `lg` | Print one instance log, where status says what but not why |
 | `cli` | _(none)_ | Open a shell inside one instance, or run one command in it |
@@ -184,7 +191,7 @@ output is buffered so a failed run never leaves a half-written `-o` file;
 `generate` and `deploy` would stop at on the TLS store files before they reach a
 platform.
 
-`deploy`, `remove`, `status`, `logs`, and `cli` all run the platform CLI named
+`deploy`, `remove`, `start`, `stop`, `restart`, `status`, `logs`, and `cli` all run the platform CLI named
 by each section's `command:` through an argv slice -- never a shell. Every
 token is checked against a safe charset, `argv[0]` is checked against a
 per-platform binary allowlist (escape hatch: `--allow-command`), and a

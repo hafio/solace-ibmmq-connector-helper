@@ -225,7 +225,7 @@ reference verbatim and says so ([section 5.1](#51-variable-expansion-var)).
 
 The first argument is a **verb**. `generate` takes an optional second argument,
 `config` (short `cfg`), which emits `application.yml`. The platform for
-`generate`/`deploy`/`remove`/`status`/`logs`/`cli` comes from `--platform`,
+`generate`/`deploy`/`remove`/`start`/`stop`/`restart`/`status`/`logs`/`cli` comes from `--platform`,
 resolved in this order:
 
 1. `--platform`, if given -- it must name a section actually present in
@@ -250,6 +250,8 @@ solmq-conn-util deploy (dp)    [--platform kubernetes|docker|podman] [-e env.yam
                                                                    Generate for the resolved platform, then apply it
 solmq-conn-util remove (rm)    [--platform kubernetes|docker|podman] [--no-prompt] [-e env.yaml] [--allow-command name]
                                                                    Tear down what deploy created for the resolved platform
+solmq-conn-util start|stop|restart [--platform kubernetes|docker|podman] [-e env.yaml] [--allow-command name]
+                                                                   Start, stop or restart the instance deploy created, in place
 solmq-conn-util status (sts)   <container|application|all> [-d] [-w] [--all] [--output table|json] [--install] [--platform kubernetes|docker|podman] [-e env.yaml] [--pod name] [--container name] [--namespace ns] [--management-port port] [--user name] [--command name] [--allow-command name]
                                                                    Report each instance: the engine's view (container), the connector's own (application), or both (all)
 solmq-conn-util logs (lg)      [--follow] [--previous] [--tail N] [--since d] [--timestamps] [--platform kubernetes|docker|podman] [-e env.yaml] [--pod name|index] [--container name|index] [--namespace ns] [--command name] [--allow-command name]
@@ -380,6 +382,22 @@ it -- see [section 12.9](#129-what-the-exit-code-means-and-what-each-view-costs)
   `command:`'s binary must be on the platform allowlist (or approved with
   `--allow-command`), and both verbs run a read-only login/daemon preflight before
   writing or applying anything -- see [section 8](#8-platform-sections-kubernetes-docker-podman).
+  A kubernetes `deploy` then reads each Secret you manage that the pod mounts --
+  one a store names (`existing.secret`), an existing credentials Secret -- and
+  stops before applying when one is missing or lacks a key the pod reads; this is
+  the one check `validate` cannot make, since the Secret lives only in the cluster.
+  A kubernetes `remove` resolves nothing: it names every Secret the tool owns
+  for deletion and needs no exported credential and no store file.
+- **`start`**, **`stop`** and **`restart`** act on the instance `deploy`
+  created, in place: on kubernetes `stop` scales the Deployment to 0 and `start`
+  back to `deployment.replicas`, and `restart` is `kubectl rollout restart`; on
+  docker they are `docker stop`/`start`/`restart` on the container; on podman
+  `systemctl [--user] stop`/`start`/`restart` on its unit. They read `env.yaml`
+  for the section's names and `command:` only -- nothing is rendered, no
+  credential resolved, no store opened -- and run the same preflight probe as
+  `deploy`. `restart` is how the connector picks up a rotated TLS store or a
+  changed `application.yml` where `deploy` does not restart it (kubernetes, or a
+  Secret you manage).
 - **`status`** reports the state of each instance of the resolved platform. Its
   target word picks which half: `container` reads the engine from outside
   (state, restarts, age, image), `application` runs the generated script inside
@@ -396,12 +414,16 @@ it -- see [section 12.9](#129-what-the-exit-code-means-and-what-each-view-costs)
   all findings (non-zero exit if any errors). Use it as a linter. It reports every
   error `generate` and `deploy` would stop at before they reach a platform, all in
   one run: once the spec itself validates, it also reads each TLS store a present
-  platform loads, builds each created one in memory (and discards it), holds them
-  to each platform's size limit, and checks docker's bind-mount sources on this
-  host. An unset `-env` variable is a warning, so it runs without the production
-  secrets exported; a created store whose password is unset is still built, with
-  a stand-in, unless it comes from a JKS, which opens with that password. Logins,
-  the image, and the cluster or engine itself are left to `deploy`.
+  platform loads and opens each existing PKCS12 with its password, builds each
+  created one in memory (and discards it), holds them -- and the kubernetes
+  ConfigMap -- to each platform's size limit, and checks docker's bind-mount
+  sources on this host. An unset `-env` variable is a warning, so it runs without
+  the production secrets exported: an existing store is then only held to being
+  a PKCS12, and a created store is still built, with a stand-in password -- one
+  from a JKS has its sources read and its format checked, and only opening the
+  JKS waits for the password. A variable set but empty is the error `deploy`
+  would give. Logins, the image, and the cluster or engine itself are left to
+  `deploy`.
 - **`auto-complete <shell>`** prints a completion script for `bash`, `zsh`, `fish` or
   `powershell` on stdout -- see [section 1.1](#11-shell-completion). It reads no
   `env.yaml` and touches nothing on disk.
@@ -1045,7 +1067,7 @@ mq-defaults:                     # optional; merged into every MQ binder's ibm.m
 | Section | Option | Notes |
 |---------|--------|-------|
 | `connections.<name>` | `solace:`/`mq:` block | a reusable connection tuple (no destination); referenced by `conn-ref` ([section 6.6](#66-reusable-connections-conn-ref)) |
-| `tls.stores.<name>` | `password` (or `password-env`), and `existing` or `create` | a named PKCS12 store; any number. A connection selects one as its `truststore:` and/or `keystore:` ([section 6.4](#64-destinations-durable-names-passthrough)); one store may serve several connections. `existing: {pkcs12: <file>}` names a PKCS12 you provide -- it may serve both roles; `create:` has `deploy` build one from certificate files or a JKS, straight into the platform's secret ([section 7.2](#72-created-stores-create)). Exactly one of the two. The password opens an existing store and encrypts a created one, and the connection is wired with it either way. Every store is PKCS12, so the tool always writes that type. The name is lowercase letters and digits joined by single hyphens, at most 63 characters (it names the mounted file, the Kubernetes Secret key and the podman secret). Any other key under `tls:` or a store is an error -- the retired `tls.truststore` / `tls.keystore` and a store's retired `file` / `type` included. A store no connection selects is neither mounted nor built, and warns |
+| `tls.stores.<name>` | `password` (or `password-env`), and `existing` and/or `create` | a named PKCS12 store; any number. A connection selects one as its `truststore:` and/or `keystore:` ([section 6.4](#64-destinations-durable-names-passthrough)); one store may serve several connections. `existing: {pkcs12: <file>}` names a PKCS12 you provide on the deploy host -- it may serve both roles; `create:` has `deploy` build one from certificate files or a JKS ([section 7.2](#72-created-stores-create)); `existing: {secret: {name, key}}` names a kubernetes Secret you manage that holds the store ([section 8.1](#81-kubernetes)). A store has one host-side source at most -- `create:` or `existing.pkcs12` -- and may name a Secret beside it: kubernetes then reads the Secret and never opens the file or builds the store, while docker and podman use the host-side source. A store naming only a Secret is kubernetes-only, and a `docker:` or `podman:` section that selects one is an error. The password opens an existing store and encrypts a created one, and the connection is wired with it either way: every verb that reads an existing PKCS12 -- `validate`, kubernetes `generate`/`deploy`, podman and docker `deploy` -- opens it with that password first, refusing a file that is not a PKCS12 (a JKS renamed `.p12`, a PEM) or that the password does not open, and warning about a truststore without Java's trusted-certificate attribute (an `openssl pkcs12 -export -nokeys` truststore made without `-jdktrust`), which Java loads as empty. Every store is PKCS12, so the tool always writes that type. The name is lowercase letters and digits joined by single hyphens, at most 63 characters (it names the mounted file, the Kubernetes Secret key and the podman secret). Any other key under `tls:` or a store is an error -- the retired `tls.truststore` / `tls.keystore` and a store's retired `file` / `type` included. A store no connection selects is neither mounted nor built, and warns |
 | `logging.level` | `<logger>: <level>` | verbatim, order preserved -> `logging.level` |
 | `logging.syslog` | `host`, `port`, `protocol` | optional; ships log lines to syslog **on every platform**, in addition to the console. Emits a `logback-spring.xml` (a ConfigMap key on kubernetes, an inlined compose config on docker, a podman secret on podman) plus `LOGGING_SYSLOG_*` env vars, appname = the instance name. `protocol` is `udp` (default) or `tcp` -- **tcp requires the `logstash-logback-encoder` jar on the connector classpath** (provide it via `libs`; fetch it with `solmq-conn-util download jar syslog`, [section 10](#10-download-jar)) |
 | `management` | `port` | -> `management.server.port`; always emitted, default `8090`. The docker/podman published port and the kubernetes `service.port` ([section 8](#8-platform-sections-kubernetes-docker-podman)) default to it |
@@ -1133,7 +1155,8 @@ block yourself, and in every leader-election mode.
   password is **readable by anyone who can read the artifact it lands in**: the
   Kubernetes ConfigMap, the Docker Compose file (which inlines
   `application.yml`), or the Podman secret store entry `<name>-application.yml`
-  ([section 8.3](#83-podman)), which never touches the host disk.
+  ([section 8.3](#83-podman)), which `deploy` writes nowhere but podman's secret
+  store -- by default a file under the deploying user's container storage.
 - **The account is GET-only** against the actuator endpoints it needs
   (`health`, `leaderelection`, `workflows`); it cannot mutate anything on the
   connector.
@@ -1148,8 +1171,14 @@ block yourself, and in every leader-election mode.
 
 A store under `create:` is built by `deploy` from certificate files you already
 have -- what a CA, cert-manager or Vault hands out -- instead of a PKCS12 you make
-yourself. It is built in memory and goes straight into the platform's secret, so
-it never lands on disk:
+yourself. It is built in memory and delivered with the platform's secrets; the
+tool never writes it beside `env.yaml`. Where its bytes then live is the
+platform's: the `<name>-stores` Secret on kubernetes (and the manifest
+`generate --platform kubernetes` prints, which embeds every store and credential
+-- with `-o` it is written mode `0600`); on docker, a base64 copy in the
+container's writable layer under the engine's storage, beside the credentials,
+and the decoded store in an in-memory directory; on podman, podman's secret store,
+by default a file under the deploying user's container storage:
 
 ```yaml
 tls:
@@ -1199,12 +1228,14 @@ it.
 
 What the build checks, and when:
 
-- **Every `deploy`** (and `generate --platform kubernetes`, which embeds the store)
+- **Every `deploy`** (and `generate --platform kubernetes`, which embeds the store
+  in the manifest it prints)
   reads the sources and the password, so both must be present there: the
   `password-env` variable exported and non-empty, and every file readable.
   **`validate`** builds the store too, for every platform section present, and
   reports what the build reports; with the password unset it builds with a
-  stand-in (a JKS source, which opens with the password, waits for it).
+  stand-in (a JKS source is read and held to the JKS format, and only opening
+  it waits for the password). A `password-env` set but empty is an error.
   `generate config` never opens them.
 - **Errors**: a file holding no certificate, an encrypted private key (decrypt it
   to a file only you can read, for example `openssl pkey -in key.pem -out
@@ -1229,16 +1260,19 @@ Where it goes:
 
 | Platform | A created store |
 |----------|-----------------|
-| kubernetes | built into the stores Secret when `secrets.stores.create: true`. With `secrets.stores.existing` the tool writes no Secret, so `create:` is not built: that Secret must already hold the store under its name ([section 8.1](#81-kubernetes)) |
+| kubernetes | built into the stores Secret, `<name>-stores`, whenever a connection selects it -- no switch to set. A created store that also names a Secret you manage (`existing.secret`) is not built on kubernetes: the pod reads it from that Secret ([section 8.1](#81-kubernetes)) |
 | podman | built by `deploy` into its podman secret, `<name>-tls-<store>`, like an existing store's file ([section 8.3](#83-podman)) |
 | docker | carried as a compose secret read from deploy's environment, base64-encoded -- docker has no secret store for a binary file, and an environment variable cannot hold a PKCS12's bytes. The service starts through a small startup script that decodes every such store into an in-memory directory on each start, then runs the image's own command ([section 8.2](#82-docker)) |
 | `generate config` | referenced at its mount path like every store -- the `application.yml` it writes is the one `deploy` ships -- and never built |
 
-Rotating a certificate is a redeploy: replace the file and run `deploy`. The
-connector reads its stores only when it starts, so restart it to pick the new store
-up -- `kubectl rollout restart` on kubernetes; a podman `deploy` restarts the unit
-itself, and a docker `deploy` recreates the container whenever a created store
-changed.
+Rotating a certificate is a redeploy: replace the file -- a created store's
+source, or an existing store's PKCS12 -- and run `deploy`. The connector reads its
+stores only when it starts, so it has to restart to pick the new store up: a
+podman `deploy` restarts the unit itself, and a docker `deploy` recreates the
+container whenever any selected store changed, created or existing. Kubernetes
+pods are not restarted by `deploy`: follow it with `solmq-conn-util restart`
+(`kubectl rollout restart deployment/<name>` underneath), and do the same after
+updating a Secret you manage (`existing.secret`).
 
 Why build instead of `openssl pkcs12 -export`: a truststore made with
 `openssl pkcs12 -export -nokeys` loads in Java as an **empty** store, because Java
@@ -1516,8 +1550,10 @@ to `<command> delete -f -`.
 > and run. Follow such a deploy with:
 >
 > ```sh
-> kubectl rollout restart deployment/<name>
+> solmq-conn-util restart --platform kubernetes -e env.yaml
 > ```
+>
+> which runs `kubectl rollout restart deployment/<name>`.
 
 ```yaml
 kubernetes:
@@ -1573,9 +1609,9 @@ kubernetes:
                                  # it names (SOL_PASSWORD, ...)
       # existing: my-credentials # ...or mount a Secret that already exists, left
                                  # untouched -- it must already carry those same keys
-    stores:                      # the selected tls.stores in one Secret (volume-mounted)
-      create: true               # <name>-stores: base64-embeds each selected store's file, keyed by its store name
-      # existing: my-tls         # ...or a Secret you manage, keyed by the same store names (mq-ca, ...)
+    # No stores: block. The selected tls.stores travel in <name>-stores whenever
+    # a connection selects one; a store kept in a Secret you manage names it on
+    # the store itself (tls.stores.<name>.existing.secret, below).
 ```
 
 | Section | Option | Notes |
@@ -1595,8 +1631,56 @@ kubernetes:
 | `libs.download` | `urls`, `image`, `pvc` | an initContainer `wget`s each URL into `/libs` at pod start; the shared volume is an `emptyDir` unless `pvc` names an existing PVC |
 | `secrets.credentials.create` | `true` | the tool builds `<name>-credentials`: one key per credential the config references, each holding the resolved value -- read from the host variable for an `-env` credential, taken from the spec for a literal |
 | `secrets.credentials.existing` | `<name>` | reference a pre-existing Secret instead of creating one; exactly one of `create` / `existing` is required once the block is present, and the Secret's keys must be the ones [section 9.2](#92-mount-names) derives -- your `-env` variable names, plus a derived name per literal |
-| `secrets.stores.create` | `true` | the tool builds `<name>-stores`, base64-embedding every `tls.stores` entry a connection selects -- an existing store's PKCS12, a created one built from its sources ([section 7.2](#72-created-stores-create)) -- each under its store name; a set over the 1 MiB a Secret holds is an error that names each store's size. Requires at least one TLS connection selecting a store |
-| `secrets.stores.existing` | `<name>` | reference a pre-existing stores Secret (`create` XOR `existing`, as above); the tool writes no Secret, so a created store is not built here and the Secret must hold it too. Its keys must be the names of the stores the connections select (`mq-ca`, `solace-client`, ...), which the pod's volume lists by name and mounts under those names -- so a key the Secret lacks keeps the pod from starting (a "couldn't find key" event) rather than failing the first TLS handshake. A Secret cert-manager writes (keys such as `truststore.jks`) has to be copied under the store names, or referenced by a store per Secret |
+| `secrets.stores` | retired | no longer read. `create: true` (in any spelling) is ignored by `generate` and `deploy`, and `validate` asks for the block to go: the tool now renders `<name>-stores` whenever a connection selects a store it holds, as docker and podman always did. `existing: <Secret>` is an error on `validate`, `generate` and `deploy` (a warning on `remove`) whose message names, for every selected store, the `existing.secret` line that replaces it -- see the upgrade note below |
+
+**The TLS stores need no kubernetes setting.** Every store a connection selects
+reaches the pod, in one projected volume at
+`/app/external/classpath/truststores`, each file under its store name -- the name
+`application.yml` reads it by:
+
+- A store the tool holds -- an `existing.pkcs12` read from the deploy host, or a
+  `create:` store built at deploy ([section 7.2](#72-created-stores-create)) --
+  travels in `<name>-stores`, keyed by store name, which the tool renders whenever
+  there is one. Over the 256 KiB kubectl's client-side `apply` can carry, the run
+  stops and names each store's size.
+- A store kept in a Secret you manage names it on the store:
+
+  ```yaml
+  tls:
+    stores:
+      broker-id:
+        password-env: BROKER_ID_PASSWORD
+        existing:
+          secret:
+            name: broker-cert          # e.g. a cert-manager Certificate's secretName
+            key: keystore.p12          # the data key; defaults to the store's name
+      broker-ca:
+        password-env: BROKER_ID_PASSWORD
+        existing:
+          secret:
+            name: broker-cert
+            key: truststore.p12
+  ```
+
+  The pod reads `keystore.p12` and `truststore.p12` straight from that Secret, so
+  a cert-manager Certificate with `keystores.pkcs12` serves both stores as it
+  writes them -- its `passwordSecretRef` password is the store's password, which
+  stays a credential like every other: export it under the `-env` name at deploy,
+  or carry it in your `credentials.existing` Secret under that name
+  ([section 9.2](#92-mount-names)). Only a PKCS12 key works: every store is PKCS12,
+  so cert-manager's `keystores.jks` output (`truststore.jks`) cannot be read. Keep
+  `pkcs12:` (or `create:`) beside the `secret:` when a `docker:` or `podman:`
+  section reads the same `env.yaml`: kubernetes reads the Secret and never opens
+  the file, docker and podman use the file. A Secret named this way is never
+  written or deleted by the tool, and `deploy` checks it holds every key the pod
+  reads before applying anything, since `validate` cannot see the cluster.
+
+The volume's files are mode `0400`, made readable by the pod's `fsGroup` (the
+run-as gid) exactly as the credentials are -- so under `run-as: image` the
+cluster must assign an `fsGroup`, as OpenShift's SCCs do
+([section 8.4](#84-run-as-and-container-hardening)). The connector reads its stores
+only when it starts: after a rotated store, run `solmq-conn-util restart`,
+whether `deploy` updated `<name>-stores` or you updated your own Secret.
 
 **Everything the tool creates is named after `deployment.name`.** The ConfigMap is
 `<name>-config`, the Secrets `<name>-credentials`, `<name>-stores` and
@@ -1620,7 +1704,7 @@ the 63-char DNS-1123 limit; `validate` rejects a combination that would not.
 
 > [!NOTE]
 > **Upgrading an env.yaml that still names these objects.** The old
-> `secrets.credentials.create.name`, `secrets.stores.create.name`,
+> `secrets.credentials.create.name`,
 > `secrets.image-pull.name` (together with `create: true`) and
 > `libs.pvc.create.name` keys are still read, and `generate`/`deploy` ignore them
 > without a word, so the file keeps deploying. `validate` reports each one as no
@@ -1642,14 +1726,40 @@ looks like it worked but leaves the claim asking for more than the volume has.
 `deploy` warns, naming the volume, whenever it re-applies a PV that already existed;
 delete the volume and deploy again to change either setting.
 
+> [!NOTE]
+> **Upgrading an env.yaml that still has `secrets.stores`.** With `create: true`,
+> nothing changes but a `validate` error asking for the block to go: `deploy`
+> renders the same `<name>-stores` with the same keys. With `existing: <Secret>`,
+> `generate` and `deploy` stop until each store names that Secret itself -- add
+> `secret: {name: <Secret>}` under the store's `existing:` (its key defaults to the
+> store's name, which is the key the old Secret already holds it under), keeping
+> `pkcs12:` beside it for a `docker:` or `podman:` section. A store with `create:`
+> was never built on kubernetes while `existing:` was set: add the same `existing:
+> {secret: ...}` beside `create:` to go on reading your Secret on kubernetes, or
+> leave it as it is to have kubernetes build it into `<name>-stores` from now on.
+> `remove` only warns, so an old deployment can be torn down before the edit. The
+> first `deploy` after the upgrade rolls the pods once -- the stores volume becomes
+> a projected volume with mode `0400` -- and later deploys keep not restarting
+> them; a `<name>-stores` left from before is deleted by `remove`.
+
 Omit a `secrets` block and that credentials Secret is not produced and nothing is
-mounted at `/app/external/var/secrets`; omit `stores` and the stores are not mounted.
+mounted at `/app/external/var/secrets`.
 Omitting a block is the way to say "none" -- a block that is present must choose
-`create` or `existing`, and one that sets neither (or both) is rejected. Omitting
-`credentials` stays legal even when the config still references one: `validate`
-then warns that credentials are referenced but `kubernetes.secrets.credentials` is
-omitted, so they will not be mounted at `/app/external/var/secrets` and every
-`${...}` in the generated config will stay unresolved at runtime.
+`create` or `existing`, and one that sets neither (or both) is rejected. "None" is
+only an answer when nothing needs a credential: once any credential field is set
+-- a username or password on a connection or the leader-election session, a
+management account's password, or the password of a store a connection selects --
+omitting `credentials` is an error on `validate`, `generate` and `deploy`, since
+nothing would be mounted at `/app/external/var/secrets` and every `${...}` in the
+generated config would stay unresolved at runtime. The connector would still
+start (the import of that directory is optional) and fail later against whatever
+it could not authenticate to. `remove` only warns: a teardown needs no credential.
+
+> [!NOTE]
+> **Upgrading an env.yaml that omits `credentials`.** Earlier releases only warned
+> here. Add `credentials: {create: true}` to have the tool build the Secret from
+> the values you already export, or `credentials: {existing: <Secret>}` if you
+> created it yourself.
 
 ### 8.2 docker
 
@@ -1692,11 +1802,25 @@ carries one, the compose file also:
   `command:`: the connector image starts the same way in every release checked
   (2.13 to 3.2), and `deploy` compares it with the image the engine reports
   before relying on it, refusing an image that starts any other way. An image the
-  engine does not have yet is not checked; compose pulls it.
-- labels the service `solace-connector/stores-sha256` with a digest of the stores,
-  filled from the environment, so `compose up` recreates the container exactly
-  when a store changed -- the stores are not in the compose file, so its own change
-  detection cannot see them.
+  engine does not have yet is pulled first, so the comparison always happens.
+
+Whenever any store is selected, created or existing, the service is labelled
+`solace-connector/stores-sha256` with a digest of every selected store's bytes,
+filled from deploy's environment, so `compose up` recreates the container exactly
+when a store changed -- the stores are not in the compose file, so its own change
+detection cannot see them. An existing store is read for the digest from the path
+the compose file mounts, and opened with its password on the way; one the
+invoking user may not read is left out with a warning (the connector reads it as
+its own run-as identity). The label is written `${_GEN_TLS_STORES_SHA256:-}`, so a
+hand-run `docker compose up` sets it empty without a warning -- and recreates the
+container once, as the next `deploy` does again with the digest. A bind-mounted
+file pins the inode it was mounted with: an existing store replaced in place is
+picked up by that recreate, not by a restart.
+
+A compose file carrying a created store is a preview of what `deploy` runs, as
+the podman unit is: its store secret is filled only by `deploy`, so a hand-run
+`docker compose up` creates the container and then refuses to start it, naming
+the unset `_GEN_TLS_<STORE>_STORE` variable.
 
 One environment variable holds 131072 bytes on Linux and 32767 characters on
 Windows, so a created store whose base64 form would not fit fails the deploy,
@@ -1798,8 +1922,12 @@ configured) and every `tls.stores` entry a connection selects -- an existing
 store's PKCS12, or a created store built from its sources
 ([section 7.2](#72-created-stores-create)) -- into the store, values
 on stdin, never in argv -- and the unit mounts every one back in with a `Secret=`
-line. A podman deployment keeps **nothing on the host but the unit itself and your
-`libs.dir`**, the one `Volume=` the unit can carry. `generate` writes nothing, so
+line. Nothing is written beside `env.yaml` or into the quadlet directory but the
+unit itself, and nothing is read from the host at run time but your `libs.dir`,
+the one `Volume=` the unit can carry. The values live in podman's secret store:
+with its default `file` driver, a file under the deploying user's container
+storage (`~/.local/share/containers/storage/secrets/` rootless,
+`/var/lib/containers/storage/secrets/` as root), protected by its file modes. `generate` writes nothing, so
 its unit is a preview: it names secrets that only `deploy` creates, and it is not
 meant to be installed by hand.
 
@@ -1867,7 +1995,10 @@ rejected outright: `validate` reports an error naming whichever key was set.
 `deploy --platform podman` first resolves everything the unit mounts -- every
 credential, every document and every selected store, which it reads from its
 `file` -- so a missing variable or an unreadable or oversized store stops it before
-anything is created. It then loads each into the secret store, deletes the file
+anything is created. It then loads each into the secret store -- with `podman
+secret create --replace` on podman 4.7 and newer, so a load that fails leaves the
+previous secret, and the unit mounting it, intact; below 4.7 as a remove then a
+create -- deletes the file
 secrets this spec no longer mounts (syslog dropped, or a store no connection
 selects any more -- found from the `Secret=` lines of the unit the last deploy
 wrote, since a store's secret is named after a store the spec may no longer
@@ -1962,9 +2093,9 @@ config map or secret store is readable by any uid: the ConfigMap files on
 kubernetes, compose `configs:` and `secrets:` on docker, and every podman secret
 (mode 0444). The rest:
 
-- **kubernetes**: the credentials Secret is mounted 0400 and owned by root, so it
-  is `fsGroup` that makes it readable -- the kubelet hands each file to that group
-  as 0440. `fsGroup` also makes a `libs` PVC writable for the `libs.download` init
+- **kubernetes**: the credentials Secret and the TLS stores are mounted 0400 and
+  owned by root, so it is `fsGroup` that makes them readable -- the kubelet hands
+  each file to that group as 0440. `fsGroup` also makes a `libs` PVC writable for the `libs.download` init
   container, which runs as the same identity. An **NFS** volume ignores `fsGroup`:
   an NFS export behind `libs` (including `libs.pvc.create.nfs`) has to be
   readable -- and, for `libs.download`, writable -- by the run-as uid or gid.
@@ -2141,6 +2272,9 @@ names until deploying to a platform does.
   `run-as: image` no `fsGroup` is written; OpenShift's restricted SCCs assign one,
   but a platform that runs an arbitrary uid without one leaves the credentials
   unreadable -- the volume mounts and the connector still cannot read them.
+  This is the one platform where credentials need a line of configuration: once
+  any credential is set, omitting `kubernetes.secrets.credentials` is an error
+  ([section 8.1](#81-kubernetes)).
 
   `create` and `existing` are mutually exclusive, and exactly one is required once
   the block is present (omit the whole block and no Secret is wired at all).
@@ -2168,11 +2302,12 @@ names until deploying to a platform does.
   connector fails later trying to authenticate.
 - **docker**: compose `secrets:` using the **environment provider**, so values are
   read from the environment `docker compose` itself runs with -- the CLI injects
-  them into that child process only. Nothing is written to disk. Requires
-  **Docker Compose v2.23.1+**. Because an `-env` credential keeps its own variable
-  name, a spec written entirely in the `-env` form yields a compose file you can
-  also bring up yourself, with only those variables exported; a literal's derived
-  name is only ever supplied by `deploy`.
+  them into that child process only, and compose copies each one into the
+  container. Requires **Docker Compose v2.23.1+**. Because an `-env` credential
+  keeps its own variable name, a spec written entirely in the `-env` form, with no
+  created store, yields a compose file you can also bring up yourself, with only
+  those variables exported; a literal's derived name, and a created store
+  ([section 8.2](#82-docker)), are only ever supplied by `deploy`.
 - **podman**: `deploy` loads each credential into **podman's secret store**
   (values on stdin, never in argv) and units mount them with
   `Secret=<name>-<KEY>,type=mount,target=/app/external/var/secrets/<KEY>`. Store
@@ -2187,11 +2322,12 @@ base64-embedded into a Kubernetes Secret mounted there, bind-mounted there from
 the host for docker, or loaded into podman's secret store and mounted there for
 podman (a created store is built into the Secret or the podman secret, and on
 docker decoded there from a compose secret at every start, [section 8.2](#82-docker)) -- which needs no configuration, since selecting the store is itself the
-request. Kubernetes does need telling, so its `kubernetes.secrets.stores` takes
-the same `create` XOR `existing` choice as `credentials`. Either way the Secret
-is keyed by store name -- `solace-ca`, `mq-ca`, ... for the example in
-[section 7](#7-connector-defaults-envyaml-top-level) -- and the pod's volume
-mounts each key under that name.
+request, on every platform. On kubernetes the tool's `<name>-stores` Secret is
+keyed by store name -- `solace-ca`, `mq-ca`, ... for the example in
+[section 7](#7-connector-defaults-envyaml-top-level) -- and a store kept in a
+Secret you manage (`existing.secret`) is read from that Secret under the key it
+names; one projected volume mounts every one of them under its store name
+([section 8.1](#81-kubernetes)).
 
 There is **no `secrets:` section under `docker:` or `podman:`** -- credentials come
 from the connection fields, so there is nothing to configure. Setting one is an
@@ -2628,7 +2764,7 @@ workflow on the next run.
 **Store paths are the same everywhere.** `generate config` writes the
 `application.yml` that `deploy` ships, so every store is located at
 `/app/external/classpath/truststores/<store name>` -- where each platform mounts
-each selected store under its name (a Secret volume for kubernetes, a bind mount
+each selected store under its name (a projected Secret volume for kubernetes, a bind mount
 for docker existing stores and an in-memory directory for created ones, a
 secret-store mount for podman) -- never at the path its `existing.pkcs12` gives,
 which is only where `deploy` reads it from. To run that document outside a
@@ -2654,7 +2790,8 @@ exists is a no-op), then a `ConfigMap` mounting `application.yml` at
 `/app/external/spring/config/application.yml` (via `subPath`) and the status script
 under its own `status` key, mounted at `/app/external/.status-script`, a `Deployment`
 (pod template carrying the `solace-connector/le-mode`/`role` labels above), an
-optional `Service`, the credentials/stores `Secret`s, and any libs
+optional `Service`, the credentials `Secret` and the `<name>-stores` Secret
+carrying every selected store the tool holds, and any libs
 `PersistentVolume`/`PersistentVolumeClaim`. The two probes are deliberately
 different checks. **Liveness** is a `tcpSocket` check on the management port,
 because it decides whether kubelet restarts the container and a slow or
@@ -2684,7 +2821,8 @@ quadlet unit**; because it cannot inline file content, the rendered
 `application.yml`, the status script, **and** the logback config when syslog is
 configured are mounted from podman's secret store rather than embedded, and
 **`deploy`** is what loads them there ([section 8.3](#83-podman)), beside the
-credentials and the stores -- nothing is written to the host but the unit (see
+credentials and the stores -- `deploy` writes nothing beside `env.yaml` but the
+unit, the values living in podman's secret store (see
 [section 9](#9-secrets-model)) -- with the same labels applied via `Label=`.
 
 ---
@@ -2910,9 +3048,10 @@ solmq-connector-7d9f8c6b5-x2n4q
 - **`components`** -- the objects the workload actually references, read from the
   pod spec (or the container's mounts, networks and secrets on docker/podman)
   rather than from `env.yaml`, so this works for an instance this tool never
-  deployed. On kubernetes each one is checked with a `kubectl get`, deduplicated
-  across pods, and reported `present`, `MISSING`, or a volume claim's own phase
-  (`Bound`/`Pending`)
+  deployed. Each source of a projected volume -- the stores' `<name>-stores` and
+  every Secret a store names -- is a component of its own. On kubernetes each one
+  is checked with a `kubectl get`, deduplicated across pods, and reported
+  `present`, `MISSING`, or a volume claim's own phase (`Bound`/`Pending`)
 - **`image-expected`** -- printed **only when the running image differs from
   `image:` in `env.yaml`**, which is what catches a pod still on the old tag
   after a rollout that never completed. The comparison tolerates the spellings
@@ -3572,8 +3711,9 @@ container is called something else, is not reachable with `cli` -- reach it with
   `libs.pvc.create.nfs.*` are all rejected when they carry whitespace, quotes,
   control characters, or shell metacharacters -- each one lands unquoted in a
   generated script, unit, or manifest. Podman names neither a store's path nor
-  its file name, and the kubernetes stores Secret is keyed by store name, which
-  the store-name rule already keeps a valid Secret key ([section 8.1](#81-kubernetes)).
+  its file name, the kubernetes stores Secret is keyed by store name, which the
+  store-name rule already keeps a valid Secret key, and a Secret a store names is
+  held to a DNS-1123 name and a valid data key ([section 8.1](#81-kubernetes)).
 - **The connector runs as `1000:0`, not root.** Every platform states a non-root
   identity unless its section sets `run-as: image`, and a mounted host file the
   identity cannot read -- a 0600 truststore on docker, a 0600 jar -- fails the
@@ -3581,6 +3721,11 @@ container is called something else, is not reachable with `cli` -- reach it with
   with every capability dropped. `deploy` warns about each one it finds on
   Linux, and a rootless podman deploy also warns when your subordinate ranges
   cannot map the run-as ids ([section 8.4](#84-run-as-and-container-hardening)).
+- **Upgrading a kubernetes deployment retires `secrets.stores`.** A selected
+  store now reaches the pod with no stores block, and one kept in a Secret you
+  manage names it on the store (`existing.secret`); an `existing:` block stops
+  `generate` and `deploy` until it is replaced, and the first deploy rolls the
+  pods once. See the upgrade note in [section 8.1](#81-kubernetes).
 - **Upgrading a podman deployment moves its files into the secret store.** The
   first `deploy` with this release loads `application.yml`, the status script, the
   logback config and the stores into podman's secret store and restarts the running

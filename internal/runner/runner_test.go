@@ -286,7 +286,7 @@ func TestKubernetesRemoveUsesDeleteVerb(t *testing.T) {
 	if _, err := Kubernetes(f, "oc", ActionRemove, "x", nil); err != nil {
 		t.Fatal(err)
 	}
-	wantArgv := []string{"oc", "delete", "-f", "-"}
+	wantArgv := []string{"oc", "delete", "-f", "-", "--ignore-not-found"}
 	if !reflect.DeepEqual(f.calls[0].argv, wantArgv) {
 		t.Errorf("argv = %v, want %v", f.calls[0].argv, wantArgv)
 	}
@@ -530,7 +530,7 @@ func TestPodmanSecretCreateRemovesThenCreatesValueOnStdin(t *testing.T) {
 	f := &fakeRunner{}
 	const name = "mq-conn-1-password"
 	const value = "s3cr3t"
-	if _, err := PodmanSecretCreate(f, "podman", name, value, nil); err != nil {
+	if _, err := PodmanSecretCreate(f, "podman", name, value, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.calls) != 2 {
@@ -559,9 +559,43 @@ func TestPodmanSecretCreateRemovesThenCreatesValueOnStdin(t *testing.T) {
 	}
 }
 
+// With replace (podman 4.7+) a secret is replaced in one create --replace,
+// the value on stdin, so a failed create leaves the previous one in place.
+func TestPodmanSecretCreateReplacesInOneCall(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := PodmanSecretCreate(f, "podman", "c-tls-ts", "bytes", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"podman", "secret", "create", "--replace", "c-tls-ts", "-"}; len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) || f.calls[0].stdin != "bytes" {
+		t.Errorf("calls = %+v, want one %v with the value on stdin", f.calls, want)
+	}
+	failing := &fakeRunner{err: fmt.Errorf("boom")}
+	if _, err := PodmanSecretCreate(failing, "podman", "c-tls-ts", "bytes", true, nil); err == nil || !strings.Contains(err.Error(), "podman secret create --replace c-tls-ts") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// PodmanVersion reads the client version from stdout alone, and
+// PodmanSupportsReplace holds it to 4.7.
+func TestPodmanVersion(t *testing.T) {
+	r := &splitRunner{stdout: "5.8.2\n", stderr: "WARN[0000] a warning\n"}
+	v, err := PodmanVersion(r, "podman", nil)
+	if err != nil || v != "5.8.2" {
+		t.Fatalf("v=%q err=%v", v, err)
+	}
+	if want := []string{"podman", "version", "--format", "{{.Client.Version}}"}; !reflect.DeepEqual(r.calls[0].argv, want) {
+		t.Errorf("argv = %v, want %v", r.calls[0].argv, want)
+	}
+	for v, want := range map[string]bool{"5.8.2": true, "4.7.0": true, "4.9.4-rhel": true, "v4.7.1": true, "4.6.2": false, "4.5": false, "3.4.4": false, "": false, "out": false, "4": false} {
+		if got := PodmanSupportsReplace(v); got != want {
+			t.Errorf("PodmanSupportsReplace(%q) = %v, want %v", v, got, want)
+		}
+	}
+}
+
 func TestPodmanSecretCreateSkipsCreateWhenRmFails(t *testing.T) {
 	f := &fakeRunner{err: fmt.Errorf("boom")}
-	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t", nil)
+	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t", false, nil)
 	if err == nil {
 		t.Fatal("a failed rm must surface as an error")
 	}
@@ -575,7 +609,7 @@ func TestPodmanSecretCreateSkipsCreateWhenRmFails(t *testing.T) {
 
 func TestPodmanSecretCreateReportsCreateFailure(t *testing.T) {
 	f := &fakeRunner{errByCall: map[int]error{1: fmt.Errorf("boom")}}
-	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t", nil)
+	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t", false, nil)
 	if err == nil {
 		t.Fatal("a failed create must surface as an error")
 	}
@@ -589,7 +623,7 @@ func TestPodmanSecretCreateReportsCreateFailure(t *testing.T) {
 
 func TestPodmanSecretCreateRejectsUnsafeCommand(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := PodmanSecretCreate(f, "podman; rm -rf /", "name", "value", nil); err == nil {
+	if _, err := PodmanSecretCreate(f, "podman; rm -rf /", "name", "value", false, nil); err == nil {
 		t.Fatal("unsafe command must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -893,7 +927,7 @@ func TestPreflightExtraAllowedThreadsThrough(t *testing.T) {
 
 func TestPreflightUnknownAction(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", "restart", "", nil); err == nil {
+	if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", "rollback", "", nil); err == nil {
 		t.Fatal("unknown action must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -2023,6 +2057,16 @@ func TestParsingHelpersIgnoreAWarningOnStderr(t *testing.T) {
 		})
 	}
 
+	// DockerImageCommand parses two JSON lines; a warning on stderr made the
+	// line count wrong and the image check pass without comparing anything.
+	t.Run("DockerImageCommand", func(t *testing.T) {
+		r := &splitRunner{stdout: "[\"java\"]\n[\"--x\"]\n", stderr: warning}
+		ep, cmd, found, err := DockerImageCommand(r, "docker", "img:1", nil)
+		if err != nil || !found || !reflect.DeepEqual(ep, []string{"java"}) || !reflect.DeepEqual(cmd, []string{"--x"}) {
+			t.Errorf("ep=%q cmd=%q found=%v err=%v, want the stdout answer despite the warning", ep, cmd, found, err)
+		}
+	})
+
 	// SystemctlNRestarts parses an integer, so the same warning would turn a
 	// restart count into an error. It answers a number rather than a string,
 	// hence its own case.
@@ -2104,5 +2148,91 @@ func TestDockerImageCommand(t *testing.T) {
 	unsafe := &fakeRunner{}
 	if _, _, _, err := DockerImageCommand(unsafe, "docker; rm -rf /", "img:1", nil); err == nil || len(unsafe.calls) != 0 {
 		t.Errorf("an unsafe command must be rejected before running: err=%v calls=%d", err, len(unsafe.calls))
+	}
+}
+
+// DockerImagePull pulls through the configured engine command, and refuses an
+// unsafe one before running anything.
+func TestDockerImagePull(t *testing.T) {
+	f := &fakeRunner{out: "pulled"}
+	if out, err := DockerImagePull(f, "docker --context remote", "img:1", nil); err != nil || out != "pulled" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	if want := []string{"docker", "--context", "remote", "image", "pull", "img:1"}; len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("argv = %v, want %v", f.calls, want)
+	}
+	unsafe := &fakeRunner{}
+	if _, err := DockerImagePull(unsafe, "docker; rm -rf /", "img:1", nil); err == nil || len(unsafe.calls) != 0 {
+		t.Errorf("an unsafe command must be rejected before running: err=%v calls=%d", err, len(unsafe.calls))
+	}
+}
+
+// The lifecycle helpers act on what deploy created, in place, through the
+// configured command: kubernetes scales the Deployment to 0 and back to its
+// replicas, or rolls it; docker starts, stops or restarts the container;
+// podman does the same to the unit through systemctl, in the unit's scope.
+func TestLifecycleArgv(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		run  func(r Runner) (string, error)
+		want []string
+	}{
+		{"kubernetes stop", func(r Runner) (string, error) {
+			return KubernetesLifecycle(r, "kubectl", ActionStop, "ns", "c", 3, nil)
+		}, []string{"kubectl", "--namespace", "ns", "scale", "deployment/c", "--replicas=0"}},
+		{"kubernetes start", func(r Runner) (string, error) {
+			return KubernetesLifecycle(r, "oc", ActionStart, "ns", "c", 3, nil)
+		}, []string{"oc", "--namespace", "ns", "scale", "deployment/c", "--replicas=3"}},
+		{"kubernetes restart, current namespace", func(r Runner) (string, error) {
+			return KubernetesLifecycle(r, "kubectl", ActionRestart, "", "c", 1, nil)
+		}, []string{"kubectl", "rollout", "restart", "deployment/c"}},
+		{"docker stop", func(r Runner) (string, error) {
+			return DockerLifecycle(r, "docker --context prod", ActionStop, "connector", nil)
+		}, []string{"docker", "--context", "prod", "stop", "connector"}},
+		{"docker restart", func(r Runner) (string, error) {
+			return DockerLifecycle(r, "docker", ActionRestart, "connector", nil)
+		}, []string{"docker", "restart", "connector"}},
+		{"podman start, user unit", func(r Runner) (string, error) {
+			return PodmanLifecycle(r, QuadletScope{UserMode: true}, ActionStart, "connector.service")
+		}, []string{"systemctl", "--user", "start", "connector.service"}},
+		{"podman stop, system unit", func(r Runner) (string, error) {
+			return PodmanLifecycle(r, QuadletScope{}, ActionStop, "connector.service")
+		}, []string{"systemctl", "stop", "connector.service"}},
+	} {
+		f := &fakeRunner{}
+		if _, err := c.run(f); err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, c.want) {
+			t.Errorf("%s: argv = %+v, want %v", c.name, f.calls, c.want)
+		}
+	}
+	for _, bad := range []func(r Runner) (string, error){
+		func(r Runner) (string, error) {
+			return KubernetesLifecycle(r, "kubectl", ActionDeploy, "ns", "c", 1, nil)
+		},
+		func(r Runner) (string, error) { return DockerLifecycle(r, "docker", "kill", "c", nil) },
+		func(r Runner) (string, error) { return PodmanLifecycle(r, QuadletScope{}, ActionRemove, "c.service") },
+		func(r Runner) (string, error) { return DockerLifecycle(r, "docker; rm -rf /", ActionStop, "c", nil) },
+	} {
+		f := &fakeRunner{}
+		if _, err := bad(f); err == nil || len(f.calls) != 0 {
+			t.Errorf("an unknown action or unsafe command must fail before running: err %v, calls %+v", err, f.calls)
+		}
+	}
+}
+
+// The lifecycle verbs' kubernetes preflight asks to patch the Deployment,
+// which scale and rollout restart both do.
+func TestPreflightKubernetesLifecycleAsksToPatch(t *testing.T) {
+	for _, action := range []string{ActionStart, ActionStop, ActionRestart} {
+		f := &fakeRunner{}
+		if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", action, "ns", nil); err != nil {
+			t.Fatalf("%s: %v", action, err)
+		}
+		if want := []string{"kubectl", "auth", "can-i", "patch", "deployment", "--namespace", "ns"}; !reflect.DeepEqual(f.calls[0].argv, want) {
+			t.Errorf("%s: argv = %v, want %v", action, f.calls[0].argv, want)
+		}
 	}
 }

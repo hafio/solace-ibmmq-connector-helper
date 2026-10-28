@@ -36,6 +36,10 @@ const podListJSON = `{
           {"name": "config", "configMap": {"name": "solmq-connector-config"}},
           {"name": "secrets", "secret": {"secretName": "solmq-connector-credentials"}},
           {"name": "libs", "persistentVolumeClaim": {"claimName": "solmq-libs"}},
+          {"name": "stores", "projected": {"defaultMode": 256, "sources": [
+            {"secret": {"name": "solmq-connector-stores", "items": [{"key": "mq-ca", "path": "mq-ca"}]}},
+            {"secret": {"name": "broker-cert", "items": [{"key": "keystore.p12", "path": "cm-id"}]}}
+          ]}},
           {"name": "scratch", "emptyDir": {}}
         ],
         "imagePullSecrets": [{"name": "solmq-pull"}]
@@ -157,6 +161,8 @@ func TestParsePodsComponentsComeFromWhatThePodReferences(t *testing.T) {
 		"persistentvolumeclaim/solmq-libs",
 		"secret/solmq-connector-extra-env", // envFrom, not a volume
 		"secret/solmq-pull",                // imagePullSecrets
+		"secret/solmq-connector-stores",    // a projected volume's sources,
+		"secret/broker-cert",               // each one its own component
 	} {
 		if _, ok := got[want]; !ok {
 			t.Errorf("missing component %q; got %v", want, keys(got))
@@ -408,6 +414,21 @@ func TestObjectExists(t *testing.T) {
 		ok, status := ObjectExists(c.doc)
 		if ok != c.wantOK || status != c.wantStatus {
 			t.Errorf("%s: got (%v, %q), want (%v, %q)", c.name, ok, status, c.wantOK, c.wantStatus)
+		}
+	}
+}
+
+func TestSecretDataKeys(t *testing.T) {
+	keys, ok := SecretDataKeys(`{"kind":"Secret","data":{"keystore.p12":"QUJD","truststore.p12":"REVG"}}`)
+	if !ok || len(keys) != 2 || !keys["keystore.p12"] || !keys["truststore.p12"] {
+		t.Errorf("keys = %v, ok %v", keys, ok)
+	}
+	if keys, ok := SecretDataKeys(`{"kind":"Secret"}`); !ok || len(keys) != 0 {
+		t.Errorf("a Secret with no data has no keys: %v, %v", keys, ok)
+	}
+	for _, doc := range []string{`{"kind":"ConfigMap","data":{"a":"b"}}`, `oops`, ``} {
+		if _, ok := SecretDataKeys(doc); ok {
+			t.Errorf("%q is not a Secret", doc)
 		}
 	}
 }

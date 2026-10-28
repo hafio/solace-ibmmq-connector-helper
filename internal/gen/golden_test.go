@@ -2,11 +2,14 @@ package gen_test
 
 import (
 	"bytes"
+	"encoding/base64"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/certfixture"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
@@ -22,6 +25,38 @@ import (
 const goldenStatusPassword = "0123456789abcdef0123456789abcdef"
 
 const specsDir = "../../testdata/golden/specs"
+
+// updateFixtures rewrites the golden spec's PKCS12 fixtures --
+// certs/truststore.p12 (opened with TRUSTSTORE_PASSWORD's ts-pw) and
+// certs/keystore.p12 (KEYSTORE_PASSWORD's ks-pw) -- from freshly minted
+// certificates. They are real stores because every verb that reads an existing
+// store opens it with its password; the manifests embed whatever bytes are
+// committed, so a rewrite needs no other change.
+var updateFixtures = flag.Bool("update-fixtures", false, "rewrite testdata/golden/specs/certs/*.p12")
+
+// TestGoldenStoreFixtures checks the committed fixtures open with the
+// passwords the golden spec gives them, and rewrites them with -update-fixtures.
+func TestGoldenStoreFixtures(t *testing.T) {
+	trust, key := filepath.Join(specsDir, "certs", "truststore.p12"), filepath.Join(specsDir, "certs", "keystore.p12")
+	if *updateFixtures {
+		ca := certfixture.CA(t, "Golden Root")
+		for path, data := range map[string][]byte{
+			trust: certfixture.TrustStorePKCS12(t, "ts-pw", ca),
+			key:   certfixture.KeyStorePKCS12(t, "ks-pw", certfixture.Issue(t, ca, "golden-client"), ca),
+		} {
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	setGoldenCredEnv(t)
+	errs, warns := gen.Validate(loadSpecs(t), gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()})
+	for _, i := range append(errs, warns...) {
+		if strings.Contains(i.Msg, "certs/") {
+			t.Errorf("a golden store fixture is not a store its password opens: %s (rewrite them with -update-fixtures)", i.Msg)
+		}
+	}
+}
 
 // loadSpecs reads the golden spec folder into a gen.Request (mirrors the CLI):
 // env.yaml is the config, every other *.yaml/*.yml is a workflow.
@@ -201,10 +236,10 @@ func TestGoldenKubernetesCreate(t *testing.T) {
 		namespaceDoc, // deploy always emits the Namespace first
 		configMapDoc(appYAML, true),
 		credDoc,
-		storesDoc,
+		storesDoc(t),
 		pvDoc,
 		pvcDoc,
-		deploymentDoc(true, true, true, true), // envFrom + stores + syslog + libs
+		deploymentDoc("solmq-connector-credentials", true, true, true), // credentials + stores + syslog + libs
 		serviceDoc,
 	}, "---\n"))
 	if norm(out) != want {
@@ -215,17 +250,22 @@ func TestGoldenKubernetesCreate(t *testing.T) {
 func TestGoldenKubernetesNoSecrets(t *testing.T) {
 	setGoldenCredEnv(t)
 	req := loadSpecs(t)
-	// Swap in a secrets/syslog/libs-free kubernetes: section (defaults unchanged).
+	// Swap in a syslog/libs-free kubernetes: section that creates no Secret but
+	// the stores (defaults unchanged).
 	req.Env = &gen.File{Name: "env.yaml", Data: envWithKubeNoSyslog(t, kubeNoSecrets)}
 	out, errs, _ := gen.GenerateKubernetes(req, gen.Resolver{Env: os.LookupEnv, ReadFile: dirReader()}, gen.KubeOpts{})
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	appYAML := norm(string(mustRead(t, "../../testdata/golden/application.yml")))
+	// No Secret but the stores is created: the credentials are the operator's,
+	// and a selected store the tool holds is delivered with nothing to
+	// configure, as on docker and podman.
 	want := norm(strings.Join([]string{
 		namespaceDoc,
 		configMapDoc(appYAML, false),
-		deploymentDoc(false, false, false, false), // no envFrom, stores, syslog, or libs
+		storesDoc(t),
+		deploymentDoc("their-creds", true, false, false), // their credentials + stores; no syslog or libs
 		serviceDoc,
 	}, "---\n"))
 	if norm(out) != want {
@@ -315,18 +355,26 @@ stringData:
   EDGE_SOL_PASSWORD: "edge-pw"
 `
 
-const storesDoc = `apiVersion: v1
+// storesDoc is the stores Secret the golden spec renders: each selected store
+// keyed by its name, holding the committed fixture it names, base64-encoded.
+func storesDoc(t *testing.T) string {
+	t.Helper()
+	enc := func(file string) string {
+		return base64.StdEncoding.EncodeToString(mustRead(t, filepath.Join(specsDir, "certs", file)))
+	}
+	return `apiVersion: v1
 kind: Secret
 metadata:
   name: solmq-connector-stores
   namespace: solace-connectors
 type: Opaque
 data:
-  mq-ca: VFJVU1RTVE9SRQo=
-  mq-client: S0VZU1RPUkUK
-  solace-ca: VFJVU1RTVE9SRQo=
-  solace-client: S0VZU1RPUkUK
+  mq-ca: ` + enc("truststore.p12") + `
+  mq-client: ` + enc("keystore.p12") + `
+  solace-ca: ` + enc("truststore.p12") + `
+  solace-client: ` + enc("keystore.p12") + `
 `
+}
 
 const pvDoc = `apiVersion: v1
 kind: PersistentVolume
@@ -373,15 +421,15 @@ spec:
       targetPort: 8090
 `
 
-// deploymentDoc builds the expected Deployment manifest. hasCreds controls
-// the credentials Secret's volume + mount: no envFrom exists any more --
+// deploymentDoc builds the expected Deployment manifest. credsSecret names the
+// Secret behind the credentials volume + mount ("" for none): no envFrom exists any more --
 // credentials are mounted as files under deploy.SecretsMountPath (one of the
 // two directories the connector's spring.config.import configtree names, S3: no secret in an env var a
 // child process or crash dump could see) -- and automountServiceAccountToken
-// is always false regardless of hasCreds (the connector never calls the
+// is always false regardless of credsSecret (the connector never calls the
 // Kubernetes API). The pod runs as the default non-root run-as with the
 // posture every pod carries.
-func deploymentDoc(hasCreds, stores, syslog, libs bool) string {
+func deploymentDoc(credsSecret string, stores, syslog, libs bool) string {
 	var b strings.Builder
 	b.WriteString(`apiVersion: apps/v1
 kind: Deployment
@@ -435,7 +483,7 @@ spec:
 `)
 	}
 	b.WriteString("          volumeMounts:\n")
-	if hasCreds {
+	if credsSecret != "" {
 		b.WriteString("            - name: secrets\n              mountPath: " + deploy.SecretsMountPath + "\n              readOnly: true\n")
 	}
 	b.WriteString(`            - name: config
@@ -486,15 +534,16 @@ spec:
           configMap:
             name: solmq-connector-config
 `)
-	if hasCreds {
-		b.WriteString("        - name: secrets\n          secret:\n            secretName: solmq-connector-credentials\n            defaultMode: 0400\n")
+	if credsSecret != "" {
+		b.WriteString("        - name: secrets\n          secret:\n            secretName: " + credsSecret + "\n            defaultMode: 0400\n")
 	}
 	if stores {
-		b.WriteString("        - name: stores\n          secret:\n            secretName: solmq-connector-stores\n" +
-			"            items:\n              - key: \"mq-ca\"\n                path: mq-ca\n" +
-			"              - key: \"mq-client\"\n                path: mq-client\n" +
-			"              - key: \"solace-ca\"\n                path: solace-ca\n" +
-			"              - key: \"solace-client\"\n                path: solace-client\n")
+		b.WriteString("        - name: stores\n          projected:\n            defaultMode: 0400\n            sources:\n" +
+			"              - secret:\n                  name: solmq-connector-stores\n                  items:\n" +
+			"                    - key: \"mq-ca\"\n                      path: mq-ca\n" +
+			"                    - key: \"mq-client\"\n                      path: mq-client\n" +
+			"                    - key: \"solace-ca\"\n                      path: solace-ca\n" +
+			"                    - key: \"solace-client\"\n                      path: solace-client\n")
 	}
 	if libs {
 		b.WriteString(`        - name: libs
@@ -505,7 +554,9 @@ spec:
 	return b.String()
 }
 
-// kubeNoSecrets is a full kubernetes: section with no secrets, syslog, or libs.
+// kubeNoSecrets is a full kubernetes: section with no syslog or libs, and no
+// Secret the tool creates: the credentials Secret, which the config's ${...}
+// references require, is the operator's own.
 const kubeNoSecrets = `kubernetes:
   command: kubectl
   deployment:
@@ -518,6 +569,9 @@ const kubeNoSecrets = `kubernetes:
   service:
     enabled: true
     port: 8090
+  secrets:
+    credentials:
+      existing: their-creds
 `
 
 // lineDiff returns a compact first-divergence report for two multi-line strings.
