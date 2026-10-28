@@ -92,7 +92,7 @@ func TestLifecycleVerbsRefuseBeforeActing(t *testing.T) {
 	if code := dispatch([]string{"start", "docker", "-e", env}, f); code != 2 || len(f.calls) != 0 {
 		t.Errorf("a positional argument is a usage error: exit %d, calls %+v", code, f.calls)
 	}
-	if _, err := os.Stat(filepath.Join(dir, composeFile)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "docker-compose.yml")); !os.IsNotExist(err) {
 		t.Errorf("a lifecycle verb writes no compose file: %v", err)
 	}
 }

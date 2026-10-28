@@ -436,20 +436,27 @@ func kubeVerb(action string) (string, error) {
 	}
 }
 
-// Docker runs `<command> compose -f <composeFile> up -d` (deploy) or
-// `<command> compose -f <composeFile> down` (remove). The compose file must
-// already be written by the caller.
+// Docker runs `<command> compose -f - --project-directory <projectDir> up -d`
+// (deploy) or `... down` (remove), handing compose the file on stdin. The file
+// inlines application.yml, which carries the status account's password, so it
+// is never written to disk -- where it sat beside env.yaml, readable by whoever
+// could read that directory, and, kept by a failed run, was read as a workflow
+// by the next one (the default workflows.dir is env.yaml's own).
+//
+// projectDir is env.yaml's directory, the one compose took from the file's
+// location when it was written there, so an .env file and any relative path
+// resolve as before.
 //
 // env carries the credential values the compose file's environment-provider
 // secrets read, in this child process only -- which is why no secret material is
 // ever written to disk for docker. It is passed on both actions: `down` resolves
 // the same secret declarations `up` did.
-func Docker(r Runner, command, action, composeFile string, env []string, extraAllowed []string) (string, error) {
+func Docker(r Runner, command, action, compose, projectDir string, env []string, extraAllowed []string) (string, error) {
 	argv, err := ParseCommand(validate.PlatformDocker, command, extraAllowed)
 	if err != nil {
 		return "", err
 	}
-	argv = append(argv, "compose", "-f", composeFile)
+	argv = append(argv, "compose", "-f", "-", "--project-directory", projectDir)
 	switch action {
 	case ActionDeploy:
 		argv = append(argv, "up", "-d")
@@ -458,7 +465,7 @@ func Docker(r Runner, command, action, composeFile string, env []string, extraAl
 	default:
 		return "", fmt.Errorf("unknown action %q (want %q or %q)", action, ActionDeploy, ActionRemove)
 	}
-	return r.Run(Cmd{Argv: argv, Env: env})
+	return r.Run(Cmd{Argv: argv, Stdin: compose, Env: env})
 }
 
 // KubernetesLifecycle stops, starts or restarts a Deployment in place: stop

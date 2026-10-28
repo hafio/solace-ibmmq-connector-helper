@@ -1154,9 +1154,11 @@ block yourself, and in every leader-election mode.
   so there is nothing for the secrets model to mount separately. That means the
   password is **readable by anyone who can read the artifact it lands in**: the
   Kubernetes ConfigMap, the Docker Compose file (which inlines
-  `application.yml`), or the Podman secret store entry `<name>-application.yml`
-  ([section 8.3](#83-podman)), which `deploy` writes nowhere but podman's secret
-  store -- by default a file under the deploying user's container storage.
+  `application.yml`; `deploy` hands it to compose on stdin and writes it nowhere,
+  and `generate -o` writes it `0600`), or the Podman secret store entry
+  `<name>-application.yml` ([section 8.3](#83-podman)), which `deploy` writes
+  nowhere but podman's secret store -- by default a file under the deploying
+  user's container storage.
 - **The account is GET-only** against the actuator endpoints it needs
   (`health`, `leaderelection`, `workflows`); it cannot mutate anything on the
   connector.
@@ -1781,8 +1783,12 @@ it could not authenticate to. `remove` only warns: a teardown needs no credentia
 
 `generate --platform docker` emits a `docker-compose.yml` with `application.yml`
 inlined under compose `configs:`; `deploy --platform docker` runs `<command>
-compose -f <file> up -d`; `remove --platform docker` runs `<command> compose -f
-<file> down`. Credentials become compose `secrets:` entries using the environment
+compose -f - --project-directory <env.yaml's folder> up -d` and `remove --platform
+docker` the same with `down`, handing compose that file on stdin: it is never
+written to disk, since it carries the status account's password
+([section 7.1](#71-the-reserved-status-account-solmq-status)). To run compose by
+hand, write the file with `generate --platform docker -o <file>` (mode `0600`),
+outside the workflows folder, where it would be read as a workflow. Credentials become compose `secrets:` entries using the environment
 provider ([section 9.3](#93-how-each-platform-delivers-them)): `docker compose` reads
 each value from the environment it itself runs with -- the CLI injects them into
 that child process only, and no credential value is written to disk. Each entry
@@ -1901,7 +1907,7 @@ Two things to know:
   they disagree -- for example, after changing `project-name` without tearing
   down the stack it replaces. Either set `project-name` to the value the note
   reports, or remove the mismatched stack by hand with `docker compose -p
-  <name> -f docker-compose.yml down`.
+  <name> down`, which needs no compose file.
 - **`COMPOSE_PROJECT_NAME` in your shell wins.** Compose resolves the project as
   `-p` first, then `COMPOSE_PROJECT_NAME`, then the file's `name:`, then the
   directory basename. The CLI declares the project in the file rather than on the

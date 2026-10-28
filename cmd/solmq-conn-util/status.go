@@ -727,7 +727,7 @@ func (c *statusCollector) compareProject(rep *statusreport.Report) {
 	rep.Notes = append(rep.Notes, fmt.Sprintf(
 		"running under compose project %s, not the %q env.yaml configures; remove would not see this stack -- set docker.project-name to the running value, or tear it down by hand with %q",
 		strings.Join(quoteAll(others), ", "), want,
-		"docker compose -p "+others[0]+" -f docker-compose.yml down"))
+		"docker compose -p "+others[0]+" down"))
 }
 
 // quoteAll quotes each project name for the compareProject note. The values are

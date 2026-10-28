@@ -315,22 +315,29 @@ func TestKubernetesUnknownAction(t *testing.T) {
 func TestDockerUpAndDown(t *testing.T) {
 	f := &fakeRunner{}
 	env := []string{"MQ_CONN_1_USER=admin", "MQ_CONN_1_PASSWORD=s3cr3t"}
-	if _, err := Docker(f, "docker", ActionDeploy, "/tmp/docker-compose.yml", env, nil); err != nil {
+	const compose = "name: proj\nservices: {}\n"
+	if _, err := Docker(f, "docker", ActionDeploy, compose, "/srv/spec", env, nil); err != nil {
 		t.Fatal(err)
 	}
-	wantUp := []string{"docker", "compose", "-f", "/tmp/docker-compose.yml", "up", "-d"}
+	wantUp := []string{"docker", "compose", "-f", "-", "--project-directory", "/srv/spec", "up", "-d"}
 	if !reflect.DeepEqual(f.calls[0].argv, wantUp) {
 		t.Errorf("up argv = %v, want %v", f.calls[0].argv, wantUp)
+	}
+	if f.calls[0].stdin != compose {
+		t.Errorf("up stdin = %q, want the compose file %q (it never touches the disk)", f.calls[0].stdin, compose)
 	}
 	if !reflect.DeepEqual(f.calls[0].env, env) {
 		t.Errorf("up env = %v, want %v (credential values must cross via Cmd.Env, never argv)", f.calls[0].env, env)
 	}
-	if _, err := Docker(f, "docker", ActionRemove, "/tmp/docker-compose.yml", env, nil); err != nil {
+	if _, err := Docker(f, "docker", ActionRemove, compose, "/srv/spec", env, nil); err != nil {
 		t.Fatal(err)
 	}
-	wantDown := []string{"docker", "compose", "-f", "/tmp/docker-compose.yml", "down"}
+	wantDown := []string{"docker", "compose", "-f", "-", "--project-directory", "/srv/spec", "down"}
 	if !reflect.DeepEqual(f.calls[1].argv, wantDown) {
 		t.Errorf("down argv = %v, want %v", f.calls[1].argv, wantDown)
+	}
+	if f.calls[1].stdin != compose {
+		t.Errorf("down stdin = %q, want the compose file", f.calls[1].stdin)
 	}
 	if !reflect.DeepEqual(f.calls[1].env, env) {
 		t.Errorf("down env = %v, want %v (down must resolve the same secret declarations up did)", f.calls[1].env, env)
@@ -339,7 +346,7 @@ func TestDockerUpAndDown(t *testing.T) {
 
 func TestDockerRejectsUnsafeCommand(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Docker(f, "docker `id`", ActionDeploy, "x", nil, nil); err == nil {
+	if _, err := Docker(f, "docker `id`", ActionDeploy, "x", "/srv/spec", nil, nil); err == nil {
 		t.Fatal("unsafe command must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -502,7 +509,7 @@ func TestPodmanDeployStartFailureIsReported(t *testing.T) {
 
 func TestDockerUnknownAction(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Docker(f, "docker", "restart", "x", nil, nil); err == nil {
+	if _, err := Docker(f, "docker", "restart", "x", "/srv/spec", nil, nil); err == nil {
 		t.Fatal("unknown action must be rejected")
 	}
 	if len(f.calls) != 0 {

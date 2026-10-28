@@ -689,7 +689,7 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestKubernetesRemoveUsesDeleteVerb | - | the remove action issues argv [oc delete -f - --ignore-not-found] |
 | TestKubernetesRejectsUnsafeCommand | - | unsafe command rejected, error returned, zero calls made |
 | TestKubernetesUnknownAction | - | unknown action rejected, error returned, zero calls made |
-| TestDockerUpAndDown | - | deploy runs compose up -d, remove runs compose down, correct argv each |
+| TestDockerUpAndDown | - | deploy runs compose -f - --project-directory <dir> up -d, remove the same with down, each with the compose file on stdin and the credentials in the child env |
 | TestDockerRejectsUnsafeCommand | - | unsafe command rejected, error returned, zero calls made |
 | TestResolveQuadletScope | follows euid | UserMode tracks `os.Geteuid() != 0`, and the directory pairs with it: user mode under the home dir, system mode at quadletSystem. Asserts the pairing rather than one fixed answer, since the answer legitimately differs for a root run |
 | TestResolveQuadletScope | home redirect | in user mode the dir tracks HOME/USERPROFILE, which is what lets a test (or a relocated home) move it without a config key -- there is no scope or dir key |
@@ -1476,8 +1476,8 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [lifecycle_test.go](
 | TestGenerateDockerToFile | - | exit 0 and compose file opens with the defaulted project line, then contains services: and image: img:1 |
 | TestGeneratePodmanQuadletStdout | - | exit 0 and stdout contains unit banner '# === solmq-conn-util.container ===' |
 | TestGeneratePodmanOnlyLibsIsAHostPath | -e env.yaml from the file's own dir | the libs Volume= source is absolute even when -e is spelled relatively, and it is the only Volume=: the store selected in the same spec is a Secret= mount. A relative source is not a near-miss in a quadlet: systemd starts the unit with no useful cwd, and podman reads a source with no ./ or / prefix as a named volume, so `Volume=libs:...` would silently mount an empty volume over the jars |
-| TestDeployDockerSeamWritesComposeAndRuns | - | exit 0, compose file written, 2 runner calls (preflight then up) argv [docker compose -f <compose> up -d] -- no -p, since the project is declared by the file's own name: key |
-| TestDeployDockerSeamComposeFileSurvivesFailedRun | - | preflight succeeds but the real `up` call fails; compose file still exists on disk afterward, exit 1 |
+| TestDeployDockerSeamPipesComposeAndRuns | - | exit 0, no compose file on disk, 2 runner calls (preflight then up) argv [docker compose -f - --project-directory <env.yaml's dir> up -d] with the compose file on stdin -- no -p, since the project is declared by the file's own name: key |
+| TestDeployDockerSeamFailedRunLeavesNoComposeFile | - | preflight succeeds but the real `up` call fails; exit 1, the up still had its file on stdin, and no compose file is left on disk |
 | TestDeployDockerSeamChildEnvCarriesCredentials | - | preflight call carries no env; the real `up` call (index 1) carries the resolved literal and -env credentials as STABLE=value pairs |
 | TestDeployDockerWarnsAboutMountsTheConnectorCannotRead | - | linux only: a 0600 truststore and a 0600 jar under libs.dir, both written with ${VAR}s and owned by another uid and gid than the run-as ones, are each named on stderr at their expanded path with their mode, and the deploy still runs (preflight, then up) |
 | TestRemoveDockerSeam | - | exit 0, 2 runner calls (preflight then down) argv [docker compose -f <compose> down] |
