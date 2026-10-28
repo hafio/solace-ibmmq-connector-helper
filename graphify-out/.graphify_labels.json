@@ -1,6 +1,5 @@
 {
   "5": "Cred",
-  "6": "checkExtraKeys",
   "7": "Internal Package Test Catalog",
   "8": "Bash Dev Script Tasks",
   "9": "PowerShell Dev Script Tasks",
@@ -34,7 +33,6 @@
   "60": "write",
   "62": "sinceFlag",
   "63": "parse_test.go",
-  "68": "Dispatch Model Consistency Tests",
   "69": "instanceFromInspect",
   "70": "statusreport/render.go",
   "71": "statusreport/render_test.go",
