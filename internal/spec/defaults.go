@@ -258,10 +258,12 @@ const (
 	LabelRoleActive = "active"
 )
 
-// LabelStoresDigestKey labels a docker service that carries created stores
-// with the sha256 of their bytes, so compose recreates the container exactly
-// when a store changes: the stores themselves travel in the environment, which
-// compose's own change detection never sees.
+// LabelStoresDigestKey labels a docker service that carries any store with
+// the sha256 of every selected store's bytes -- created ones as built, existing
+// ones as read from their bind-mount source -- so compose recreates the
+// container exactly when a store changes: neither a created store, which
+// travels in the environment, nor the content of a bind-mounted file is
+// something compose's own change detection sees.
 const LabelStoresDigestKey = "solace-connector/stores-sha256"
 
 // Security mirrors solace.connector.security. Management security is always

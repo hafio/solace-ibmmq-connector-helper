@@ -50,7 +50,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 990 test functions, 1423 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 993 test functions, 1429 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -624,7 +624,8 @@ Tests: [dockergen_test.go](../internal/dockergen/dockergen_test.go)
 | TestRenderWithoutSyslogEmitsNeither | - | no block, no config entry, no env vars |
 | TestRenderCreatedStores | - | a created store makes the service start through the storescript with the image's own command handed over, mounts the encoded store at /app/external/var/stores/<name> after the credentials, adds the script as a config (its $ doubled), a 0700 tmpfs owned by the run-as uid:gid and the stores label filled from ${_GEN_TLS_STORES_SHA256}, and declares the store a top-level environment secret after the credentials; an existing store is still bind-mounted |
 | TestRenderCreatedStoresRunAsImageAndNone | run-as image | the tmpfs names no uid or gid |
-| TestRenderCreatedStoresRunAsImageAndNone | no created store | no entrypoint, command, tmpfs, script, label or encoded mount appears |
+| TestRenderCreatedStoresRunAsImageAndNone | no store selected | no entrypoint, command, tmpfs, script, label or encoded mount appears |
+| TestRenderCreatedStoresRunAsImageAndNone | existing stores alone | the stores digest label, written with a :- default, and none of the created-store machinery |
 
 ## internal/podmangen
 
@@ -698,8 +699,9 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestPodmanDeployStartFailureIsReported | daemon-reload / start / restart | a failing daemon-reload stops at call 0; a failing start or restart (call 2, after daemon-reload and is-active) surfaces naming the verb, `systemctl start a.service` or `systemctl restart a.service`; nothing runs after the failure |
 | TestDockerUnknownAction | - | unknown action rejected, error returned, zero calls made |
 | TestDockerImageCommand | an image the engine has | one image inspect call returns the entrypoint and command |
-| TestDockerImageCommand | not pulled / one line / not json | an engine that cannot answer, or an answer that does not parse, leaves nothing to compare -- no error |
+| TestDockerImageCommand | not pulled / one line / not json | an engine that cannot answer, or an answer that does not parse, is found=false with no error, for the caller to pull and ask again |
 | TestDockerImageCommand | unsafe command | rejected before anything runs |
+| TestDockerImagePull | - | the pull runs through the configured engine command, and an unsafe command is rejected before anything runs |
 | TestPodmanRemoveStopFailureIsReported | - | stop failure surfaces error containing 'stop solmq-connector.service' |
 | TestPodmanSecretCreateRemovesThenCreatesValueOnStdin | - | PodmanSecretCreate issues rm `--ignore` then create with the value on stdin, never in argv |
 | TestPodmanSecretCreateSkipsCreateWhenRmFails | - | a failed rm surfaces an error naming it, and create never runs |
@@ -756,7 +758,7 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestOSRunSplitKeepsTheStreamsApart | - | RunSplit keeps stdout and stderr separate where Run merges them, so a stderr deprecation warning from `oc get -o json` cannot land ahead of the JSON and break the parse |
 | TestOSRunSplitWiresStdinAndEnv | - | the split path wires stdin and env exactly as Run does, so a helper's choice between them is invisible to its caller |
 | TestOSRunSplitRejectsEmptyAndUnresolvableArgv | - | RunSplit refuses an empty or unresolvable argv[0] through the same resolveArgv0 seam as Run, Stream and Attach |
-| TestParsingHelpersIgnoreAWarningOnStderr | KubernetesPodsJSON / KubernetesGetJSON / KubernetesListJSON / KubernetesTop / EngineInspectJSON / EngineImageInspectJSON / EngineStats / EngineList / SystemctlNRestarts | every helper that parses rather than scans its output returns the payload alone when a warning sits on stderr, via the Splitter path |
+| TestParsingHelpersIgnoreAWarningOnStderr | KubernetesPodsJSON / KubernetesGetJSON / KubernetesListJSON / KubernetesTop / EngineInspectJSON / EngineImageInspectJSON / EngineStats / EngineList / SystemctlNRestarts / DockerImageCommand | every helper that parses rather than scans its output returns the payload alone when a warning sits on stderr, via the Splitter path |
 | TestParsingHelpersFallBackToRun | - | a Runner with no Splitter still works, on exactly the combined output Run has always returned |
 | TestParsedFailureCarriesBothStreams | - | a failed command still reports what it said, on whichever stream it said it on, so splitting the streams did not cost the error context |
 
@@ -1097,13 +1099,15 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestCreatedStoreWarningsSurface | kubernetes / podman | a created store's expiry warning reaches the operator on both build paths |
 | TestResolveDockerStoresLimits | over the limit | a store whose base64 form would not fit one environment variable fails naming the store, its sizes, the limit and the host |
 | TestResolveDockerStoresLimits | a build failure | a store that does not build stops the deploy |
-| TestResolveDockerStoresLimits | no created store | no environment, no warning, no error |
+| TestResolveDockerStoresLimits | no selected store | no environment, no warning, no error |
+| TestResolveDockerStoresDigestsExistingStores | - | an existing store's bytes, read from its mount path, enter the digest: unchanged keeps it, replaced in place changes it; one its password does not open stops the deploy, one this user cannot read warns and stays out, a missing one is the host checks' to report |
 | TestEnvVarMax | windows / linux / darwin | 32767 on Windows, 131072 elsewhere |
 | TestValidateReadsWhatDeployReads | a readable existing store | kubernetes and podman read it, nothing is reported |
 | TestValidateReadsWhatDeployReads | a missing existing store, kubernetes / podman | each reports the unreadable store, naming its key and path |
 | TestValidateReadsWhatDeployReads | missing under two platforms | read once, reported once |
 | TestValidateReadsWhatDeployReads | two bad stores | both reported in the same run |
-| TestValidateReadsWhatDeployReads | a docker existing store | not read: a bind mount, which the validate verb checks on its host |
+| TestValidateReadsWhatDeployReads | a docker existing store, missing | read as deploy reads it for the digest; missing is the host checks' to report, not an error here |
+| TestValidateReadsWhatDeployReads | a docker existing store, opened | a JKS named as pkcs12 is refused for docker too |
 | TestValidateReadsWhatDeployReads | a created store that does not build | the build's error is reported |
 | TestValidateReadsWhatDeployReads | unset password | the store is still built with a stand-in, so a bad source is reported, beside the unset-variable warning |
 | TestValidateReadsWhatDeployReads | unset password, a JKS | not opened, but read: a missing JKS file is reported beside the unset-variable warning |
@@ -1129,7 +1133,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestCheckExistingStore | a keystore read as a truststore | opens, but its contents are unreadable here: a warning, not an error |
 | TestCheckExistingStoreFromOpenSSL | - | where openssl is on PATH: its keystore opens with no finding; its -nokeys truststore warns that it lacks Java's trusted-certificate attribute |
 | TestResolvePodmanFilesOpensExistingStores | - | podman deploy opens an existing store before loading it: a good one loads, one its password does not open stops the deploy |
-| TestDockerStorePlaceholders | - | remove's placeholders cover each created store's secret, named _GEN_TLS_<STORE>_STORE, and the digest -- never an existing store -- and a plan without created stores needs none |
+| TestDockerStorePlaceholders | - | remove's placeholders cover each created store's secret, named _GEN_TLS_<STORE>_STORE, and the digest -- never an existing store's -- existing stores alone need only the digest's, and a plan with no store selected needs none |
 | TestTargetMounts | selected stores + libs | 2 store mounts at MountDir/<store name> -- a created store, having no host file, is skipped --, each named tls.stores.<name>.existing.pkcs12, the keystore Private (carried into HostMount), and a libs mount whose source is the resolved abs host dir and whose target is the fixed default libs path |
 | TestTargetMounts | no stores, no libs | yields nil,nil -- no selected store is the only way to get no store mounts |
 | TestResolveCredentials | nil refs | no kvs, no error |
@@ -1461,7 +1465,9 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [commands_doc_test.g
 | TestDeployDockerSeamChildEnvCarriesCredentials | - | preflight call carries no env; the real `up` call (index 1) carries the resolved literal and -env credentials as STABLE=value pairs |
 | TestDeployDockerWarnsAboutMountsTheConnectorCannotRead | - | linux only: a 0600 truststore and a 0600 jar under libs.dir, both written with ${VAR}s and owned by another uid and gid than the run-as ones, are each named on stderr at their expanded path with their mode, and the deploy still runs (preflight, then up) |
 | TestRemoveDockerSeam | - | exit 0, 2 runner calls (preflight then down) argv [docker compose -f <compose> down] |
-| TestDeployDockerCarriesCreatedStores | - | a docker deploy runs info, image inspect (an answer that does not parse is an image not pulled yet) and compose up, whose child environment -- never argv -- carries the built store base64-encoded under _GEN_TLS_TS_STORE and its digest |
+| TestDeployDockerCarriesCreatedStores | - | a docker deploy runs info, image inspect (the image starts as the storescript hands over to) and compose up, whose child environment -- never argv -- carries the built store base64-encoded under _GEN_TLS_TS_STORE and its digest |
+| TestDeployDockerPullsAnImageItCannotInspect | pulled, then it starts as expected | an image the engine cannot describe is pulled and inspected again, then compose up runs |
+| TestDeployDockerPullsAnImageItCannotInspect | pulled, still not described / the pull fails | the deploy stops before compose runs |
 | TestDeployDockerRefusesAnImageStartingOtherwise | - | an image the engine reports starting another way fails the deploy naming both commands, after only info and image inspect, with no compose file written |
 | TestRemoveDockerNeedsNoCreatedStoreSources | - | remove succeeds with the store's source gone -- its password resolved like every declared credential -- handing compose placeholders for the store secret and the digest |
 | TestDeployDockerRefusesAMissingStoreFile | - | a docker deploy whose existing store is missing exits 1 naming it, before any runner call; remove still tears down |

@@ -23,6 +23,7 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusreport"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/storescript"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
 
@@ -2738,7 +2739,12 @@ func TestDeployDockerWarnsAboutMountsTheConnectorCannotRead(t *testing.T) {
 		}
 	}
 	truststore := filepath.Join(dir, "certs", "truststore.jks")
-	writeMode(t, truststore, 0o600)
+	// A real store its password opens, since deploy opens it before the
+	// digest; the mode is what this test is about.
+	write(t, filepath.Join(dir, "certs"), "truststore.jks", string(certfixture.TrustStorePKCS12(t, "ts", certfixture.CA(t, "Root"))))
+	if err := os.Chmod(truststore, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	jar := filepath.Join(libs, "com.ibm.mq.jakarta.client.jar")
 	writeMode(t, jar, 0o600)
 	runAs := fmt.Sprintf("%d:%d", os.Getuid()+1, os.Getgid()+1)
@@ -6658,13 +6664,27 @@ func envValue(env []string, key string) (string, bool) {
 	return "", false
 }
 
+// imageStartReply is what `image inspect` prints for an image that starts the
+// way storescript records: its entrypoint, then its command, as JSON lines.
+func imageStartReply(t *testing.T) string {
+	t.Helper()
+	ep, err := json.Marshal(storescript.ImageEntrypoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := json.Marshal(storescript.ImageCmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(ep) + "\n" + string(cmd) + "\n"
+}
+
 // A docker deploy carrying a created store builds it and hands it to compose
 // in the child environment -- base64-encoded under its secret's name, with the
 // digest the stores label is filled from -- never in argv. The image is
-// inspected first; the fake engine's answer does not parse, which is an image
-// it does not have yet, so there is nothing to compare.
+// inspected first and starts the way the storescript hands over to.
 func TestDeployDockerCarriesCreatedStores(t *testing.T) {
-	f := useFakeRunner(t)
+	f := &queueRunner{resp: []queuedResp{{out: "ok"}, {out: imageStartReply(t)}}}
 	dir := t.TempDir()
 	createdStoreDockerSpec(t, dir)
 	t.Setenv("SOLMQ_TEST_TS_PW", "store-pass-123")
@@ -6693,6 +6713,48 @@ func TestDeployDockerCarriesCreatedStores(t *testing.T) {
 		if strings.Contains(a, enc[:16]) {
 			t.Errorf("store bytes reached argv: %q", a)
 		}
+	}
+}
+
+// An image the engine does not have yet is pulled and then inspected, so the
+// check always compares something; one it still cannot describe after the
+// pull stops the deploy before anything is written.
+func TestDeployDockerPullsAnImageItCannotInspect(t *testing.T) {
+	noImage := queuedResp{out: "Error: No such image: img:1", err: errors.New("exit status 1")}
+	for _, c := range []struct {
+		name  string
+		resp  []queuedResp
+		code  int
+		calls []string // the verb after "docker" in each call
+	}{
+		{"pulled, then it starts as expected", []queuedResp{{out: "ok"}, noImage, {out: "pulled"}, {out: imageStartReply(t)}}, 0, []string{"info", "image", "image", "image", "compose"}},
+		{"pulled, still not described", []queuedResp{{out: "ok"}, noImage, {out: "pulled"}, noImage}, 1, []string{"info", "image", "image", "image"}},
+		{"the pull fails", []queuedResp{{out: "ok"}, noImage, {out: "denied", err: errors.New("exit status 1")}}, 1, []string{"info", "image", "image"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			q := &queueRunner{resp: c.resp}
+			dir := t.TempDir()
+			createdStoreDockerSpec(t, dir)
+			t.Setenv("SOLMQ_TEST_TS_PW", "store-pass-123")
+			var code int
+			stderr := captureStderr(t, func() {
+				code = dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, q)
+			})
+			if code != c.code {
+				t.Fatalf("exit=%d, want %d:\n%s", code, c.code, stderr)
+			}
+			if len(q.calls) != len(c.calls) {
+				t.Fatalf("calls = %+v, want %v", q.calls, c.calls)
+			}
+			for i, v := range c.calls {
+				if q.calls[i].argv[1] != v {
+					t.Errorf("call %d = %v, want docker %s ...", i, q.calls[i].argv, v)
+				}
+			}
+			if len(q.calls) > 2 && !reflect.DeepEqual(q.calls[2].argv, []string{"docker", "image", "pull", "img:1"}) {
+				t.Errorf("call 2 = %v, want the pull", q.calls[2].argv)
+			}
+		})
 	}
 }
 

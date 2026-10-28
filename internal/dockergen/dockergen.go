@@ -72,6 +72,9 @@ type Input struct {
 	// start by the storescript entrypoint; nil when none, and then nothing
 	// about the service changes.
 	Created []CreatedStore
+	// Digest labels the service with the stores digest: some store, created
+	// or existing, is selected.
+	Digest bool
 }
 
 // yw is the indentation-aware line writer used by every renderer here.
@@ -161,9 +164,10 @@ func renderService(w *yw, in Input, inst Instance) {
 		w.Line(6, spec.LabelRoleKey+": "+spec.LabelRoleActive)
 	}
 	// Left for compose to interpolate from deploy's environment: the stores
-	// are not in this file, so their digest cannot be either.
-	if len(in.Created) > 0 {
-		w.Line(6, spec.LabelStoresDigestKey+": ${"+StoresDigestVar+"}")
+	// are not in this file, so their digest cannot be either. The :- default
+	// keeps a hand-run compose up silent, with an empty label.
+	if in.Digest {
+		w.Line(6, spec.LabelStoresDigestKey+": ${"+StoresDigestVar+":-}")
 	}
 	if d.Restart != "" {
 		w.Line(4, "restart: "+d.Restart)

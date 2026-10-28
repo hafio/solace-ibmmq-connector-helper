@@ -8,7 +8,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
+	"syscall"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/dockergen"
@@ -267,6 +269,41 @@ func dockerStores(stores []consolidate.StoreUse, defs spec.TLSConfig) []DockerSt
 	return out
 }
 
+// DockerExisting is an existing store a compose file bind-mounts: its use,
+// the host path the compose file mounts (expanded and absolute), and its
+// password, for deploy to fold its bytes into the stores digest and open it.
+type DockerExisting struct {
+	Use      consolidate.StoreUse
+	Path     string
+	Password spec.Cred
+}
+
+// dockerExisting lists the existing stores among the selected ones, in their
+// order, at the paths the compose file mounts them from.
+func dockerExisting(stores []consolidate.StoreUse, defs spec.TLSConfig, res Resolver) []DockerExisting {
+	var out []DockerExisting
+	for _, st := range stores {
+		if st.Created || st.File == "" {
+			continue
+		}
+		out = append(out, DockerExisting{Use: st, Path: res.abs(st.File), Password: defs.Store(st.Name).Secret()})
+	}
+	return out
+}
+
+// dockerOnlyRead reports what a failure to read a store only docker reads
+// comes to. Missing, or a directory where the PKCS12 belongs, is nothing here:
+// the host checks report it, with the remedy, before anything runs. Any other
+// failure -- a file the invoking user may not read, above all -- leaves the
+// store out of the digest and unopened, with a warning saying so: the
+// connector reads it as its own run-as identity, which the host checks judge.
+func dockerOnlyRead(st consolidate.StoreUse, err error) []Issue {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.EISDIR) {
+		return nil
+	}
+	return []Issue{{File: fileEnv, Msg: fmt.Sprintf("cannot read %s %q here (%v), so it is left out of the stores digest -- a store replaced in place will not recreate the container -- and is not opened with its password", StoreField(st.Name), st.File, err)}}
+}
+
 // dockerCreated projects the plan's created stores onto what the compose
 // renderer names.
 func dockerCreated(stores []DockerStore) []dockergen.CreatedStore {
@@ -285,8 +322,15 @@ func dockerCreated(stores []DockerStore) []dockergen.CreatedStore {
 // is an error naming the store, rather than docker's bare "argument list too
 // long". The result is secret material: callers hand it to the child
 // environment only.
+//
+// The digest covers every selected store: each existing one is read from the
+// path the compose file bind-mounts, and opened with its password
+// (checkExistingStore), so replacing it in place and deploying recreates the
+// container as a changed created store does. A file it cannot read follows
+// dockerOnlyRead; the host checks, which run first, have already refused a
+// missing one.
 func ResolveDockerStores(plan DockerPlan, res Resolver, envMax int, host string) ([]KV, []Issue, error) {
-	if len(plan.Stores) == 0 {
+	if !plan.Digest {
 		return nil, nil, nil
 	}
 	var out []KV
@@ -304,6 +348,23 @@ func ResolveDockerStores(plan DockerPlan, res Resolver, envMax int, host string)
 		}
 		out = append(out, KV{Key: ds.Secret, Val: enc})
 		sum.Write([]byte(ds.Build.Name + "\x00"))
+		sum.Write(data)
+	}
+	for _, ex := range plan.Existing {
+		if res.ReadFile == nil {
+			return nil, nil, fmt.Errorf("cannot read %s %q (no file access)", StoreField(ex.Use.Name), ex.Use.File)
+		}
+		data, err := res.ReadFile(ex.Path)
+		if err != nil {
+			warns = append(warns, dockerOnlyRead(ex.Use, err)...)
+			continue
+		}
+		w, err := checkExistingStore(ex.Use, data, ex.Password, res)
+		if err != nil {
+			return nil, nil, err
+		}
+		warns = append(warns, w...)
+		sum.Write([]byte(ex.Use.Name + "\x00"))
 		sum.Write(data)
 	}
 	out = append(out, KV{Key: dockergen.StoresDigestVar, Val: hex.EncodeToString(sum.Sum(nil))})
@@ -332,11 +393,12 @@ func EnvVarMax(goos string) int {
 }
 
 // DockerStorePlaceholders is the environment `docker compose down` runs with
-// for the created stores: compose resolves every secret a file declares even to
-// tear it down, but never reads them, so a placeholder stands in -- remove
-// neither needs a store's sources nor builds it.
+// for the stores: compose resolves every secret a file declares even to tear
+// it down, but never reads them, so a placeholder stands in for each created
+// store's, and for the digest -- remove neither needs a store's sources nor
+// builds or reads one.
 func DockerStorePlaceholders(plan DockerPlan) []KV {
-	if len(plan.Stores) == 0 {
+	if !plan.Digest {
 		return nil
 	}
 	var out []KV
@@ -377,12 +439,16 @@ func validateStores(e *spec.Env, stores []consolidate.StoreUse, res Resolver) (e
 	for _, st := range stores {
 		sb := storeBuild(st, e.Defaults.TLS)
 		kubeReads := kube && !st.ClusterHeld()
-		if !kubeReads && !podman && (!docker || sb == nil) {
+		if !kubeReads && !podman && !docker {
 			continue
 		}
 		data, w, err := validateStoreBytes(st, sb, res)
 		warns = append(warns, w...)
 		switch {
+		case err != nil && sb == nil && !kubeReads && !podman && res.ReadFile != nil:
+			// Only docker reads it, as deploy does: the same read rule.
+			warns = append(warns, dockerOnlyRead(st, err)...)
+			continue
 		case err != nil:
 			fail(err)
 			continue
@@ -438,7 +504,7 @@ func validateStoreBytes(st consolidate.StoreUse, sb *StoreBuild, res Resolver) (
 		}
 		b, err := res.ReadFile(st.File)
 		if err != nil {
-			return nil, nil, fmt.Errorf("reading %s %q: %v", StoreField(st.Name), st.File, err)
+			return nil, nil, fmt.Errorf("reading %s %q: %w", StoreField(st.Name), st.File, err)
 		}
 		return b, nil, nil
 	}

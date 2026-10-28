@@ -2023,6 +2023,16 @@ func TestParsingHelpersIgnoreAWarningOnStderr(t *testing.T) {
 		})
 	}
 
+	// DockerImageCommand parses two JSON lines; a warning on stderr made the
+	// line count wrong and the image check pass without comparing anything.
+	t.Run("DockerImageCommand", func(t *testing.T) {
+		r := &splitRunner{stdout: "[\"java\"]\n[\"--x\"]\n", stderr: warning}
+		ep, cmd, found, err := DockerImageCommand(r, "docker", "img:1", nil)
+		if err != nil || !found || !reflect.DeepEqual(ep, []string{"java"}) || !reflect.DeepEqual(cmd, []string{"--x"}) {
+			t.Errorf("ep=%q cmd=%q found=%v err=%v, want the stdout answer despite the warning", ep, cmd, found, err)
+		}
+	})
+
 	// SystemctlNRestarts parses an integer, so the same warning would turn a
 	// restart count into an error. It answers a number rather than a string,
 	// hence its own case.
@@ -2103,6 +2113,22 @@ func TestDockerImageCommand(t *testing.T) {
 	}
 	unsafe := &fakeRunner{}
 	if _, _, _, err := DockerImageCommand(unsafe, "docker; rm -rf /", "img:1", nil); err == nil || len(unsafe.calls) != 0 {
+		t.Errorf("an unsafe command must be rejected before running: err=%v calls=%d", err, len(unsafe.calls))
+	}
+}
+
+// DockerImagePull pulls through the configured engine command, and refuses an
+// unsafe one before running anything.
+func TestDockerImagePull(t *testing.T) {
+	f := &fakeRunner{out: "pulled"}
+	if out, err := DockerImagePull(f, "docker --context remote", "img:1", nil); err != nil || out != "pulled" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	if want := []string{"docker", "--context", "remote", "image", "pull", "img:1"}; len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("argv = %v, want %v", f.calls, want)
+	}
+	unsafe := &fakeRunner{}
+	if _, err := DockerImagePull(unsafe, "docker; rm -rf /", "img:1", nil); err == nil || len(unsafe.calls) != 0 {
 		t.Errorf("an unsafe command must be rejected before running: err=%v calls=%d", err, len(unsafe.calls))
 	}
 }

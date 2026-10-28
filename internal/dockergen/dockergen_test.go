@@ -621,11 +621,12 @@ func TestRenderCreatedStores(t *testing.T) {
 		Secrets:  []string{"SOL_PASSWORD"},
 		Stores:   []Mount{{Source: "/h/mq-ca.p12", Target: "/app/external/classpath/truststores/mq-ca"}},
 		Created:  []CreatedStore{{Name: "solace-ca", Secret: "_GEN_TLS_SOLACE_CA_STORE"}},
+		Digest:   true,
 	})
 	for _, want := range []string{
 		"    container_name: solmq\n    entrypoint: [\"/bin/sh\", \"/app/external/.stores-init\"]\n" +
 			"    command: [\"java\", \"-cp\", \"@/app/jib-classpath-file\", \"com.solace.connector.jms.JmsConnector\", \"--spring.config.additional-location=optional:file:/app/external/spring/config/,optional:file:/app/external/spring/config/*/\"]\n",
-		"      solace-connector/stores-sha256: ${_GEN_TLS_STORES_SHA256}\n",
+		"      solace-connector/stores-sha256: ${_GEN_TLS_STORES_SHA256:-}\n",
 		"    secrets:\n      - source: SOL_PASSWORD\n        target: /app/external/var/secrets/SOL_PASSWORD\n" +
 			"      - source: _GEN_TLS_SOLACE_CA_STORE\n        target: /app/external/var/stores/solace-ca\n",
 		"      - source: solmq-stores-init\n        target: /app/external/.stores-init\n",
@@ -656,6 +657,18 @@ func TestRenderCreatedStoresRunAsImageAndNone(t *testing.T) {
 	in.Created = nil
 	out := Render(in)
 	for _, absent := range []string{"entrypoint:", "command:", "tmpfs:", "stores-init", "stores-sha256", "/app/external/var/stores"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("no store selected, but the compose holds %q:\n%s", absent, out)
+		}
+	}
+	// Existing stores alone: the digest label, with a default so a hand-run
+	// compose up is silent, and nothing of the created-store machinery.
+	in.Stores, in.Digest = []Mount{{Source: "/h/ca.p12", Target: "/app/external/classpath/truststores/ca"}}, true
+	out = Render(in)
+	if !strings.Contains(out, "      solace-connector/stores-sha256: ${_GEN_TLS_STORES_SHA256:-}\n") {
+		t.Errorf("existing stores carry the digest label:\n%s", out)
+	}
+	for _, absent := range []string{"entrypoint:", "command:", "tmpfs:", "stores-init", "/app/external/var/stores"} {
 		if strings.Contains(out, absent) {
 			t.Errorf("no created store, but the compose holds %q:\n%s", absent, out)
 		}

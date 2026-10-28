@@ -452,15 +452,16 @@ func Docker(r Runner, command, action, composeFile string, env []string, extraAl
 // (`<command> image inspect`), for a deploy that overrides the entrypoint to
 // check that it hands over to the command the image really runs. found is
 // false when the engine cannot answer -- above all when it does not have the
-// image yet, which `compose up` then pulls -- so there is nothing to compare;
-// only a command the engine reports can fail the check.
+// image yet -- so the caller pulls it and asks again (DockerImagePull). The
+// answer is read from stdout alone (runParsed): a warning the CLI prints on
+// stderr must not turn a reply into "no answer".
 func DockerImageCommand(r Runner, command, image string, extraAllowed []string) (entrypoint, cmd []string, found bool, err error) {
 	argv, err := ParseCommand(validate.PlatformDocker, command, extraAllowed)
 	if err != nil {
 		return nil, nil, false, err
 	}
 	argv = append(argv, "image", "inspect", "--format", "{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}", image)
-	out, rerr := r.Run(Cmd{Argv: argv})
+	out, rerr := runParsed(r, Cmd{Argv: argv})
 	if rerr != nil {
 		return nil, nil, false, nil
 	}
@@ -469,6 +470,18 @@ func DockerImageCommand(r Runner, command, image string, extraAllowed []string) 
 		return nil, nil, false, nil
 	}
 	return entrypoint, cmd, true, nil
+}
+
+// DockerImagePull pulls image through the engine (`<command> image pull`), for
+// a deploy that has to see how an image starts before compose runs it. The
+// pull prints its progress on both streams, so it runs through Run and its
+// output is reported, never parsed.
+func DockerImagePull(r Runner, command, image string, extraAllowed []string) (string, error) {
+	argv, err := ParseCommand(validate.PlatformDocker, command, extraAllowed)
+	if err != nil {
+		return "", err
+	}
+	return r.Run(Cmd{Argv: append(argv, "image", "pull", image)})
 }
 
 // Preflight runs a cheap, read-only probe before any generated file is written

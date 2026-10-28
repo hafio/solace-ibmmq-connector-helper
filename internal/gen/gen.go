@@ -341,6 +341,12 @@ type DockerPlan struct {
 	// Stores are the created stores the compose file carries as secrets read
 	// from the environment, built and encoded at deploy (ResolveDockerStores).
 	Stores []DockerStore
+	// Existing are the existing stores the compose file bind-mounts: deploy
+	// reads each into the stores digest and opens it with its password.
+	Existing []DockerExisting
+	// Digest is whether the service carries the stores digest label: some
+	// store is selected, created or existing.
+	Digest bool
 	// Image is the reference the service runs, which deploy inspects before
 	// overriding its entrypoint for the stores.
 	Image string
@@ -400,6 +406,8 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 	}
 	sm, lm := targetMounts(b.model.Stores, d.Libs, res)
 	stores := dockerStores(b.model.Stores, e.Defaults.TLS)
+	existing := dockerExisting(b.model.Stores, e.Defaults.TLS, res)
+	digest := len(stores)+len(existing) > 0
 	in := dockergen.Input{
 		Docker:  d,
 		Syslog:  e.Defaults.Syslog,
@@ -407,6 +415,7 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 		Stores:  toDockerMounts(sm),
 		Libs:    toDockerMount(lm),
 		Created: dockerCreated(stores),
+		Digest:  digest,
 		Instance: dockergen.Instance{
 			Name:         d.Name,
 			Image:        e.Image.Ref(),
@@ -419,7 +428,7 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 			RunAs:        runAs,
 		},
 	}
-	return DockerPlan{Compose: dockergen.Render(in), Secrets: b.model.Secrets, RunAs: runAs, Mounts: hostMounts(sm, lm), Stores: stores, Image: e.Image.Ref()}, nil, warns
+	return DockerPlan{Compose: dockergen.Render(in), Secrets: b.model.Secrets, RunAs: runAs, Mounts: hostMounts(sm, lm), Stores: stores, Existing: existing, Digest: digest, Image: e.Image.Ref()}, nil, warns
 }
 
 // resolvePullSecret turns the image-pull block into the wiring deploy renders.

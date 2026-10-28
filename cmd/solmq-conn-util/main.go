@@ -590,9 +590,24 @@ func actDocker(o actionOpts, r runner.Runner) int {
 	if cerr != nil {
 		return errExit(cerr)
 	}
+	if action == runner.ActionDeploy {
+		// docker bind-mounts the TLS stores and the libs jars, which the
+		// connector reads as its run-as identity with the host's own ids. The
+		// paths are the plan's, as the compose file mounts them: expanded and
+		// absolute. Checked before the stores are read below, so a missing
+		// store is reported here, with its remedy.
+		herrs, hwarns := dockerHostChecks(plan)
+		if len(herrs) > 0 {
+			return failAll(herrs)
+		}
+		for _, w := range hwarns {
+			fmt.Fprintln(os.Stderr, "warning:", w)
+		}
+	}
 	// The created stores travel in the same environment, built and encoded by
-	// deploy; down resolves the secrets the file declares but never reads them,
-	// so remove passes placeholders and needs no store's sources.
+	// deploy, beside the digest of every selected store; down resolves the
+	// secrets the file declares but never reads them, so remove passes
+	// placeholders and needs no store's sources.
 	storeKVs := gen.DockerStorePlaceholders(plan)
 	if action == runner.ActionDeploy {
 		skvs, swarns, serr := gen.ResolveDockerStores(plan, res, gen.EnvVarMax(runtime.GOOS), runtime.GOOS)
@@ -601,19 +616,6 @@ func actDocker(o actionOpts, r runner.Runner) int {
 			return errExit(serr)
 		}
 		storeKVs = skvs
-	}
-	if action == runner.ActionDeploy {
-		// docker bind-mounts the TLS stores and the libs jars, which the
-		// connector reads as its run-as identity with the host's own ids. The
-		// paths are the plan's, as the compose file mounts them: expanded and
-		// absolute.
-		herrs, hwarns := dockerHostChecks(plan)
-		if len(herrs) > 0 {
-			return failAll(herrs)
-		}
-		for _, w := range hwarns {
-			fmt.Fprintln(os.Stderr, "warning:", w)
-		}
 	}
 	if code, ok := preflight(r, action, validate.PlatformDocker, e.Docker.Command, "", extraAllowed); !ok {
 		return code
@@ -641,11 +643,23 @@ func actDocker(o actionOpts, r runner.Runner) int {
 // image it runs: the service's entrypoint decodes the stores and then execs
 // the command recorded in storescript, so an image the engine reports starting
 // any other way fails the deploy before anything is written. An image the
-// engine does not have yet is not checked; compose pulls it.
+// engine does not have yet is pulled first and then inspected, so the check
+// never passes without comparing anything.
 func checkImageCommand(r runner.Runner, command, image string, extraAllowed []string) error {
 	entrypoint, cmd, found, err := runner.DockerImageCommand(r, command, image, extraAllowed)
-	if err != nil || !found {
+	if err != nil {
 		return err
+	}
+	if !found {
+		if out, perr := runner.DockerImagePull(r, command, image, extraAllowed); perr != nil {
+			return fmt.Errorf("pulling %s to check how it starts before deploying a created store: %w\n%s", image, perr, strings.TrimSpace(out))
+		}
+		if entrypoint, cmd, found, err = runner.DockerImageCommand(r, command, image, extraAllowed); err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("%s was pulled, but `%s image inspect %s` still does not say how it starts, which a docker service carrying a created store relies on; select existing: stores on docker, or check the engine", image, command, image)
+		}
 	}
 	if !slices.Equal(entrypoint, storescript.ImageEntrypoint) || !slices.Equal(cmd, storescript.ImageCmd) {
 		return fmt.Errorf("the image %s starts with entrypoint %q and command %q, not the %q and %q the docker service hands over to after decoding its created stores; select existing: stores on docker, or report the image's new command", image, entrypoint, cmd, storescript.ImageEntrypoint, storescript.ImageCmd)

@@ -201,6 +201,22 @@ Binaries-only: with no Dockerfile the image job self-skips. Cross-compilation re
 the same way. Actions are SHA-pinned and tracked by [`.github/dependabot.yml`](../.github/dependabot.yml);
 Go module pins (including govulncheck and the toolchain) move deliberately, gates re-run.
 
+### Release checklist
+
+What the gates cannot check, before tagging:
+
+- **The connector image still starts the way the docker created-store path assumes.** For
+  each connector tag the docs name as supported, compare `docker image inspect --format
+  '{{json .Config.Entrypoint}} {{json .Config.Cmd}}' solace/solace-pubsub-connector-ibmmq:<tag>`
+  with `storescript.ImageEntrypoint` / `storescript.ImageCmd`
+  ([`internal/storescript/storescript.go`](../internal/storescript/storescript.go)). `deploy`
+  refuses an image that starts otherwise, so a mismatch is a docker deploy with a created
+  store that stops until the constants follow.
+- **A changed store path was run on a real engine.** The store delivery of each platform is
+  unit-tested only; after a change to it, run one deploy with a created and an existing store
+  on that platform and open each store inside the container (`keytool -list -storetype PKCS12`,
+  which the image ships).
+
 ## Design notes
 
 - **Byte-for-byte output.** `application.yml` and the manifests use a deterministic ordered

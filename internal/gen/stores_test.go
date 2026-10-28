@@ -283,20 +283,63 @@ func hasIssue(issues []Issue, sub string) bool {
 // A docker store over what one environment variable holds on the host fails
 // the deploy naming the store, its sizes and the host, instead of docker's bare
 // "argument list too long"; a build failure stops it too; a plan without
-// created stores needs no environment at all.
+// selected store needs no environment at all.
 func TestResolveDockerStoresLimits(t *testing.T) {
 	ca := certfixture.CA(t, "Root")
 	res := Resolver{Env: storeEnv, ReadFile: storeFiles(map[string][]byte{"./ca.pem": certfixture.PEM(ca)})}
-	plan := DockerPlan{Stores: []DockerStore{{Build: StoreBuild{Name: "ts", Store: createdCA("./ca.pem"), Trusted: true}, Secret: "_GEN_TLS_TS_STORE"}}}
+	plan := DockerPlan{Digest: true, Stores: []DockerStore{{Build: StoreBuild{Name: "ts", Store: createdCA("./ca.pem"), Trusted: true}, Secret: "_GEN_TLS_TS_STORE"}}}
 	if _, _, err := ResolveDockerStores(plan, res, 100, "windows"); err == nil || !strings.Contains(err.Error(), "once base64-encoded, over the 100 an environment variable holds on windows; trim the certificates, or deploy with podman or kubernetes") || !strings.HasPrefix(err.Error(), "tls.stores.ts is ") {
 		t.Errorf("err = %v", err)
 	}
-	bad := DockerPlan{Stores: []DockerStore{{Build: StoreBuild{Name: "ts", Store: createdCA("./gone.pem")}, Secret: "_GEN_TLS_TS_STORE"}}}
+	bad := DockerPlan{Digest: true, Stores: []DockerStore{{Build: StoreBuild{Name: "ts", Store: createdCA("./gone.pem")}, Secret: "_GEN_TLS_TS_STORE"}}}
 	if _, _, err := ResolveDockerStores(bad, res, 131072, "linux"); err == nil || !strings.Contains(err.Error(), `reading tls.stores.ts.create.certs[0] "./gone.pem"`) {
 		t.Errorf("a build failure must stop the deploy: %v", err)
 	}
 	if env, warns, err := ResolveDockerStores(DockerPlan{}, res, 131072, "linux"); env != nil || warns != nil || err != nil {
-		t.Errorf("no created store: %v %v %v", env, warns, err)
+		t.Errorf("no selected store: %v %v %v", env, warns, err)
+	}
+}
+
+// The docker stores digest covers every selected store: an existing store's
+// bytes, read from the path the compose file mounts, change it as a created
+// store's do, so deploying after an in-place rotation recreates the container.
+// The existing store is opened with its password on the way; a file this user
+// cannot read only warns and stays out of the digest, and a missing one is the
+// host checks' to report.
+func TestResolveDockerStoresDigestsExistingStores(t *testing.T) {
+	root := certfixture.CA(t, "Root")
+	one, two := certfixture.TrustStorePKCS12(t, storePW, root), certfixture.TrustStorePKCS12(t, storePW, certfixture.CA(t, "Other"))
+	files := map[string][]byte{"/abs/t.p12": one}
+	res := Resolver{Env: storeEnv, ReadFile: storeFiles(files)}
+	ex := DockerExisting{Use: consolidate.StoreUse{Name: "ts", File: "./t.p12", Trusted: true}, Path: "/abs/t.p12", Password: spec.Cred{EnvVar: "CA_PW"}}
+	plan := DockerPlan{Digest: true, Existing: []DockerExisting{ex}}
+	digest := func() string {
+		t.Helper()
+		env, warns, err := ResolveDockerStores(plan, res, 131072, "linux")
+		if err != nil || len(warns) != 0 || len(env) != 1 || env[0].Key != "_GEN_TLS_STORES_SHA256" {
+			t.Fatalf("env %v, warns %v, err %v", env, warns, err)
+		}
+		return env[0].Val
+	}
+	first := digest()
+	if digest() != first {
+		t.Error("an unchanged store must keep its digest")
+	}
+	files["/abs/t.p12"] = two
+	if digest() == first {
+		t.Error("a store replaced in place must change the digest")
+	}
+	res.Env = func(string) (string, bool) { return "not-it", true }
+	if _, _, err := ResolveDockerStores(plan, res, 131072, "linux"); err == nil || !strings.Contains(err.Error(), "does not open with the value of CA_PW") {
+		t.Errorf("a store its password does not open stops the deploy, got %v", err)
+	}
+	res = Resolver{Env: storeEnv, ReadFile: func(string) ([]byte, error) { return nil, fs.ErrPermission }}
+	if env, warns, err := ResolveDockerStores(plan, res, 131072, "linux"); err != nil || len(env) != 1 || !hasIssue(warns, "so it is left out of the stores digest") {
+		t.Errorf("an unreadable store warns and stays out: env %v, warns %v, err %v", env, warns, err)
+	}
+	res.ReadFile = func(string) ([]byte, error) { return nil, fs.ErrNotExist }
+	if _, warns, err := ResolveDockerStores(plan, res, 131072, "linux"); err != nil || len(warns) != 0 {
+		t.Errorf("a missing store is the host checks' to report: warns %v, err %v", warns, err)
 	}
 }
 
@@ -304,14 +347,18 @@ func TestResolveDockerStoresLimits(t *testing.T) {
 // so remove hands it placeholders: no store is built and no source is needed.
 // A store's secret is named inside the generated-name prefix, after the store.
 func TestDockerStorePlaceholders(t *testing.T) {
-	plan := DockerPlan{Stores: dockerStores([]consolidate.StoreUse{{Name: "mq-ca", Trusted: true, Created: true}, {Name: "have", File: "./t.p12"}}, spec.TLSConfig{})}
+	plan := DockerPlan{Digest: true, Stores: dockerStores([]consolidate.StoreUse{{Name: "mq-ca", Trusted: true, Created: true}, {Name: "have", File: "./t.p12"}}, spec.TLSConfig{})}
 	got := DockerStorePlaceholders(plan)
 	want := []KV{{Key: "_GEN_TLS_MQ_CA_STORE", Val: "-"}, {Key: "_GEN_TLS_STORES_SHA256", Val: "-"}}
 	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("placeholders = %v, want %v (the existing store is not a docker secret)", got, want)
 	}
 	if DockerStorePlaceholders(DockerPlan{}) != nil {
-		t.Error("no created store needs no placeholder")
+		t.Error("no selected store needs no placeholder")
+	}
+	existingOnly := DockerStorePlaceholders(DockerPlan{Digest: true})
+	if len(existingOnly) != 1 || existingOnly[0] != (KV{Key: "_GEN_TLS_STORES_SHA256", Val: "-"}) {
+		t.Errorf("existing stores alone need the digest placeholder only, got %v", existingOnly)
 	}
 }
 
@@ -391,7 +438,9 @@ func TestValidateReadsWhatDeployReads(t *testing.T) {
 			errs: []string{`reading tls.stores.ts.existing.pkcs12 "./gone.p12"`}},
 		{name: "two bad stores, both reported", req: validateEnv(existing("ts", "./gone.p12")+existing("ks", "./lost.p12"), podman),
 			errs: []string{`reading tls.stores.ts.existing.pkcs12 "./gone.p12"`, `reading tls.stores.ks.existing.pkcs12 "./lost.p12"`}},
-		{name: "a docker existing store is the host's to check", req: validateEnv(existing("ts", "./gone.p12")+existing("ks", "./gone.p12"), docker), readsNone: true},
+		{name: "a docker existing store, missing, is the host checks' to report", req: validateEnv(existing("ts", "./gone.p12")+existing("ks", "./gone.p12"), docker)},
+		{name: "a docker existing store is opened with its password", req: validateEnv(existing("ts", "./jks.p12")+existing("ks", "./k.p12"), docker),
+			errs: []string{`tls.stores.ts.existing.pkcs12 "./jks.p12" is a JKS keystore, not a PKCS12`}},
 		{name: "a created store that does not build", req: validateEnv(created("ts", "CA_PW", "./junk.pem")+existing("ks", "./k.p12"), docker),
 			errs: []string{"holds no certificate"}},
 		{name: "unset password: built with a stand-in", req: validateEnv(created("ts", "NOPE", "./junk.pem")+existing("ks", "./k.p12"), podman),

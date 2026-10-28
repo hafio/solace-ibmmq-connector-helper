@@ -1158,8 +1158,14 @@ block yourself, and in every leader-election mode.
 
 A store under `create:` is built by `deploy` from certificate files you already
 have -- what a CA, cert-manager or Vault hands out -- instead of a PKCS12 you make
-yourself. It is built in memory and goes straight into the platform's secret, so
-it never lands on disk:
+yourself. It is built in memory and delivered with the platform's secrets; the
+tool never writes it beside `env.yaml`. Where its bytes then live is the
+platform's: the `<name>-stores` Secret on kubernetes (and the manifest
+`generate --platform kubernetes` prints, which embeds every store and credential
+-- with `-o` it is written mode `0600`); on docker, a base64 copy in the
+container's writable layer under the engine's storage, beside the credentials,
+and the decoded store in an in-memory directory; on podman, podman's secret store,
+by default a file under the deploying user's container storage:
 
 ```yaml
 tls:
@@ -1246,11 +1252,14 @@ Where it goes:
 | docker | carried as a compose secret read from deploy's environment, base64-encoded -- docker has no secret store for a binary file, and an environment variable cannot hold a PKCS12's bytes. The service starts through a small startup script that decodes every such store into an in-memory directory on each start, then runs the image's own command ([section 8.2](#82-docker)) |
 | `generate config` | referenced at its mount path like every store -- the `application.yml` it writes is the one `deploy` ships -- and never built |
 
-Rotating a certificate is a redeploy: replace the file and run `deploy`. The
-connector reads its stores only when it starts, so restart it to pick the new store
-up -- `kubectl rollout restart` on kubernetes; a podman `deploy` restarts the unit
-itself, and a docker `deploy` recreates the container whenever a created store
-changed.
+Rotating a certificate is a redeploy: replace the file -- a created store's
+source, or an existing store's PKCS12 -- and run `deploy`. The connector reads its
+stores only when it starts, so it has to restart to pick the new store up: a
+podman `deploy` restarts the unit itself, and a docker `deploy` recreates the
+container whenever any selected store changed, created or existing. Kubernetes
+pods are not restarted by `deploy`: follow it with `kubectl rollout restart
+deployment/<name>`, and do the same after updating a Secret you manage
+(`existing.secret`).
 
 Why build instead of `openssl pkcs12 -export`: a truststore made with
 `openssl pkcs12 -export -nokeys` loads in Java as an **empty** store, because Java
@@ -1769,11 +1778,25 @@ carries one, the compose file also:
   `command:`: the connector image starts the same way in every release checked
   (2.13 to 3.2), and `deploy` compares it with the image the engine reports
   before relying on it, refusing an image that starts any other way. An image the
-  engine does not have yet is not checked; compose pulls it.
-- labels the service `solace-connector/stores-sha256` with a digest of the stores,
-  filled from the environment, so `compose up` recreates the container exactly
-  when a store changed -- the stores are not in the compose file, so its own change
-  detection cannot see them.
+  engine does not have yet is pulled first, so the comparison always happens.
+
+Whenever any store is selected, created or existing, the service is labelled
+`solace-connector/stores-sha256` with a digest of every selected store's bytes,
+filled from deploy's environment, so `compose up` recreates the container exactly
+when a store changed -- the stores are not in the compose file, so its own change
+detection cannot see them. An existing store is read for the digest from the path
+the compose file mounts, and opened with its password on the way; one the
+invoking user may not read is left out with a warning (the connector reads it as
+its own run-as identity). The label is written `${_GEN_TLS_STORES_SHA256:-}`, so a
+hand-run `docker compose up` sets it empty without a warning -- and recreates the
+container once, as the next `deploy` does again with the digest. A bind-mounted
+file pins the inode it was mounted with: an existing store replaced in place is
+picked up by that recreate, not by a restart.
+
+A compose file carrying a created store is a preview of what `deploy` runs, as
+the podman unit is: its store secret is filled only by `deploy`, so a hand-run
+`docker compose up` creates the container and then refuses to start it, naming
+the unset `_GEN_TLS_<STORE>_STORE` variable.
 
 One environment variable holds 131072 bytes on Linux and 32767 characters on
 Windows, so a created store whose base64 form would not fit fails the deploy,
@@ -2245,11 +2268,12 @@ names until deploying to a platform does.
   connector fails later trying to authenticate.
 - **docker**: compose `secrets:` using the **environment provider**, so values are
   read from the environment `docker compose` itself runs with -- the CLI injects
-  them into that child process only. Nothing is written to disk. Requires
-  **Docker Compose v2.23.1+**. Because an `-env` credential keeps its own variable
-  name, a spec written entirely in the `-env` form yields a compose file you can
-  also bring up yourself, with only those variables exported; a literal's derived
-  name is only ever supplied by `deploy`.
+  them into that child process only, and compose copies each one into the
+  container. Requires **Docker Compose v2.23.1+**. Because an `-env` credential
+  keeps its own variable name, a spec written entirely in the `-env` form, with no
+  created store, yields a compose file you can also bring up yourself, with only
+  those variables exported; a literal's derived name, and a created store
+  ([section 8.2](#82-docker)), are only ever supplied by `deploy`.
 - **podman**: `deploy` loads each credential into **podman's secret store**
   (values on stdin, never in argv) and units mount them with
   `Secret=<name>-<KEY>,type=mount,target=/app/external/var/secrets/<KEY>`. Store
