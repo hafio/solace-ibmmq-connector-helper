@@ -13,7 +13,11 @@ import (
 // this list is what keeps them from drifting away from support.go.
 var supportNoticeDocs = []string{
 	"../../README.md",
-	"../../docs/userguide.md",
+	"../../docs/getting-started.md",
+	"../../docs/configuration.md",
+	"../../docs/operations.md",
+	"../../docs/troubleshooting.md",
+	"../../docs/DESIGN.md",
 	"../../docs/DEVELOPMENT.md",
 }
 
@@ -61,7 +65,7 @@ func supportNoticePlain() string {
 }
 
 // TestSupportNoticeInHandWrittenDocs pins the support statement at the top of
-// the README, the user guide and the development guide -- the three docs a
+// the README and every hand-written doc under docs/ -- each one a page a
 // reader can land on directly without passing through any other -- and holds
 // both forms of the statement to plain ASCII, since they reach terminals, logs
 // and the in-binary output.

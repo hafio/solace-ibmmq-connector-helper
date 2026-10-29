@@ -4,7 +4,7 @@ Every test in the suite, grouped by package and expanded to individual cases, so
 see what behavior is covered and jump to the test that covers it. This is a living
 document: when a test or case is added, removed, or renamed, update the matching row in
 the same change. For build and release details see [DEVELOPMENT.md](DEVELOPMENT.md);
-for using the tool, see [userguide.md](userguide.md).
+for using the tool, see [getting-started.md](getting-started.md).
 
 Run the suite with `./scripts/dev.sh test` (`.\scripts\dev.ps1 test` on Windows);
 measure coverage with the `cov` task.
@@ -1556,7 +1556,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [lifecycle_test.go](
 | TestStatusVerboseUnderWatchSaysWhichWins | -v / --verbose | both spellings reach the field and print the precedence note on stderr rather than a usage error -- the flags do not conflict, one just wins; the note is the last thing the flag checks do, so what ends this run instead is a failing preflight (exit 1, that probe the only call made) |
 | TestStatusStdoutIsIdenticalWithAndWithoutTheSpinner | - | the stream contract the feature rests on: `status application --output json` yields byte-identical stdout with and without a terminal (and still parses), while only the terminal run writes a spinner to stderr |
 | TestVersionOutputShape | - | `version` prints `solmq-conn-util <version> <go version> <GOOS>/<GOARCH>` as its unchanged first line, then the two-line support notice (supportNoticeVersion), exit 0; the package-level version var defaults to "dev" in an un-injected test build |
-| TestSupportNoticeInHandWrittenDocs | README.md / userguide.md / DEVELOPMENT.md | each carries supportNoticeMarkdown verbatim, with a blank line either side (a line directly after a blockquote folds into it), ahead of its first `## ` heading; both forms of the notice are plain ASCII |
+| TestSupportNoticeInHandWrittenDocs | README.md and every hand-written doc under docs/ (getting-started, configuration, operations, troubleshooting, DESIGN, DEVELOPMENT) | each carries supportNoticeMarkdown verbatim, with a blank line either side (a line directly after a blockquote folds into it), ahead of its first `## ` heading; both forms of the notice are plain ASCII |
 | TestSupportNoticeInGeneratedDocs | docs/commands.md / docs/abbreviation.md | renderCommandsDoc and renderAbbreviationDoc both emit the notice block ahead of their first `## ` heading; the committed files are held to them by the two DocInSync gates |
 | TestSupportNoticeInGeneratorPage | - | solmq-conn-util-generator.html's id="support-notice" element reads exactly as supportNoticeMarkdown in plain text, sits above the page body, and the page no longer sizes its body with `calc(100vh - 60px)`, which left no room for the strip |
 | TestAbsPath | absolute input | absPath returns input unchanged when already absolute |
