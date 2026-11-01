@@ -19,6 +19,7 @@ var supportNoticeDocs = []string{
 	"../../docs/troubleshooting.md",
 	"../../docs/DESIGN.md",
 	"../../docs/DEVELOPMENT.md",
+	"../../docs/parity.md",
 }
 
 const supportNoticePagePath = "../../solmq-conn-util-generator.html"

@@ -8,9 +8,10 @@ package main
 //   - docs/commands.md and docs/abbreviation.md emit supportNoticeMarkdown
 //     verbatim (renderCommandsDoc, renderAbbreviationDoc);
 //   - README.md and the hand-written docs under docs/ (getting-started,
-//     configuration, operations, troubleshooting, DESIGN, DEVELOPMENT) are
-//     listed in supportNoticeDocs, so TestSupportNoticeInHandWrittenDocs
-//     requires the same block verbatim at the top of each;
+//     configuration, operations, troubleshooting, parity, DESIGN,
+//     DEVELOPMENT) are listed in supportNoticeDocs, so
+//     TestSupportNoticeInHandWrittenDocs requires the same block verbatim at
+//     the top of each;
 //   - solmq-conn-util-generator.html carries it as HTML, which
 //     TestSupportNoticeInGeneratorPage compares against this block as plain
 //     text;

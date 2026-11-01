@@ -145,10 +145,11 @@ giving a login hint. There is no skip flag.
 wrapper) for this run only. The command runs as an argv slice, never through a
 shell, and every token is checked against a safe charset.
 
-**What a redeploy restarts.** Podman restarts the unit on every deploy. Docker
-recreates the container when the compose file or any selected store changed.
-Kubernetes does not restart pods when only `application.yml`, the status script
-or a store changed; follow such a deploy with `restart`.
+**What a redeploy restarts.** Podman reloads systemd, then restarts the unit
+when it is active and starts it when it is not. Docker recreates the container
+when the compose file or any selected store changed. Kubernetes does not
+restart pods when only `application.yml`, the status script or a store
+changed; follow such a deploy with `restart`.
 
 ## 5. remove
 

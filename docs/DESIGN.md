@@ -11,7 +11,9 @@
 Why the tool behaves the way it does. This is for someone changing it or judging
 a change. For using it, read [getting-started.md](getting-started.md),
 [configuration.md](configuration.md) and [operations.md](operations.md). For
-building and releasing it, read [DEVELOPMENT.md](DEVELOPMENT.md).
+building and releasing it, read [DEVELOPMENT.md](DEVELOPMENT.md). For what is
+shared with the sibling `solace-util` on Docker, Podman and Kubernetes, read
+[parity.md](parity.md).
 
 ## Contents
 

@@ -77,3 +77,5 @@ block when stdin is not a terminal.
   and every short spelling.
 - [docs/DESIGN.md](docs/DESIGN.md): why the tool behaves the way it does.
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): building, testing and releasing.
+- [docs/parity.md](docs/parity.md): where this tool and its sibling
+  `solace-util` agree and differ on Docker, Podman and Kubernetes.
