@@ -91,7 +91,9 @@ them.
 confirmation, the `remove` confirmation and an interactive `cli` session all fail
 immediately when stdin is not a terminal, naming the flag that replaces them.
 A CI job that hangs on a hidden prompt is worse than one that fails with a
-message.
+message. One prompter from the shared `confirm` package serves every question in
+a run, so it holds the run's single stdin reader and the `cli` terminal check
+agrees with the prompts.
 
 **`validate` reports everything; `generate` fails fast.** `validate` is the
 linter and must surface every error `generate` or `deploy` would hit, TLS store

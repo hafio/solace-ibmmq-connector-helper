@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/confirm"
 	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
@@ -204,22 +205,14 @@ func removeNamespace(r runner.Runner, o actionOpts, k *spec.Kubernetes) int {
 	return report("remove namespace", tgtKubernetes, out, rerr)
 }
 
-// confirmNamespaceRemoval asks the second question, through the same promptLine
-// seam and non-TTY refusal every other prompt uses.
+// confirmNamespaceRemoval asks the second question, through the same prompter
+// and non-TTY refusal every other prompt uses.
 //
 // It is asked separately from the teardown confirmation because it destroys
 // something the teardown does not, and something the operator may well not have
 // created: saying yes to removing a deployment is not saying yes to removing
 // the namespace around it.
 func confirmNamespaceRemoval(ns string) (bool, error) {
-	line, err := promptLine(fmt.Sprintf("namespace %s holds nothing else -- remove the namespace too? [y/N] ", ns))
-	if err != nil {
-		return false, fmt.Errorf("confirming the namespace removal interactively: %w; pass %s instead", err, noPromptFlagName)
-	}
-	switch strings.ToLower(line) {
-	case "y", "yes":
-		return true, nil
-	default:
-		return false, nil
-	}
+	return prompter.Gate(false, confirm.Lenient,
+		fmt.Sprintf("namespace %s holds nothing else -- remove the namespace too? [y/N] ", ns), "the namespace removal")
 }

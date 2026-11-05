@@ -18,7 +18,6 @@
 package main
 
 import (
-	"bufio"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/hafio/go-deploy-utility/abbrev"
+	"github.com/hafio/go-deploy-utility/confirm"
 	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/hafio/go-deploy-utility/notice"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/examples"
@@ -895,58 +895,27 @@ func resolvePlatform(flagVal string, present []string, requireSection bool) (str
 	}
 }
 
-// promptLine is the injectable stdin-read seam behind the interactive
-// platform menu and the status install confirmation: readStdinLine in
-// production, a canned fake in tests (mirroring the runner.Runner seam
-// dispatch already threads explicitly -- see useFakeRunner in main_test.go).
-var promptLine = readStdinLine
+// prompter is the run's one confirmation seam: the platform menu, the status
+// install prompt and both remove questions go through it, so a single buffered
+// reader serves every question in the run. Tests replace it with a prompter
+// whose terminal answer and input they control (withPrompter in main_test.go),
+// because go test's own stdin is never a character device.
+var prompter = confirm.New(confirm.Options{})
 
-// stdinIsTerminal reports whether stdin is a character device, which is this
-// tool's one definition of "the operator is here to answer". Both the prompts
-// below and cli's refusal to open a shell nobody can type into read it, so the
-// two cannot come to different conclusions about the same terminal.
+// stderrIsTerminal reports whether there is a screen to draw a progress line
+// on. Deliberately separate from the prompter's terminal answer (stdin), because
+// the two differ in exactly the cases that matter -- `status app > report.txt`
+// still has a terminal to spin on, and `status app 2>steps.log` still has an
+// operator to prompt.
 //
-// A var rather than a func for the reason promptLine is one: go test's own
-// stdin is never a character device, so a hard-coded probe would make every
-// path behind it unreachable from a test.
-var stdinIsTerminal = func() bool {
-	fi, err := os.Stdin.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
-}
-
-// stderrIsTerminal is the same probe for the other end: whether there is a
-// screen to draw a progress line on. Deliberately separate from
-// stdinIsTerminal, because the two answers differ in exactly the cases that
-// matter -- `status app > report.txt` still has a terminal to spin on, and
-// `status app 2>steps.log` still has an operator to prompt.
-//
-// A var for stdinIsTerminal's reason: go test's own stderr is a pipe, so a
+// A var for the reason prompter is one: go test's own stderr is a pipe, so a
 // hard-coded probe would make the spinner unreachable from a test.
-var stderrIsTerminal = func() bool {
-	fi, err := os.Stderr.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
-}
-
-// readStdinLine refuses to read when stdin is not a character device (a
-// script, a CI job, or anything else that is not an interactive terminal) so
-// a non-interactive invocation fails fast with actionable guidance instead of
-// blocking forever on a read that will never return.
-func readStdinLine(question string) (string, error) {
-	if !stdinIsTerminal() {
-		return "", fmt.Errorf("stdin is not a terminal, so this prompt cannot be answered interactively")
-	}
-	fmt.Fprint(os.Stderr, question)
-	line, rerr := bufio.NewReader(os.Stdin).ReadString('\n')
-	if rerr != nil && line == "" {
-		return "", fmt.Errorf("reading input: %w", rerr)
-	}
-	return strings.TrimSpace(line), nil
-}
+var stderrIsTerminal = func() bool { return confirm.IsCharDevice(os.Stderr) }
 
 // promptPlatformMenu lists present as a numbered menu and reads the operator's
-// choice via promptLine. A non-TTY refusal is wrapped with a --platform hint
-// so the operator has an immediate next step instead of a bare "not a
-// terminal" error.
+// choice via the prompter. A non-TTY refusal or an unanswered prompt is wrapped
+// with a --platform hint so the operator has an immediate next step instead of
+// a bare "not a terminal" error.
 func promptPlatformMenu(present []string) (string, error) {
 	var b strings.Builder
 	b.WriteString("multiple platforms are configured in env.yaml; choose one:\n")
@@ -954,7 +923,10 @@ func promptPlatformMenu(present []string) (string, error) {
 		fmt.Fprintf(&b, "  %d) %s\n", i+1, p)
 	}
 	b.WriteString("> ")
-	line, err := promptLine(b.String())
+	line, answered, err := prompter.ReadLine(b.String())
+	if err == nil && !answered {
+		err = confirm.Unanswered()
+	}
 	if err != nil {
 		return "", fmt.Errorf("choosing a platform interactively: %w; pass --platform instead", err)
 	}
@@ -1407,24 +1379,16 @@ func noPromptFlag(fs *flag.FlagSet) *bool {
 }
 
 // confirmRemove asks once before anything is torn down, through the same
-// promptLine seam and non-TTY refusal promptPlatformMenu and confirmInstall
-// use. "y"/"yes" (case-insensitive) proceeds; anything else, a blank line
-// included, cancels -- the safe answer is the one you get by pressing Enter.
+// prompter and non-TTY refusal promptPlatformMenu and confirmInstall use.
+// "y"/"yes" (case-insensitive) proceeds; anything else, a blank line included,
+// cancels -- the safe answer is the one you get by pressing Enter.
 //
 // what names the actual target so a run pointed at the wrong env.yaml is caught
 // here: on kubernetes that means the namespace, which is usually the only thing
 // distinguishing production from a scratch cluster.
 func confirmRemove(platform, what string) (bool, error) {
-	line, err := promptLine(fmt.Sprintf("remove %s: this tears down %s -- continue? [y/N] ", platform, what))
-	if err != nil {
-		return false, fmt.Errorf("confirming the teardown interactively: %w; pass %s instead", err, noPromptFlagName)
-	}
-	switch strings.ToLower(line) {
-	case "y", "yes":
-		return true, nil
-	default:
-		return false, nil
-	}
+	return prompter.Gate(false, confirm.Lenient,
+		fmt.Sprintf("remove %s: this tears down %s -- continue? [y/N] ", platform, what), "the teardown")
 }
 
 // removeTarget describes what remove is about to destroy on the resolved

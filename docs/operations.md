@@ -61,7 +61,8 @@ flags and examples. Flags may go before, after or between positional arguments.
 **Non-TTY rule.** The menu, the `status` install prompt, the `remove`
 confirmation and an interactive `cli` all fail immediately when stdin is not a
 terminal, naming the flag to pass instead. Scripts and CI pass `--platform`,
-`--install` and `--no-prompt` explicitly.
+`--install` and `--no-prompt` explicitly. The checks and prompts come from the
+shared `confirm` package.
 
 **Exit codes.** 0 success; 1 something ran and failed, or the live system
 refused it (a preflight, a host check, a failed platform command); 2 refused

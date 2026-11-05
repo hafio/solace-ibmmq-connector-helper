@@ -59,7 +59,7 @@ var progressFrames = []string{"-", "\\", "|", "/"}
 const progressLineWidth = 79
 
 // progressFrameRate and progressNow are the two test seams, vars for the same
-// reason stdinIsTerminal is one: a hard-coded 120ms tick and a real clock would
+// reason stderrIsTerminal is one: a hard-coded 120ms tick and a real clock would
 // make the rendered output untestable and the elapsed times unpinnable.
 var (
 	progressFrameRate = 120 * time.Millisecond
@@ -145,7 +145,7 @@ func (p *progress) stop() {
 
 // pause hands stderr back for the duration of fn. The step in flight ends
 // first, so no frame is drawn over the question the install confirmation asks
-// on stderr (see readStdinLine) and, under --verbose, that step reports the
+// on stderr (see confirmInstall) and, under --verbose, that step reports the
 // time the call took rather than the time the operator took to answer. Nothing
 // is restored afterwards because nothing needs to be: every site that can
 // prompt opens a new step before its next slow call.

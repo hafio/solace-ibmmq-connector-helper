@@ -162,7 +162,7 @@ func actShell(o shellOpts, r runner.Runner) int {
 	// possibly work should say so with a next step rather than hang or open a
 	// session nobody can type into. Only the shell form needs a terminal; the
 	// one-shot form is exactly what a script should be using instead.
-	if o.interactive() && !stdinIsTerminal() {
+	if o.interactive() && !prompter.Terminal() {
 		return errExit(fmt.Errorf("cli opens an interactive shell and stdin is not a terminal; run `cli %s <command>` to run one command instead", argSeparator))
 	}
 
@@ -246,7 +246,7 @@ func attachShell(a runner.Attacher, sess instanceSession, o shellOpts, t instanc
 		// piped in, which is what a stdin that is not a terminal means here.
 		// Asking for it unconditionally would leave a command that reads stdin
 		// waiting on a terminal that never sends EOF.
-		opts = runner.ExecOpts{Stdin: !stdinIsTerminal()}
+		opts = runner.ExecOpts{Stdin: !prompter.Terminal()}
 		payload = o.remote
 	}
 

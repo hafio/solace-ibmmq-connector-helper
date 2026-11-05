@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/confirm"
 	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
@@ -781,7 +782,7 @@ func (c *statusCollector) collectApplication(rep *statusreport.Report) bool {
 		if !doInstall && !c.promptedInstall {
 			c.promptedInstall = true
 			// Paused around the prompt: the question goes to stderr too (see
-			// readStdinLine), so a spinner frame drawn under it would overwrite it.
+			// confirmInstall), so a spinner frame drawn under it would overwrite it.
 			var answer bool
 			var cerr error
 			c.prog.pause(func() {
@@ -866,20 +867,19 @@ func instanceNames(rep *statusreport.Report, idx []int) []string {
 }
 
 // confirmInstall asks once whether to install the status script on the listed
-// missing instances, via the same promptLine seam and non-TTY refusal
+// missing instances, via the same prompter and non-TTY refusal
 // promptPlatformMenu uses. "y"/"yes" (case-insensitive) installs; anything
 // else, including a blank line, declines.
 func confirmInstall(missing []string) (bool, error) {
-	line, err := promptLine(fmt.Sprintf("status script missing on %s -- install it now? [y/N] ", strings.Join(missing, ", ")))
+	yes, answered, err := prompter.Ask(
+		fmt.Sprintf("status script missing on %s -- install it now? [y/N] ", strings.Join(missing, ", ")), confirm.Lenient)
+	if err == nil && !answered {
+		err = confirm.Unanswered()
+	}
 	if err != nil {
 		return false, fmt.Errorf("confirming the status script install interactively: %w; pass --install instead", err)
 	}
-	switch strings.ToLower(line) {
-	case "y", "yes":
-		return true, nil
-	default:
-		return false, nil
-	}
+	return yes, nil
 }
 
 // ---- rendering ---------------------------------------------------------------

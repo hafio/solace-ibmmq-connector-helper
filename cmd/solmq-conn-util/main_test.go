@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 
 	pkcs12 "software.sslmate.com/src/go-pkcs12"
 
+	"github.com/hafio/go-deploy-utility/confirm"
 	"github.com/hafio/go-deploy-utility/notice"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/certfixture"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/libs"
@@ -231,36 +233,25 @@ func captureStderr(t *testing.T, f func()) string {
 	return <-done
 }
 
-// withPromptAnswer overrides the injectable promptLine seam (the interactive
-// platform menu and the status install confirmation) to return answer for
-// every call during the test, restoring the previous value on cleanup. It
-// never touches the real os.Stdin, so it carries no risk of blocking on a
-// read regardless of how the test binary itself was invoked.
-func withPromptAnswer(t *testing.T, answer string) {
+// withPrompter swaps the run's prompter (the seam behind the platform menu, the
+// status install confirmation, both remove questions and cli's terminal check)
+// for one whose terminal answer and input the test controls, restoring the
+// previous one on cleanup. input is every line the run may read, one per
+// question: the prompter holds a single reader, so a run that asks twice needs
+// two lines. It returns the buffer the questions are written to. It never
+// touches the real os.Stdin, so it carries no risk of blocking on a read
+// regardless of how the test binary itself was invoked.
+func withPrompter(t *testing.T, terminal bool, input string) *bytes.Buffer {
 	t.Helper()
-	old := promptLine
-	promptLine = func(string) (string, error) { return answer, nil }
-	t.Cleanup(func() { promptLine = old })
-}
-
-// withPromptAnswers is withPromptAnswer for a run that asks more than once,
-// answering each prompt in turn. remove is the case that needs it: the teardown
-// and the namespace are deliberately separate questions, so a test that wants
-// "yes, tear down" then "no, keep the namespace" cannot use one canned answer
-// for both. Answers beyond the list repeat the last one.
-func withPromptAnswers(t *testing.T, answers ...string) {
-	t.Helper()
-	old := promptLine
-	i := 0
-	promptLine = func(string) (string, error) {
-		a := answers[len(answers)-1]
-		if i < len(answers) {
-			a = answers[i]
-		}
-		i++
-		return a, nil
-	}
-	t.Cleanup(func() { promptLine = old })
+	out := &bytes.Buffer{}
+	old := prompter
+	prompter = confirm.New(confirm.Options{
+		IsTerminal: func() bool { return terminal },
+		In:         strings.NewReader(input),
+		Out:        out,
+	})
+	t.Cleanup(func() { prompter = old })
+	return out
 }
 
 // ---- deploy/remove seam helpers -------------------------------------------------
@@ -756,7 +747,7 @@ func TestRemoveKubernetesSeamHappyPath(t *testing.T) {
 	f := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
 	// remove asks before it tears down; this test is about the argv that
 	// follows, so it answers yes. The prompt itself is covered below.
-	withPromptAnswer(t, "y")
+	withPrompter(t, true, "y\ny\n")
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
@@ -848,7 +839,7 @@ func TestRemoveKubernetesSeamPromptsBeforeTearingDown(t *testing.T) {
 	for _, answer := range []string{"y", "yes", "YES", "Y"} {
 		t.Run(answer, func(t *testing.T) {
 			f := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
-			withPromptAnswer(t, answer)
+			withPrompter(t, true, answer+"\n"+answer+"\n")
 			dir := t.TempDir()
 			write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 			write(t, dir, "10.yaml", validWF)
@@ -873,7 +864,7 @@ func TestRemoveDeclinedTouchesNothing(t *testing.T) {
 	for _, answer := range []string{"n", "no", "", "  ", "anything else"} {
 		t.Run("answer="+answer, func(t *testing.T) {
 			f := useFakeRunner(t)
-			withPromptAnswer(t, answer)
+			withPrompter(t, true, answer+"\n")
 			dir := t.TempDir()
 			write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 			write(t, dir, "10.yaml", validWF)
@@ -895,16 +886,11 @@ func TestRemoveDeclinedTouchesNothing(t *testing.T) {
 	}
 }
 
-// TestRemoveNoPromptSkipsThePromptEntirely covers the scripted path: --no-prompt must not
-// reach promptLine at all, rather than reaching it and ignoring the answer.
+// TestRemoveNoPromptSkipsThePromptEntirely covers the scripted path: --no-prompt must write
+// no question at all, rather than asking it and ignoring the answer.
 func TestRemoveNoPromptSkipsThePromptEntirely(t *testing.T) {
 	f := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
-	old := promptLine
-	promptLine = func(string) (string, error) {
-		t.Error("--no-prompt must not prompt at all")
-		return "n", nil
-	}
-	t.Cleanup(func() { promptLine = old })
+	out := withPrompter(t, true, "n\nn\n")
 
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
@@ -918,6 +904,9 @@ func TestRemoveNoPromptSkipsThePromptEntirely(t *testing.T) {
 	if len(f.calls) != 4 {
 		t.Fatalf("want 4 calls, got %d: %+v", len(f.calls), f.calls)
 	}
+	if out.Len() != 0 {
+		t.Errorf("--no-prompt must not prompt at all, got %q", out.String())
+	}
 }
 
 // TestRemoveNonTTYFailsFastNamingTheFlag is the CI case: rather than blocking on
@@ -926,11 +915,7 @@ func TestRemoveNoPromptSkipsThePromptEntirely(t *testing.T) {
 // confirmation use.
 func TestRemoveNonTTYFailsFastNamingTheFlag(t *testing.T) {
 	f := useFakeRunner(t)
-	old := promptLine
-	promptLine = func(string) (string, error) {
-		return "", fmt.Errorf("stdin is not a terminal, so this prompt cannot be answered interactively")
-	}
-	t.Cleanup(func() { promptLine = old })
+	out := withPrompter(t, false, "y\ny\n")
 
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
@@ -948,6 +933,9 @@ func TestRemoveNonTTYFailsFastNamingTheFlag(t *testing.T) {
 	}
 	if len(f.calls) != 0 {
 		t.Fatalf("nothing may run, got %d calls: %+v", len(f.calls), f.calls)
+	}
+	if out.Len() != 0 {
+		t.Errorf("a non-terminal must not be asked anything, got %q", out.String())
 	}
 }
 
@@ -967,10 +955,7 @@ func TestRemovePromptNamesWhatItWillDestroy(t *testing.T) {
 	} {
 		t.Run(c.platform, func(t *testing.T) {
 			f := useFakeRunner(t)
-			var asked string
-			old := promptLine
-			promptLine = func(q string) (string, error) { asked = q; return "n", nil }
-			t.Cleanup(func() { promptLine = old })
+			out := withPrompter(t, true, "n\n")
 
 			dir := t.TempDir()
 			write(t, dir, "env.yaml", sharedEnv+c.env)
@@ -979,6 +964,7 @@ func TestRemovePromptNamesWhatItWillDestroy(t *testing.T) {
 			captureStderr(t, func() {
 				dispatch([]string{"remove", "--platform", c.platform, "-e", filepath.Join(dir, "env.yaml")}, f)
 			})
+			asked := out.String()
 			if !strings.Contains(asked, c.platform) {
 				t.Errorf("the prompt should name the platform, got %q", asked)
 			}
@@ -1001,14 +987,12 @@ func TestDeployNeverPromptsAndRejectsNoPrompt(t *testing.T) {
 	write(t, dir, "10.yaml", validWF)
 
 	f := useFakeRunner(t)
-	old := promptLine
-	promptLine = func(string) (string, error) {
-		t.Error("deploy must never prompt")
-		return "n", nil
-	}
-	t.Cleanup(func() { promptLine = old })
+	out := withPrompter(t, true, "n\n")
 	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("deploy exit=%d, want 0", code)
+	}
+	if out.Len() != 0 {
+		t.Errorf("deploy must never prompt, got %q", out.String())
 	}
 
 	f2 := useFakeRunner(t)
@@ -1078,7 +1062,7 @@ func nsItemJSON(kind, name string) string {
 // must never carry it.
 func TestRemoveTeardownManifestOmitsTheNamespace(t *testing.T) {
 	f := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
-	withPromptAnswer(t, "y")
+	withPrompter(t, true, "y\ny\n")
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
@@ -1116,7 +1100,7 @@ func TestRemoveNamespaceOccupiedLeavesItAlone(t *testing.T) {
 			nsItemJSON("PersistentVolumeClaim", "billing-data"),
 		), nil},
 	}}
-	withPromptAnswer(t, "y")
+	withPrompter(t, true, "y\n")
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
@@ -1155,7 +1139,7 @@ func TestRemoveNamespaceEmptyPromptsSeparately(t *testing.T) {
 			q := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
 			// Two questions: yes to the teardown, then the case's answer to the
 			// namespace. That separation is the point of the feature.
-			withPromptAnswers(t, "y", c.answer)
+			withPrompter(t, true, "y\n"+c.answer+"\n")
 			dir := t.TempDir()
 			write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 			write(t, dir, "10.yaml", validWF)
@@ -1177,6 +1161,31 @@ func TestRemoveNamespaceEmptyPromptsSeparately(t *testing.T) {
 	}
 }
 
+// TestRemoveSharesOneReaderAcrossBothQuestions pins the one-prompter-per-run
+// rule: the teardown and the namespace questions read from the same buffered
+// reader, so one write answering both ("y\ny\n") is not half lost to the first
+// question's read-ahead.
+func TestRemoveSharesOneReaderAcrossBothQuestions(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
+	out := withPrompter(t, true, "y\ny\n")
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+	write(t, dir, "10.yaml", validWF)
+
+	if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, q); code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if n := strings.Count(out.String(), "[y/N]"); n != 2 {
+		t.Errorf("want 2 questions asked, got %d: %q", n, out.String())
+	}
+	if len(q.calls) != 4 {
+		t.Fatalf("both answers must be read, want 4 calls (preflight, delete, probe, namespace delete), got %d: %+v", len(q.calls), q.calls)
+	}
+	if !strings.Contains(q.calls[3].stdin, "kind: Namespace") {
+		t.Errorf("the namespace delete should pipe the Namespace document, got %q", q.calls[3].stdin)
+	}
+}
+
 // TestRemoveNoPromptNeverRemovesAnOccupiedNamespace is the invariant, and the
 // case that must never regress: no flag removes a namespace that still holds
 // someone else's work.
@@ -1190,12 +1199,7 @@ func TestRemoveNoPromptNeverRemovesAnOccupiedNamespace(t *testing.T) {
 		{"", nil}, // delete
 		{nsList(nsItemJSON("Deployment", "billing-api")), nil},
 	}}
-	old := promptLine
-	promptLine = func(string) (string, error) {
-		t.Error("--no-prompt must not prompt at all")
-		return "n", nil
-	}
-	t.Cleanup(func() { promptLine = old })
+	out := withPrompter(t, true, "n\nn\n")
 
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
@@ -1207,6 +1211,9 @@ func TestRemoveNoPromptNeverRemovesAnOccupiedNamespace(t *testing.T) {
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0 -- the teardown succeeded", code)
+	}
+	if out.Len() != 0 {
+		t.Errorf("--no-prompt must not prompt at all, got %q", out.String())
 	}
 	// preflight, delete, probe -- and no fourth call, whatever the flags say.
 	if len(q.calls) != 3 {
@@ -1225,10 +1232,7 @@ func TestRemoveNoPromptNeverRemovesAnOccupiedNamespace(t *testing.T) {
 // something to opt into.
 func TestRemovePlainRunChecksTheNamespace(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
-	var asked []string
-	old := promptLine
-	promptLine = func(question string) (string, error) { asked = append(asked, question); return "y", nil }
-	t.Cleanup(func() { promptLine = old })
+	out := withPrompter(t, true, "y\ny\n")
 
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
@@ -1238,11 +1242,12 @@ func TestRemovePlainRunChecksTheNamespace(t *testing.T) {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	// Two questions with no flags at all: the teardown, then the namespace.
-	if len(asked) != 2 {
-		t.Fatalf("want 2 prompts (teardown, namespace), got %d: %v", len(asked), asked)
+	asked := out.String()
+	if n := strings.Count(asked, "[y/N]"); n != 2 {
+		t.Fatalf("want 2 prompts (teardown, namespace), got %d: %q", n, asked)
 	}
-	if !strings.Contains(asked[1], "namespace") {
-		t.Errorf("the second question should be about the namespace, got %q", asked[1])
+	if !strings.Contains(asked, "remove the namespace too?") {
+		t.Errorf("the second question should be about the namespace, got %q", asked)
 	}
 	if len(q.calls) != 4 {
 		t.Fatalf("want 4 calls (preflight, delete, probe, namespace delete), got %d: %+v", len(q.calls), q.calls)
@@ -1533,11 +1538,7 @@ func TestRemoveNamespaceUnreadableProbeLeavesItAlone(t *testing.T) {
 // skips it rather than blocking on a read that will never return.
 func TestRemoveNamespaceNonTTYFailsFastNamingTheFlag(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{{nsList(), nil}}}
-	old := promptLine
-	promptLine = func(string) (string, error) {
-		return "", fmt.Errorf("stdin is not a terminal, so this prompt cannot be answered interactively")
-	}
-	t.Cleanup(func() { promptLine = old })
+	withPrompter(t, false, "y\n")
 
 	k := &spec.Kubernetes{Command: spec.DefaultKubeCommand}
 	k.Deployment.Name = "solmq-connector"
@@ -2794,7 +2795,7 @@ func TestRemoveDockerSeam(t *testing.T) {
 	f := useFakeRunner(t)
 	// remove asks before it tears down; this test is about the argv that
 	// follows, so it answers yes. The prompt itself is covered in section g.
-	withPromptAnswer(t, "y")
+	withPrompter(t, true, "y\n")
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
@@ -2960,7 +2961,7 @@ func TestRemovePodmanSeamStopsRemovesReloads(t *testing.T) {
 	dir := t.TempDir()
 	// remove asks before it tears down; this test is about the argv that
 	// follows, so it answers yes. The prompt itself is covered in section g.
-	withPromptAnswer(t, "y")
+	withPrompter(t, true, "y\n")
 	write(t, dir, "env.yaml", sharedEnv+podmanEnv()+"  base-dir: "+filepath.ToSlash(legacyDir)+"\n")
 	write(t, dir, "10.yaml", validWF)
 	// Pre-seed the unit a deploy would have written, and the files an older
@@ -3419,10 +3420,10 @@ func TestPlatformSingleSectionInferred(t *testing.T) {
 }
 
 // TestPlatformMenuOnMultipleSections asserts that with no --platform and more
-// than one section present, the interactive menu (via the injected promptLine
+// than one section present, the interactive menu (via the injected prompter
 // seam) picks the platform.
 func TestPlatformMenuOnMultipleSections(t *testing.T) {
-	withPromptAnswer(t, "2") // present order is [kubernetes, docker]; 2 = docker
+	withPrompter(t, true, "2\n") // present order is [kubernetes, docker]; 2 = docker
 	f := useFakeRunner(t)
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv)
@@ -3438,25 +3439,15 @@ func TestPlatformMenuOnMultipleSections(t *testing.T) {
 
 // TestPlatformMenuNonTTYRefusesWithPlatformHint asserts the menu refuses to
 // block when stdin is not a terminal, instead of hanging on a read that would
-// never return, and that the resulting error points at --platform. Stdin is
-// swapped for a pipe (never a character device) rather than relying on
-// whatever terminal state the test binary happened to inherit, so this cannot
-// flake or block regardless of how the tests are invoked.
+// never return, and that the resulting error points at --platform. The
+// prompter is told it has no terminal rather than relying on whatever terminal
+// state the test binary happened to inherit, so this cannot flake or block
+// regardless of how the tests are invoked.
 func TestPlatformMenuNonTTYRefusesWithPlatformHint(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv)
 
-	oldStdin := os.Stdin
-	pr, pw, perr := os.Pipe()
-	if perr != nil {
-		t.Fatal(perr)
-	}
-	os.Stdin = pr
-	t.Cleanup(func() {
-		os.Stdin = oldStdin
-		_ = pw.Close()
-		_ = pr.Close()
-	})
+	withPrompter(t, false, "")
 
 	f := &fakeRunner{}
 	stderr := captureStderr(t, func() {
@@ -4174,7 +4165,7 @@ func TestStatusInstallPaths(t *testing.T) {
 	})
 
 	t.Run("prompt answered yes installs", func(t *testing.T) {
-		withPromptAnswer(t, "y")
+		withPrompter(t, true, "y\n")
 		q := base(queuedResp{"", nil}, queuedResp{appReport, nil})
 		captureStdout(t, func() {
 			if code := dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, q); code != 0 {
@@ -4187,7 +4178,7 @@ func TestStatusInstallPaths(t *testing.T) {
 	})
 
 	t.Run("prompt declined skips the instance and exits 1", func(t *testing.T) {
-		withPromptAnswer(t, "n")
+		withPrompter(t, true, "n\n")
 		q := base()
 		var code int
 		stdout := captureStdout(t, func() {
@@ -4209,21 +4200,10 @@ func TestStatusInstallPaths(t *testing.T) {
 
 // TestStatusInstallPromptNonTTYRefusesWithInstallHint is the confirmInstall
 // counterpart to TestPlatformMenuNonTTYRefusesWithPlatformHint: the install
-// confirmation shares the same stdin seam, so it must refuse rather than block
+// confirmation shares the same prompter, so it must refuse rather than block
 // on a read that would never return, and point at --install.
 func TestStatusInstallPromptNonTTYRefusesWithInstallHint(t *testing.T) {
-	oldStdin := os.Stdin
-	pr, pw, perr := os.Pipe()
-	if perr != nil {
-		t.Fatal(perr)
-	}
-	os.Stdin = pr
-	t.Cleanup(func() {
-		os.Stdin = oldStdin
-		_ = pw.Close()
-		_ = pr.Close()
-	})
-	_ = pw.Close() // EOF: a read returns immediately, as it would in CI
+	withPrompter(t, false, "")
 
 	q := &queueRunner{resp: []queuedResp{
 		{"", nil},
@@ -4656,7 +4636,7 @@ func TestStatusAllSortsRowsAlphabetically(t *testing.T) {
 
 // withStderrTerminal injects an answer for the stderrIsTerminal seam so a test
 // can ask for the spinner: go test's own stderr is a pipe, which would otherwise
-// make the default rendering unreachable. withTerminal is the stdin counterpart.
+// make the default rendering unreachable. withPrompter is the stdin counterpart.
 func withStderrTerminal(t *testing.T, yes bool) {
 	t.Helper()
 	prev := stderrIsTerminal
@@ -5409,7 +5389,7 @@ func TestLogsUnexpectedPositionalArgument(t *testing.T) {
 func TestLogsPlatformMenuWhenSeveralSectionsArePresent(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv)
-	withPromptAnswer(t, "1") // kubernetes, the first section present
+	withPrompter(t, true, "1\n") // kubernetes, the first section present
 
 	q := &streamRunner{resp: []queuedResp{{"", nil}, {onePodJSON, nil}}}
 	var code int
@@ -5439,8 +5419,8 @@ func TestLogsPlatformFlagSkipsTheMenu(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv)
 	// Answering the menu with kubernetes would be wrong; the flag must win
-	// before promptLine is ever consulted.
-	withPromptAnswer(t, "1")
+	// before the prompter is ever consulted.
+	withPrompter(t, true, "1\n")
 
 	q := &streamRunner{resp: []queuedResp{{"", nil}}}
 	var code int
@@ -6433,21 +6413,11 @@ func (a *attachRunner) Attach(c runner.Cmd, _, _, _ *os.File) (int, error) {
 	return a.attaches[i].code, a.attaches[i].err
 }
 
-// withTerminal drives the stdinIsTerminal seam, mirroring withPromptAnswer and
-// existing for the same reason: go test's own stdin is never a character
-// device, so every path behind the real probe would be unreachable.
-func withTerminal(t *testing.T, yes bool) {
-	t.Helper()
-	prev := stdinIsTerminal
-	stdinIsTerminal = func() bool { return yes }
-	t.Cleanup(func() { stdinIsTerminal = prev })
-}
-
 // TestCliNeedsAnAttachingRunner pins the type assertion: a Runner that cannot
 // hand over the terminal fails loudly, before anything runs, rather than
 // silently degrading to a session with no prompt.
 func TestCliNeedsAnAttachingRunner(t *testing.T) {
-	withTerminal(t, true)
+	withPrompter(t, true, "")
 	f := useFakeRunner(t)
 	var code int
 	stderr := captureStderr(t, func() {
@@ -6469,7 +6439,7 @@ func TestCliNeedsAnAttachingRunner(t *testing.T) {
 // fail with the next step rather than open a session nobody can type into. The
 // next step here is the one-shot form, so the message has to name it.
 func TestCliRefusesAShellWithoutATerminal(t *testing.T) {
-	withTerminal(t, false)
+	withPrompter(t, false, "")
 	q := &attachRunner{}
 	var code int
 	stderr := captureStderr(t, func() {
@@ -6491,7 +6461,7 @@ func TestCliRefusesAShellWithoutATerminal(t *testing.T) {
 // kubectl where the in-container command starts. Naming a pod costs no
 // discovery call, so the whole run is the preflight probe and the attach.
 func TestCliKubernetesArgvShape(t *testing.T) {
-	withTerminal(t, true)
+	withPrompter(t, true, "")
 	q := &attachRunner{}
 	if code := dispatch([]string{"cli", "--platform", "kubernetes", "--pod", "pod-a", "--namespace", "prod"}, q); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -6511,7 +6481,7 @@ func TestCliKubernetesArgvShape(t *testing.T) {
 func TestCliEngineArgvShape(t *testing.T) {
 	for _, platform := range []string{"docker", "podman"} {
 		t.Run(platform, func(t *testing.T) {
-			withTerminal(t, true)
+			withPrompter(t, true, "")
 			q := &attachRunner{}
 			if code := dispatch([]string{"cli", "--platform", platform, "--container", "solmq-conn"}, q); code != 0 {
 				t.Fatalf("exit=%d, want 0", code)
@@ -6532,7 +6502,7 @@ func TestCliEngineArgvShape(t *testing.T) {
 // no prompt to draw, and no -i either while stdin is a terminal -- a command
 // that reads stdin would otherwise wait on one that never sends EOF.
 func TestCliOneShotRunsTheCommandWithNoTerminal(t *testing.T) {
-	withTerminal(t, true)
+	withPrompter(t, true, "")
 	q := &attachRunner{}
 	code := dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn", "--", "ls", "-la", "/app/external"}, q)
 	if code != 0 {
@@ -6549,7 +6519,7 @@ func TestCliOneShotRunsTheCommandWithNoTerminal(t *testing.T) {
 // into, so -i is what makes `echo hi | cli -- cat` work. It is also the case
 // that proves the one-shot form is allowed without a terminal at all.
 func TestCliOneShotAttachesStdinWhenSomethingIsPiped(t *testing.T) {
-	withTerminal(t, false)
+	withPrompter(t, false, "")
 	q := &attachRunner{}
 	code := dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn", "--", "cat"}, q)
 	if code != 0 {
@@ -6565,7 +6535,7 @@ func TestCliOneShotAttachesStdinWhenSomethingIsPiped(t *testing.T) {
 // contract: once the session ran, its own status is the answer, so `exit 3`
 // inside the shell reaches the operator as 3.
 func TestCliPropagatesTheSessionExitStatus(t *testing.T) {
-	withTerminal(t, true)
+	withPrompter(t, true, "")
 	q := &attachRunner{attaches: []attached{{code: 3}}}
 	if code := dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, q); code != 3 {
 		t.Errorf("exit=%d, want the session status 3", code)
@@ -6575,7 +6545,7 @@ func TestCliPropagatesTheSessionExitStatus(t *testing.T) {
 // TestCliSessionThatCouldNotStartIsAnError separates the two: a session that
 // never began is this tool failing, which is exit 1 and names the instance.
 func TestCliSessionThatCouldNotStartIsAnError(t *testing.T) {
-	withTerminal(t, true)
+	withPrompter(t, true, "")
 	q := &attachRunner{attaches: []attached{{err: fmt.Errorf("docker: not found")}}}
 	var code int
 	stderr := captureStderr(t, func() {
@@ -6640,7 +6610,7 @@ func TestCliRejectsWhatCannotMeanAnything(t *testing.T) {
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			withTerminal(t, true)
+			withPrompter(t, true, "")
 			q := &attachRunner{}
 			var code int
 			stderr := captureStderr(t, func() { code = dispatch(c.args, q) })
@@ -6664,7 +6634,7 @@ func TestCliRejectsWhatCannotMeanAnything(t *testing.T) {
 // behind the --pod the picker is telling the operator to add. A line that
 // pasted the flag after the command would not parse.
 func TestCliPickerCarriesTheCommandBehindTheSeparator(t *testing.T) {
-	withTerminal(t, true)
+	withPrompter(t, true, "")
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
 	envPath := filepath.Join(dir, "env.yaml")
@@ -6698,7 +6668,7 @@ func TestCliPickerCarriesTheCommandBehindTheSeparator(t *testing.T) {
 // order logs and status print, so a number copied off one verb means the same
 // instance in another.
 func TestCliIndexSelectsFromTheSortedList(t *testing.T) {
-	withTerminal(t, true)
+	withPrompter(t, true, "")
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
 
@@ -6719,7 +6689,7 @@ func TestCliIndexSelectsFromTheSortedList(t *testing.T) {
 // and logs: an engine that cannot be reached is reported once, up front, and no
 // session is attempted.
 func TestCliPreflightFailureOpensNothing(t *testing.T) {
-	withTerminal(t, true)
+	withPrompter(t, true, "")
 	q := &attachRunner{resp: []queuedResp{{"cannot connect to the docker daemon", fmt.Errorf("exit status 1")}}}
 	var code int
 	captureStderr(t, func() {
@@ -6886,7 +6856,7 @@ func TestDeployDockerRefusesAnImageStartingOtherwise(t *testing.T) {
 // every credential is.
 func TestRemoveDockerNeedsNoCreatedStoreSources(t *testing.T) {
 	f := useFakeRunner(t)
-	withPromptAnswer(t, "y")
+	withPrompter(t, true, "y\n")
 	dir := t.TempDir()
 	createdStoreDockerSpec(t, dir)
 	t.Setenv("SOLMQ_TEST_TS_PW", "store-pass-123")
@@ -6911,7 +6881,7 @@ func TestRemoveDockerNeedsNoCreatedStoreSources(t *testing.T) {
 func TestRemovePodmanDeletesACreatedStoreSecretWithoutTheUnit(t *testing.T) {
 	f := useFakeRunner(t)
 	podmanQuadletHome(t) // no unit written: the fallback is what is tested
-	withPromptAnswer(t, "y")
+	withPrompter(t, true, "y\n")
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+`
 tls:
@@ -6950,7 +6920,7 @@ func TestDeployDockerRefusesAMissingStoreFile(t *testing.T) {
 	if len(f.calls) != 0 {
 		t.Errorf("nothing may run before the store is there, got %+v", f.calls)
 	}
-	withPromptAnswer(t, "y")
+	withPrompter(t, true, "y\n")
 	if code := dispatch([]string{"remove", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, useFakeRunner(t)); code != 0 {
 		t.Errorf("remove must not need the store: exit=%d", code)
 	}
