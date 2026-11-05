@@ -84,7 +84,7 @@ func TestLifecycleVerbsRefuseBeforeActing(t *testing.T) {
 	f = &fakeRunner{}
 	var code int
 	stderr := captureStderr(t, func() { code = dispatch([]string{"restart", "--platform", "docker", "-e", env}, f) })
-	if code == 0 || len(f.calls) != 0 || !strings.Contains(stderr, `docker.name "--all" is not a valid DNS-1123 label`) {
+	if code != 2 || len(f.calls) != 0 || !strings.Contains(stderr, `docker.name "--all" is not a valid DNS-1123 label`) {
 		t.Errorf("an unsafe name must be refused before anything runs: exit %d, calls %+v\n%s", code, f.calls, stderr)
 	}
 

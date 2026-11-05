@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -158,11 +159,11 @@ func removeNamespace(r runner.Runner, o actionOpts, k *spec.Kubernetes) int {
 	command, ns := k.Command, k.Deployment.Namespace
 	if ns == "" {
 		fmt.Fprintf(os.Stderr, "remove: no namespace in env.yaml to remove\n")
-		return 0
+		return exitcode.OK
 	}
 	if wellKnownNamespaces[ns] {
 		fmt.Fprintf(os.Stderr, "remove: %s is a cluster namespace and is never removed\n", ns)
-		return 0
+		return exitcode.OK
 	}
 
 	argv, err := runner.ParseCommand(validate.PlatformKubernetes, command, o.allow)
@@ -173,12 +174,12 @@ func removeNamespace(r runner.Runner, o actionOpts, k *spec.Kubernetes) int {
 	if lerr != nil {
 		// A namespace is not worth deleting on a guess.
 		fmt.Fprintf(os.Stderr, "remove: could not check what is in namespace %s, so it was left in place: %v\n", ns, lerr)
-		return 0
+		return exitcode.OK
 	}
 	occupants, perr := namespaceOccupants(doc, ownedNames(k))
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "remove: could not check what is in namespace %s, so it was left in place: %v\n", ns, perr)
-		return 0
+		return exitcode.OK
 	}
 	if len(occupants) > 0 {
 		fmt.Fprintf(os.Stderr, "\nnamespace %s still holds %d resource(s) this release does not own:\n", ns, len(occupants))
@@ -186,7 +187,7 @@ func removeNamespace(r runner.Runner, o actionOpts, k *spec.Kubernetes) int {
 			fmt.Fprintln(os.Stderr, "  "+occ)
 		}
 		fmt.Fprintf(os.Stderr, "leaving namespace %s in place.\n", ns)
-		return 0
+		return exitcode.OK
 	}
 
 	if !o.noPrompt {
@@ -196,7 +197,7 @@ func removeNamespace(r runner.Runner, o actionOpts, k *spec.Kubernetes) int {
 		}
 		if !ok {
 			fmt.Fprintf(os.Stderr, "remove: namespace %s left in place\n", ns)
-			return 0
+			return exitcode.OK
 		}
 	}
 	out, rerr := runner.Kubernetes(r, command, runner.ActionRemove, deploy.NamespaceManifest(ns), o.allow)

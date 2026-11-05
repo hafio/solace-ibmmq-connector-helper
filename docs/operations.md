@@ -63,9 +63,12 @@ confirmation and an interactive `cli` all fail immediately when stdin is not a
 terminal, naming the flag to pass instead. Scripts and CI pass `--platform`,
 `--install` and `--no-prompt` explicitly.
 
-**Exit codes.** 0 success; 1 a processing error (bad input, a missing variable,
-a failed platform command); 2 a usage error (unknown verb, flag or combination).
-`cli` passes the remote command's own status back once it is running.
+**Exit codes.** 0 success; 1 something ran and failed, or the live system
+refused it (a preflight, a host check, a failed platform command); 2 refused
+before acting because of what it was given (an unknown verb, flag or
+combination, an unreadable or invalid `env.yaml`, a file or variable it names,
+the platform selected). `cli` passes the remote command's own status back once
+it is running.
 
 **Trust model.** `env.yaml` is executable configuration: its `command:` runs
 with your privileges. Review a file someone hands you before `deploy` or

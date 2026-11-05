@@ -98,7 +98,10 @@ linter and must surface every error `generate` or `deploy` would hit, TLS store
 files included. `generate` stops at the first error and writes nothing. Its
 output is buffered, so a failed run never leaves a half-written `-o` file.
 
-**Exit codes are 0, 1 or 2**, except for `cli`. Once a session or command runs
+**Exit codes are 0, 1 or 2**, except for `cli`. 2 means the tool refused before
+acting because of what it was given: the command line, `env.yaml`, the files and
+variables it names, or the platform it selects. 1 means something ran and
+failed, or the live system said no. Once a session or command runs
 inside the instance, its own status is passed back. The engines overload that
 status: `kubectl exec` reports an unreachable pod and a failing command with the
 same code, and docker adds 125, 126 and 127. `cli` does not guess between them;

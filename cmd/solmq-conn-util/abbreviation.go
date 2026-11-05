@@ -75,7 +75,7 @@ func renderAbbreviationDoc() string {
 	add("Regenerate: go test ./cmd/solmq-conn-util -run TestAbbreviationDocInSync -update")
 	add("TestAbbreviationDocInSync fails the build if this file drifts from the model. -->")
 	add("")
-	for _, ln := range supportNoticeMarkdown {
+	for _, ln := range supportNotice.Lines() {
 		add(ln)
 	}
 	add("")

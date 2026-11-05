@@ -29,6 +29,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/abbrev"
+	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/notice"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/examples"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/libs"
@@ -73,15 +76,23 @@ var platformAliasList = []struct{ Alias, Canonical string }{
 	{"pm", tgtPodman},
 }
 
-// platformAliases is platformAliasList keyed for lookup.
-var platformAliases = buildPlatformAliases()
+// platformAbbrev is platformNames and platformAliasList as the shared module's
+// abbreviation set, which enforces the alias rule when it is built: lower-case
+// letters and digits, shorter than the word, unique, never a canonical name.
+var platformAbbrev = newPlatformAbbrev()
 
-func buildPlatformAliases() map[string]string {
-	m := make(map[string]string, len(platformAliasList))
-	for _, e := range platformAliasList {
-		m[e.Alias] = e.Canonical
+func newPlatformAbbrev() *abbrev.Set {
+	entries := make([]abbrev.Entry, 0, len(platformNames))
+	for _, name := range platformNames {
+		e := abbrev.Entry{Canonical: name}
+		for _, a := range platformAliasList {
+			if a.Canonical == name {
+				e.Short = append(e.Short, a.Alias)
+			}
+		}
+		entries = append(entries, e)
 	}
-	return m
+	return abbrev.New("platform", entries)
 }
 
 // platformSpellings lists every accepted --platform value, canonical names
@@ -98,7 +109,7 @@ func platformSpellings() []string {
 // known alias, otherwise val unchanged -- resolvePlatform's validation is what
 // rejects an unknown value.
 func resolvePlatformAlias(val string) string {
-	if canon, ok := platformAliases[val]; ok {
+	if canon, ok := platformAbbrev.Expand(val); ok {
 		return canon
 	}
 	return val
@@ -143,26 +154,24 @@ var verbHandlers = map[string]func(args []string, r runner.Runner) int{
 	"help":          func(args []string, r runner.Runner) int { return runHelp(args) },
 }
 
-// verbAliases maps each alternate spelling (cliVerb.Aliases in commands.go) to
-// its canonical verb name. Built from the model instead of hand-written so it
+// commandAbbrev is cliVerbs (Name and Aliases in commands.go) as the shared
+// module's abbreviation set. Built from the model instead of hand-written so it
 // can never drift from cliVerbs -- see resolveVerb.
-var verbAliases = buildVerbAliases()
+var commandAbbrev = newCommandAbbrev()
 
-func buildVerbAliases() map[string]string {
-	m := make(map[string]string)
+func newCommandAbbrev() *abbrev.Set {
+	entries := make([]abbrev.Entry, 0, len(cliVerbs))
 	for _, v := range cliVerbs {
-		for _, a := range v.Aliases {
-			m[a] = v.Name
-		}
+		entries = append(entries, abbrev.Entry{Canonical: v.Name, Short: v.Aliases})
 	}
-	return m
+	return abbrev.New("command", entries)
 }
 
 // resolveVerb returns name's canonical verb if name is a modeled alias,
 // otherwise name unchanged (already canonical, or unknown -- either way
 // dispatch's verbHandlers lookup is what decides that).
 func resolveVerb(name string) string {
-	if canon, ok := verbAliases[name]; ok {
+	if canon, ok := commandAbbrev.Expand(name); ok {
 		return canon
 	}
 	return name
@@ -177,18 +186,18 @@ func resolveVerb(name string) string {
 func dispatch(args []string, r runner.Runner) int {
 	if len(args) == 0 {
 		usage(os.Stderr)
-		return 2
+		return exitcode.Usage
 	}
 	if args[0] == "-h" || args[0] == "--help" {
 		usage(os.Stdout)
-		return 0
+		return exitcode.OK
 	}
 	verb := resolveVerb(args[0])
 	h, ok := verbHandlers[verb]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", args[0])
 		usage(os.Stderr)
-		return 2
+		return exitcode.Usage
 	}
 	// `<command> -h` straight after the verb prints that command's own page --
 	// for every verb, including the ones that parse no flags of their own
@@ -196,7 +205,7 @@ func dispatch(args []string, r runner.Runner) int {
 	// through the flag parser; see flagExit.
 	if len(args) > 1 && (args[1] == "-h" || args[1] == "--help") {
 		fmt.Fprint(os.Stdout, verbUsage(verb))
-		return 0
+		return exitcode.OK
 	}
 	return h(args[1:], r)
 }
@@ -213,16 +222,16 @@ func dispatch(args []string, r runner.Runner) int {
 func runHelp(args []string) int {
 	if len(args) == 0 {
 		usage(os.Stdout)
-		return 0
+		return exitcode.OK
 	}
 	page := verbUsage(resolveVerb(args[0]))
 	if page == "" {
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", args[0])
 		usage(os.Stderr)
-		return 2
+		return exitcode.Usage
 	}
 	fmt.Fprint(os.Stdout, page)
-	return 0
+	return exitcode.OK
 }
 
 // verbFlagSet is the flag set every verb parses with. Its Usage is silenced
@@ -244,10 +253,10 @@ func verbFlagSet(name string) *flag.FlagSet {
 func flagExit(verb string, err error) int {
 	if errors.Is(err, flag.ErrHelp) {
 		fmt.Fprint(os.Stdout, verbUsage(verb))
-		return 0
+		return exitcode.OK
 	}
 	fmt.Fprintf(os.Stderr, "run 'solmq-conn-util help %s' for its arguments and flags\n", verb)
-	return 2
+	return exitcode.Usage
 }
 
 // targetNames returns the modeled target/platform names for verb, in the order
@@ -352,19 +361,19 @@ func runGenerate(args []string) int {
 		case contains(platformNames, pos[0]):
 			fmt.Fprintf(os.Stderr, "generate: %q is no longer a positional target; pass --platform %s instead\n", pos[0], pos[0])
 			fmt.Fprint(os.Stderr, verbUsage("generate"))
-			return 2
+			return exitcode.Usage
 		default:
 			fmt.Fprintf(os.Stderr, "generate: unknown target %q (want %s)\n", pos[0], wantList(append(targetNames("generate"), platformNames...)))
-			return 2
+			return exitcode.Usage
 		}
 	}
 	e, lerr := loadEnvFile(*env)
 	if lerr != nil {
-		return errExit(lerr)
+		return usageExit(lerr)
 	}
 	platformName, perr := resolvePlatform(*platform, presentPlatforms(e), true)
 	if perr != nil {
-		return errExit(perr)
+		return usageExit(perr)
 	}
 	return platformGenerators[platformName](*env, *out)
 }
@@ -372,7 +381,7 @@ func runGenerate(args []string) int {
 func genConfig(envPath, out string) int {
 	req, _, envDir, err := loadEnv(envPath)
 	if err != nil {
-		return errExit(err)
+		return usageExit(err)
 	}
 	doc, errs, warns := gen.Config(req, resolver(envDir))
 	printWarnings(warns)
@@ -385,7 +394,7 @@ func genConfig(envPath, out string) int {
 func genKubernetes(envPath, out string) int {
 	req, _, envDir, err := loadEnv(envPath)
 	if err != nil {
-		return errExit(err)
+		return usageExit(err)
 	}
 	manifest, errs, warns := gen.GenerateKubernetes(req, resolver(envDir), gen.KubeOpts{})
 	printWarnings(warns)
@@ -398,7 +407,7 @@ func genKubernetes(envPath, out string) int {
 func genDocker(envPath, out string) int {
 	req, _, envDir, err := loadEnv(envPath)
 	if err != nil {
-		return errExit(err)
+		return usageExit(err)
 	}
 	plan, errs, warns := gen.GenerateDocker(req, resolver(envDir))
 	printWarnings(warns)
@@ -411,7 +420,7 @@ func genDocker(envPath, out string) int {
 func genPodman(envPath, out string) int {
 	req, _, envDir, err := loadEnv(envPath)
 	if err != nil {
-		return errExit(err)
+		return usageExit(err)
 	}
 	plan, errs, warns := gen.GeneratePodman(req, resolver(envDir))
 	printWarnings(warns)
@@ -477,18 +486,18 @@ func runAction(action string, args []string, r runner.Runner) int {
 		if contains(platformNames, pos[0]) {
 			fmt.Fprintf(os.Stderr, "%s: %q is no longer a positional platform; pass --platform %s instead\n", action, pos[0], pos[0])
 			fmt.Fprint(os.Stderr, verbUsage(action))
-			return 2
+			return exitcode.Usage
 		}
 		fmt.Fprintf(os.Stderr, "%s: unexpected argument %q (the platform is now selected with --platform)\n", action, pos[0])
-		return 2
+		return exitcode.Usage
 	}
 	e, lerr := loadEnvFile(*env)
 	if lerr != nil {
-		return errExit(lerr)
+		return usageExit(lerr)
 	}
 	platformName, perr := resolvePlatform(*platform, presentPlatforms(e), true)
 	if perr != nil {
-		return errExit(perr)
+		return usageExit(perr)
 	}
 	// The one destructive verb asks before it acts, and asks here -- ahead of
 	// the per-platform preflight probe -- so a cancelled teardown touches the
@@ -502,7 +511,7 @@ func runAction(action string, args []string, r runner.Runner) int {
 			// Declining is an answer, not a failure -- the same reasoning
 			// watchStatus records for a deliberate Ctrl-C.
 			fmt.Fprintln(os.Stderr, "remove: cancelled")
-			return 0
+			return exitcode.OK
 		}
 	}
 	return actTargets[platformName](actionOpts{
@@ -523,17 +532,17 @@ func preflight(r runner.Runner, action, platform, command, namespace string, ext
 	if err != nil {
 		return report(action, platform, out, err), false
 	}
-	return 0, true
+	return exitcode.OK, true
 }
 
 func actKubernetes(o actionOpts, r runner.Runner) int {
 	action, envPath, extraAllowed := o.action, o.envPath, o.allow
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
-		return errExit(err)
+		return usageExit(err)
 	}
 	if e.Kubernetes == nil {
-		return errExit(fmt.Errorf("env.yaml has no kubernetes: section to %s", action))
+		return usageExit(fmt.Errorf("env.yaml has no kubernetes: section to %s", action))
 	}
 	// A teardown renders differently in three ways -- no Namespace document,
 	// the documents reversed so kubectl does not block deleting a PVC a running
@@ -568,17 +577,17 @@ func actKubernetes(o actionOpts, r runner.Runner) int {
 	if action == runner.ActionRemove {
 		return removeNamespace(r, o, e.Kubernetes)
 	}
-	return 0
+	return exitcode.OK
 }
 
 func actDocker(o actionOpts, r runner.Runner) int {
 	action, envPath, extraAllowed := o.action, o.envPath, o.allow
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
-		return errExit(err)
+		return usageExit(err)
 	}
 	if e.Docker == nil {
-		return errExit(fmt.Errorf("env.yaml has no docker: section to %s", action))
+		return usageExit(fmt.Errorf("env.yaml has no docker: section to %s", action))
 	}
 	res := resolver(envDir)
 	plan, errs, warns := gen.GenerateDocker(req, res, extraAllowed...)
@@ -590,7 +599,7 @@ func actDocker(o actionOpts, r runner.Runner) int {
 	// named variable, not leave a compose file behind for a run that never began.
 	kvs, cerr := gen.ResolveCredentials(plan.Secrets, res)
 	if cerr != nil {
-		return errExit(cerr)
+		return usageExit(cerr)
 	}
 	if action == runner.ActionDeploy {
 		// docker bind-mounts the TLS stores and the libs jars, which the
@@ -615,7 +624,7 @@ func actDocker(o actionOpts, r runner.Runner) int {
 		skvs, swarns, serr := gen.ResolveDockerStores(plan, res, gen.EnvVarMax(runtime.GOOS), runtime.GOOS)
 		printWarnings(swarns)
 		if serr != nil {
-			return errExit(serr)
+			return usageExit(serr)
 		}
 		storeKVs = skvs
 	}
@@ -677,10 +686,10 @@ func actPodman(o actionOpts, r runner.Runner) int {
 	action, envPath, extraAllowed := o.action, o.envPath, o.allow
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
-		return errExit(err)
+		return usageExit(err)
 	}
 	if e.Podman == nil {
-		return errExit(fmt.Errorf("env.yaml has no podman: section to %s", action))
+		return usageExit(fmt.Errorf("env.yaml has no podman: section to %s", action))
 	}
 	sc, serr := runner.ResolveQuadletScope()
 	if serr != nil {
@@ -720,12 +729,12 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	// references secrets that must already exist.
 	kvs, cerr := gen.ResolveCredentials(plan.Secrets, res)
 	if cerr != nil {
-		return errExit(cerr)
+		return usageExit(cerr)
 	}
 	files, fwarns, ferr := gen.ResolvePodmanFiles(plan.Files, res)
 	printWarnings(fwarns)
 	if ferr != nil {
-		return errExit(ferr)
+		return usageExit(ferr)
 	}
 	// Read before the new unit replaces it: the stores the last deploy mounted.
 	previous := previousStoreSecrets(sc, plan, p)
@@ -985,10 +994,10 @@ func actVersion() int {
 	// The support statement goes under the version line, never into it: this
 	// is the output people paste into a problem report, and the first line is
 	// still the only thing a script needs to read.
-	for _, ln := range supportNoticeVersion {
+	for _, ln := range notice.Short() {
 		fmt.Println(ln)
 	}
-	return 0
+	return exitcode.OK
 }
 
 // ---- validate / examples -----------------------------------------------------
@@ -1001,22 +1010,29 @@ func runValidate(args []string) int {
 	}
 	req, e, envDir, lerr := loadEnv(*env)
 	if lerr != nil {
-		return errExit(lerr)
+		return usageExit(lerr)
 	}
 	res := resolver(envDir)
-	errs, warns := gen.Validate(req, res)
+	verrs, warns := gen.Validate(req, res)
 	herrs, hwarns := hostChecks(req, e, res)
-	errs, warns = append(errs, herrs...), append(warns, hwarns...)
+	nverr := len(verrs)
+	errs, warns := append(verrs, herrs...), append(warns, hwarns...)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		for _, e := range errs { // validate: report every error
 			fmt.Fprintln(os.Stderr, "error:", e.String())
 		}
 		fmt.Fprintf(os.Stderr, "\n%d error(s)\n", len(errs))
-		return 1
+		// A problem in what env.yaml and the workflows say is a usage error; a
+		// host that is not ready for a deploy that would otherwise generate is
+		// a failure, the same as the deploy's own host check.
+		if nverr > 0 {
+			return exitcode.Usage
+		}
+		return exitcode.Failure
 	}
 	fmt.Fprintln(os.Stderr, "ok: no errors")
-	return 0
+	return exitcode.OK
 }
 
 // hostChecks runs, for validate, the checks a docker or podman deploy makes on
@@ -1074,7 +1090,7 @@ func runExamples(args []string) int {
 	}
 	fmt.Fprintf(os.Stderr, "\n%d written, %d skipped in %q\n", len(written), len(skipped), dir)
 	fmt.Fprintf(os.Stderr, "next: solmq-conn-util generate config -e %s\n", filepath.Join(dir, defaultEnvFile))
-	return 0
+	return exitcode.OK
 }
 
 // ---- download --------------------------------------------------------------
@@ -1166,25 +1182,25 @@ func runDownload(args []string) int {
 	if len(pos) == 0 {
 		fmt.Fprintf(os.Stderr, "download: missing target (%s)\n\n", pipeList(targetNames("download")))
 		fmt.Fprint(os.Stderr, verbUsage("download"))
-		return 2
+		return exitcode.Usage
 	}
 	target := pos[0]
 	if !contains(targetNames("download"), target) {
 		fmt.Fprintf(os.Stderr, "download: unknown target %q (want %s)\n", target, wantList(targetNames("download")))
-		return 2
+		return exitcode.Usage
 	}
 
 	setWords := targetSetNames("download", target)
 	if len(pos) < 2 {
 		fmt.Fprintf(os.Stderr, "download: missing set (%s)\n\n", pipeList(setWords))
 		fmt.Fprint(os.Stderr, verbUsage("download"))
-		return 2
+		return exitcode.Usage
 	}
 	setArg := pos[1]
 	set, ok := downloadSets[setArg]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "download: unknown set %q (want %s)\n", setArg, wantList(setWords))
-		return 2
+		return exitcode.Usage
 	}
 
 	dir := "./libs"
@@ -1193,12 +1209,12 @@ func runDownload(args []string) int {
 	}
 	if len(pos) > 3 {
 		fmt.Fprintf(os.Stderr, "download: unexpected argument %q\n", pos[3])
-		return 2
+		return exitcode.Usage
 	}
 
 	deployedImage, ierr := downloadDeployedImage(fs, *envPath)
 	if ierr != nil {
-		return errExit(ierr)
+		return usageExit(ierr)
 	}
 
 	rep, derr := downloadFn(libs.Input{
@@ -1293,9 +1309,9 @@ func reportDownload(rep libs.Report, dir string) int {
 		fmt.Fprintln(os.Stderr, next)
 	}
 	if len(rep.Failed) > 0 {
-		return 1
+		return exitcode.Failure
 	}
-	return 0
+	return exitcode.OK
 }
 
 // ---- auto-complete -------------------------------------------------------
@@ -1323,12 +1339,12 @@ func runAutoComplete(args []string) int {
 	if len(pos) == 0 {
 		fmt.Fprintf(os.Stderr, "auto-complete: missing shell (%s)\n\n", pipeList(targetNames("auto-complete")))
 		fmt.Fprint(os.Stderr, verbUsage("auto-complete"))
-		return 2
+		return exitcode.Usage
 	}
 	h, ok := completionShellRenderers[pos[0]]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "auto-complete: unknown shell %q (want %s)\n", pos[0], wantList(targetNames("auto-complete")))
-		return 2
+		return exitcode.Usage
 	}
 	return emit("", h())
 }
@@ -1538,12 +1554,12 @@ func absPath(dir, p string) string {
 func emit(out, content string) int {
 	if out == "" {
 		fmt.Print(content)
-		return 0
+		return exitcode.OK
 	}
 	if err := os.WriteFile(out, []byte(content), 0o600); err != nil {
 		return errExit(err)
 	}
-	return 0
+	return exitcode.OK
 }
 
 // report prints a deployer's combined output and a final ok/error line.
@@ -1553,10 +1569,10 @@ func report(action, platform, out string, err error) int {
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %s %s failed: %v\n", action, platform, err)
-		return 1
+		return exitcode.Failure
 	}
 	fmt.Fprintf(os.Stderr, "ok: %s %s\n", action, platform)
-	return 0
+	return exitcode.OK
 }
 
 // warnIfPVUnchanged says so when a deploy re-applied a PersistentVolume that
@@ -1583,14 +1599,29 @@ func warnIfPVUnchanged(action, out string) {
 	}
 }
 
+// errExit reports an error and returns its exit code: 1 for something that ran
+// and failed, or that the live system refused, unless the error was marked with
+// exitcode.Usagef or exitcode.AsUsage where it was made, which makes it 2. An
+// error that is about what the tool was given -- argv, the env file, the files and
+// variables it names, the platform it selects -- is marked, or goes through
+// usageExit.
 func errExit(err error) int {
 	fmt.Fprintln(os.Stderr, "error:", err)
-	return 1
+	return exitcode.Code(err)
 }
 
+// usageExit prints err exactly as errExit does and exits 2: the tool refused
+// before acting because of what it was given.
+func usageExit(err error) int {
+	fmt.Fprintln(os.Stderr, "error:", err)
+	return exitcode.Usage
+}
+
+// failFast reports the first issue gen found in what the env file and workflows
+// describe, before anything ran, so it exits 2.
 func failFast(errs []gen.Issue) int {
 	fmt.Fprintln(os.Stderr, "error:", errs[0].String())
-	return 1
+	return exitcode.Usage
 }
 
 // failAll reports every error, one per line, and exits non-zero.
@@ -1598,7 +1629,7 @@ func failAll(errs []error) int {
 	for _, err := range errs {
 		fmt.Fprintln(os.Stderr, "error:", err)
 	}
-	return 1
+	return exitcode.Failure
 }
 
 func printWarnings(warns []gen.Issue) {

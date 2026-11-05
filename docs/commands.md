@@ -117,8 +117,8 @@ The menu -- and `status`'s install confirmation, and `remove`'s teardown confirm
 | Code | Meaning |
 |------|---------|
 | `0` | success |
-| `1` | processing error (bad input, unreadable file, missing env var, a deploy command that failed) |
-| `2` | usage error (missing/unknown verb or target, unknown flag) |
+| `1` | processing error: something ran and failed, or the live system refused it (a preflight, a host check, a deploy command that failed) |
+| `2` | usage error: refused before acting because of what it was given -- the command line, `env.yaml`, the files and variables it names, or the platform selected (including every `validate` error in `env.yaml` or its workflows) |
 | _other_ | `cli` only: once a session or command is running inside the instance, its own exit status is passed straight back. Anything that fails before that still uses the three codes above |
 
 ## Command details
@@ -299,7 +299,7 @@ solmq-conn-util version
 
 Alias: `vld`.
 
-Runs every check across the whole `env.yaml` (including any `kubernetes:`/`docker:`/`podman:` sections) and its workflows, printing all findings. Non-zero exit if any errors. Use it as a linter.
+Runs every check across the whole `env.yaml` (including any `kubernetes:`/`docker:`/`podman:` sections) and its workflows, printing all findings. Exits 2 if `env.yaml` or its workflows have any error, and 1 if only a docker or podman host check fails. Use it as a linter.
 
 It reports every error `generate` and `deploy` would stop at before they reach a platform: once the spec itself validates, it reads each TLS store a present platform loads and opens each existing PKCS12 with its password, builds each created one in memory and discards it, holds them and the kubernetes ConfigMap to each platform's size limit, and checks docker's bind-mount sources on this host. An unset `-env` variable is a warning. Logins, the image, and the cluster or engine itself are left to `deploy`.
 

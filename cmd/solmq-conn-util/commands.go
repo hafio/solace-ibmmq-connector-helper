@@ -5,6 +5,7 @@ package main
 import (
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/abbrev"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/libs"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusreport"
@@ -250,8 +251,10 @@ type cliVerb struct {
 	// canonical name is (dispatch, shell completion of a verb's own
 	// flags/targets), but deliberately never offered as a position-1
 	// completion candidate -- the TAB menu keeps showing only canonical verbs.
-	// Entries must be [a-z0-9-] only: names are spliced unquoted into shell
-	// case patterns and fish conditions, and assertShellSafeName enforces it.
+	// The rule is the shared module's (abbrev.New enforces it when the set is
+	// built): lower-case letters and digits only, shorter than the word, unique,
+	// and never a canonical name. Names are spliced unquoted into shell case
+	// patterns and fish conditions, and assertShellSafeName gates them too.
 	Aliases []string
 }
 
@@ -447,7 +450,7 @@ var cliVerbs = []cliVerb{
 		Name: "validate", Args: "[-e env.yaml]", Flags: []string{"-e"}, PosArg: posNone, Aliases: []string{"vld"},
 		Synopsis: "validate [flags]",
 		Summary:  "Lint the whole env.yaml + workflows", Example: "solmq-conn-util validate -e env.yaml",
-		Detail: "Runs every check across the whole " + bt + "env.yaml" + bt + " (including any " + bt + "kubernetes:" + bt + "/" + bt + "docker:" + bt + "/" + bt + "podman:" + bt + " sections) and its workflows, printing all findings. Non-zero exit if any errors. Use it as a linter.\n\n" +
+		Detail: "Runs every check across the whole " + bt + "env.yaml" + bt + " (including any " + bt + "kubernetes:" + bt + "/" + bt + "docker:" + bt + "/" + bt + "podman:" + bt + " sections) and its workflows, printing all findings. Exits 2 if " + bt + "env.yaml" + bt + " or its workflows have any error, and 1 if only a docker or podman host check fails. Use it as a linter.\n\n" +
 			"It reports every error " + bt + "generate" + bt + " and " + bt + "deploy" + bt + " would stop at before they reach a platform: once the spec itself validates, it reads each TLS store a present platform loads and opens each existing PKCS12 with its password, builds each created one in memory and discards it, holds them and the kubernetes ConfigMap to each platform's size limit, and checks docker's bind-mount sources on this host. An unset " + bt + "-env" + bt + " variable is a warning. Logins, the image, and the cluster or engine itself are left to " + bt + "deploy" + bt + ".",
 	},
 	{
@@ -603,7 +606,7 @@ func renderCommandsDoc() string {
 	add("Regenerate: go test ./cmd/solmq-conn-util -run TestCommandsDocInSync -update")
 	add("TestCommandsDocInSync fails the build if this file drifts from the model. -->")
 	add("")
-	for _, ln := range supportNoticeMarkdown {
+	for _, ln := range supportNotice.Lines() {
 		add(ln)
 	}
 	add("")
@@ -686,8 +689,8 @@ func renderCommandsDoc() string {
 	add("| Code | Meaning |")
 	add("|------|---------|")
 	add("| " + bt + "0" + bt + " | success |")
-	add("| " + bt + "1" + bt + " | processing error (bad input, unreadable file, missing env var, a deploy command that failed) |")
-	add("| " + bt + "2" + bt + " | usage error (missing/unknown verb or target, unknown flag) |")
+	add("| " + bt + "1" + bt + " | processing error: something ran and failed, or the live system refused it (a preflight, a host check, a deploy command that failed) |")
+	add("| " + bt + "2" + bt + " | usage error: refused before acting because of what it was given -- the command line, " + bt + "env.yaml" + bt + ", the files and variables it names, or the platform selected (including every " + bt + "validate" + bt + " error in " + bt + "env.yaml" + bt + " or its workflows) |")
 	add("| _other_ | " + bt + "cli" + bt + " only: once a session or command is running inside the instance, its own exit status is passed straight back. Anything that fails before that still uses the three codes above |")
 	add("")
 	add("## Command details")
@@ -890,22 +893,31 @@ func verbExample(v cliVerb) string {
 // reason resolveVerb is: an alias added to cliVerbs is accepted everywhere
 // without a second table to keep in step.
 func resolveTarget(verb, name string) string {
-	for _, v := range cliVerbs {
-		if v.Name != verb {
-			continue
-		}
-		for _, tg := range v.Targets {
-			if tg.Name == name {
-				return name
-			}
-			for _, a := range tg.Aliases {
-				if a == name {
-					return tg.Name
-				}
-			}
+	if set, ok := targetAbbrev[verb]; ok {
+		if canon, ok := set.Expand(name); ok {
+			return canon
 		}
 	}
 	return name
+}
+
+// targetAbbrev holds one abbreviation set per verb that models targets, keyed by
+// the verb's name and built from each cliTarget's Name and Aliases.
+var targetAbbrev = newTargetAbbrev()
+
+func newTargetAbbrev() map[string]*abbrev.Set {
+	m := make(map[string]*abbrev.Set)
+	for _, v := range cliVerbs {
+		if len(v.Targets) == 0 {
+			continue
+		}
+		entries := make([]abbrev.Entry, 0, len(v.Targets))
+		for _, tg := range v.Targets {
+			entries = append(entries, abbrev.Entry{Canonical: tg.Name, Short: tg.Aliases})
+		}
+		m[v.Name] = abbrev.New(v.Name+" target", entries)
+	}
+	return m
 }
 
 // usageText is the in-binary help summary: one line per command, description

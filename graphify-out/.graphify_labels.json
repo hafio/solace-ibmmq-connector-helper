@@ -21,7 +21,6 @@
   "46": "libs_test.go",
   "49": "Command Reference Details",
   "50": "Golden Bash Completion",
-  "51": "Model",
   "53": "Golden PowerShell Completion",
   "54": "Application",
   "55": "instanceSession",
@@ -38,6 +37,5 @@
   "94": "Expand",
   "97": "repeatableName",
   "99": "tailFlag",
-  "108": "yw",
-  "111": "Support Notice Wording"
+  "108": "yw"
 }

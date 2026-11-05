@@ -19,6 +19,7 @@ import (
 
 	pkcs12 "software.sslmate.com/src/go-pkcs12"
 
+	"github.com/hafio/go-deploy-utility/notice"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/certfixture"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/libs"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
@@ -352,8 +353,8 @@ func TestExitCodeContract(t *testing.T) {
 		{"help with an alias", []string{"help", "sts"}, 0},
 		{"help with an unknown command", []string{"help", "bogus"}, 2},
 		{"unknown flag", []string{"generate", "config", "-nope"}, 2},
-		{"missing env file", []string{"generate", "config", "-e", filepath.Join(validDir, "does-not-exist.yaml")}, 1},
-		{"invalid spec", []string{"generate", "config", "-e", filepath.Join(invalidDir, "env.yaml")}, 1},
+		{"missing env file", []string{"generate", "config", "-e", filepath.Join(validDir, "does-not-exist.yaml")}, 2},
+		{"invalid spec", []string{"generate", "config", "-e", filepath.Join(invalidDir, "env.yaml")}, 2},
 		{"generate bogus target", []string{"generate", "bogus"}, 2},
 		{"deploy bogus platform", []string{"deploy", "bogus"}, 2},
 		{"download missing target", []string{"download"}, 2},
@@ -629,8 +630,8 @@ func TestGenerateConfigWorkflowCapExceeded(t *testing.T) {
 	stderr := captureStderr(t, func() {
 		code = run([]string{"generate", "config", "-e", filepath.Join(dir, "env.yaml"), "-o", out})
 	})
-	if code != 1 {
-		t.Fatalf("exit=%d, want 1", code)
+	if code != 2 {
+		t.Fatalf("exit=%d, want 2", code)
 	}
 	if !strings.Contains(stderr, "21 workflows found") || !strings.Contains(stderr, "at most 20") {
 		t.Errorf("stderr missing cap error, got:\n%s", stderr)
@@ -832,8 +833,8 @@ func TestDeployKubernetesSeamRejectsUnsafeCommand(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+kubeEnvUnsafeCommand)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
-		t.Fatalf("unsafe kubernetes.command should exit 1, got %d", code)
+	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 2 {
+		t.Fatalf("unsafe kubernetes.command should exit 2, got %d", code)
 	}
 	if len(f.calls) != 0 {
 		t.Fatalf("nothing must reach the runner when the command is rejected, got %d calls", len(f.calls))
@@ -1584,7 +1585,7 @@ func TestValidateOKAndErrors(t *testing.T) {
 		t.Errorf("valid spec should validate, exit=%d", code)
 	}
 	invalidDir := workflowDir(t, invalidWF)
-	if code := run([]string{"validate", "-e", filepath.Join(invalidDir, "env.yaml")}); code != 1 {
+	if code := run([]string{"validate", "-e", filepath.Join(invalidDir, "env.yaml")}); code != 2 {
 		t.Errorf("invalid spec should fail validate, exit=%d", code)
 	}
 }
@@ -2294,8 +2295,8 @@ func TestDownloadReadsDeployedImageFromEnv(t *testing.T) {
 		f := &fakeDownload{}
 		useFakeDownload(t, f)
 		args := []string{"download", "jar", "mq", "-e", filepath.Join(t.TempDir(), "nope.yaml")}
-		if code := dispatch(args, &fakeRunner{}); code != 1 {
-			t.Errorf("exit=%d, want 1: the operator named this file", code)
+		if code := dispatch(args, &fakeRunner{}); code != 2 {
+			t.Errorf("exit=%d, want 2: the operator named this file", code)
 		}
 		if len(f.calls) != 0 {
 			t.Errorf("downloadFn must not run, got %d calls", len(f.calls))
@@ -2504,7 +2505,7 @@ tls:
 // placed in podman's store, then the unit, then systemctl. A missing variable
 // or store found late would leave a half-built deployment behind.
 //
-// So each case asserts a non-zero exit naming what is missing, no runner call
+// So each case asserts exit 2 naming what is missing, no runner call
 // beyond the read-only preflight probe, and nothing written to the quadlet
 // directory.
 func TestDeployPodmanUnresolvedInputFailsBeforeAnyWrite(t *testing.T) {
@@ -2539,8 +2540,8 @@ tls:
 			stderr := captureStderr(t, func() {
 				code = dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f)
 			})
-			if code == 0 {
-				t.Fatal("a deploy with an unresolved input must fail")
+			if code != 2 {
+				t.Fatalf("exit=%d, want 2: a deploy with an unresolved input is refused for what env.yaml names", code)
 			}
 			if !strings.Contains(stderr, c.want) {
 				t.Errorf("the error should name %q, got %q", c.want, stderr)
@@ -3079,8 +3080,8 @@ func TestAllowCommandFlagRepeatableThreadsToRunner(t *testing.T) {
 	envPath := filepath.Join(dir, "env.yaml")
 
 	fReject := useFakeRunner(t)
-	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", envPath}, fReject); code != 1 {
-		t.Fatalf("without --allow-command: exit=%d, want 1", code)
+	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", envPath}, fReject); code != 2 {
+		t.Fatalf("without --allow-command: exit=%d, want 2", code)
 	}
 	if len(fReject.calls) != 0 {
 		t.Fatalf("without --allow-command: runner must not be invoked, got %d calls", len(fReject.calls))
@@ -3252,8 +3253,8 @@ func TestPlatformAliasMissingSectionNamesCanonicalSection(t *testing.T) {
 	f := &fakeRunner{}
 	stderr := captureStderr(t, func() {
 		code := dispatch([]string{"deploy", "--platform", "kube", "-e", filepath.Join(dir, "env.yaml")}, f)
-		if code != 1 {
-			t.Fatalf("exit=%d, want 1", code)
+		if code != 2 {
+			t.Fatalf("exit=%d, want 2", code)
 		}
 	})
 	if !strings.Contains(stderr, "kubernetes") {
@@ -3273,8 +3274,8 @@ func TestPlatformUnknownValueListsEverySpelling(t *testing.T) {
 	f := &fakeRunner{}
 	stderr := captureStderr(t, func() {
 		code := dispatch([]string{"deploy", "--platform", "k8s", "-e", filepath.Join(dir, "env.yaml")}, f)
-		if code != 1 {
-			t.Fatalf("exit=%d, want 1", code)
+		if code != 2 {
+			t.Fatalf("exit=%d, want 2", code)
 		}
 	})
 	for _, want := range []string{"kubernetes", "docker", "podman", "kube", "dk", "pm"} {
@@ -3325,8 +3326,52 @@ func TestPlatformAliasesCoverEveryPlatformExactlyOnce(t *testing.T) {
 			t.Errorf("alias %q collides with a canonical platform name", e.Alias)
 		}
 	}
-	if len(platformAliases) != len(platformAliasList) {
-		t.Errorf("lookup map has %d entries for %d declared aliases", len(platformAliases), len(platformAliasList))
+	if got := platformAbbrev.Shorts(); len(got) != len(platformAliasList) {
+		t.Errorf("platform set has %d short forms for %d declared aliases", len(got), len(platformAliasList))
+	}
+}
+
+// TestAliasDeclarationsFollowTheSharedRules builds the real sets -- the verbs,
+// each verb's targets and the platforms -- through the same builders the binary
+// uses. abbrev.New panics on a declaration that breaks the shared rule (lower-case
+// letters and digits, shorter than the word, unique, never a canonical name), so
+// building them here is the check; the loop then pins that every declared alias
+// expands to its canonical word.
+func TestAliasDeclarationsFollowTheSharedRules(t *testing.T) {
+	commands := newCommandAbbrev()
+	for _, v := range cliVerbs {
+		for _, a := range v.Aliases {
+			if got, ok := commands.Expand(a); !ok || got != v.Name {
+				t.Errorf("verb alias %q expands to %q (known=%v), want %q", a, got, ok, v.Name)
+			}
+		}
+	}
+	sets := newTargetAbbrev()
+	for _, v := range cliVerbs {
+		set, ok := sets[v.Name]
+		if len(v.Targets) == 0 {
+			if ok {
+				t.Errorf("%s models no targets but has a target set", v.Name)
+			}
+			continue
+		}
+		if !ok {
+			t.Errorf("%s models targets but has no target set", v.Name)
+			continue
+		}
+		for _, tg := range v.Targets {
+			for _, a := range tg.Aliases {
+				if got, ok := set.Expand(a); !ok || got != tg.Name {
+					t.Errorf("%s target alias %q expands to %q (known=%v), want %q", v.Name, a, got, ok, tg.Name)
+				}
+			}
+		}
+	}
+	platforms := newPlatformAbbrev()
+	for _, e := range platformAliasList {
+		if got, ok := platforms.Expand(e.Alias); !ok || got != e.Canonical {
+			t.Errorf("platform alias %q expands to %q (known=%v), want %q", e.Alias, got, ok, e.Canonical)
+		}
 	}
 }
 
@@ -3339,8 +3384,8 @@ func TestPlatformFlagMissingSectionIsLoudError(t *testing.T) {
 	f := &fakeRunner{}
 	stderr := captureStderr(t, func() {
 		code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f)
-		if code != 1 {
-			t.Fatalf("exit=%d, want 1", code)
+		if code != 2 {
+			t.Fatalf("exit=%d, want 2", code)
 		}
 	})
 	if !strings.Contains(stderr, "kubernetes") || !strings.Contains(stderr, "docker") {
@@ -3416,8 +3461,8 @@ func TestPlatformMenuNonTTYRefusesWithPlatformHint(t *testing.T) {
 	f := &fakeRunner{}
 	stderr := captureStderr(t, func() {
 		code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, f)
-		if code != 1 {
-			t.Fatalf("exit=%d, want 1", code)
+		if code != 2 {
+			t.Fatalf("exit=%d, want 2", code)
 		}
 	})
 	if !strings.Contains(stderr, "--platform") {
@@ -3436,8 +3481,8 @@ func TestPlatformZeroSectionsIsLoudError(t *testing.T) {
 	f := &fakeRunner{}
 	stderr := captureStderr(t, func() {
 		code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, f)
-		if code != 1 {
-			t.Fatalf("exit=%d, want 1", code)
+		if code != 2 {
+			t.Fatalf("exit=%d, want 2", code)
 		}
 	})
 	for _, want := range []string{"kubernetes:", "docker:", "podman:"} {
@@ -4454,8 +4499,8 @@ func TestStatusRejectsUnsafeUserBeforeAnyExec(t *testing.T) {
 	for _, user := range []string{"bad/user", "who$e", "a b", "quote'd"} {
 		f := &fakeRunner{}
 		code := dispatch([]string{"status", "app", "--platform", "docker", "--container", "c1", "--user", user}, f)
-		if code != 1 {
-			t.Errorf("--user %q: exit=%d, want 1", user, code)
+		if code != 2 {
+			t.Errorf("--user %q: exit=%d, want 2", user, code)
 		}
 		if len(f.calls) != 0 {
 			t.Errorf("--user %q: runner must not be invoked, got %d calls", user, len(f.calls))
@@ -4477,8 +4522,8 @@ func TestStatusTargetValidationRejectsBadPodAndNamespace(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeRunner{}
-			if code := dispatch(c.args, f); code != 1 {
-				t.Errorf("%s: exit=%d, want 1", c.name, code)
+			if code := dispatch(c.args, f); code != 2 {
+				t.Errorf("%s: exit=%d, want 2", c.name, code)
 			}
 			if len(f.calls) != 0 {
 				t.Errorf("%s: runner must not be invoked, got %d calls", c.name, len(f.calls))
@@ -4495,8 +4540,8 @@ func TestStatusManagementPortBounds(t *testing.T) {
 		t.Run(p, func(t *testing.T) {
 			f := &fakeRunner{}
 			args := []string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a", "--management-port", p}
-			if code := dispatch(args, f); code != 1 {
-				t.Errorf("--management-port %s: exit=%d, want 1", p, code)
+			if code := dispatch(args, f); code != 2 {
+				t.Errorf("--management-port %s: exit=%d, want 2", p, code)
 			}
 			if len(f.calls) != 0 {
 				t.Errorf("--management-port %s: runner must not be invoked, got %d calls", p, len(f.calls))
@@ -5291,8 +5336,8 @@ func TestLogsRejectsUnsafeNamesBeforeAnyCall(t *testing.T) {
 			q := &streamRunner{}
 			var code int
 			stderr := captureStderr(t, func() { code = dispatch(c.args, q) })
-			if code != 1 {
-				t.Fatalf("exit=%d, want 1", code)
+			if code != 2 {
+				t.Fatalf("exit=%d, want 2", code)
 			}
 			if !strings.Contains(stderr, "unsafe character") {
 				t.Errorf("stderr should say why, got:\n%s", stderr)
@@ -5436,8 +5481,8 @@ func TestLogsWithoutEnvFileNeedsAnExplicitPlatform(t *testing.T) {
 	stderr := captureStderr(t, func() {
 		code = dispatch([]string{"logs", "--container", "foreign", "-e", missing}, q2)
 	})
-	if code != 1 {
-		t.Fatalf("exit=%d, want 1", code)
+	if code != 2 {
+		t.Fatalf("exit=%d, want 2", code)
 	}
 	if !strings.Contains(stderr, "no-such-env.yaml") {
 		t.Errorf("the error should name the file it could not read, got:\n%s", stderr)
@@ -5502,8 +5547,8 @@ func TestLogsPlatformWithNoSectionAtAllIsLoud(t *testing.T) {
 	stderr := captureStderr(t, func() {
 		code = dispatch([]string{"logs", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, q)
 	})
-	if code != 1 {
-		t.Fatalf("exit=%d, want 1", code)
+	if code != 2 {
+		t.Fatalf("exit=%d, want 2", code)
 	}
 	for _, w := range []string{"kubernetes:", "docker:", "podman:"} {
 		if !strings.Contains(stderr, w) {
@@ -5625,14 +5670,14 @@ func TestLogsCommandFlagOverridesTheSection(t *testing.T) {
 	}
 
 	// A binary outside the allowlist is refused before anything runs, exactly as
-	// it is for deploy/remove/status.
+	// it is for deploy/remove/status, and it is argv, so the exit is a usage error.
 	q2 := &streamRunner{}
 	var code int
 	stderr := captureStderr(t, func() {
 		code = dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "pod-a", "--command", "curl"}, q2)
 	})
-	if code != 1 {
-		t.Fatalf("exit=%d, want 1", code)
+	if code != 2 {
+		t.Fatalf("exit=%d, want 2", code)
 	}
 	if !strings.Contains(stderr, "curl") {
 		t.Errorf("the error should name the refused binary, got:\n%s", stderr)
@@ -5757,8 +5802,8 @@ func TestLogsWithoutASectionToDiscoverFrom(t *testing.T) {
 			stderr := captureStderr(t, func() {
 				code = dispatch([]string{"logs", "--platform", c.platform, c.wrongFlag, c.wrongVal, "-e", missing}, q)
 			})
-			if code != 1 {
-				t.Fatalf("exit=%d, want 1", code)
+			if code != 2 {
+				t.Fatalf("exit=%d, want 2", code)
 			}
 			for _, w := range []string{c.wantSection, c.wantFix} {
 				if !strings.Contains(stderr, w) {
@@ -5936,7 +5981,8 @@ func TestLogsIndexOutOfRangeNamesTheRange(t *testing.T) {
 
 // TestLogsIndexWithNothingToIndexInto covers an index given where discovery has
 // no list to offer: the message has to say that is the problem, rather than
-// reporting a missing pod named "0".
+// reporting a missing pod named "0". With no env file there is nothing to
+// discover from, which is about what the tool was given, so the exit is 2.
 func TestLogsIndexWithNothingToIndexInto(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such-env.yaml")
 	q := &streamRunner{resp: []queuedResp{{"", nil}}}
@@ -5944,8 +5990,8 @@ func TestLogsIndexWithNothingToIndexInto(t *testing.T) {
 	stderr := captureStderr(t, func() {
 		code = dispatch([]string{"logs", "--platform", "kubernetes", "-e", missing, "--pod", "0"}, q)
 	})
-	if code != 1 {
-		t.Fatalf("exit=%d, want 1", code)
+	if code != 2 {
+		t.Fatalf("exit=%d, want 2", code)
 	}
 	if !strings.Contains(stderr, "index") {
 		t.Errorf("the error should say an index needs a list, got:\n%s", stderr)
@@ -6316,7 +6362,7 @@ func TestVersionOutputShape(t *testing.T) {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	first := fmt.Sprintf("solmq-conn-util dev %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
-	want := first + strings.Join(supportNoticeVersion, "\n") + "\n"
+	want := first + strings.Join(notice.Short(), "\n") + "\n"
 	if stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
@@ -6584,13 +6630,13 @@ func TestCliRejectsWhatCannotMeanAnything(t *testing.T) {
 			name: "an unsafe command token",
 			args: []string{"cli", "--platform", "docker", "--container", "c", "--", "ls", "*"},
 			want: []string{"unsafe character", "argv, not a shell line"},
-			code: 1,
+			code: 2,
 		},
 		{
 			name: "an unsafe instance name",
 			args: []string{"cli", "--platform", "kubernetes", "--pod", "pod-a;rm -rf /"},
 			want: []string{"unsafe character"},
-			code: 1,
+			code: 2,
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {

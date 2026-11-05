@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusreport"
@@ -195,7 +196,7 @@ func kubeDiscovery(s instanceSession, pods []string, all bool) (selector, match,
 		return "", "", "", nil
 	default:
 		if s.env == nil || s.env.Kubernetes == nil {
-			return "", "", "", fmt.Errorf("no kubernetes: section in env.yaml to discover pods from; %s", namingHint(s))
+			return "", "", "", exitcode.Usagef("no kubernetes: section in env.yaml to discover pods from; %s", namingHint(s))
 		}
 		name := s.env.Kubernetes.Deployment.Name
 		return "app=" + name, "", name, nil
@@ -258,12 +259,12 @@ func engineNames(r runner.Runner, s instanceSession, conts []string, all bool) (
 func configuredInstanceName(s instanceSession) (string, error) {
 	if s.platform == validate.PlatformDocker {
 		if s.env == nil || s.env.Docker == nil {
-			return "", fmt.Errorf("no docker: section in env.yaml to discover the container name from; %s", namingHint(s))
+			return "", exitcode.Usagef("no docker: section in env.yaml to discover the container name from; %s", namingHint(s))
 		}
 		return s.env.Docker.Name, nil
 	}
 	if s.env == nil || s.env.Podman == nil {
-		return "", fmt.Errorf("no podman: section in env.yaml to discover the container name from; %s", namingHint(s))
+		return "", exitcode.Usagef("no podman: section in env.yaml to discover the container name from; %s", namingHint(s))
 	}
 	return s.env.Podman.Name, nil
 }

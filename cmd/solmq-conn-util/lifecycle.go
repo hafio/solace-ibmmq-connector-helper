@@ -5,6 +5,7 @@ import (
 	"os"
 	"regexp"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
@@ -40,15 +41,15 @@ func runLifecycle(action string, args []string, r runner.Runner) int {
 	if len(pos) > 0 {
 		fmt.Fprintf(os.Stderr, "%s: unexpected argument %q (the platform is selected with --platform)\n", action, pos[0])
 		fmt.Fprint(os.Stderr, verbUsage(action))
-		return 2
+		return exitcode.Usage
 	}
 	e, lerr := loadEnvFile(*env)
 	if lerr != nil {
-		return errExit(lerr)
+		return usageExit(lerr)
 	}
 	name, perr := resolvePlatform(*platform, presentPlatforms(e), true)
 	if perr != nil {
-		return errExit(perr)
+		return usageExit(perr)
 	}
 	checkName := func(field, v string) error {
 		if !lifecycleNameRE.MatchString(v) || len(v) > 63 {
@@ -61,11 +62,11 @@ func runLifecycle(action string, args []string, r runner.Runner) int {
 	case validate.PlatformKubernetes:
 		k := e.Kubernetes
 		if err := checkName("kubernetes.deployment.name", k.Deployment.Name); err != nil {
-			return errExit(err)
+			return usageExit(err)
 		}
 		if ns := k.Deployment.Namespace; ns != "" {
 			if err := checkName("kubernetes.deployment.namespace", ns); err != nil {
-				return errExit(err)
+				return usageExit(err)
 			}
 		}
 		if code, ok := preflight(r, action, name, k.Command, k.Deployment.Namespace, *allow); !ok {
@@ -75,7 +76,7 @@ func runLifecycle(action string, args []string, r runner.Runner) int {
 	case validate.PlatformDocker:
 		d := e.Docker
 		if err := checkName("docker.name", d.Name); err != nil {
-			return errExit(err)
+			return usageExit(err)
 		}
 		if code, ok := preflight(r, action, name, d.Command, "", *allow); !ok {
 			return code
@@ -84,7 +85,7 @@ func runLifecycle(action string, args []string, r runner.Runner) int {
 	default:
 		p := e.Podman
 		if err := checkName("podman.name", p.Name); err != nil {
-			return errExit(err)
+			return usageExit(err)
 		}
 		sc, serr := runner.ResolveQuadletScope()
 		if serr != nil {

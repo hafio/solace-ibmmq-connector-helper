@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
@@ -88,11 +89,11 @@ func runShell(args []string, r runner.Runner) int {
 		// mistake worth naming rather than a name to guess at.
 		fmt.Fprintf(os.Stderr, "cli: unexpected argument %q (name an instance with %s or %s; a command to run goes after %s)\n",
 			pos[0], podFlagName, containerFlagName, argSeparator)
-		return 2
+		return exitcode.Usage
 	}
 	if sawSep && len(remote) == 0 {
 		fmt.Fprintf(os.Stderr, "cli: %s was given with no command after it (leave it off to open a shell)\n", argSeparator)
-		return 2
+		return exitcode.Usage
 	}
 
 	o := shellOpts{
@@ -127,10 +128,10 @@ func checkShellFlags(o shellOpts) int {
 	} {
 		if len(f.vals) > 1 {
 			fmt.Fprintf(os.Stderr, "cli: %s may be given once -- cli reaches one instance; run cli with no %s to list what matches\n", f.name, f.name)
-			return 2
+			return exitcode.Usage
 		}
 	}
-	return 0
+	return exitcode.OK
 }
 
 // actShell resolves the platform, settles on exactly one instance, and hands
@@ -152,7 +153,7 @@ func actShell(o shellOpts, r runner.Runner) int {
 	// else so a typo costs no process at all.
 	for _, t := range o.remote {
 		if !validate.SafeToken(t) {
-			return errExit(fmt.Errorf("the command token %q contains an unsafe character (%s); cli runs an argv, not a shell line, so a pipe or a glob has to be written inside the session instead", t, validate.UnsafeTokenReason))
+			return usageExit(fmt.Errorf("the command token %q contains an unsafe character (%s); cli runs an argv, not a shell line, so a pipe or a glob has to be written inside the session instead", t, validate.UnsafeTokenReason))
 		}
 	}
 
@@ -176,7 +177,7 @@ func actShell(o shellOpts, r runner.Runner) int {
 		allow:    o.allow,
 	})
 	if serr != nil {
-		return errExit(serr)
+		return usageExit(serr)
 	}
 
 	// The same read-only preflight probe status and logs run, for the same
@@ -193,7 +194,7 @@ func actShell(o shellOpts, r runner.Runner) int {
 	if !found {
 		// The picker was printed: the run answered an ambiguous request with
 		// exactly what to type next, which is not a failure.
-		return 0
+		return exitcode.OK
 	}
 	return attachShell(a, sess, o, target)
 }

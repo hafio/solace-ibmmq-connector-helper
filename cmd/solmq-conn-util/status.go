@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -205,22 +206,22 @@ func statusView(pos []string) (statusreport.View, int) {
 	if len(pos) == 0 {
 		fmt.Fprintf(os.Stderr, "status: missing target (%s)\n\n", pipeList(targetNames("status")))
 		fmt.Fprint(os.Stderr, verbUsage("status"))
-		return 0, 2
+		return 0, exitcode.Usage
 	}
 	if len(pos) > 1 {
 		fmt.Fprintf(os.Stderr, "status: unexpected argument %q\n", pos[1])
-		return 0, 2
+		return 0, exitcode.Usage
 	}
 	switch resolveTarget("status", pos[0]) {
 	case statusTargetContainer:
-		return statusreport.ViewContainer, 0
+		return statusreport.ViewContainer, exitcode.OK
 	case statusTargetApplication:
-		return statusreport.ViewApplication, 0
+		return statusreport.ViewApplication, exitcode.OK
 	case statusTargetAll:
-		return statusreport.ViewAll, 0
+		return statusreport.ViewAll, exitcode.OK
 	}
 	fmt.Fprintf(os.Stderr, "status: unknown target %q (want %s)\n", pos[0], wantList(targetNames("status")))
-	return 0, 2
+	return 0, exitcode.Usage
 }
 
 // checkStatusFlags rejects the combinations that cannot mean anything, loudly
@@ -232,18 +233,18 @@ func checkStatusFlags(o statusOpts, output string) int {
 	case outputTable, outputJSON:
 	default:
 		fmt.Fprintf(os.Stderr, "status: unknown --output %q (want %s)\n", output, wantList([]string{outputTable, outputJSON}))
-		return 2
+		return exitcode.Usage
 	}
 	if o.json && o.watch.on {
 		// A redraw loop emitting a document per tick is neither a stream a parser
 		// can read nor a screen a human can, so the two are refused together
 		// rather than one silently winning.
 		fmt.Fprintln(os.Stderr, "status: --output json cannot be combined with --watch")
-		return 2
+		return exitcode.Usage
 	}
 	if o.all && (len(o.pods) > 0 || len(o.conts) > 0) {
 		fmt.Fprintln(os.Stderr, "status: --all searches for every instance by image name, so it cannot be combined with --pod/--container")
-		return 2
+		return exitcode.Usage
 	}
 	if o.view == statusreport.ViewContainer {
 		// These three only steer the in-container script, which the container
@@ -259,7 +260,7 @@ func checkStatusFlags(o statusOpts, output string) int {
 			if f.set {
 				fmt.Fprintf(os.Stderr, "status: %s applies to the %s and %s views, which run the in-container script; %s does not\n",
 					f.name, statusTargetApplication, statusTargetAll, statusTargetContainer)
-				return 2
+				return exitcode.Usage
 			}
 		}
 	}
@@ -274,7 +275,7 @@ func checkStatusFlags(o statusOpts, output string) int {
 		// saying that run is not happening.
 		fmt.Fprintf(os.Stderr, "note: %s prints no steps under %s -- the redraw owns the screen\n", verboseFlagName, watchFlagName)
 	}
-	return 0
+	return exitcode.OK
 }
 
 // actStatus resolves the platform and its targets and renders the report, once
@@ -294,7 +295,7 @@ func actStatus(o statusOpts, r runner.Runner) int {
 		all:      o.all,
 	})
 	if serr != nil {
-		return errExit(serr)
+		return usageExit(serr)
 	}
 	o.ns = sess.ns
 
@@ -305,14 +306,14 @@ func actStatus(o statusOpts, r runner.Runner) int {
 	// sed address inside the generated script, where a '/' or a regex
 	// metacharacter would break the password lookup rather than fail loudly.
 	if !validate.SafeActuatorUser(o.user) {
-		return errExit(fmt.Errorf("--user %q is not a usable account name (%s)", o.user, validate.SafeActuatorUserReason))
+		return usageExit(fmt.Errorf("--user %q is not a usable account name (%s)", o.user, validate.SafeActuatorUserReason))
 	}
 
 	if o.port == 0 {
 		o.port = sess.env.Defaults.EffectiveManagementPort()
 	}
 	if o.port < 1 || o.port > 65535 {
-		return errExit(fmt.Errorf("--management-port %d must be 1-65535", o.port))
+		return usageExit(fmt.Errorf("--management-port %d must be 1-65535", o.port))
 	}
 
 	// Progress starts here rather than in the collector, because the first thing
@@ -904,9 +905,9 @@ func (c *statusCollector) renderOnce(w *os.File) int {
 		}
 	}
 	if failed {
-		return 1
+		return exitcode.Failure
 	}
-	return 0
+	return exitcode.OK
 }
 
 // watchStatus re-renders the report until the operator interrupts it. Each tick
@@ -932,7 +933,7 @@ func watchStatus(o statusOpts, c *statusCollector) int {
 		select {
 		case <-stop:
 			fmt.Fprintln(os.Stdout)
-			return 0
+			return exitcode.OK
 		case <-tick.C:
 		}
 	}

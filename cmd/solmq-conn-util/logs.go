@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
@@ -126,7 +127,7 @@ func runLogs(args []string, r runner.Runner) int {
 		// not positionally, so a bare word here is a mistake worth naming rather
 		// than a name to guess at.
 		fmt.Fprintf(os.Stderr, "logs: unexpected argument %q (name an instance with %s or %s)\n", pos[0], podFlagName, containerFlagName)
-		return 2
+		return exitcode.Usage
 	}
 
 	o := logsOpts{
@@ -156,7 +157,7 @@ func runLogs(args []string, r runner.Runner) int {
 func checkLogsFlags(o logsOpts) int {
 	if o.follow && o.previous {
 		fmt.Fprintf(os.Stderr, "logs: %s reads a log that has already ended, so it cannot be combined with %s\n", previousFlagName, followFlagName)
-		return 2
+		return exitcode.Usage
 	}
 	// logs reads one instance, so naming two is a question it cannot answer.
 	// Refused loudly rather than by quietly using the first: a repeated flag is
@@ -171,10 +172,10 @@ func checkLogsFlags(o logsOpts) int {
 	} {
 		if len(f.vals) > 1 {
 			fmt.Fprintf(os.Stderr, "logs: %s may be given once -- logs reads one instance; run logs with no %s to list what matches\n", f.name, f.name)
-			return 2
+			return exitcode.Usage
 		}
 	}
-	return 0
+	return exitcode.OK
 }
 
 // actLogs resolves the platform, settles on exactly one instance, and reads its
@@ -202,12 +203,12 @@ func actLogs(o logsOpts, r runner.Runner) int {
 		allow:    o.allow,
 	})
 	if serr != nil {
-		return errExit(serr)
+		return usageExit(serr)
 	}
 
 	if o.previous && sess.platform != validate.PlatformKubernetes {
 		fmt.Fprintf(os.Stderr, "logs: %s is a kubernetes concept; %s keeps no prior-run log to read\n", previousFlagName, sess.platform)
-		return 2
+		return exitcode.Usage
 	}
 
 	// The same read-only preflight probe status runs, for the same reason: fail
@@ -224,7 +225,7 @@ func actLogs(o logsOpts, r runner.Runner) int {
 	if !found {
 		// The picker was printed: the run answered an ambiguous request with
 		// exactly what to type next, which is not a failure.
-		return 0
+		return exitcode.OK
 	}
 	return readLog(s, sess, o, target)
 }
@@ -297,5 +298,5 @@ func readLog(s runner.Streamer, sess instanceSession, o logsOpts, t instanceRef)
 	if err := s.Stream(ctx, runner.Cmd{Argv: argv}, os.Stdout, os.Stderr); err != nil {
 		return errExit(fmt.Errorf("reading %s: %w", t.name, err))
 	}
-	return 0
+	return exitcode.OK
 }
