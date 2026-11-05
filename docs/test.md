@@ -50,7 +50,7 @@ measure coverage with the `cov` task.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 1009 test functions, 1450 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 1015 test functions, 1467 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -673,6 +673,8 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestOSRunAcceptsAbsolutePathArgv0 | - | absolute path as argv0 runs successfully, output equals abs-argv0-ok |
 | TestOSRunEnvReachesChildAndAmbientInherited | - | Cmd.Env entries reach the child and override an ambient var of the same name, while an ambient-only var still passes through |
 | TestParseCommand | kubectl | parses to [kubectl], ok |
+| TestParseCommand | kubectl.Exe | accepted: the .exe suffix is folded in any case |
+| TestParseCommand | kubectl --kubeconfig=C:/RUNNER~1/config | accepted: an embedded tilde is an 8.3 short name |
 | TestParseCommand | kubectl --context prod -n solace | parses to [kubectl `--context` prod `-n` solace] tokens, ok |
 | TestParseCommand | oc | trims whitespace to [oc], ok |
 | TestParseCommand | empty string | returns error, nil result |
@@ -683,8 +685,11 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestParseCommand | kubectl --kubeconfig "a b" | quote+space rejected as unsafe, error |
 | TestParseCommand | curl | not on the kubernetes allowlist, error |
 | TestParseCommand | /tmp/evil | path, not a bare name, error |
-| TestParseCommandExtraAllowed | sudo podman without extraAllowed | rejected, error |
-| TestParseCommandExtraAllowed | sudo podman with extraAllowed=[sudo] | accepted, argv [sudo podman] with the platform binary unmodified |
+| TestParseCommand | every refused case | the error is marked as a usage error, so it is exit 2 wherever it surfaces |
+| TestParseCommandExtraAllowed | lima podman without an approval | rejected, error |
+| TestParseCommandExtraAllowed | lima podman with lima approved | accepted, argv [lima podman] with the platform binary unmodified |
+| TestParseCommandExtraAllowed | sudo podman with lima approved | refused as a privilege-escalation wrapper that is never permitted, marked as a usage error |
+| TestParseCommandExtraAllowed | --allow-command sudo | execguard.Approve refuses it, naming `sudo solmq-conn-util` as the supported way |
 | TestKubernetesDeployApplyOnStdin | - | deploy issues one call kubectl `--context` prod apply `-f` - with manifest on stdin |
 | TestKubernetesRemoveUsesDeleteVerb | - | the remove action issues argv [oc delete -f - --ignore-not-found] |
 | TestKubernetesRejectsUnsafeCommand | - | unsafe command rejected, error returned, zero calls made |
@@ -727,7 +732,7 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestPreflightReadVerbsAskOnlyWhatTheyUse | status / logs / cli | kubernetes asks can-i get pods, get pods --subresource log, and create pods --subresource exec (never deploy's create deployment); docker still runs info |
 | TestPreflightRefusalNamesThePermission | "no" / "no - reason" / unreachable | a can-i "no" names the permission, the namespace (or the current one) and the answer, without the login hint and with nothing else to print; an unreachable cluster keeps the login hint |
 | TestPreflightRejectsDisallowedBinaryBeforeRunning | - | a command outside the platform allowlist (curl) is rejected before the probe ever runs, zero runner calls |
-| TestPreflightExtraAllowedThreadsThrough | - | "sudo podman" is rejected without extraAllowed and accepted with it, running argv [sudo podman info] |
+| TestPreflightExtraAllowedThreadsThrough | - | "lima podman" is rejected without an approval and accepted with lima approved, running argv [lima podman info]; "sudo podman" is refused as an escalation wrapper before any probe runs |
 | TestPreflightUnknownAction | - | an action other than deploy/remove/start/stop/restart is rejected, zero runner calls |
 | TestPreflightKubernetesLifecycleAsksToPatch | - | start, stop and restart ask kubectl auth can-i to patch the Deployment |
 | TestLifecycleArgv | kubernetes stop / start / restart | scale to 0, scale to the replicas, rollout restart, each under --namespace when one is set |
@@ -809,7 +814,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestLeaderSessionPasswordConflict | session is a different broker | a distinct tuple is a distinct binder, so the passwords may differ |
 | TestMQCipherRequiresTLS | - | mq cipher set with tls false errors require 'tls: true' |
 | TestDeployKubeChecks | - | a bad deployment name errors with not a valid DNS-1123 label |
-| TestCredentialsEnvChecks | - | unset env var for credentials errors variable MISSING_VAR is not set |
+| TestCredentialsEnvChecks | - | an -env variable that is unset, or set but empty, warns (never errors), naming the variable and which of the two it is |
 | TestCheckSideMQMissingFields | - | mq side missing conn-name/queue-manager/channel errors each; user/password not flagged missing |
 | TestCheckSideSolaceMissingAndBadScheme | missing-host-vpn | empty solace side errors missing host and msg-vpn; client creds not flagged |
 | TestCheckSideSolaceMissingAndBadScheme | bad-scheme | http scheme host errors must start with tcp:// or tcps:// |
@@ -836,10 +841,12 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestRetiredStoresBlockTiers | - | kubernetes.secrets.stores create: (any spelling) or an empty block is ignored by generate/deploy and an error under Lint asking for its removal; existing: NAME is an error on every kubernetes path naming each selected store's replacement, a warning on teardown, and offers both ways on for a created store |
 | TestNoStoresWiringWarning | - | a workflow selecting a store with a kubernetes section and no stores block warns about nothing |
 | TestClusterOnlyStoreNeedsAHostSource | - | docker and podman refuse a selected store held only in a kubernetes Secret, accept it with a file or sources beside the Secret, and kubernetes and an unselected store raise nothing |
-| TestCheckCredRules | both literal and env set | errors sets both a literal value and target password-env |
-| TestCheckCredRules | env value is a ${...} reference | errors must be a bare variable name, not a ${...} reference |
+| TestCheckCredRules | both literal and env set | errors target password and target password-env are both set |
+| TestCheckCredRules | env value is a ${...} reference | errors target password-env holds a variable reference, not a name |
 | TestCheckCredRules | env value not a valid identifier | errors is not a valid environment variable name |
-| TestCheckCredRules | -env var unset in this environment | warns (not errors) which is not set in this environment |
+| TestCheckCredRules | -env var unset in this environment | warns (not errors) which is not set; export it before running |
+| TestCheckCredRules | -env var set but empty | warns (not errors) which is set but empty; export it before running |
+| TestCheckCredInvalidNameNotEchoed | a value with a space / a ${...} reference / a leading digit | an invalid -env name is never printed back, in an error or a warning, in case it is the secret itself |
 | TestCheckCredRejectsReservedPrefix | -env starting with spec.GeneratedNamePrefix | rejected: the prefix is reserved for derived mount names, which is what keeps an operator's name and a derived name from ever meeting |
 | TestCheckCredRejectsReservedPrefix | MY_GEN_PASSWORD / _MY_PASSWORD / SOL_PASSWORD | accepted -- only a name *starting* with the prefix is reserved |
 | TestCheckCredLiteralLooksLikeEnvRefWarns | - | a literal credential containing ${ warns naming the -env key to use instead; the value is still used as a literal |
@@ -882,8 +889,8 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestCheckLibs | pvc-existing-valid | pvc.existing set alone has no errors |
 | TestCheckLibs | download-valid | valid download urls has no errors |
 | TestCheckDocker | valid-docker | valid docker section passes with no errors |
-| TestCheckDocker | missing-image-empty-cmd-bad-port | errors docker.image required, command must not be empty, and port 0 must be 1-65535 |
-| TestCheckDocker | unsafe-command | docker command with semicolon errors unsafe character |
+| TestCheckDocker | missing-image-empty-cmd-bad-port | errors docker.image required, docker.command is empty, and port 0 must be 1-65535 |
+| TestCheckDocker | unsafe-command | docker command with semicolon errors "which is not allowed in a command token" |
 | TestCheckDocker | stores-removed | a present docker.stores errors `docker.stores is no longer configured` |
 | TestCheckDocker | libs-no-dir | docker libs set without dir errors docker.libs.dir is required |
 | TestCheckLibsMountPathRemoved | docker custom / podman fixed / dir alone | libs.mount-path is rejected for both sections whatever its value -- the fixed one included, since the key decides nothing -- while libs with dir alone passes |
@@ -904,16 +911,21 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestPodmanBaseDirIgnoredButNotedByValidate | set, under validate | no error; one Lint warning naming the value and the files earlier deploys left there (`c-application.yml`, `c-status`, `c-logback-spring.xml`), the first holding the solmq-status password |
 | TestPodmanBaseDirIgnoredButNotedByValidate | set, under generate or deploy | no error and no warning: only validate notes the ignored key |
 | TestPodmanBaseDirIgnoredButNotedByValidate | unsafe value, under validate | a value the old host-path gate refused is no error either, just the same note |
-| TestCheckCommandMultiToken | safe-multi-token | docker command with extra safe tokens has no unsafe-character error |
-| TestCheckCommandMultiToken | unsafe-token | docker command with $(evil) token errors unsafe character |
-| TestCheckDeployCommandAcceptReject | kubectl / oc / kubectl with flags / docker with flag / podman / kubectl.exe / sudo podman with extraAllowed | accept matrix: bare allowlisted argv[0], flag-shaped args, .exe-stripped comparison, and a chained binary approved via extraAllowed all pass |
-| TestCheckDeployCommandAcceptReject | curl / absolute path / relative path / bare positional arg / sudo podman without extraAllowed / bare "--" / empty command | reject matrix: unlisted binary, path argv[0], a bare positional argument, an unapproved chained binary, a bare end-of-flags marker, and an empty command all error |
-| TestCheckDeployCommandEndOfFlagsMarkerMidCommand | - | "kubectl --" errors token "--": end-of-flags marker is not accepted, distinct from the argv[0] allowlist rejection |
-| TestCheckDeployCommandErrorTexts | - | pins the canonical wording verbatim for the path, allowlist, end-of-flags, flag-shape, and empty-command errors |
+| TestCheckCommandMultiToken | safe-multi-token | docker command with extra safe tokens has no docker.command error |
+| TestCheckCommandMultiToken | unsafe-token | docker command with $(evil) token errors docker.command[2] "which is not allowed in a command token" |
+| TestCommandRulesPerPlatform | kubernetes / docker / podman | CommandRules names the field `<platform>.command`, scopes the allowlist to the platform, copies AllowedCommands and sets no subword |
+| TestCommandRulesPerPlatform | unknown platform | fails as a wiring error naming the field rather than accepting anything |
+| TestCommandGuardMessages | path / unlisted binary / end-of-flags / bare word / empty / unsafe character / sudo / sudo after argv[0] | the shared guard's messages reach the operator named by their field, indexed by token |
+| TestCommandGuardAccepts | kubectl / oc / flags / docker / podman / kubectl.exe / kubectl.Exe / embedded tilde in a flag value | accepted; a leading tilde in a flag value is still refused |
 | TestCheckKubeCommandNowValidated | - | an unsafe kubernetes.command such as "kubectl; rm -rf /" errors; a safe kubectl command produces no such error |
 | TestCheckKubeCommandDefaultKubectlUnvalidated | - | the zero-value default (spec.DefaultKubeCommand) validates clean |
-| TestContextAllowCommandsHonored | - | Context.AllowCommands threads into checkKube and checkContainerTarget: "sudo docker"/"sudo podman"/"sudo kubectl" reject with AllowCommands nil, accept with AllowCommands=[sudo] |
-| TestCheckContainerCommandUnlistedBinaryRejected | - | docker.command "curl" and podman.command "/tmp/evil" are rejected by the platform allowlist, not merely the charset check |
+| TestContextAllowCommandsHonored | - | Context.AllowCommands threads into checkKube and checkContainerTarget: "lima docker"/"lima podman"/"lima kubectl" reject with the zero Approvals, accept with lima approved; "sudo podman" is refused as an escalation wrapper even with other approvals, and Approve refuses sudo with the run-it-under-sudo advice |
+| TestCheckContainerCommandUnlistedBinaryRejected | - | docker.command "curl" and podman.command "/tmp/evil" are rejected by the platform allowlist and the bare-name rule, not merely the charset check |
+| TestSafeTokenCharset | plain name / empty | accepted |
+| TestSafeTokenCharset | embedded tilde / leading tilde / metacharacter / $ / backslash / space | refused: execguard.UnsafeChars plus '~' |
+| TestSafeTokenCharset | unicode space / next line / DEL / C1 as UTF-8 / zero-width space / invalid UTF-8 | refused: whitespace over all of Unicode, control (C0, DEL, C1) and invisible characters, and invalid UTF-8 |
+| TestSafeHostPathCharset | unix path / windows path / 8.3 short name | accepted: a host path admits a backslash and a tilde |
+| TestSafeHostPathCharset | space / metacharacter / quote / C1 as UTF-8 / zero-width space / invalid UTF-8 | refused, the same as SafeToken |
 | TestSafeHostPathAllowsWindowsShortNames | RUNNER~1 / PROGRA~1 / ~/certs | a tilde is legal in a host path: 8.3 short names are real directories an operator cannot rename, and no sink expands one (argv only, no shell; systemd does not expand in a unit directive; ordinary inside a compose scalar) |
 | TestSafeHostPathAllowsWindowsShortNames | space / newline / $ / ; / \| / * / () / # / ! / backtick | every other metacharacter is still refused -- the tilde is the only concession, and only for paths |
 | TestSafeToken | kubectl | SafeToken returns true |
@@ -1152,6 +1164,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestResolveCredentials | nil refs | no kvs, no error |
 | TestResolveCredentials | literal + -env mix | literal ref passes through, -env ref reads from the resolver's environment |
 | TestResolveCredentials | unset -env variable | fails loud naming the stable secret and the variable, never a value |
+| TestResolveCredentials | set but empty -env variable | fails loud naming the stable secret and saying the variable is set but empty |
 | TestResolveCredentials | no environment access | fails loud rather than silently resolving to empty |
 | TestConfigRejectsSecretNameConflict | security.users "ops.1" and "ops-1" | Config renders nothing and errors naming the contested key *and both claiming positions*, rather than emit a config where one credential silently takes the other's password |
 | TestConfigRejectsSecretNameConflict | same spec through Validate | the collision is caught while linting too, not only at generate/deploy -- names are assigned in consolidate, so Validate builds to see them |
@@ -1438,10 +1451,13 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [lifecycle_test.go](
 | TestLifecycleVerbsActInPlace | stop / start / restart x kubernetes / docker / podman | the platform's preflight, then one call acting on the instance env.yaml names -- scale, rollout restart, the engine's own verb, or systemctl -- with no -env variable exported and no store file present |
 | TestLifecycleVerbsRefuseBeforeActing | - | a failed preflight stops before acting, a name that is not a DNS-1123 label is refused before anything runs (exit 2), a positional argument is a usage error, and no compose file is written |
 | TestDeployKubernetesSeamRejectsUnsafeCommand | - | unsafe kubernetes.command yields exit 2 and zero runner calls |
-| TestAllowCommandFlagBadValueExitsUsageError | path value | `--allow-command` /usr/bin/sudo exits 2, zero runner calls |
-| TestAllowCommandFlagBadValueExitsUsageError | unsafe character | `--allow-command` sudo;rm exits 2, zero runner calls |
+| TestAllowCommandFlagBadValueExitsUsageError | path value | `--allow-command` /usr/bin/lima exits 2 naming the bare-name rule, zero runner calls |
+| TestAllowCommandFlagBadValueExitsUsageError | unsafe character | `--allow-command` lima;rm exits 2 with the shared charset message, zero runner calls |
+| TestAllowCommandFlagBadValueExitsUsageError | escalator, including another case with .exe | `--allow-command` sudo and Doas.EXE exit 2 with "never permitted" and "elevate the tool instead", zero runner calls |
+| TestAllowCommandSudoNamesTheSupportedAlternative | deploy / remove / start / status / logs / cli | `--allow-command sudo` exits 2 on every verb that takes the flag, naming `sudo solmq-conn-util`, zero runner calls |
 | TestAllowCommandFlagRejectedOnGenerateAndValidate | generate config / validate | `--allow-command` is undefined on generate/validate; exit 2 as an unknown flag |
-| TestAllowCommandFlagRepeatableThreadsToRunner | - | "sudo podman" rejects (exit 2) with zero runner calls without the flag; repeating `--allow-command` sudo twice threads through to preflight (argv [sudo podman info]) and to the podman secret calls |
+| TestAllowCommandFlagRepeatableThreadsToRunner | - | "lima podman" rejects (exit 2) with zero runner calls without the flag; repeating `--allow-command` lima twice threads through to preflight (argv [lima podman info]) and to the podman secret calls |
+| TestDeployRefusesSudoCommandWhateverIsApproved | no approval / an unrelated approval | podman.command `sudo podman` exits 2, naming the escalation wrapper and "run the tool itself under sudo instead", zero runner calls |
 | TestDeployKubernetesPreflightFailureStopsBeforeApply | - | a failing kubernetes preflight (auth can-i argv incl. `--namespace`) stops with exit 1 and exactly 1 runner call |
 | TestDeployDockerPreflightFailureStopsBeforeWrite | - | a failing docker preflight (argv [docker info]) stops before the compose file is written, exit 1, exactly 1 runner call |
 | TestDeployPodmanPreflightFailureStopsBeforeWrite | - | a failing podman preflight (argv [podman info]) stops before the unit is written, exit 1, exactly 1 runner call |
@@ -1491,6 +1507,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [lifecycle_test.go](
 | TestDeployPodmanRootlessWarnsAboutAnUnlistableLibsDir | - | linux only, rootless: the default 1000:0 maps to no host uid and to the invoker's group, so a 0700 libs.dir written as ${VAR} is named on stderr at its expanded path with the listable remedy, and the deploy still runs |
 | TestDeployPodmanUnresolvedInputFailsBeforeAnyWrite | unreadable store | a selected store's file that cannot be read fails the deploy (exit 2) naming tls.stores.ts.existing.pkcs12 and its path, after only the read-only preflight probe and before any secret is created or the unit written: the steps that follow have side effects outside the process, so a late failure would leave a half-built deployment |
 | TestDeployPodmanUnresolvedInputFailsBeforeAnyWrite | unset credential variable | a password-env naming an unset variable fails the same way (exit 2), naming the variable, before any secret is created |
+| TestDeployPodmanSetButEmptyCredentialFailsBeforeAnyWrite | set but empty password-env variable | exit 2 saying the variable is set but empty, only the preflight probe run, nothing written; validate warns the same |
 | TestDeployPodmanFailureStopsBeforeSystemctl | credential | a failing `podman secret rm` for the first credential stops the deploy there (exit 1, the failed call named), with no unit written and no systemctl call |
 | TestDeployPodmanFailureStopsBeforeSystemctl | document | a failing secret call for application.yml stops the deploy the same way |
 | TestDeployPodmanFailureStopsBeforeSystemctl | unmounted file secret | a failing batched `secret rm` of the file secrets the spec no longer mounts stops the deploy before the unit, which would otherwise run beside a stale secret |
@@ -1691,7 +1708,7 @@ manifest-parity cases)
 | TestNamespaceManifestMatchesWhatRenderEmits | - | the standalone document the namespace delete pipes is exactly the one Render emits, so the two cannot drift |
 | TestOwnedNamesCoversEverythingThisReleaseCreates | created secrets/PVC / referenced ones / nil section | the safety net behind the occupancy check: everything this release creates counts as ours under the name it was actually created with (derived from deployment.name, never a retired name key), an empty name never does, and objects merely referenced (existing:) are *not* ours -- the operator manages them and their presence is a real reason to keep the namespace |
 | TestRemoveNamespaceWithoutANamespaceSaysSo | - | a kubernetes section with no namespace has nothing to remove, and says so rather than acting on an empty name |
-| TestRemoveNamespaceRejectsAnUnsafeCommand | - | the namespace delete goes through the same binary allowlist as everything else, rather than being a second path around it |
+| TestRemoveNamespaceRejectsAnUnsafeCommand | - | the namespace delete goes through the same binary allowlist as everything else, rather than being a second path around it; the refusal exits 2 |
 | TestRemoveNamespaceUnreadableProbeLeavesItAlone | - | output that cannot be parsed must not read as "empty" and authorise the delete |
 | TestRemoveNamespaceNonTTYFailsFastNamingTheFlag | - | the namespace question refuses a non-TTY naming `--no-prompt`, the same shape every other prompt uses; the namespace is not deleted |
 | TestRemoveNamespaceProbeArgvIsOneQuery | - | one call listing every kind whose loss would matter, in the namespace being considered |

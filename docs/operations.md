@@ -73,7 +73,9 @@ it is running.
 
 **Trust model.** `env.yaml` is executable configuration: its `command:` runs
 with your privileges. Review a file someone hands you before `deploy` or
-`remove`. `generate` is the dry run.
+`remove`. `generate` is the dry run. A privilege-escalation wrapper (`sudo`
+and the like) in `command:` is refused outright: run `sudo solmq-conn-util`
+instead.
 
 ## 2. validate
 
@@ -145,9 +147,11 @@ A failing probe stops the run, naming the missing permission and namespace, or
 giving a login hint. There is no skip flag.
 
 `command:` must start with an allowlisted bare binary (`kubectl`/`oc`,
-`docker`, `podman`). `--allow-command <name>` approves another one (`sudo`, a
-wrapper) for this run only. The command runs as an argv slice, never through a
-shell, and every token is checked against a safe charset.
+`docker`, `podman`). `--allow-command <name>` approves another one (a chained
+runner such as `lima`) for this run only. A privilege-escalation wrapper
+(`sudo`, `doas`, `su` and the like) is never approved, in the flag or in the
+file: run `sudo solmq-conn-util ...` instead. The command runs as an argv slice,
+never through a shell, and every token is checked against a safe charset.
 
 **What a redeploy restarts.** Podman reloads systemd, then restarts the unit
 when it is active and starts it when it is not. Docker recreates the container
@@ -295,7 +299,7 @@ the `application` and `all` views only; with `container` they are a usage error.
 | `--pod`, `--container` | limit to these instances, by name or by index into the listed (alphabetical) order; repeatable |
 | `--namespace` | kubernetes namespace (default: the deployment's) |
 | `--management-port`, `--user` | the actuator port and account the script uses (defaults: the configured port, `solmq-status`) |
-| `--command`, `--allow-command` | override the platform CLI, and approve a binary outside the allowlist |
+| `--command`, `--allow-command` | override the platform CLI, and approve a binary outside the allowlist (never `sudo` or another escalator) |
 
 `--details` adds, per instance:
 

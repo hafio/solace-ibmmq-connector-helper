@@ -1,10 +1,10 @@
 // Package runner executes the deploy/remove actions for each target by shelling
 // out to the configured CLI (kubectl/oc, docker, podman/systemctl) through an
 // argv slice -- never a shell string, so no token is ever re-interpreted by a
-// shell. Command strings from env.yaml are tokenised and every token is checked
-// against the safe charset (validate.SafeToken) before a process is started.
-// Beyond the charset, ParseCommand enforces validate.CheckDeployCommand's
-// per-platform binary allowlist and flag-shape rules, Preflight runs a
+// shell. Command strings from env.yaml are tokenised and ParseCommand checks
+// every token with the shared guard (execguard.Check, through
+// validate.CommandRules) before a process is started: the charset, the
+// per-platform binary allowlist and the flag-shape rules. Preflight runs a
 // read-only login/daemon probe before any mutating call, and the real Runner
 // resolves argv[0] via exec.LookPath, refusing a current-directory resolution.
 //
@@ -28,12 +28,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/execguard"
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
 
 // preflightHints gives an actionable next step per platform when Preflight's
-// read-only probe fails, keyed by the same platform constants CheckDeployCommand
+// read-only probe fails, keyed by the same platform constants CommandRules
 // uses.
 var preflightHints = map[string]string{
 	validate.PlatformKubernetes: "log in or select a context first (e.g. 'oc login', or check 'kubectl config current-context'), then re-run",
@@ -365,23 +367,20 @@ func applyCmdInput(cmd *exec.Cmd, c Cmd) {
 }
 
 // ParseCommand splits a command string into an argv slice on whitespace (the
-// same tokenisation validate.checkCommand uses, so a command that passed
-// validation parses identically here), rejects any token that is not
-// SafeToken-clean, and then runs the full deploy-command guard
-// (validate.CheckDeployCommand): argv[0] must be a bare name on the platform's
-// allowlist or extraAllowed, and every later token must be flag-shaped. Quoted
-// arguments containing spaces are intentionally unsupported: a token with a
-// space or quote fails the safe-charset gate before the guard ever runs.
-func ParseCommand(platform, cmd string, extraAllowed []string) ([]string, error) {
-	tokens, bad := validate.Tokenize(cmd)
-	if len(bad) > 0 {
-		return nil, fmt.Errorf("command token %q contains an unsafe character (%s)", bad[0], validate.UnsafeTokenReason)
-	}
-	if bad != nil {
-		return nil, fmt.Errorf("command is empty")
-	}
-	if err := validate.CheckDeployCommand(platform, cmd, extraAllowed); err != nil {
-		return nil, err
+// same split the validator uses, so a command that passed validation parses
+// identically here) and runs the shared guard over it: every token passes the
+// charset, argv[0] must be a bare name on the platform's allowlist or among the
+// operator's approvals, and every later token must be flag-shaped. A privilege
+// escalation wrapper is refused whatever the approvals say. Quoted arguments
+// containing spaces are intentionally unsupported: the split tears them apart
+// before the guard sees them.
+//
+// A refusal is marked as a usage error, because what it refuses came from the
+// env file or the command line, so it is exit 2 wherever it surfaces.
+func ParseCommand(platform, cmd string, approvals execguard.Approvals) ([]string, error) {
+	tokens := strings.Fields(cmd)
+	if err := execguard.Check(validate.CommandRules(platform), tokens, approvals); err != nil {
+		return nil, exitcode.AsUsage(err)
 	}
 	return tokens, nil
 }
@@ -409,8 +408,8 @@ func WriteFile(path, content string, mode os.FileMode) error {
 // always, whether or not this spec renders it -- so an object already gone
 // is the expected case, not a failure that would stop remove before the
 // namespace step.
-func Kubernetes(r Runner, command, action, manifest string, extraAllowed []string) (string, error) {
-	argv, err := ParseCommand(validate.PlatformKubernetes, command, extraAllowed)
+func Kubernetes(r Runner, command, action, manifest string, approvals execguard.Approvals) (string, error) {
+	argv, err := ParseCommand(validate.PlatformKubernetes, command, approvals)
 	if err != nil {
 		return "", err
 	}
@@ -451,8 +450,8 @@ func kubeVerb(action string) (string, error) {
 // secrets read, in this child process only -- which is why no secret material is
 // ever written to disk for docker. It is passed on both actions: `down` resolves
 // the same secret declarations `up` did.
-func Docker(r Runner, command, action, compose, projectDir string, env []string, extraAllowed []string) (string, error) {
-	argv, err := ParseCommand(validate.PlatformDocker, command, extraAllowed)
+func Docker(r Runner, command, action, compose, projectDir string, env []string, approvals execguard.Approvals) (string, error) {
+	argv, err := ParseCommand(validate.PlatformDocker, command, approvals)
 	if err != nil {
 		return "", err
 	}
@@ -472,8 +471,8 @@ func Docker(r Runner, command, action, compose, projectDir string, env []string,
 // scales it to 0, start scales it back to replicas (the env.yaml value), and
 // restart is `rollout restart`, which replaces the pods one by one as a
 // rollout does.
-func KubernetesLifecycle(r Runner, command, action, namespace, name string, replicas int, extraAllowed []string) (string, error) {
-	argv, err := ParseCommand(validate.PlatformKubernetes, command, extraAllowed)
+func KubernetesLifecycle(r Runner, command, action, namespace, name string, replicas int, approvals execguard.Approvals) (string, error) {
+	argv, err := ParseCommand(validate.PlatformKubernetes, command, approvals)
 	if err != nil {
 		return "", err
 	}
@@ -495,8 +494,8 @@ func KubernetesLifecycle(r Runner, command, action, namespace, name string, repl
 
 // DockerLifecycle runs `<command> start|stop|restart <container>` on the
 // container a deploy created.
-func DockerLifecycle(r Runner, command, action, container string, extraAllowed []string) (string, error) {
-	argv, err := ParseCommand(validate.PlatformDocker, command, extraAllowed)
+func DockerLifecycle(r Runner, command, action, container string, approvals execguard.Approvals) (string, error) {
+	argv, err := ParseCommand(validate.PlatformDocker, command, approvals)
 	if err != nil {
 		return "", err
 	}
@@ -529,8 +528,8 @@ func PodmanLifecycle(r Runner, sc QuadletScope, action, service string) (string,
 // image yet -- so the caller pulls it and asks again (DockerImagePull). The
 // answer is read from stdout alone (runParsed): a warning the CLI prints on
 // stderr must not turn a reply into "no answer".
-func DockerImageCommand(r Runner, command, image string, extraAllowed []string) (entrypoint, cmd []string, found bool, err error) {
-	argv, err := ParseCommand(validate.PlatformDocker, command, extraAllowed)
+func DockerImageCommand(r Runner, command, image string, approvals execguard.Approvals) (entrypoint, cmd []string, found bool, err error) {
+	argv, err := ParseCommand(validate.PlatformDocker, command, approvals)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -550,8 +549,8 @@ func DockerImageCommand(r Runner, command, image string, extraAllowed []string) 
 // a deploy that has to see how an image starts before compose runs it. The
 // pull prints its progress on both streams, so it runs through Run and its
 // output is reported, never parsed.
-func DockerImagePull(r Runner, command, image string, extraAllowed []string) (string, error) {
-	argv, err := ParseCommand(validate.PlatformDocker, command, extraAllowed)
+func DockerImagePull(r Runner, command, image string, approvals execguard.Approvals) (string, error) {
+	argv, err := ParseCommand(validate.PlatformDocker, command, approvals)
 	if err != nil {
 		return "", err
 	}
@@ -570,8 +569,8 @@ func DockerImagePull(r Runner, command, image string, extraAllowed []string) (st
 // A non-nil error wraps the probe's own output with a platform-specific hint
 // (log in, start the daemon, ...) so the operator gets a next step instead of a
 // bare CLI error.
-func Preflight(r Runner, platform, command, action, namespace string, extraAllowed []string) (string, error) {
-	argv, err := ParseCommand(platform, command, extraAllowed)
+func Preflight(r Runner, platform, command, action, namespace string, approvals execguard.Approvals) (string, error) {
+	argv, err := ParseCommand(platform, command, approvals)
 	if err != nil {
 		return "", err
 	}
@@ -667,8 +666,8 @@ func canIDenied(out string) (string, bool) {
 
 // PodmanVersion is the podman client's version, as `podman version --format
 // {{.Client.Version}}` prints it (5.8.2), read from stdout alone.
-func PodmanVersion(r Runner, command string, extraAllowed []string) (string, error) {
-	argv, err := ParseCommand(validate.PlatformPodman, command, extraAllowed)
+func PodmanVersion(r Runner, command string, approvals execguard.Approvals) (string, error) {
+	argv, err := ParseCommand(validate.PlatformPodman, command, approvals)
 	if err != nil {
 		return "", err
 	}
@@ -709,8 +708,8 @@ func PodmanSupportsReplace(version string) bool {
 // intact. Below 4.7, where the rest of the quadlet wiring still works, it is a
 // remove-then-create: a create that fails then leaves the installed unit
 // naming a secret that is gone until deploy is run again.
-func PodmanSecretCreate(r Runner, command, name, value string, replace bool, extraAllowed []string) (string, error) {
-	argv, err := ParseCommand(validate.PlatformPodman, command, extraAllowed)
+func PodmanSecretCreate(r Runner, command, name, value string, replace bool, approvals execguard.Approvals) (string, error) {
+	argv, err := ParseCommand(validate.PlatformPodman, command, approvals)
 	if err != nil {
 		return "", err
 	}
@@ -735,11 +734,11 @@ func PodmanSecretCreate(r Runner, command, name, value string, replace bool, ext
 
 // PodmanSecretRemove deletes the named secrets, ignoring any that are already
 // gone so a repeated delete stays quiet.
-func PodmanSecretRemove(r Runner, command string, names []string, extraAllowed []string) (string, error) {
+func PodmanSecretRemove(r Runner, command string, names []string, approvals execguard.Approvals) (string, error) {
 	if len(names) == 0 {
 		return "", nil
 	}
-	argv, err := ParseCommand(validate.PlatformPodman, command, extraAllowed)
+	argv, err := ParseCommand(validate.PlatformPodman, command, approvals)
 	if err != nil {
 		return "", err
 	}

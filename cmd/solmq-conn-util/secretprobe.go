@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -24,8 +25,8 @@ import (
 // at start if something is missing. Any other failure to read it is a warning
 // too, naming what kubectl said; the preflight probe has already shown the
 // cluster is reachable.
-func probeOperatorSecrets(r runner.Runner, k *spec.Kubernetes, probes []gen.SecretProbe, extraAllowed []string) (errs []error, warns []string) {
-	argv, err := runner.ParseCommand(validate.PlatformKubernetes, k.Command, extraAllowed)
+func probeOperatorSecrets(r runner.Runner, k *spec.Kubernetes, probes []gen.SecretProbe, approvals execguard.Approvals) (errs []error, warns []string) {
+	argv, err := runner.ParseCommand(validate.PlatformKubernetes, k.Command, approvals)
 	if err != nil {
 		return []error{err}, nil
 	}

@@ -1,85 +1,104 @@
 package validate
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
-// TestCheckDeployCommandAcceptReject pins the accept/reject matrix from the
-// deploy-command lockdown: a bare, allowlisted argv[0] with flag-shaped
-// arguments passes; a path, an unlisted binary, a bare positional argument, an
-// unapproved chained binary, a bare end-of-flags marker, and an empty command
-// are all rejected. extraAllowed (--allow-command) is what turns "sudo podman"
-// from a reject into an accept.
-func TestCheckDeployCommandAcceptReject(t *testing.T) {
+// approved builds the --allow-command approvals a test hands to Context, failing
+// the test on a value Approve refuses.
+func approved(t *testing.T, names ...string) execguard.Approvals {
+	t.Helper()
+	a, err := execguard.Approve("solmq-conn-util", names)
+	if err != nil {
+		t.Fatalf("Approve(%v) = %v", names, err)
+	}
+	return a
+}
+
+// TestCommandRulesPerPlatform pins the one Rules value per command field: the
+// field the messages name, the platform as scope, and AllowedCommands as the
+// source of Allowed (copied, so a caller cannot widen the package's list). An
+// unknown platform has no allowlist, which the guard reports rather than
+// accepting anything.
+func TestCommandRulesPerPlatform(t *testing.T) {
+	for platform, allowed := range AllowedCommands {
+		r := CommandRules(platform)
+		if r.Field != platform+".command" || r.Scope != platform || r.Subword != "" || strings.Join(r.Allowed, ",") != strings.Join(allowed, ",") {
+			t.Errorf("CommandRules(%q) = %+v, want field %s.command, scope %s, allowed %v and no subword", platform, r, platform, platform, allowed)
+		}
+	}
+	r := CommandRules(PlatformKubernetes)
+	r.Allowed[0] = "curl"
+	if AllowedCommands[PlatformKubernetes][0] != "kubectl" {
+		t.Error("CommandRules must copy AllowedCommands, not alias it")
+	}
+	if err := execguard.Check(CommandRules("nomad"), []string{"nomad"}, execguard.Approvals{}); err == nil ||
+		!strings.Contains(err.Error(), "Rules.Allowed is empty for nomad.command") {
+		t.Errorf("an unknown platform must fail as a wiring error, got %v", err)
+	}
+}
+
+// TestCommandGuardMessages pins what the shared guard says for each mistake an
+// env file actually makes, named by the field it was found in. The words come
+// from execguard; this pins that the platform rules reach them intact.
+func TestCommandGuardMessages(t *testing.T) {
 	cases := []struct {
 		name     string
 		platform string
 		cmd      string
-		extra    []string
-		wantErr  bool
+		want     string
 	}{
-		{"kubectl", PlatformKubernetes, "kubectl", nil, false},
-		{"oc", PlatformKubernetes, "oc", nil, false},
-		{"kubectl with context and namespace flags", PlatformKubernetes, "kubectl --context prod -n ns", nil, false},
-		{"docker with context flag", PlatformDocker, "docker --context foo", nil, false},
-		{"podman", PlatformPodman, "podman", nil, false},
-		{"kubectl.exe (Windows-authored config)", PlatformKubernetes, "kubectl.exe", nil, false},
-		{"sudo podman, sudo approved via extraAllowed", PlatformPodman, "sudo podman", []string{"sudo"}, false},
-
-		{"curl is not on any platform allowlist", PlatformKubernetes, "curl", nil, true},
-		{"absolute path argv0 rejected", PlatformKubernetes, "/tmp/evil", nil, true},
-		{"relative path argv0 rejected", PlatformKubernetes, "./kubectl", nil, true},
-		{"bare positional argument after argv0", PlatformKubernetes, "kubectl delete ns prod", nil, true},
-		{"sudo podman rejected without extraAllowed", PlatformPodman, "sudo podman", nil, true},
-		{"bare end-of-flags marker as argv0", PlatformKubernetes, "--", nil, true},
-		{"empty command", PlatformKubernetes, "", nil, true},
+		{"path", PlatformKubernetes, "/tmp/evil",
+			`kubernetes.command[0] = "/tmp/evil" must be a bare binary name, not a path`},
+		{"unlisted binary", PlatformKubernetes, "curl",
+			`kubernetes.command[0] = "curl" is not a binary this tool runs: allowed on kubernetes are kubectl, oc -- correct the env file, or approve this one for a single run with --allow-command curl`},
+		{"end of flags", PlatformKubernetes, "kubectl --",
+			`kubernetes.command[1] = "--" is not allowed: end-of-flags`},
+		{"bare word", PlatformKubernetes, "kubectl delete",
+			`kubernetes.command[1] = "delete" is not allowed in subcommand position`},
+		{"empty", PlatformKubernetes, "",
+			`kubernetes.command is empty: it must name the binary to run (one of: kubectl, oc)`},
+		{"unsafe character", PlatformDocker, "docker --host $(evil)",
+			`docker.command[2] = "$(evil)" contains "$", which is not allowed in a command token`},
+		{"sudo is an escalator", PlatformPodman, "sudo podman",
+			`podman.command[0] = "sudo" is a privilege-escalation wrapper (sudo), which is never permitted in a command, not even with --allow-command`},
+		{"sudo after argv0", PlatformPodman, "podman sudo",
+			`podman.command[1] = "sudo" is a privilege-escalation wrapper (sudo)`},
 	}
 	for _, c := range cases {
-		err := CheckDeployCommand(c.platform, c.cmd, c.extra)
-		if (err != nil) != c.wantErr {
-			t.Errorf("%s: CheckDeployCommand(%q, extra=%v) = %v, want error=%v", c.name, c.cmd, c.extra, err, c.wantErr)
+		err := execguard.Check(CommandRules(c.platform), strings.Fields(c.cmd), execguard.Approvals{})
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: Check(%q) = %v, want it to contain %q", c.name, c.cmd, err, c.want)
 		}
 	}
 }
 
-// TestCheckDeployCommandEndOfFlagsMarkerMidCommand exercises the "--" rule
-// specifically at a non-argv0 position (kubectl is a valid, allowlisted
-// binary; "--" as its first argument is still rejected as an end-of-flags
-// marker, distinct from the argv0 allowlist rejection covered above).
-func TestCheckDeployCommandEndOfFlagsMarkerMidCommand(t *testing.T) {
-	err := CheckDeployCommand(PlatformKubernetes, "kubectl --", nil)
-	if err == nil || !strings.Contains(err.Error(), `token "--": end-of-flags marker is not accepted`) {
-		t.Fatalf(`want end-of-flags rejection, got %v`, err)
+// TestCommandGuardAccepts pins what the guard now lets through that the old gate
+// refused: an embedded tilde (a Windows 8.3 short name in a flag value) and a
+// ".Exe" suffix in any case, next to the plain forms.
+func TestCommandGuardAccepts(t *testing.T) {
+	for _, c := range []struct{ platform, cmd string }{
+		{PlatformKubernetes, "kubectl"},
+		{PlatformKubernetes, "oc"},
+		{PlatformKubernetes, "kubectl --context prod -n ns"},
+		{PlatformDocker, "docker --context foo"},
+		{PlatformPodman, "podman"},
+		{PlatformKubernetes, "kubectl.exe"},
+		{PlatformKubernetes, "kubectl.Exe"},
+		{PlatformKubernetes, "kubectl --kubeconfig=C:/RUNNER~1/config"},
+		{PlatformKubernetes, "kubectl --kubeconfig C:/PROGRA~1/kube/config"},
+	} {
+		if err := execguard.Check(CommandRules(c.platform), strings.Fields(c.cmd), execguard.Approvals{}); err != nil {
+			t.Errorf("%s %q must be accepted, got %v", c.platform, c.cmd, err)
+		}
 	}
-}
-
-// TestCheckDeployCommandErrorTexts pins the canonical error wording verbatim
-// (the CLI validator and the generator page's JS validator must emit the same
-// words for the same mistake).
-func TestCheckDeployCommandErrorTexts(t *testing.T) {
-	if err := CheckDeployCommand(PlatformKubernetes, "/tmp/evil", nil); err == nil ||
-		err.Error() != `"/tmp/evil": a path is not accepted here; use a bare binary name, resolved from PATH` {
-		t.Errorf("path error text = %v", err)
-	}
-	wantAllowlist := fmt.Sprintf(`"curl": binary must be one of %s; deploy/remove can approve another with --allow-command <name>`,
-		strings.Join(AllowedCommands[PlatformKubernetes], ", "))
-	if err := CheckDeployCommand(PlatformKubernetes, "curl", nil); err == nil || err.Error() != wantAllowlist {
-		t.Errorf("allowlist error text = %v, want %v", err, wantAllowlist)
-	}
-	if err := CheckDeployCommand(PlatformKubernetes, "kubectl --", nil); err == nil ||
-		err.Error() != `token "--": end-of-flags marker is not accepted` {
-		t.Errorf("end-of-flags error text = %v", err)
-	}
-	if err := CheckDeployCommand(PlatformKubernetes, "kubectl delete", nil); err == nil ||
-		err.Error() != `token "delete": arguments must be flag-shaped (-x, --flag, --flag=value, or a flag's value); solmq-conn-util appends its own subcommand` {
-		t.Errorf("flag-shape error text = %v", err)
-	}
-	if err := CheckDeployCommand(PlatformKubernetes, "", nil); err == nil || err.Error() != "must not be empty" {
-		t.Errorf("empty error text = %v", err)
+	if err := execguard.Check(CommandRules(PlatformKubernetes), []string{"kubectl", "--kubeconfig", "~/kc"}, execguard.Approvals{}); err == nil ||
+		!strings.Contains(err.Error(), "starts with '~'") {
+		t.Errorf("a leading tilde must still be refused, got %v", err)
 	}
 }
 
@@ -114,33 +133,47 @@ func TestCheckKubeCommandDefaultKubectlUnvalidated(t *testing.T) {
 
 // TestContextAllowCommandsHonored covers Context.AllowCommands threading into
 // checkContainerTarget (docker/podman) and checkKube (kubernetes): a chained
-// binary is rejected when AllowCommands is nil (plain `validate`) and accepted
-// once the operator's --allow-command value is present.
+// binary is rejected when AllowCommands is the zero value (plain `validate`) and
+// accepted once the operator's --allow-command approval is present. A
+// privilege-escalation wrapper is the one chained binary no approval can reach:
+// it cannot even be approved, and the command that names one is refused whatever
+// the approvals say.
 func TestContextAllowCommandsHonored(t *testing.T) {
+	lima := approved(t, "lima")
+
 	d := dockerOK()
-	d.Command = "sudo docker"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true}); !hasErr(e, "docker.command") {
-		t.Errorf("sudo docker without AllowCommands should be rejected, got %v", e)
+	d.Command = "lima docker"
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true}); !hasErr(e, "docker.command[0] = \"lima\"") {
+		t.Errorf("lima docker without AllowCommands should be rejected, got %v", e)
 	}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true, AllowCommands: []string{"sudo"}}); hasErr(e, "docker.command") {
-		t.Errorf("sudo docker with AllowCommands=[sudo] should be accepted, got %v", e)
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true, AllowCommands: lima}); hasErr(e, "docker.command") {
+		t.Errorf("lima docker with lima approved should be accepted, got %v", e)
 	}
 
 	p := podmanOK()
-	p.Command = "sudo podman"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p, CheckPodman: true}); !hasErr(e, "podman.command") {
-		t.Errorf("sudo podman without AllowCommands should be rejected, got %v", e)
+	p.Command = "lima podman"
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p, CheckPodman: true}); !hasErr(e, "podman.command[0] = \"lima\"") {
+		t.Errorf("lima podman without AllowCommands should be rejected, got %v", e)
 	}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p, CheckPodman: true, AllowCommands: []string{"sudo"}}); hasErr(e, "podman.command") {
-		t.Errorf("sudo podman with AllowCommands=[sudo] should be accepted, got %v", e)
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p, CheckPodman: true, AllowCommands: lima}); hasErr(e, "podman.command") {
+		t.Errorf("lima podman with lima approved should be accepted, got %v", e)
 	}
 
-	k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: "sudo kubectl"}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true}); !hasErr(e, "kubernetes.command") {
-		t.Errorf("sudo kubectl without AllowCommands should be rejected, got %v", e)
+	k := &spec.Kubernetes{Deployment: baseKubeDeploy(), Command: "lima kubectl"}
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true}); !hasErr(e, "kubernetes.command[0] = \"lima\"") {
+		t.Errorf("lima kubectl without AllowCommands should be rejected, got %v", e)
 	}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true, AllowCommands: []string{"sudo"}}); hasErr(e, "kubernetes.command") {
-		t.Errorf("sudo kubectl with AllowCommands=[sudo] should be accepted, got %v", e)
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Kube: k, CheckKubernetes: true, AllowCommands: lima}); hasErr(e, "kubernetes.command") {
+		t.Errorf("lima kubectl with lima approved should be accepted, got %v", e)
+	}
+
+	// sudo: refused with no approvals, and Approve will not produce one.
+	p.Command = "sudo podman"
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p, CheckPodman: true, AllowCommands: lima}); !hasErr(e, "podman.command[0] = \"sudo\" is a privilege-escalation wrapper") {
+		t.Errorf("sudo podman must be refused even with other approvals, got %v", e)
+	}
+	if _, err := execguard.Approve("solmq-conn-util", []string{"sudo"}); err == nil || !strings.Contains(err.Error(), "sudo solmq-conn-util") {
+		t.Errorf("approving sudo must be refused with the run-it-under-sudo advice, got %v", err)
 	}
 }
 
@@ -150,12 +183,12 @@ func TestContextAllowCommandsHonored(t *testing.T) {
 func TestCheckContainerCommandUnlistedBinaryRejected(t *testing.T) {
 	d := dockerOK()
 	d.Command = "curl"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true}); !hasErr(e, "binary must be one of") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: d, CheckDocker: true}); !hasErr(e, `docker.command[0] = "curl" is not a binary this tool runs: allowed on docker are docker`) {
 		t.Errorf("docker.command curl should be rejected by the allowlist, got %v", e)
 	}
 	p := podmanOK()
 	p.Command = "/tmp/evil"
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p, CheckPodman: true}); !hasErr(e, "a path is not accepted here") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Podman: p, CheckPodman: true}); !hasErr(e, "podman.command[0] = \"/tmp/evil\" must be a bare binary name, not a path") {
 		t.Errorf("podman.command as a path should be rejected, got %v", e)
 	}
 }

@@ -151,7 +151,7 @@ Alias: `dp`.
 
 Generates for the platform, then applies it by shelling out to the section's `command:` (`kubectl`/`oc`, `docker`, or `podman` + `systemctl`) through an argv slice -- never a shell. The env file must contain the matching section.
 
-`command:`'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); `--allow-command` approves an extra binary for this invocation (e.g. a `sudo` prefix). Before anything is written or applied, a read-only preflight probe (on kubernetes, `auth can-i create deployment`) must succeed, or the run stops: naming the missing permission when the cluster answers no, with a login hint when it cannot be reached. For how the platform is picked, see [Platform resolution](#platform-resolution).
+`command:`'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); `--allow-command` approves an extra binary for this invocation (e.g. a chained runner such as `lima nerdctl`). A privilege-escalation wrapper such as `sudo` is never approved: run `sudo solmq-conn-util` instead. Before anything is written or applied, a read-only preflight probe (on kubernetes, `auth can-i create deployment`) must succeed, or the run stops: naming the missing permission when the cluster answers no, with a login hint when it cannot be reached. For how the platform is picked, see [Platform resolution](#platform-resolution).
 
 Flags: `--platform`; `-e`, `--env`; `--allow-command`.
 

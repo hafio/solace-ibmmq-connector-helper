@@ -684,8 +684,14 @@ absent is an error.
 
 `command` rules: the first token must be a bare binary on the platform's
 allowlist (`kubectl`/`oc`, `docker`, `podman`), later tokens must be
-flag-shaped, and every token is checked against a safe charset. Another binary
-(`sudo`, a wrapper) needs `--allow-command` on the command line.
+flag-shaped, and every token is checked against a safe charset: valid UTF-8,
+no whitespace, control or invisible characters, no shell metacharacters. An
+embedded `~` (`--kubeconfig=C:/RUNNER~1/config`) and `.exe` in any case are
+accepted; a leading `~` is not. Another binary (a chained runner such as
+`lima nerdctl`) needs `--allow-command` on the command line. A
+privilege-escalation wrapper (`sudo`, `doas`, `su` and the like) is never
+accepted, not even with `--allow-command`: run `sudo solmq-conn-util ...`
+instead, so the privilege belongs to one invocation you chose.
 
 No section takes a `secrets:` block for application credentials (kubernetes
 takes one for how they are delivered), and none configures in-container paths.

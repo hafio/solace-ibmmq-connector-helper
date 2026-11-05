@@ -4,15 +4,20 @@
 package validate
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/hafio/go-deploy-utility/envref"
+	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
@@ -39,14 +44,28 @@ const (
 )
 
 // AllowedCommands is the argv[0] allowlist for each deploy platform's
-// `command:` field. CheckDeployCommand also honors any names passed as
-// extraAllowed (deploy/remove's repeatable --allow-command flag), which is
-// how an operator approves a chained binary (e.g. `sudo podman`) that the
-// yaml author cannot grant on their own.
+// `command:` field, the source of CommandRules' Allowed. The shared guard also
+// honors the operator's --allow-command approvals (execguard.Approvals), which is
+// how an operator approves a chained binary (e.g. `lima nerdctl`) that the yaml
+// author cannot grant on their own. A privilege-escalation wrapper such as sudo
+// is never approvable: run `sudo solmq-conn-util` instead.
 var AllowedCommands = map[string][]string{
 	PlatformKubernetes: {"kubectl", "oc"},
 	PlatformDocker:     {"docker"},
 	PlatformPodman:     {"podman"},
+}
+
+// CommandRules builds the shared guard's rules for one platform's `command:`
+// field: the validator, runner.ParseCommand and the --command override all check
+// against this one value. There is no Subword, because the runner appends
+// `compose` itself. An unknown platform has no allowlist, which the guard reports
+// as a wiring error rather than accepting anything.
+func CommandRules(platform string) execguard.Rules {
+	return execguard.Rules{
+		Field:   platform + ".command",
+		Scope:   platform,
+		Allowed: slices.Clone(AllowedCommands[platform]),
+	}
 }
 
 // fileEnv is the single config file label on every issue (everything now lives
@@ -108,19 +127,18 @@ type Context struct {
 	// subordinate id ranges).
 	Lint bool
 
-	// AllowCommands extends the platform binary allowlist for CheckDeployCommand,
-	// threaded from deploy/remove's repeatable --allow-command flag. Plain
-	// `validate` leaves this nil: an exotic command (a chained binary like `sudo
-	// podman`) validates clean only at deploy/remove time with the flag, and the
+	// AllowCommands extends the platform binary allowlist for the shared command
+	// guard, threaded from the repeatable --allow-command flag. Plain `validate`
+	// leaves this the zero value: an exotic command (a chained binary like `lima
+	// nerdctl`) validates clean only at deploy/remove time with the flag, and the
 	// error text says so.
-	AllowCommands []string
+	AllowCommands execguard.Approvals
 }
 
 var (
 	connNameRE = regexp.MustCompile(`^[^()\s,]+\(\d+\)(,[^()\s,]+\(\d+\))*$`)
 	dns1123RE  = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 	hostRE     = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
-	envNameRE  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
 // Run executes all checks, returning fatal errors and non-fatal warnings.
@@ -375,38 +393,38 @@ func checkSide(add, warn func(string, string, ...any), env func(string) (string,
 	edaAdvisory(warn, file, s, isSource)
 }
 
-// checkCred validates one credential position: the literal and `-env` forms are
-// mutually exclusive, an `-env` value must be an environment-variable name (not
-// a `${...}` reference or a value), and a `${` in the literal form is almost
-// always someone reaching for the `-env` key.
+// checkCred validates one credential position through the shared envref rules:
+// the literal and `-env` forms are mutually exclusive, an `-env` value must be an
+// environment-variable name (not a `${...}` reference or a value, and a name that
+// fails is never echoed back), and a `${` in the literal form is almost always
+// someone reaching for the `-env` key. The tool's own reserved-prefix rule follows.
 //
-// env, when non-nil, also confirms the named variable is actually set, so a
+// env, when non-nil, also confirms the named variable is set and not empty, so a
 // missing credential is caught while linting rather than mid-deploy.
 func checkCred(add, warn func(string, string, ...any), env func(string) (string, bool), file, label string, c spec.Cred) {
-	if c.Both() {
-		add(file, "%s sets both a literal value and %s-env; use one or the other", label, label)
+	ref := envref.Ref{Field: label, EnvKey: label + "-env", Literal: c.Literal, Name: c.EnvVar}
+	if err := ref.Check(); err != nil {
+		add(file, "%s", err)
 		return
 	}
 	if c.EnvVar != "" {
-		switch {
-		case strings.Contains(c.EnvVar, "${"):
-			add(file, "%s-env %q must be a bare variable name, not a ${...} reference", label, c.EnvVar)
-		case strings.HasPrefix(c.EnvVar, spec.GeneratedNamePrefix):
+		if strings.HasPrefix(c.EnvVar, spec.GeneratedNamePrefix) {
 			// An -env credential is mounted under the variable name it gives, and
 			// so shares one namespace with the names the tool derives for literals.
 			// Reserving this prefix is what keeps the two apart: without it a
 			// variable spelled like a derived name would put two credentials on one
-			// mounted file. envNameRE would accept it (a leading underscore is a
-			// legal identifier), so it needs its own case.
+			// mounted file. A leading underscore is a legal identifier, so the
+			// shared name rules accept it and it needs its own case.
 			add(file, "%s-env %q starts with %s, which is reserved for the mount names this tool derives for itself; rename the variable so it falls outside that prefix", label, c.EnvVar, spec.GeneratedNamePrefix)
-		case !envNameRE.MatchString(c.EnvVar):
-			add(file, "%s-env %q is not a valid environment variable name (letters, digits and underscore; not starting with a digit)", label, c.EnvVar)
-		case env != nil:
+			return
+		}
+		if env != nil {
 			// Advisory only. Authoring a spec, generating a config, or linting on
 			// a laptop must not require every production credential to be
 			// exported; the deploy path resolves values and fails hard there.
-			if _, ok := env(c.EnvVar); !ok {
-				warn(file, "%s-env names %s, which is not set in this environment; deploying will fail until it is exported", label, c.EnvVar)
+			var unset *envref.UnsetError
+			if _, err := ref.Resolve(env); errors.As(err, &unset) {
+				warn(file, "%s", unset)
 			}
 		}
 		return
@@ -876,8 +894,8 @@ func checkDuplicateSources(warn func(string, string, ...any), wfs []spec.Workflo
 }
 
 func checkKube(add, warn func(string, string, ...any), ctx Context) {
-	if err := CheckDeployCommand(PlatformKubernetes, ctx.Kube.Command, ctx.AllowCommands); err != nil {
-		add(fileEnv, "kubernetes.command %s", err)
+	if err := execguard.Check(CommandRules(PlatformKubernetes), strings.Fields(ctx.Kube.Command), ctx.AllowCommands); err != nil {
+		add(fileEnv, "%s", err)
 	}
 
 	dep := ctx.Kube.Deployment
@@ -1099,7 +1117,7 @@ func safeLibsURL(raw string) bool {
 // metacharacters (';', '&', '?', '#', ...): those are harmless inside single
 // quotes and legitimately appear in download URLs (query strings, fragments), so
 // widening this set would reject valid URLs. Argv tokens use the stricter
-// SafeToken, which layers shellMeta on top.
+// SafeToken, which is built from the shared execguard charset.
 func safeShellChars(s string) bool {
 	for _, r := range s {
 		if r <= 0x20 || r == 0x7f || r == '\'' || r == '"' || r == '\\' || r == '`' || r == '$' {
@@ -1109,36 +1127,42 @@ func safeShellChars(s string) bool {
 	return true
 }
 
-// pathShellMeta is shellMeta minus '~', for host paths only. A Windows 8.3 short
-// name is a legitimate path and carries one -- C:\Users\RUNNER~1\..., the form
-// %TEMP% takes on a GitHub Windows runner, and PROGRA~1 for Program Files -- so
-// rejecting the tilde rejects real directories an operator cannot rename.
+// unsafeRune reports the runes no token or host path may carry whatever the
+// punctuation set: whitespace over the whole Unicode White_Space property,
+// control characters (C0, DEL, C1) and invisible format characters. It is the
+// rune half of the one charset definition; execguard.UnsafeChars is the other.
+func unsafeRune(r rune) bool {
+	return unicode.IsSpace(r) || execguard.IsControl(r) || execguard.IsInvisible(r)
+}
+
+// pathShellMeta is execguard.UnsafeChars minus '\', for host paths only. A
+// Windows-authored path (C:\certs\truststore.jks) is legitimate and carries
+// backslashes, so a host path admits them. A tilde was never in UnsafeChars, so a
+// Windows 8.3 short name -- C:\Users\RUNNER~1\..., the form %TEMP% takes on a
+// GitHub Windows runner, and PROGRA~1 for Program Files -- also passes, and SafeToken
+// adds the tilde back for argv tokens.
 //
-// It is safe to allow in these sinks specifically: no shell is ever invoked (the
-// runner runs an argv slice), systemd does not expand a tilde in a unit
-// directive, and inside a compose plain scalar it is an ordinary character. It is
-// derived from shellMeta rather than spelled out so the two cannot drift apart if
-// shellMeta gains a character.
-var pathShellMeta = strings.ReplaceAll(shellMeta, "~", "")
+// It is safe to allow both in these sinks specifically: no shell is ever invoked
+// (the runner runs an argv slice), systemd does not expand a tilde in a unit
+// directive, and inside a compose plain scalar neither is special. It is derived
+// from execguard.UnsafeChars rather than spelled out so the two cannot drift apart
+// if the shared charset gains a character.
+var pathShellMeta = strings.ReplaceAll(execguard.UnsafeChars, "\\", "")
 
 // safeHostPath gates a config-declared host path that a docker/podman renderer
 // concatenates unquoted into a mount argument (`Volume=` in a quadlet unit, a
-// compose `volumes:` entry). It rejects whitespace, control characters, quotes,
-// backtick and '$' plus the shell metacharacters: a newline would open a new unit
-// directive or YAML key, and a space would split the mount argument in two.
+// compose `volumes:` entry). It rejects invalid UTF-8, whitespace, control and
+// invisible characters, quotes, backtick and '$' plus the shell metacharacters: a
+// newline would open a new unit directive or YAML key, and a space would split the
+// mount argument in two.
 //
-// Unlike safeShellChars it permits '\' and ':' so a Windows-authored path
+// Unlike SafeToken it permits '\' and ':' so a Windows-authored path
 // (C:\certs\truststore.jks) still validates, and '~' for the short-name reason
-// pathShellMeta records -- none of the three can escape either sink. Only the
-// value as written in env.yaml is checked, never the absolute path it resolves
-// to, which is the developer's own working directory.
+// pathShellMeta records. Only the value as written in env.yaml is checked, never
+// the absolute path it resolves to, which is the developer's own working
+// directory.
 func safeHostPath(s string) bool {
-	for _, r := range s {
-		if r <= 0x20 || r == 0x7f || r == '\'' || r == '"' || r == '`' || r == '$' {
-			return false
-		}
-	}
-	return !strings.ContainsAny(s, pathShellMeta)
+	return utf8.ValidString(s) && !strings.ContainsFunc(s, unsafeRune) && !strings.ContainsAny(s, pathShellMeta)
 }
 
 // resolveWorkflows materialises every conn-ref side, as Run does once for the
@@ -1612,108 +1636,9 @@ func checkPorts(add func(string, string, ...any), section string, ports []spec.P
 	}
 }
 
-// CheckDeployCommand is the single shared gate for a deploy/remove `command:`
-// field, used by both the validator (nil extraAllowed) and the runner (the
-// operator's --allow-command values). It layers three checks on top of
-// Tokenize's charset gate, in order, and returns nil or one error naming the
-// first offending token:
-//
-//  1. Empty command -> "must not be empty".
-//  2. argv[0] (a ".exe"/".EXE" suffix is stripped before comparing, so a
-//     Windows-authored config stays portable): a path separator is rejected
-//     outright (a bare PATH-resolved name only); otherwise the token must be
-//     in AllowedCommands[platform] or extraAllowed.
-//  3. Every later token must be flag-shaped: it starts with "-"; or it is
-//     itself allowlisted/extraAllowed after the same .exe-strip (this is what
-//     lets a chained binary like `sudo podman` validate once "sudo" is
-//     extraAllowed); or the previous token starts with "-" and contains no
-//     "=" (so this token is that flag's value). A literal "--" is rejected
-//     outright: as an end-of-flags marker it would let a positional argument
-//     smuggle past this rule right after it.
-//
-// Honest limitation: a flag's value is not further inspectable (arity is
-// unknowable from the token stream alone), so the hard guarantee here covers
-// argv[0] and every bare token -- not what a flag's value itself contains.
-func CheckDeployCommand(platform, cmd string, extraAllowed []string) error {
-	tokens, bad := Tokenize(cmd)
-	if bad != nil {
-		if len(bad) == 0 {
-			return fmt.Errorf("must not be empty")
-		}
-		return fmt.Errorf("token %q contains an unsafe character (%s)", bad[0], UnsafeTokenReason)
-	}
-
-	stripExe := func(tok string) string {
-		if s, ok := strings.CutSuffix(tok, ".exe"); ok {
-			return s
-		}
-		if s, ok := strings.CutSuffix(tok, ".EXE"); ok {
-			return s
-		}
-		return tok
-	}
-	allowed := AllowedCommands[platform]
-	isAllowed := func(name string) bool {
-		for _, a := range allowed {
-			if a == name {
-				return true
-			}
-		}
-		for _, a := range extraAllowed {
-			if a == name {
-				return true
-			}
-		}
-		return false
-	}
-
-	bin := tokens[0]
-	if binName := stripExe(bin); strings.Contains(binName, "/") {
-		return fmt.Errorf("%q: a path is not accepted here; use a bare binary name, resolved from PATH", bin)
-	} else if !isAllowed(binName) {
-		return fmt.Errorf("%q: binary must be one of %s; deploy/remove can approve another with --allow-command <name>", bin, strings.Join(allowed, ", "))
-	}
-
-	for i := 1; i < len(tokens); i++ {
-		tok := tokens[i]
-		switch {
-		case tok == "--":
-			return fmt.Errorf(`token "--": end-of-flags marker is not accepted`)
-		case strings.HasPrefix(tok, "-"):
-		case isAllowed(stripExe(tok)):
-		case strings.HasPrefix(tokens[i-1], "-") && !strings.Contains(tokens[i-1], "="):
-			// This token is the previous flag's value.
-		default:
-			return fmt.Errorf("token %q: arguments must be flag-shaped (-x, --flag, --flag=value, or a flag's value); solmq-conn-util appends its own subcommand", tok)
-		}
-	}
-	return nil
-}
-
 // UnsafeTokenReason describes the safe-token charset, shared so the validator and
 // the runner reject a token with the same words.
-const UnsafeTokenReason = "no spaces, quotes, backslash, control chars, or shell metacharacters"
-
-// Tokenize splits a command string into argv on whitespace and reports which
-// tokens fail the safe charset. It is the single definition of "how a command:
-// becomes argv", used by the validator (which reports every bad token) and by
-// the runner (which refuses to start a process on the first one) -- so what
-// validation accepts and what actually executes can never drift apart.
-//
-// bad is nil when every token is safe; a non-nil, empty bad means the command
-// was empty.
-func Tokenize(cmd string) (tokens, bad []string) {
-	tokens = strings.Fields(cmd)
-	if len(tokens) == 0 {
-		return nil, []string{}
-	}
-	for _, t := range tokens {
-		if !SafeToken(t) {
-			bad = append(bad, t)
-		}
-	}
-	return tokens, bad
-}
+const UnsafeTokenReason = "no whitespace, quotes, backslash, '~', control or invisible characters, or shell metacharacters"
 
 // containerTarget is one docker/podman section flattened to the fields the shared
 // checks need. Grouping them keeps checkContainerTarget's call sites named rather
@@ -1773,8 +1698,8 @@ func checkRestart(add func(string, string, ...any), section, platform, v string)
 
 // checkContainerTarget runs the checks common to the docker and podman sections:
 // a DNS-1123 name (it flows into filesystem paths and a systemctl unit token), a
-// deploy command gated by CheckDeployCommand (bare, allowlisted binary plus
-// flag-shaped arguments), a required image, valid ports, credentials wiring, and
+// deploy command gated by the shared execguard.Check (bare, allowlisted binary
+// plus flag-shaped arguments), a required image, valid ports, credentials wiring, and
 // host-provided stores/libs paths.
 //
 // image/restart/timezone and the host paths are gated here because both renderers
@@ -1803,8 +1728,8 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 	if !isDNS1123(t.Name) {
 		add(fileEnv, "%s.name %q is not a valid DNS-1123 label", section, t.Name)
 	}
-	if err := CheckDeployCommand(t.Platform, t.Command, ctx.AllowCommands); err != nil {
-		add(fileEnv, "%s.command %s", section, err)
+	if err := execguard.Check(CommandRules(t.Platform), strings.Fields(t.Command), ctx.AllowCommands); err != nil {
+		add(fileEnv, "%s", err)
 	}
 	if t.Image != "" {
 		add(fileEnv, "%s.image is no longer configured here: the image moved to the top-level image: block (repo/name/tag) so one declaration serves every platform. Remove %s.image", section, section)
@@ -1931,20 +1856,16 @@ func checkPodman(add, warn func(string, string, ...any), ctx Context) {
 	}
 }
 
-// shellMeta lists the shell metacharacters SafeToken rejects on top of the
-// safeShellChars set (which already covers spaces, quotes, backslash, backtick,
-// and '$'). No shell is ever invoked -- the runner runs an argv slice via os/exec,
-// never sh -c -- so this is defense-in-depth against a token being reinterpreted by
-// a shell downstream. Legitimate CLI tokens (paths, flags, contexts) use only
-// letters, digits, and - . / : _ = @ , +, none of which appear here.
-const shellMeta = ";|&<>()*?[]{}~#!"
-
-// SafeToken reports whether s is safe to pass as a single argv token: on top of
-// safeShellChars (spaces, quotes, backslash, backtick, '$', control chars) it also
-// rejects the shell metacharacters in shellMeta. The runner reuses this gate before
-// executing any config-derived command token.
+// SafeToken reports whether s is safe to pass as a single argv token: valid UTF-8
+// with no whitespace, control or invisible characters, and none of
+// execguard.UnsafeChars (quotes, backslash, backtick, '$' and the shell
+// metacharacters) or '~'. No shell is ever invoked -- the runner runs an argv slice
+// via os/exec, never sh -c -- so this is defense-in-depth against a token being
+// reinterpreted by a shell downstream. Legitimate CLI tokens (paths, flags,
+// contexts) use only letters, digits, and - . / : _ = @ , +, none of which are
+// refused. The charset has one definition, shared with the command guard.
 func SafeToken(s string) bool {
-	return safeShellChars(s) && !strings.ContainsAny(s, shellMeta)
+	return utf8.ValidString(s) && !strings.ContainsFunc(s, unsafeRune) && !strings.ContainsAny(s, execguard.UnsafeChars+"~")
 }
 
 // SafeActuatorUser reports whether s is safe to use as the management account

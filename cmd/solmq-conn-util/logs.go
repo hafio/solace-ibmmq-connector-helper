@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
@@ -79,6 +80,7 @@ type logsOpts struct {
 	ns       string
 	command  string
 	allow    []string
+	approved execguard.Approvals
 
 	follow     bool
 	previous   bool
@@ -122,6 +124,10 @@ func runLogs(args []string, r runner.Runner) int {
 	if err != nil {
 		return flagExit("logs", err)
 	}
+	approvals, aerr := approvalsFrom(*allow)
+	if aerr != nil {
+		return usageExit(aerr)
+	}
 	if len(pos) > 0 {
 		// logs has no target word: an instance is named with --pod/--container,
 		// not positionally, so a bare word here is a mistake worth naming rather
@@ -138,6 +144,7 @@ func runLogs(args []string, r runner.Runner) int {
 		ns:         *namespace,
 		command:    *command,
 		allow:      *allow,
+		approved:   approvals,
 		follow:     *follow,
 		previous:   *previous,
 		timestamps: *timestamps,
@@ -200,7 +207,7 @@ func actLogs(o logsOpts, r runner.Runner) int {
 		command:  o.command,
 		pods:     o.pods,
 		conts:    o.conts,
-		allow:    o.allow,
+		approved: o.approved,
 	})
 	if serr != nil {
 		return usageExit(serr)
@@ -214,7 +221,7 @@ func actLogs(o logsOpts, r runner.Runner) int {
 	// The same read-only preflight probe status runs, for the same reason: fail
 	// on an unreachable engine once, up front, rather than at the point of read.
 	// On kubernetes it asks for the log subresource, what logs actually reads.
-	if code, ok := preflight(r, runner.ActionLogs, sess.platform, sess.command, sess.ns, o.allow); !ok {
+	if code, ok := preflight(r, runner.ActionLogs, sess.platform, sess.command, sess.ns, o.approved); !ok {
 		return code
 	}
 

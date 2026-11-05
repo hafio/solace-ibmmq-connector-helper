@@ -38,6 +38,10 @@ func runLifecycle(action string, args []string, r runner.Runner) int {
 	if err != nil {
 		return flagExit(action, err)
 	}
+	approvals, aerr := approvalsFrom(*allow)
+	if aerr != nil {
+		return usageExit(aerr)
+	}
 	if len(pos) > 0 {
 		fmt.Fprintf(os.Stderr, "%s: unexpected argument %q (the platform is selected with --platform)\n", action, pos[0])
 		fmt.Fprint(os.Stderr, verbUsage(action))
@@ -69,19 +73,19 @@ func runLifecycle(action string, args []string, r runner.Runner) int {
 				return usageExit(err)
 			}
 		}
-		if code, ok := preflight(r, action, name, k.Command, k.Deployment.Namespace, *allow); !ok {
+		if code, ok := preflight(r, action, name, k.Command, k.Deployment.Namespace, approvals); !ok {
 			return code
 		}
-		out, err = runner.KubernetesLifecycle(r, k.Command, action, k.Deployment.Namespace, k.Deployment.Name, k.Deployment.Replicas, *allow)
+		out, err = runner.KubernetesLifecycle(r, k.Command, action, k.Deployment.Namespace, k.Deployment.Name, k.Deployment.Replicas, approvals)
 	case validate.PlatformDocker:
 		d := e.Docker
 		if err := checkName("docker.name", d.Name); err != nil {
 			return usageExit(err)
 		}
-		if code, ok := preflight(r, action, name, d.Command, "", *allow); !ok {
+		if code, ok := preflight(r, action, name, d.Command, "", approvals); !ok {
 			return code
 		}
-		out, err = runner.DockerLifecycle(r, d.Command, action, d.Name, *allow)
+		out, err = runner.DockerLifecycle(r, d.Command, action, d.Name, approvals)
 	default:
 		p := e.Podman
 		if err := checkName("podman.name", p.Name); err != nil {
@@ -91,7 +95,7 @@ func runLifecycle(action string, args []string, r runner.Runner) int {
 		if serr != nil {
 			return errExit(serr)
 		}
-		if code, ok := preflight(r, action, name, p.Command, "", *allow); !ok {
+		if code, ok := preflight(r, action, name, p.Command, "", approvals); !ok {
 			return code
 		}
 		out, err = runner.PodmanLifecycle(r, sc, action, gen.PodmanServiceName(p.Name))

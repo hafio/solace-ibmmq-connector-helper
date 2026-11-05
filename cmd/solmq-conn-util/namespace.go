@@ -167,7 +167,7 @@ func removeNamespace(r runner.Runner, o actionOpts, k *spec.Kubernetes) int {
 		return exitcode.OK
 	}
 
-	argv, err := runner.ParseCommand(validate.PlatformKubernetes, command, o.allow)
+	argv, err := runner.ParseCommand(validate.PlatformKubernetes, command, o.approvals)
 	if err != nil {
 		return errExit(err)
 	}
@@ -201,7 +201,7 @@ func removeNamespace(r runner.Runner, o actionOpts, k *spec.Kubernetes) int {
 			return exitcode.OK
 		}
 	}
-	out, rerr := runner.Kubernetes(r, command, runner.ActionRemove, deploy.NamespaceManifest(ns), o.allow)
+	out, rerr := runner.Kubernetes(r, command, runner.ActionRemove, deploy.NamespaceManifest(ns), o.approvals)
 	return report("remove namespace", tgtKubernetes, out, rerr)
 }
 

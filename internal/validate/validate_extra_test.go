@@ -469,14 +469,14 @@ func TestCheckDocker(t *testing.T) {
 	// Empty command + bad port (the image is a top-level key now).
 	d := &spec.Docker{Command: "", Ports: []spec.Port{{Host: 0, Container: 0}}}
 	e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d, CheckDocker: true})
-	for _, sub := range []string{"docker.command must not be empty", "docker.ports host port 0 must be 1-65535"} {
+	for _, sub := range []string{"docker.command is empty", "docker.ports host port 0 must be 1-65535"} {
 		if !hasErr(e, sub) {
 			t.Errorf("want %q, got %v", sub, e)
 		}
 	}
 	// A command with a shell metacharacter is rejected as unsafe.
 	d2 := &spec.Docker{Command: "docker; rm -rf /", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d2, CheckDocker: true}); !hasErr(e, "unsafe character") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d2, CheckDocker: true}); !hasErr(e, "which is not allowed in a command token") {
 		t.Errorf("want unsafe-command error, got %v", e)
 	}
 	// stores is a removed key: any present block is rejected by name.
@@ -495,7 +495,7 @@ func TestCheckDocker(t *testing.T) {
 	// probe has to name an error an unchecked empty section WOULD produce -- the
 	// old "docker.image is required" no longer exists, so asserting its absence
 	// would pass whether the gate worked or not.
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: &spec.Docker{}}); hasErr(e, "docker.command must not be empty") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Docker: &spec.Docker{}}); hasErr(e, "docker.command is empty") {
 		t.Errorf("docker checks must be gated by CheckDocker, got %v", e)
 	}
 }
@@ -720,11 +720,11 @@ func TestCheckCommandMultiToken(t *testing.T) {
 	// A multi-token command (extra kubeconfig/context args) is fine when every
 	// token is safe; an unsafe token anywhere is flagged.
 	d := &spec.Docker{Command: "docker --context prod", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d, CheckDocker: true}); hasErr(e, "unsafe character") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d, CheckDocker: true}); hasErr(e, "docker.command[") {
 		t.Errorf("safe multi-token command should pass, got %v", e)
 	}
 	d2 := &spec.Docker{Command: "docker --host $(evil)", Name: "c", Ports: []spec.Port{{Host: 8090, Container: 8090}}}
-	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d2, CheckDocker: true}); !hasErr(e, "unsafe character") {
+	if e, _ := Run(Context{Workflows: wfOK(), Defaults: &spec.Defaults{}, Image: imageOK(), Docker: d2, CheckDocker: true}); !hasErr(e, "docker.command[2] = \"$(evil)\" contains \"$\", which is not allowed in a command token") {
 		t.Errorf("want unsafe-token error, got %v", e)
 	}
 }
@@ -1131,8 +1131,8 @@ func TestCheckKubeSecretNames(t *testing.T) {
 // TestCheckCredRejectsReservedPrefix pins the namespace reservation. An -env
 // credential is mounted under the variable name it gives, sharing one namespace
 // with the names derived for literals; rejecting the prefix here is what makes a
-// derived name and an operator's name structurally unable to meet. envNameRE
-// accepts a leading underscore, so this cannot be left to the charset check.
+// derived name and an operator's name structurally unable to meet. The shared
+// name rules accept a leading underscore, so this cannot be left to them.
 func TestCheckCredRejectsReservedPrefix(t *testing.T) {
 	run := func(envVar string) []Issue {
 		d := &spec.Defaults{Security: spec.Security{Users: []spec.User{{Name: "ops", PasswordEnv: envVar}}}}
@@ -1394,7 +1394,7 @@ func TestSecurityUserRoles(t *testing.T) {
 	}
 
 	// Both texts are mirrored verbatim by the generator page's JS validator, so
-	// pin them in full the way TestCheckDeployCommandErrorTexts does for the
+	// pin them in full the way TestCommandGuardMessages does for the
 	// deploy-command wording: the substring checks above would let the two
 	// validators drift in the half they do not cover.
 	dw := defsWithStores()
@@ -1872,6 +1872,61 @@ func TestCheckKubeSpreadAndAffinity(t *testing.T) {
 		}
 		if errs := kubeWith(edit); !hasErr(errs, c.want) {
 			t.Errorf("%s: want %q, got %v", c.name, c.want, errs)
+		}
+	}
+}
+
+// TestSafeTokenCharset pins the one charset behind SafeToken: execguard's
+// UnsafeChars plus '~', whitespace over all of Unicode, control characters
+// including C1, invisible format characters and invalid UTF-8.
+func TestSafeTokenCharset(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		s    string
+		want bool
+	}{
+		{"plain name", "my-ns.1_a:b=c,d@e+f/g", true},
+		{"empty", "", true},
+		{"embedded tilde", "RUNNER~1", false},
+		{"leading tilde", "~/x", false},
+		{"shell metacharacter", "a;b", false},
+		{"dollar", "a$b", false},
+		{"backslash", `a\b`, false},
+		{"space", "a b", false},
+		{"unicode space", "a\u00a0b", false},
+		{"next line", "a\u0085b", false},
+		{"DEL", "a\x7fb", false},
+		{"C1 control as UTF-8", "a\xc2\x9bb", false},
+		{"invisible zero-width space", "a\u200bb", false},
+		{"invalid UTF-8", "a\x9bb", false},
+	} {
+		if got := SafeToken(c.s); got != c.want {
+			t.Errorf("%s: SafeToken(%q) = %v, want %v", c.name, c.s, got, c.want)
+		}
+	}
+}
+
+// TestSafeHostPathCharset pins the host-path gate against the same charset: it
+// admits '~' (a Windows 8.3 short name) and '\' (a Windows-authored path), and
+// refuses everything else SafeToken refuses.
+func TestSafeHostPathCharset(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		s    string
+		want bool
+	}{
+		{"unix path", "/opt/certs/truststore.jks", true},
+		{"windows path", `C:\certs\truststore.jks`, true},
+		{"short name tilde", `C:\Users\RUNNER~1\certs`, true},
+		{"space", "/opt/my libs", false},
+		{"shell metacharacter", "/opt/a;b", false},
+		{"quote", `/opt/a"b`, false},
+		{"C1 control as UTF-8", "/opt/a\xc2\x9bb", false},
+		{"invisible zero-width space", "/opt/a\u200bb", false},
+		{"invalid UTF-8", "/opt/a\x9bb", false},
+	} {
+		if got := safeHostPath(c.s); got != c.want {
+			t.Errorf("%s: safeHostPath(%q) = %v, want %v", c.name, c.s, got, c.want)
 		}
 	}
 }

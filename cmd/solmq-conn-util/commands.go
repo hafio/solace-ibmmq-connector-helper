@@ -263,7 +263,7 @@ var cliFlags = []cliFlag{
 	{Short: "-o", Long: "--out", AppliesTo: bt + "generate" + bt, Meaning: "write output to a file (default: stdout)", Arg: argFile, Usage: "write output to a file (default: stdout)"},
 	{Short: "-f", Long: "--force", AppliesTo: bt + "examples" + bt + "/" + bt + "download" + bt, Meaning: "overwrite existing files", Arg: argNone, Usage: "overwrite existing files"},
 	// argName, not argFile: the value must be a bare, PATH-resolved binary name
-	// (allowCommandValue rejects a path), so offering filenames would suggest
+	// (approvalsFrom rejects a path), so offering filenames would suggest
 	// exactly what the flag refuses.
 	{Short: allowCommandFlagName, Long: allowCommandFlagName, AppliesTo: bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "start" + bt + "/" + bt + "stop" + bt + "/" + bt + "restart" + bt + "/" + bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "approve an extra command binary beyond the " + cmdFieldSpan + " allowlist; repeatable", Arg: argName, Usage: "approve an extra command binary beyond the platform allowlist (repeatable)"},
 	// argName: the model has no enumerated-value kind (only argNone/argFile/
@@ -319,7 +319,7 @@ var cliVerbs = []cliVerb{
 		Example:    "solmq-conn-util deploy --platform kubernetes -e env.yaml",
 		TreeSuffix: bt + platformArgBracket + bt,
 		Detail: "Generates for the platform, then applies it by shelling out to the section's " + cmdFieldSpan + " (" + bt + "kubectl" + bt + "/" + bt + "oc" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " + " + bt + "systemctl" + bt + ") through an argv slice -- never a shell. The env file must contain the matching section.\n\n" +
-			cmdFieldSpan + "'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); " + allowCommandSpan + " approves an extra binary for this invocation (e.g. a " + bt + "sudo" + bt + " prefix). Before anything is written or applied, a read-only preflight probe (on kubernetes, " + bt + "auth can-i create deployment" + bt + ") must succeed, or the run stops: naming the missing permission when the cluster answers no, with a login hint when it cannot be reached. " + platformResolutionPointer,
+			cmdFieldSpan + "'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); " + allowCommandSpan + " approves an extra binary for this invocation (e.g. a chained runner such as " + bt + "lima nerdctl" + bt + "). A privilege-escalation wrapper such as " + bt + "sudo" + bt + " is never approved: run " + bt + "sudo solmq-conn-util" + bt + " instead. Before anything is written or applied, a read-only preflight probe (on kubernetes, " + bt + "auth can-i create deployment" + bt + ") must succeed, or the run stops: naming the missing permission when the cluster answers no, with a login hint when it cannot be reached. " + platformResolutionPointer,
 	},
 	{
 		Name: "remove", Args: platformArgBracket + " [" + noPromptFlagName + "] [-e env.yaml] [" + allowCommandFlagName + " name]",

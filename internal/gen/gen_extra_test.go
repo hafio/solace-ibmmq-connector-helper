@@ -343,11 +343,11 @@ target:
 	}
 }
 
-// TestResolveCredentials covers the three behaviors ResolveCredentials must
-// get right: a literal reference passes its value straight through, an -env
-// reference is read from the resolver's environment, and an unset variable
-// fails loud with a message that names the stable secret and the variable --
-// never a value (S3).
+// TestResolveCredentials covers the behaviors ResolveCredentials must get
+// right: a literal reference passes its value straight through, an -env
+// reference is read from the resolver's environment, and an unset or set but
+// empty variable fails loud with a message that names the stable secret and
+// the variable -- never a value (S3).
 func TestResolveCredentials(t *testing.T) {
 	if kvs, err := ResolveCredentials(nil, Resolver{}); err != nil || len(kvs) != 0 {
 		t.Errorf("nil refs -> no kvs, no error: %v %v", kvs, err)
@@ -380,6 +380,19 @@ func TestResolveCredentials(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "MQ_CONN_1_PASSWORD") || !strings.Contains(err.Error(), "MQ_PW") {
 		t.Errorf("error %q should name the stable secret and the variable", err.Error())
+	}
+
+	// Set but empty is refused too: deploying with a blank password is worse than
+	// refusing to deploy.
+	_, err = ResolveCredentials(
+		[]consolidate.SecretRef{{Stable: "MQ_CONN_1_PASSWORD", EnvVar: "MQ_PW"}},
+		Resolver{Env: func(string) (string, bool) { return "", true }},
+	)
+	if err == nil {
+		t.Fatal("expected an error for a set but empty environment variable")
+	}
+	if !strings.Contains(err.Error(), "MQ_CONN_1_PASSWORD") || !strings.Contains(err.Error(), "MQ_PW, which is set but empty") {
+		t.Errorf("error %q should name the stable secret and say the variable is set but empty", err.Error())
 	}
 
 	// No environment access at all: also fails loud, not silently.

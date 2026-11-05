@@ -131,15 +131,20 @@ interleave would be worse than a list.
 
 **Never a shell.** `internal/runner` runs the CLI named by each section's
 `command:` through an argv slice. Every config-derived token is checked against a
-safe charset first. `validate.CheckDeployCommand` pins argv[0] to a bare,
-per-platform allowlisted binary and requires later tokens to be flag-shaped,
-since the tool appends its own subcommand and a stray positional would land in
-the wrong place. argv[0] is resolved with `exec.LookPath`, rejecting an
+safe charset first. The shared `execguard.Check` (rules from
+`validate.CommandRules`) pins argv[0] to a bare, per-platform allowlisted binary
+and requires later tokens to be flag-shaped, since the tool appends its own
+subcommand and a stray positional would land in the wrong place. The same
+function runs in the validator and in `runner.ParseCommand`, and a refusal is a
+usage error (exit 2) in both. argv[0] is resolved with `exec.LookPath`, rejecting an
 `exec.ErrDot` same-directory match.
 
 **Authority lives with whoever runs the command.** `--allow-command` approves an
 extra binary for one invocation. It is a flag, not an `env.yaml` key, so a config
-someone hands you cannot approve `sudo` for itself. `env.yaml` is still
+someone hands you cannot approve a binary for itself. A privilege-escalation
+wrapper such as `sudo` cannot be approved at all, by the flag or the file:
+elevate the tool (`sudo solmq-conn-util ...`), not the commands it issues.
+`env.yaml` is still
 executable configuration: its `command:` runs with your privileges, so review it
 like a Makefile. `generate` is the dry run.
 

@@ -30,6 +30,7 @@ import (
 
 	"github.com/hafio/go-deploy-utility/abbrev"
 	"github.com/hafio/go-deploy-utility/confirm"
+	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/hafio/go-deploy-utility/notice"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/examples"
@@ -436,16 +437,17 @@ func genPodman(envPath, out string) int {
 // Gated against platformNames by TestPlatformMapsCoverThreeNames (deploy/
 // remove no longer model a positional Targets list in commands.go -- the
 // platform is resolved by resolvePlatform, not looked up from args[0]).
-// extraAllowed carries the values of a repeatable --allow-command flag (nil
-// when unused).
 // actionOpts is one deploy/remove invocation, as an options struct rather than
 // a growing positional list: removeNamespace applies to exactly one platform,
 // and threading it as a fourth argument through all three would put a
 // kubernetes-only concern in the docker and podman signatures.
+//
+// approvals carries the operator's repeatable --allow-command values, already
+// checked by execguard.Approve (the zero value when the flag was not given).
 type actionOpts struct {
-	action  string
-	envPath string
-	allow   []string
+	action    string
+	envPath   string
+	approvals execguard.Approvals
 	// noPrompt skips both questions a teardown asks: the confirmation and, when
 	// the namespace turns out to be empty, whether to remove it too.
 	//
@@ -482,6 +484,10 @@ func runAction(action string, args []string, r runner.Runner) int {
 	if err != nil {
 		return flagExit(action, err)
 	}
+	approvals, aerr := approvalsFrom(*allow)
+	if aerr != nil {
+		return usageExit(aerr)
+	}
 	if len(pos) > 0 {
 		if contains(platformNames, pos[0]) {
 			fmt.Fprintf(os.Stderr, "%s: %q is no longer a positional platform; pass --platform %s instead\n", action, pos[0], pos[0])
@@ -515,10 +521,10 @@ func runAction(action string, args []string, r runner.Runner) int {
 		}
 	}
 	return actTargets[platformName](actionOpts{
-		action:   action,
-		envPath:  *env,
-		allow:    *allow,
-		noPrompt: noPrompt != nil && *noPrompt,
+		action:    action,
+		envPath:   *env,
+		approvals: approvals,
+		noPrompt:  noPrompt != nil && *noPrompt,
 	}, r)
 }
 
@@ -527,8 +533,8 @@ func runAction(action string, args []string, r runner.Runner) int {
 // probe's combined output and wrapped error (which already names the platform
 // and carries a login hint) and the caller must stop without writing or
 // executing anything further.
-func preflight(r runner.Runner, action, platform, command, namespace string, extraAllowed []string) (code int, ok bool) {
-	out, err := runner.Preflight(r, platform, command, action, namespace, extraAllowed)
+func preflight(r runner.Runner, action, platform, command, namespace string, approvals execguard.Approvals) (code int, ok bool) {
+	out, err := runner.Preflight(r, platform, command, action, namespace, approvals)
 	if err != nil {
 		return report(action, platform, out, err), false
 	}
@@ -536,7 +542,7 @@ func preflight(r runner.Runner, action, platform, command, namespace string, ext
 }
 
 func actKubernetes(o actionOpts, r runner.Runner) int {
-	action, envPath, extraAllowed := o.action, o.envPath, o.allow
+	action, envPath, approvals := o.action, o.envPath, o.approvals
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
 		return usageExit(err)
@@ -549,17 +555,19 @@ func actKubernetes(o actionOpts, r runner.Runner) int {
 	// pod still holds, and every Secret by name alone, so nothing is resolved.
 	// See deploy.Input.Teardown.
 	var probes []gen.SecretProbe
-	manifest, errs, warns := gen.GenerateKubernetes(req, resolver(envDir),
-		gen.KubeOpts{Teardown: action == runner.ActionRemove, Probes: &probes}, extraAllowed...)
+	res := resolver(envDir)
+	res.Approvals = approvals
+	manifest, errs, warns := gen.GenerateKubernetes(req, res,
+		gen.KubeOpts{Teardown: action == runner.ActionRemove, Probes: &probes})
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
 	}
-	if code, ok := preflight(r, action, validate.PlatformKubernetes, e.Kubernetes.Command, e.Kubernetes.Deployment.Namespace, extraAllowed); !ok {
+	if code, ok := preflight(r, action, validate.PlatformKubernetes, e.Kubernetes.Command, e.Kubernetes.Deployment.Namespace, approvals); !ok {
 		return code
 	}
 	if action == runner.ActionDeploy && len(probes) > 0 {
-		perrs, pwarns := probeOperatorSecrets(r, e.Kubernetes, probes, extraAllowed)
+		perrs, pwarns := probeOperatorSecrets(r, e.Kubernetes, probes, approvals)
 		for _, w := range pwarns {
 			fmt.Fprintln(os.Stderr, "warning:", w)
 		}
@@ -567,7 +575,7 @@ func actKubernetes(o actionOpts, r runner.Runner) int {
 			return failAll(perrs)
 		}
 	}
-	out, rerr := runner.Kubernetes(r, e.Kubernetes.Command, action, manifest, extraAllowed)
+	out, rerr := runner.Kubernetes(r, e.Kubernetes.Command, action, manifest, approvals)
 	warnIfPVUnchanged(action, out)
 	if code := report(action, tgtKubernetes, out, rerr); code != 0 {
 		// A failed teardown leaves the namespace alone: whatever did not come
@@ -581,7 +589,7 @@ func actKubernetes(o actionOpts, r runner.Runner) int {
 }
 
 func actDocker(o actionOpts, r runner.Runner) int {
-	action, envPath, extraAllowed := o.action, o.envPath, o.allow
+	action, envPath, approvals := o.action, o.envPath, o.approvals
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
 		return usageExit(err)
@@ -590,7 +598,8 @@ func actDocker(o actionOpts, r runner.Runner) int {
 		return usageExit(fmt.Errorf("env.yaml has no docker: section to %s", action))
 	}
 	res := resolver(envDir)
-	plan, errs, warns := gen.GenerateDocker(req, res, extraAllowed...)
+	res.Approvals = approvals
+	plan, errs, warns := gen.GenerateDocker(req, res)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
@@ -628,18 +637,18 @@ func actDocker(o actionOpts, r runner.Runner) int {
 		}
 		storeKVs = skvs
 	}
-	if code, ok := preflight(r, action, validate.PlatformDocker, e.Docker.Command, "", extraAllowed); !ok {
+	if code, ok := preflight(r, action, validate.PlatformDocker, e.Docker.Command, "", approvals); !ok {
 		return code
 	}
 	if action == runner.ActionDeploy && len(plan.Stores) > 0 {
-		if err := checkImageCommand(r, e.Docker.Command, plan.Image, extraAllowed); err != nil {
+		if err := checkImageCommand(r, e.Docker.Command, plan.Image, approvals); err != nil {
 			return errExit(err)
 		}
 	}
 	// The compose file goes to compose on stdin and never touches the disk:
 	// every deploy and remove renders it afresh, so nothing needs it kept, and
 	// `generate --platform docker -o` writes one (0600) for a hand-run compose.
-	out, rerr := runner.Docker(r, e.Docker.Command, action, plan.Compose, envDir, envPairs(append(kvs, storeKVs...)), extraAllowed)
+	out, rerr := runner.Docker(r, e.Docker.Command, action, plan.Compose, envDir, envPairs(append(kvs, storeKVs...)), approvals)
 	return report(action, tgtDocker, out, rerr)
 }
 
@@ -649,16 +658,16 @@ func actDocker(o actionOpts, r runner.Runner) int {
 // any other way fails the deploy before anything is written. An image the
 // engine does not have yet is pulled first and then inspected, so the check
 // never passes without comparing anything.
-func checkImageCommand(r runner.Runner, command, image string, extraAllowed []string) error {
-	entrypoint, cmd, found, err := runner.DockerImageCommand(r, command, image, extraAllowed)
+func checkImageCommand(r runner.Runner, command, image string, approvals execguard.Approvals) error {
+	entrypoint, cmd, found, err := runner.DockerImageCommand(r, command, image, approvals)
 	if err != nil {
 		return err
 	}
 	if !found {
-		if out, perr := runner.DockerImagePull(r, command, image, extraAllowed); perr != nil {
+		if out, perr := runner.DockerImagePull(r, command, image, approvals); perr != nil {
 			return fmt.Errorf("pulling %s to check how it starts before deploying a created store: %w\n%s", image, perr, strings.TrimSpace(out))
 		}
-		if entrypoint, cmd, found, err = runner.DockerImageCommand(r, command, image, extraAllowed); err != nil {
+		if entrypoint, cmd, found, err = runner.DockerImageCommand(r, command, image, approvals); err != nil {
 			return err
 		}
 		if !found {
@@ -683,7 +692,7 @@ func envPairs(kvs []gen.KV) []string {
 }
 
 func actPodman(o actionOpts, r runner.Runner) int {
-	action, envPath, extraAllowed := o.action, o.envPath, o.allow
+	action, envPath, approvals := o.action, o.envPath, o.approvals
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
 		return usageExit(err)
@@ -696,16 +705,17 @@ func actPodman(o actionOpts, r runner.Runner) int {
 		return errExit(serr)
 	}
 	res := resolver(envDir)
-	plan, errs, warns := gen.GeneratePodman(req, res, extraAllowed...)
+	res.Approvals = approvals
+	plan, errs, warns := gen.GeneratePodman(req, res)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
 	}
-	if code, ok := preflight(r, action, validate.PlatformPodman, e.Podman.Command, "", extraAllowed); !ok {
+	if code, ok := preflight(r, action, validate.PlatformPodman, e.Podman.Command, "", approvals); !ok {
 		return code
 	}
 	if action == runner.ActionRemove {
-		return podmanRemove(sc, plan, e.Podman, r, extraAllowed)
+		return podmanRemove(sc, plan, e.Podman, r, approvals)
 	}
 	// Everything but libs.dir reaches the container from podman's secret store,
 	// readable by any uid; the libs jars are a bind mount, read with the host's
@@ -719,10 +729,10 @@ func actPodman(o actionOpts, r runner.Runner) int {
 	for _, w := range podmanHostChecks(plan, sc) {
 		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
-	return podmanDeploy(sc, plan, e.Podman, res, r, extraAllowed)
+	return podmanDeploy(sc, plan, e.Podman, res, r, approvals)
 }
 
-func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, res gen.Resolver, r runner.Runner, extraAllowed []string) int {
+func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, res gen.Resolver, r runner.Runner, approvals execguard.Approvals) int {
 	// Everything the unit mounts is resolved first -- the credentials, then the
 	// documents and stores -- so a missing variable or an unreadable or
 	// oversized store stops the deploy before anything is created: the unit
@@ -740,10 +750,10 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	previous := previousStoreSecrets(sc, plan, p)
 	// podman 4.7 replaces a secret in one step; an older one, or a version that
 	// cannot be read, keeps to remove-then-create (runner.PodmanSecretCreate).
-	version, _ := runner.PodmanVersion(r, p.Command, extraAllowed)
+	version, _ := runner.PodmanVersion(r, p.Command, approvals)
 	replace := runner.PodmanSupportsReplace(version)
 	for _, kv := range kvs {
-		out, err := runner.PodmanSecretCreate(r, p.Command, gen.PodmanSecretStoreName(p.Name, kv.Key), kv.Val, replace, extraAllowed)
+		out, err := runner.PodmanSecretCreate(r, p.Command, gen.PodmanSecretStoreName(p.Name, kv.Key), kv.Val, replace, approvals)
 		if err != nil {
 			return report(runner.ActionDeploy, tgtPodman, out, err)
 		}
@@ -758,7 +768,7 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	mounted := make(map[string]bool, len(files))
 	for _, kv := range files {
 		mounted[kv.Key] = true
-		out, err := runner.PodmanSecretCreate(r, p.Command, kv.Key, kv.Val, replace, extraAllowed)
+		out, err := runner.PodmanSecretCreate(r, p.Command, kv.Key, kv.Val, replace, approvals)
 		if err != nil {
 			return report(runner.ActionDeploy, tgtPodman, out, err)
 		}
@@ -772,7 +782,7 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 			stale = append(stale, n)
 		}
 	}
-	if out, err := runner.PodmanSecretRemove(r, p.Command, stale, extraAllowed); err != nil {
+	if out, err := runner.PodmanSecretRemove(r, p.Command, stale, approvals); err != nil {
 		return report(runner.ActionDeploy, tgtPodman, out, err)
 	}
 	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.Unit.Filename), plan.Unit.Content, 0o644); err != nil {
@@ -782,7 +792,7 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	return report(runner.ActionDeploy, tgtPodman, out, rerr)
 }
 
-func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r runner.Runner, extraAllowed []string) int {
+func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r runner.Runner, approvals execguard.Approvals) int {
 	// The stores the deployed unit mounts, read before the unit is deleted, and
 	// the ones this spec mounts, in case the unit is already gone.
 	stores := previousStoreSecrets(sc, plan, p)
@@ -805,7 +815,7 @@ func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	}
 	names = append(names, gen.PodmanFileSecretNames(p.Name)...)
 	names = append(names, stores...)
-	so, serr := runner.PodmanSecretRemove(r, p.Command, names, extraAllowed)
+	so, serr := runner.PodmanSecretRemove(r, p.Command, names, approvals)
 	out += so
 	if rerr == nil {
 		rerr = serr
@@ -1340,32 +1350,34 @@ func outFlag(fs *flag.FlagSet) *string {
 }
 
 // allowCommandValue implements flag.Value for a repeatable --allow-command: it
-// validates each value against the same bare-name/safe-charset rules
-// CheckDeployCommand applies to the command itself (a path or an unsafe
-// character in the escape hatch would just move the hole), then appends it.
+// only collects the raw values. approvalsFrom checks them all once the flags are
+// parsed, through execguard.Approve, so a path, an unsafe character or a
+// privilege-escalation wrapper is refused with the shared message.
 type allowCommandValue struct{ vals *[]string }
 
 func (allowCommandValue) String() string { return "" } // flag.Value needs a zero-value String; nothing to show before parsing
 
 func (v allowCommandValue) Set(s string) error {
-	if strings.ContainsRune(s, '/') {
-		return fmt.Errorf("--allow-command %q: a path is not accepted here; use a bare binary name, resolved from PATH", s)
-	}
-	if !validate.SafeToken(s) {
-		return fmt.Errorf("--allow-command %q: contains an unsafe character (%s)", s, validate.UnsafeTokenReason)
-	}
 	*v.vals = append(*v.vals, s)
 	return nil
 }
 
-// allowCommandFlag registers the repeatable --allow-command flag (deploy/remove
-// only -- runGenerate/runValidate never call this) and returns the accumulated,
-// already-validated values. A bad value fails fs.Parse, which callers surface
-// as the standard usage-error exit (2).
+// allowCommandFlag registers the repeatable --allow-command flag (deploy/remove,
+// the lifecycle verbs, status, logs and cli -- runGenerate/runValidate never call
+// this) and returns the accumulated raw values. The caller passes them to
+// approvalsFrom after flag parsing.
 func allowCommandFlag(fs *flag.FlagSet) *[]string {
 	vals := &[]string{}
 	fs.Var(allowCommandValue{vals}, "allow-command", "approve an extra command binary for this invocation (repeatable)")
 	return vals
+}
+
+// approvalsFrom turns the raw --allow-command values into this run's approvals,
+// once per run. A bad value is a usage error (exit 2) carrying the shared guard's
+// message; the zero Approvals comes back with it.
+func approvalsFrom(vals []string) (execguard.Approvals, error) {
+	a, err := execguard.Approve("solmq-conn-util", vals)
+	return a, exitcode.AsUsage(err)
 }
 
 // noPromptFlag registers remove's --no-prompt confirmation skip.
@@ -1533,7 +1545,7 @@ func report(action, platform, out string, err error) int {
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %s %s failed: %v\n", action, platform, err)
-		return exitcode.Failure
+		return exitcode.Code(err)
 	}
 	fmt.Fprintf(os.Stderr, "ok: %s %s\n", action, platform)
 	return exitcode.OK

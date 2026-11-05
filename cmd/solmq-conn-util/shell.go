@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
@@ -35,6 +36,7 @@ type shellOpts struct {
 	ns       string
 	command  string
 	allow    []string
+	approved execguard.Approvals
 
 	// remote is what to run inside the instance: everything after the "--"
 	// separator. Empty is the interactive form, an attached shell.
@@ -83,6 +85,10 @@ func runShell(args []string, r runner.Runner) int {
 	if err != nil {
 		return flagExit(verbShell, err)
 	}
+	approvals, aerr := approvalsFrom(*allow)
+	if aerr != nil {
+		return usageExit(aerr)
+	}
 	if len(pos) > 0 {
 		// cli has no target word: an instance is named with --pod/--container,
 		// and a command to run in it goes after "--", so a bare word here is a
@@ -104,6 +110,7 @@ func runShell(args []string, r runner.Runner) int {
 		ns:       *namespace,
 		command:  *command,
 		allow:    *allow,
+		approved: approvals,
 		remote:   remote,
 	}
 	if code := checkShellFlags(o); code != 0 {
@@ -174,7 +181,7 @@ func actShell(o shellOpts, r runner.Runner) int {
 		command:  o.command,
 		pods:     o.pods,
 		conts:    o.conts,
-		allow:    o.allow,
+		approved: o.approved,
 	})
 	if serr != nil {
 		return usageExit(serr)
@@ -183,7 +190,7 @@ func actShell(o shellOpts, r runner.Runner) int {
 	// The same read-only preflight probe status and logs run, for the same
 	// reason: fail on an unreachable engine once, up front, rather than at the
 	// point of attach. On kubernetes it asks for exec, what cli actually does.
-	if code, ok := preflight(r, runner.ActionCLI, sess.platform, sess.command, sess.ns, o.allow); !ok {
+	if code, ok := preflight(r, runner.ActionCLI, sess.platform, sess.command, sess.ns, o.approved); !ok {
 		return code
 	}
 

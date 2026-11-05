@@ -129,9 +129,8 @@ kubernetes:
 `
 
 // kubeEnvUnsafeCommand mirrors kubeEnv but with a command containing a shell
-// metacharacter -- validate.go's checkKube never inspects kubernetes.command
-// (only the docker/podman container-target checks do), so this reaches the CLI
-// and is rejected only at the runner.ParseCommand/SafeToken gate.
+// metacharacter -- it reaches the CLI and is refused by the shared command
+// guard (execguard.Check), at validate and again at runner.ParseCommand.
 const kubeEnvUnsafeCommand = `
 kubernetes:
   command: "kubectl; rm -rf /"
@@ -1499,8 +1498,8 @@ func TestRemoveNamespaceRejectsAnUnsafeCommand(t *testing.T) {
 	stderr := captureStderr(t, func() {
 		code = removeNamespace(f, actionOpts{action: "remove"}, k)
 	})
-	if code != 1 {
-		t.Fatalf("exit=%d, want 1", code)
+	if code != 2 { // a command the guard refuses is about what the tool was given
+		t.Fatalf("exit=%d, want 2", code)
 	}
 	if !strings.Contains(stderr, "curl") {
 		t.Errorf("the error should name the refused binary, got:\n%s", stderr)
@@ -2378,10 +2377,23 @@ podman:
 `
 }
 
-// podmanEnvSudo mirrors podmanEnv but with a chained `sudo podman` command:
-// rejected outright (sudo is not on the podman allowlist) unless the caller
-// approves it via --allow-command sudo, which is the escape-hatch scenario
+// podmanEnvChained mirrors podmanEnv but with a chained `lima podman` command:
+// rejected outright (lima is not on the podman allowlist) unless the caller
+// approves it via --allow-command lima, which is the escape-hatch scenario
 // the flag exists for.
+func podmanEnvChained() string {
+	return `
+podman:
+  command: lima podman
+  name: solmq-conn
+  ports:
+    - 8090
+`
+}
+
+// podmanEnvSudo mirrors podmanEnv but with `sudo podman`: a privilege-escalation
+// wrapper, refused whatever --allow-command says. Run `sudo solmq-conn-util`
+// instead.
 func podmanEnvSudo() string {
 	return `
 podman:
@@ -2524,7 +2536,7 @@ tls:
 ` + podmanEnv(), tlsWF, `tls.stores.ts.existing.pkcs12 "./certs/missing.jks"`},
 		{"unset credential variable", sharedEnv + podmanEnv(),
 			strings.Replace(validWF, "    password: pw\n", "    password-env: "+unsetVar+"\n", 1),
-			"environment variable " + unsetVar + " is not set"},
+			"environment variable " + unsetVar + ", which is not set"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			// t.Setenv restores whatever was there; Unsetenv makes sure the
@@ -2560,6 +2572,45 @@ tls:
 				t.Errorf("no file should be written on a rejected deploy, got %d", len(ents))
 			}
 		})
+	}
+}
+
+// TestDeployPodmanSetButEmptyCredentialFailsBeforeAnyWrite pins the empty half
+// of the -env rule: a variable that is set but empty is refused at deploy like an
+// unset one (exit 2, only the preflight probe run, nothing written), and validate
+// warns about it, since a blank password is worse than refusing to deploy.
+func TestDeployPodmanSetButEmptyCredentialFailsBeforeAnyWrite(t *testing.T) {
+	const emptyVar = "SOLMQ_TEST_PODMAN_EMPTY_PW"
+	t.Setenv(emptyVar, "")
+	f := useFakeRunner(t)
+	dir := t.TempDir()
+	quadletDir := podmanQuadletHome(t)
+	write(t, dir, "env.yaml", sharedEnv+podmanEnv())
+	write(t, dir, "10.yaml", strings.Replace(validWF, "    password: pw\n", "    password-env: "+emptyVar+"\n", 1))
+	envPath := filepath.Join(dir, "env.yaml")
+
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"deploy", "--platform", "podman", "-e", envPath}, f)
+	})
+	if code != 2 {
+		t.Fatalf("exit=%d, want 2: a set but empty credential variable is refused like an unset one", code)
+	}
+	if want := "environment variable " + emptyVar + ", which is set but empty"; !strings.Contains(stderr, want) {
+		t.Errorf("the error should say %q, got %q", want, stderr)
+	}
+	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, []string{"podman", "info"}) {
+		t.Errorf("only the preflight probe may run before the inputs are resolved, got %+v", f.calls)
+	}
+	if ents, rerr := os.ReadDir(quadletDir); rerr != nil && !os.IsNotExist(rerr) {
+		t.Fatal(rerr)
+	} else if len(ents) != 0 {
+		t.Errorf("no file should be written on a rejected deploy, got %d", len(ents))
+	}
+
+	vstderr := captureStderr(t, func() { run([]string{"validate", "-e", envPath}) })
+	if want := "environment variable " + emptyVar + ", which is set but empty; export it before running"; !strings.Contains(vstderr, want) {
+		t.Errorf("validate should warn %q, got %q", want, vstderr)
 	}
 }
 
@@ -3018,9 +3069,10 @@ func TestRemovePodmanSeamStopsRemovesReloads(t *testing.T) {
 // ---- j) --allow-command flag --------------------------------------------------
 
 // TestAllowCommandFlagBadValueExitsUsageError covers the flag's own input
-// validation (SafeToken-clean, no path separator) independent of
-// CheckDeployCommand: a bad value must fail fs.Parse (exit 2, the usage-error
-// contract) before anything reaches loadEnv/validate/the runner.
+// validation, done once per run by execguard.Approve (a bare name, no unsafe
+// character, never a privilege-escalation wrapper): a bad value is a usage error
+// (exit 2) with the shared message before anything reaches loadEnv/validate/the
+// runner.
 func TestAllowCommandFlagBadValueExitsUsageError(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
@@ -3030,19 +3082,56 @@ func TestAllowCommandFlagBadValueExitsUsageError(t *testing.T) {
 	cases := []struct {
 		name string
 		val  string
+		want string
 	}{
-		{"path", "/usr/bin/sudo"},
-		{"unsafe character", "sudo;rm"},
+		{"path", "/usr/bin/lima", "it must be a bare binary name, not a path"},
+		{"unsafe character", "lima;rm", `which is not allowed in a command token`},
+		{"escalator", "sudo", "--allow-command sudo is never permitted"},
+		{"escalator in another case with .exe", "Doas.EXE", "elevate the tool instead"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeRunner{}
-			code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", envPath, "--allow-command", c.val}, f)
+			var code int
+			stderr := captureStderr(t, func() {
+				code = dispatch([]string{"deploy", "--platform", "kubernetes", "-e", envPath, "--allow-command", c.val}, f)
+			})
 			if code != 2 {
 				t.Errorf("--allow-command %q: exit=%d, want 2", c.val, code)
 			}
+			if !strings.Contains(stderr, c.want) {
+				t.Errorf("--allow-command %q: stderr should contain %q, got:\n%s", c.val, c.want, stderr)
+			}
 			if len(f.calls) != 0 {
 				t.Errorf("--allow-command %q: runner must not be invoked, got %d calls", c.val, len(f.calls))
+			}
+		})
+	}
+}
+
+// TestAllowCommandSudoNamesTheSupportedAlternative pins the message an operator
+// meets on `--allow-command sudo`: it names `sudo solmq-conn-util`, the supported
+// way to run elevated, on every verb that takes the flag.
+func TestAllowCommandSudoNamesTheSupportedAlternative(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
+	write(t, dir, "10.yaml", validWF)
+	envPath := filepath.Join(dir, "env.yaml")
+	for _, verb := range []string{"deploy", "remove", "start", "status", "logs", "cli"} {
+		t.Run(verb, func(t *testing.T) {
+			f := &fakeRunner{}
+			var code int
+			stderr := captureStderr(t, func() {
+				code = dispatch([]string{verb, "--platform", "kubernetes", "-e", envPath, "--allow-command", "sudo"}, f)
+			})
+			if code != 2 {
+				t.Errorf("%s --allow-command sudo: exit=%d, want 2", verb, code)
+			}
+			if !strings.Contains(stderr, "sudo solmq-conn-util") {
+				t.Errorf("%s: stderr should name sudo solmq-conn-util, got:\n%s", verb, stderr)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("%s: runner must not be invoked, got %d calls", verb, len(f.calls))
 			}
 		})
 	}
@@ -3056,8 +3145,8 @@ func TestAllowCommandFlagRejectedOnGenerateAndValidate(t *testing.T) {
 	dir := workflowDir(t, validWF)
 	envPath := filepath.Join(dir, "env.yaml")
 	cases := [][]string{
-		{"generate", "config", "-e", envPath, "--allow-command", "sudo"},
-		{"validate", "-e", envPath, "--allow-command", "sudo"},
+		{"generate", "config", "-e", envPath, "--allow-command", "lima"},
+		{"validate", "-e", envPath, "--allow-command", "lima"},
 	}
 	for _, args := range cases {
 		if code := run(args); code != 2 {
@@ -3067,8 +3156,8 @@ func TestAllowCommandFlagRejectedOnGenerateAndValidate(t *testing.T) {
 }
 
 // TestAllowCommandFlagRepeatableThreadsToRunner is the threading assertion:
-// a chained `sudo podman` command: fails before the runner without the flag,
-// and reaches every runner call (preflight, secrets) once --allow-command sudo
+// a chained `lima podman` command: fails before the runner without the flag,
+// and reaches every runner call (preflight, secrets) once --allow-command lima
 // approves it. Passing the flag twice with the same value also covers that it
 // is genuinely repeatable (flag.Value.Set called more than once).
 func TestAllowCommandFlagRepeatableThreadsToRunner(t *testing.T) {
@@ -3076,7 +3165,7 @@ func TestAllowCommandFlagRepeatableThreadsToRunner(t *testing.T) {
 	// redirected away from the developer's real ~/.config.
 	podmanQuadletHome(t)
 	dir := t.TempDir()
-	write(t, dir, "env.yaml", sharedEnv+podmanEnvSudo())
+	write(t, dir, "env.yaml", sharedEnv+podmanEnvChained())
 	write(t, dir, "10.yaml", validWF)
 	envPath := filepath.Join(dir, "env.yaml")
 
@@ -3089,27 +3178,54 @@ func TestAllowCommandFlagRepeatableThreadsToRunner(t *testing.T) {
 	}
 
 	fAccept := useFakeRunner(t)
-	args := []string{"deploy", "--platform", "podman", "-e", envPath, "--allow-command", "sudo", "--allow-command", "sudo"}
+	args := []string{"deploy", "--platform", "podman", "-e", envPath, "--allow-command", "lima", "--allow-command", "lima"}
 	if code := dispatch(args, fAccept); code != 0 {
-		t.Fatalf("with --allow-command sudo: exit=%d, want 0", code)
+		t.Fatalf("with --allow-command lima: exit=%d, want 0", code)
 	}
 	if len(fAccept.calls) == 0 {
-		t.Fatalf("with --allow-command sudo: expected the runner to be reached")
+		t.Fatalf("with --allow-command lima: expected the runner to be reached")
 	}
-	// The preflight probe runs first, resolving argv[0] "sudo" via the flag and
+	// The preflight probe runs first, resolving argv[0] "lima" via the flag and
 	// "podman" as its own allowlisted chained token.
-	if want := []string{"sudo", "podman", "info"}; !reflect.DeepEqual(fAccept.calls[0].argv, want) {
+	if want := []string{"lima", "podman", "info"}; !reflect.DeepEqual(fAccept.calls[0].argv, want) {
 		t.Errorf("preflight argv = %v, want %v", fAccept.calls[0].argv, want)
 	}
 	foundSecretCall := false
 	for _, c := range fAccept.calls {
-		if len(c.argv) >= 3 && c.argv[0] == "sudo" && c.argv[1] == "podman" && c.argv[2] == "secret" {
+		if len(c.argv) >= 3 && c.argv[0] == "lima" && c.argv[1] == "podman" && c.argv[2] == "secret" {
 			foundSecretCall = true
 			break
 		}
 	}
 	if !foundSecretCall {
-		t.Errorf("expected a podman secret call prefixed with [sudo podman secret ...], got %+v", fAccept.calls)
+		t.Errorf("expected a podman secret call prefixed with [lima podman secret ...], got %+v", fAccept.calls)
+	}
+}
+
+// TestDeployRefusesSudoCommandWhateverIsApproved pins the escalator ban: an env
+// file whose podman.command is `sudo podman` is refused at deploy, exit 2 with
+// the runner never reached, with no approval and with an unrelated one. The only
+// supported way to run elevated is `sudo solmq-conn-util`.
+func TestDeployRefusesSudoCommandWhateverIsApproved(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+podmanEnvSudo())
+	write(t, dir, "10.yaml", validWF)
+	envPath := filepath.Join(dir, "env.yaml")
+	for _, extra := range [][]string{nil, {"--allow-command", "lima"}} {
+		f := useFakeRunner(t)
+		args := append([]string{"deploy", "--platform", "podman", "-e", envPath}, extra...)
+		var code int
+		stderr := captureStderr(t, func() { code = dispatch(args, f) })
+		if code != 2 {
+			t.Errorf("%v: exit=%d, want 2", args, code)
+		}
+		if !strings.Contains(stderr, `podman.command[0] = "sudo" is a privilege-escalation wrapper (sudo), which is never permitted`) ||
+			!strings.Contains(stderr, "run the tool itself under sudo instead") {
+			t.Errorf("%v: stderr should refuse the wrapper and name the alternative, got:\n%s", args, stderr)
+		}
+		if len(f.calls) != 0 {
+			t.Errorf("%v: runner must not be invoked, got %d calls", args, len(f.calls))
+		}
 	}
 }
 
@@ -6159,7 +6275,7 @@ func TestLogsPickerCarriesEveryFlagBack(t *testing.T) {
 			"logs", "-e", envPath,
 			"--namespace", "prod",
 			"--command", "oc",
-			"--allow-command", "sudo",
+			"--allow-command", "lima",
 			"--previous",
 			"--timestamps",
 			"--since", "10m",
@@ -6174,7 +6290,7 @@ func TestLogsPickerCarriesEveryFlagBack(t *testing.T) {
 		"-e " + envPath,
 		"--namespace prod",
 		"--command oc",
-		"--allow-command sudo",
+		"--allow-command lima",
 		"--previous",
 		"--timestamps",
 		"--tail 50",
@@ -6193,7 +6309,7 @@ func TestLogsPickerCarriesEveryFlagBack(t *testing.T) {
 func TestInstanceCommandResolution(t *testing.T) {
 	withKube := &spec.Env{Kubernetes: &spec.Kubernetes{Command: "oc"}}
 	withDocker := &spec.Env{Docker: &spec.Docker{Command: "podman-compat"}}
-	withPodman := &spec.Env{Podman: &spec.Podman{Command: "sudo podman"}}
+	withPodman := &spec.Env{Podman: &spec.Podman{Command: "podman --remote"}}
 
 	for _, c := range []struct {
 		name     string
@@ -6208,7 +6324,7 @@ func TestInstanceCommandResolution(t *testing.T) {
 		{"kube nil env", validate.PlatformKubernetes, "", nil, spec.DefaultKubeCommand},
 		{"docker section", validate.PlatformDocker, "", withDocker, "podman-compat"},
 		{"docker default", validate.PlatformDocker, "", &spec.Env{}, spec.DefaultDockerCommand},
-		{"podman section", validate.PlatformPodman, "", withPodman, "sudo podman"},
+		{"podman section", validate.PlatformPodman, "", withPodman, "podman --remote"},
 		{"podman default", validate.PlatformPodman, "", &spec.Env{}, spec.DefaultPodmanCommand},
 		{"unknown platform", "nonsense", "", &spec.Env{}, ""},
 	} {

@@ -120,7 +120,15 @@ in [configuration.md](configuration.md), the verbs in
 - **The safe-charset gate covers more than `command:`.** `image`, `restart`,
   `timezone`, bind-mounted store files, `libs.dir`, referenced Secret names and
   `libs.pvc.create.nfs.*` are rejected when they carry whitespace, quotes,
-  control characters or shell metacharacters.
+  control or invisible characters, invalid UTF-8 or shell metacharacters. One
+  charset serves them all. Names (namespace, pod, role and the like) refuse a
+  `~`, host paths admit it and a backslash, and `command:` tokens refuse only a
+  leading `~`.
+- **`command: sudo podman` is refused, and so is `--allow-command sudo`.** A
+  privilege-escalation wrapper would elevate every command for the life of the
+  env file. Run `sudo solmq-conn-util ...` instead.
+- **A set but empty `-env` variable fails deploy**, like an unset one; `validate`
+  warns about both.
 - **`java-options` has its own gate.** Spaces separate options and shell
   metacharacters are fine, since no value reaches a shell. Quotes, backslash,
   backtick, a leftover `$`, control characters and a `#` comment inside a `>-`

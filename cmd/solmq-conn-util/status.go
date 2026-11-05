@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/hafio/go-deploy-utility/confirm"
+	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
@@ -136,7 +137,7 @@ type statusOpts struct {
 	port     int
 	user     string
 	command  string
-	allow    []string
+	approved execguard.Approvals
 	all      bool
 
 	// now is the clock ages are measured against, injected here rather than
@@ -177,6 +178,10 @@ func runStatus(args []string, r runner.Runner) int {
 	if err != nil {
 		return flagExit("status", err)
 	}
+	approvals, aerr := approvalsFrom(*allow)
+	if aerr != nil {
+		return usageExit(aerr)
+	}
 
 	view, code := statusView(pos)
 	if code != 0 {
@@ -187,7 +192,7 @@ func runStatus(args []string, r runner.Runner) int {
 		view: view, json: *output == outputJSON, watch: watch, verbose: *verbose,
 		envPath: *env, install: *install, platform: *platform,
 		pods: pods, conts: containers, ns: *namespace, port: *port,
-		user: *user, command: *command, allow: *allow, all: *all,
+		user: *user, command: *command, approved: approvals, all: *all,
 		now: time.Now(),
 	}
 	if *details {
@@ -292,7 +297,7 @@ func actStatus(o statusOpts, r runner.Runner) int {
 		command:  o.command,
 		pods:     o.pods,
 		conts:    o.conts,
-		allow:    o.allow,
+		approved: o.approved,
 		all:      o.all,
 	})
 	if serr != nil {
@@ -329,7 +334,7 @@ func actStatus(o statusOpts, r runner.Runner) int {
 	// (docker/podman ignore it): status asks to get pods, the one permission it
 	// cannot work without, so a view-only operator is not refused a write.
 	prog.step("preflight")
-	if code, ok := preflight(r, runner.ActionStatus, sess.platform, sess.command, sess.ns, o.allow); !ok {
+	if code, ok := preflight(r, runner.ActionStatus, sess.platform, sess.command, sess.ns, o.approved); !ok {
 		return code
 	}
 

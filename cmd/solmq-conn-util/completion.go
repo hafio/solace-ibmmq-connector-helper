@@ -20,7 +20,7 @@ import "strings"
 //	word 4 after a verb+target+set  a directory (PosArg), when the verb has one
 //	a value after -e/--env, -o/--out    a filesystem path
 //	a value after --allow-command   nothing: it is a free-form binary name, and
-//	                                allowCommandValue rejects anything path-shaped
+//	                                approvalsFrom rejects anything path-shaped
 //	a word starting with -          that verb's flags
 //
 // Positions are counted only after skipping flag words and their values, because

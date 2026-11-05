@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/envref"
+	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/dockergen"
@@ -66,6 +68,11 @@ type Resolver struct {
 	// environment variable holds for a docker created store (EnvVarMax).
 	// Tests pin it; empty means runtime.GOOS.
 	GOOS string
+	// Approvals are the operator's --allow-command approvals for this run,
+	// threaded into every command-field check. The zero value approves nothing,
+	// which is what `generate` and `validate` use, so an exotic command validates
+	// clean only at deploy time.
+	Approvals execguard.Approvals
 }
 
 func (res Resolver) now() time.Time {
@@ -182,9 +189,9 @@ const statusPasswordPlaceholder = "validate-only-placeholder"
 // Credentials/stores are resolved and embedded (stringData/base64), so this is
 // the same rendered output the deploy path applies.
 //
-// extraAllowed threads deploy/remove's --allow-command values into the
-// kubernetes.command allowlist check; plain `generate kubernetes` calls this
-// with none, so an exotic command validates clean only at deploy time.
+// res.Approvals threads the --allow-command approvals into the kubernetes.command
+// allowlist check; plain `generate kubernetes` leaves it empty, so an exotic
+// command validates clean only at deploy time.
 // KubeOpts steers the kubernetes render, mirroring PodmanOpts rather than
 // widening the signature every time a caller needs a variant.
 type KubeOpts struct {
@@ -210,7 +217,7 @@ type SecretProbe struct {
 	Field string
 }
 
-func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...string) (out string, errs, warns []Issue) {
+func GenerateKubernetes(r Request, res Resolver, opts KubeOpts) (out string, errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
 	k := e.Kubernetes
 	if k == nil {
@@ -226,7 +233,7 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		CheckKubernetes: true,
 		Teardown:        opts.Teardown,
 		Env:             res.Env,
-		AllowCommands:   extraAllowed,
+		AllowCommands:   res.Approvals,
 	})
 	errs = append(pissues, verrs...)
 	warns = append(ewarns, w...)
@@ -373,9 +380,9 @@ func StoreField(store string) string { return "tls.stores." + store + ".existing
 // application.yml inlined under compose configs:). Store/libs host paths are
 // resolved to absolute so the compose is portable regardless of cwd.
 //
-// extraAllowed threads deploy/remove's --allow-command values into the
-// docker.command allowlist check; plain `generate docker` calls this with none.
-func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan DockerPlan, errs, warns []Issue) {
+// res.Approvals threads the --allow-command approvals into the docker.command
+// allowlist check; plain `generate docker` leaves it empty.
+func GenerateDocker(r Request, res Resolver) (plan DockerPlan, errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
 	d := e.Docker
 	if d == nil {
@@ -383,7 +390,7 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 	}
 	verrs, w := validate.Run(validate.Context{
 		Workflows: wfs, Defaults: &e.Defaults, Image: e.Image, Timezone: e.Timezone, JavaOptions: e.JavaOptions, Docker: d, CheckDocker: true, Env: res.Env,
-		AllowCommands: extraAllowed,
+		AllowCommands: res.Approvals,
 	})
 	errs = append(pissues, verrs...)
 	warns = append(ewarns, w...)
@@ -657,9 +664,9 @@ func ResolvePodmanFiles(files []PodmanFile, res Resolver) ([]KV, []Issue, error)
 // documents and stores it mounts are returned on the plan for deploy to load
 // into podman's secret store; nothing is read from or written to the host here.
 //
-// extraAllowed threads deploy/remove's --allow-command values into the
-// podman.command allowlist check; plain `generate podman` calls this with none.
-func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan PodmanPlan, errs, warns []Issue) {
+// res.Approvals threads the --allow-command approvals into the podman.command
+// allowlist check; plain `generate podman` leaves it empty.
+func GeneratePodman(r Request, res Resolver) (plan PodmanPlan, errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
 	p := e.Podman
 	if p == nil {
@@ -667,7 +674,7 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 	}
 	verrs, w := validate.Run(validate.Context{
 		Workflows: wfs, Defaults: &e.Defaults, Image: e.Image, Timezone: e.Timezone, JavaOptions: e.JavaOptions, Podman: p, CheckPodman: true, Env: res.Env,
-		AllowCommands: extraAllowed,
+		AllowCommands: res.Approvals,
 	})
 	errs = append(pissues, verrs...)
 	warns = append(ewarns, w...)
@@ -760,7 +767,9 @@ func runAsOf(section, raw string) (spec.RunAsID, []Issue) {
 // value, an -env reference the value of that host variable. The result is secret
 // material -- callers hand it straight to the secret store and never log it.
 //
-// Errors name the stable secret name and the variable, never a value.
+// An -env variable that is unset or set but empty is an error: deploying with a
+// blank password is worse than refusing to deploy. Errors name the stable secret
+// name and the variable, never a value.
 func ResolveCredentials(refs []consolidate.SecretRef, res Resolver) ([]KV, error) {
 	out := make([]KV, 0, len(refs))
 	for _, r := range refs {
@@ -768,12 +777,10 @@ func ResolveCredentials(refs []consolidate.SecretRef, res Resolver) ([]KV, error
 			out = append(out, KV{Key: r.Stable, Val: r.Literal})
 			continue
 		}
-		if res.Env == nil {
-			return nil, fmt.Errorf("secret %s reads environment variable %s, but this command has no environment access", r.Stable, r.EnvVar)
-		}
-		v, ok := res.Env(r.EnvVar)
-		if !ok {
-			return nil, fmt.Errorf("secret %s: environment variable %s is not set; export it before deploying", r.Stable, r.EnvVar)
+		field := "secret " + r.Stable
+		v, err := envref.Ref{Field: field, EnvKey: field, Name: r.EnvVar}.Resolve(res.Env)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, KV{Key: r.Stable, Val: v})
 	}

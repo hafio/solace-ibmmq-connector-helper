@@ -13,9 +13,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/execguard"
+	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
+
+// noApprovals is the zero Approvals: a run without --allow-command.
+var noApprovals execguard.Approvals
+
+// approve builds the approvals a run with --allow-command <names> would carry,
+// failing the test on a value Approve refuses.
+func approve(t *testing.T, names ...string) execguard.Approvals {
+	t.Helper()
+	a, err := execguard.Approve("solmq-conn-util", names)
+	if err != nil {
+		t.Fatalf("Approve(%v) = %v", names, err)
+	}
+	return a
+}
 
 // fakeRunner records every invocation so tests can assert the exact argv/stdin
 // crossing the exec boundary without starting a process.
@@ -218,6 +234,8 @@ func TestParseCommand(t *testing.T) {
 		{"kubectl", []string{"kubectl"}, true},
 		{"kubectl --context prod -n solace", []string{"kubectl", "--context", "prod", "-n", "solace"}, true},
 		{"  oc   ", []string{"oc"}, true},
+		{"kubectl.Exe", []string{"kubectl.Exe"}, true},
+		{"kubectl --kubeconfig=C:/RUNNER~1/config", []string{"kubectl", "--kubeconfig=C:/RUNNER~1/config"}, true},
 		{"", nil, false},
 		{"   ", nil, false},
 		{"kubectl; rm -rf /", nil, false},          // ';' is unsafe
@@ -228,7 +246,7 @@ func TestParseCommand(t *testing.T) {
 		{"/tmp/evil", nil, false},                  // path, not a bare name
 	}
 	for _, c := range cases {
-		got, err := ParseCommand(validate.PlatformKubernetes, c.in, nil)
+		got, err := ParseCommand(validate.PlatformKubernetes, c.in, noApprovals)
 		if c.ok {
 			if err != nil {
 				t.Errorf("ParseCommand(%q) unexpected error: %v", c.in, err)
@@ -241,32 +259,47 @@ func TestParseCommand(t *testing.T) {
 		}
 		if err == nil {
 			t.Errorf("ParseCommand(%q) should have failed, got %v", c.in, got)
+		} else if !exitcode.IsUsage(err) {
+			t.Errorf("ParseCommand(%q) refusal must be a usage error (exit 2), got %v", c.in, err)
 		}
 	}
 }
 
 // TestParseCommandExtraAllowed pins the escape hatch: a chained binary (e.g.
-// `sudo podman`) is rejected on the platform allowlist alone but accepted once
-// its argv[0] is named in extraAllowed, and the platform's own binary still
-// follows in argv unmodified.
+// `lima podman`) is rejected on the platform allowlist alone but accepted once
+// its argv[0] is approved, and the platform's own binary still follows in argv
+// unmodified. A privilege-escalation wrapper is the one chained binary that no
+// approval reaches: `sudo podman` is refused as a usage error whatever the
+// approvals say, and --allow-command sudo is refused by Approve itself.
 func TestParseCommandExtraAllowed(t *testing.T) {
-	if _, err := ParseCommand(validate.PlatformPodman, "sudo podman", nil); err == nil {
-		t.Fatal("sudo podman must be rejected without --allow-command sudo")
+	if _, err := ParseCommand(validate.PlatformPodman, "lima podman", noApprovals); err == nil {
+		t.Fatal("lima podman must be rejected without --allow-command lima")
 	}
-	got, err := ParseCommand(validate.PlatformPodman, "sudo podman", []string{"sudo"})
+	got, err := ParseCommand(validate.PlatformPodman, "lima podman", approve(t, "lima"))
 	if err != nil {
-		t.Fatalf("ParseCommand with extraAllowed=[sudo] unexpected error: %v", err)
+		t.Fatalf("ParseCommand with lima approved unexpected error: %v", err)
 	}
-	want := []string{"sudo", "podman"}
+	want := []string{"lima", "podman"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("ParseCommand(%q) = %v, want %v", "sudo podman", got, want)
+		t.Errorf("ParseCommand(%q) = %v, want %v", "lima podman", got, want)
+	}
+
+	_, err = ParseCommand(validate.PlatformPodman, "sudo podman", approve(t, "lima"))
+	if err == nil || !strings.Contains(err.Error(), `podman.command[0] = "sudo" is a privilege-escalation wrapper (sudo), which is never permitted`) {
+		t.Fatalf("sudo podman must be refused as an escalation wrapper, got %v", err)
+	}
+	if !exitcode.IsUsage(err) {
+		t.Errorf("an escalation refusal must be a usage error (exit 2), got %v", err)
+	}
+	if _, err := execguard.Approve("solmq-conn-util", []string{"sudo"}); err == nil || !strings.Contains(err.Error(), "sudo solmq-conn-util") {
+		t.Errorf("--allow-command sudo must be refused with the run-it-under-sudo advice, got %v", err)
 	}
 }
 
 func TestKubernetesDeployApplyOnStdin(t *testing.T) {
 	f := &fakeRunner{}
 	manifest := "apiVersion: v1\nkind: Namespace\n"
-	if _, err := Kubernetes(f, "kubectl --context prod", ActionDeploy, manifest, nil); err != nil {
+	if _, err := Kubernetes(f, "kubectl --context prod", ActionDeploy, manifest, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.calls) != 1 {
@@ -283,7 +316,7 @@ func TestKubernetesDeployApplyOnStdin(t *testing.T) {
 
 func TestKubernetesRemoveUsesDeleteVerb(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Kubernetes(f, "oc", ActionRemove, "x", nil); err != nil {
+	if _, err := Kubernetes(f, "oc", ActionRemove, "x", noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	wantArgv := []string{"oc", "delete", "-f", "-", "--ignore-not-found"}
@@ -294,7 +327,7 @@ func TestKubernetesRemoveUsesDeleteVerb(t *testing.T) {
 
 func TestKubernetesRejectsUnsafeCommand(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Kubernetes(f, "kubectl; rm -rf /", ActionDeploy, "x", nil); err == nil {
+	if _, err := Kubernetes(f, "kubectl; rm -rf /", ActionDeploy, "x", noApprovals); err == nil {
 		t.Fatal("unsafe command must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -304,7 +337,7 @@ func TestKubernetesRejectsUnsafeCommand(t *testing.T) {
 
 func TestKubernetesUnknownAction(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Kubernetes(f, "kubectl", "restart", "x", nil); err == nil {
+	if _, err := Kubernetes(f, "kubectl", "restart", "x", noApprovals); err == nil {
 		t.Fatal("unknown action must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -316,7 +349,7 @@ func TestDockerUpAndDown(t *testing.T) {
 	f := &fakeRunner{}
 	env := []string{"MQ_CONN_1_USER=admin", "MQ_CONN_1_PASSWORD=s3cr3t"}
 	const compose = "name: proj\nservices: {}\n"
-	if _, err := Docker(f, "docker", ActionDeploy, compose, "/srv/spec", env, nil); err != nil {
+	if _, err := Docker(f, "docker", ActionDeploy, compose, "/srv/spec", env, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	wantUp := []string{"docker", "compose", "-f", "-", "--project-directory", "/srv/spec", "up", "-d"}
@@ -329,7 +362,7 @@ func TestDockerUpAndDown(t *testing.T) {
 	if !reflect.DeepEqual(f.calls[0].env, env) {
 		t.Errorf("up env = %v, want %v (credential values must cross via Cmd.Env, never argv)", f.calls[0].env, env)
 	}
-	if _, err := Docker(f, "docker", ActionRemove, compose, "/srv/spec", env, nil); err != nil {
+	if _, err := Docker(f, "docker", ActionRemove, compose, "/srv/spec", env, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	wantDown := []string{"docker", "compose", "-f", "-", "--project-directory", "/srv/spec", "down"}
@@ -346,7 +379,7 @@ func TestDockerUpAndDown(t *testing.T) {
 
 func TestDockerRejectsUnsafeCommand(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Docker(f, "docker `id`", ActionDeploy, "x", "/srv/spec", nil, nil); err == nil {
+	if _, err := Docker(f, "docker `id`", ActionDeploy, "x", "/srv/spec", nil, noApprovals); err == nil {
 		t.Fatal("unsafe command must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -509,7 +542,7 @@ func TestPodmanDeployStartFailureIsReported(t *testing.T) {
 
 func TestDockerUnknownAction(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Docker(f, "docker", "restart", "x", "/srv/spec", nil, nil); err == nil {
+	if _, err := Docker(f, "docker", "restart", "x", "/srv/spec", nil, noApprovals); err == nil {
 		t.Fatal("unknown action must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -537,7 +570,7 @@ func TestPodmanSecretCreateRemovesThenCreatesValueOnStdin(t *testing.T) {
 	f := &fakeRunner{}
 	const name = "mq-conn-1-password"
 	const value = "s3cr3t"
-	if _, err := PodmanSecretCreate(f, "podman", name, value, false, nil); err != nil {
+	if _, err := PodmanSecretCreate(f, "podman", name, value, false, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.calls) != 2 {
@@ -570,14 +603,14 @@ func TestPodmanSecretCreateRemovesThenCreatesValueOnStdin(t *testing.T) {
 // the value on stdin, so a failed create leaves the previous one in place.
 func TestPodmanSecretCreateReplacesInOneCall(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := PodmanSecretCreate(f, "podman", "c-tls-ts", "bytes", true, nil); err != nil {
+	if _, err := PodmanSecretCreate(f, "podman", "c-tls-ts", "bytes", true, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	if want := []string{"podman", "secret", "create", "--replace", "c-tls-ts", "-"}; len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) || f.calls[0].stdin != "bytes" {
 		t.Errorf("calls = %+v, want one %v with the value on stdin", f.calls, want)
 	}
 	failing := &fakeRunner{err: fmt.Errorf("boom")}
-	if _, err := PodmanSecretCreate(failing, "podman", "c-tls-ts", "bytes", true, nil); err == nil || !strings.Contains(err.Error(), "podman secret create --replace c-tls-ts") {
+	if _, err := PodmanSecretCreate(failing, "podman", "c-tls-ts", "bytes", true, noApprovals); err == nil || !strings.Contains(err.Error(), "podman secret create --replace c-tls-ts") {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -586,7 +619,7 @@ func TestPodmanSecretCreateReplacesInOneCall(t *testing.T) {
 // PodmanSupportsReplace holds it to 4.7.
 func TestPodmanVersion(t *testing.T) {
 	r := &splitRunner{stdout: "5.8.2\n", stderr: "WARN[0000] a warning\n"}
-	v, err := PodmanVersion(r, "podman", nil)
+	v, err := PodmanVersion(r, "podman", noApprovals)
 	if err != nil || v != "5.8.2" {
 		t.Fatalf("v=%q err=%v", v, err)
 	}
@@ -602,7 +635,7 @@ func TestPodmanVersion(t *testing.T) {
 
 func TestPodmanSecretCreateSkipsCreateWhenRmFails(t *testing.T) {
 	f := &fakeRunner{err: fmt.Errorf("boom")}
-	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t", false, nil)
+	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t", false, noApprovals)
 	if err == nil {
 		t.Fatal("a failed rm must surface as an error")
 	}
@@ -616,7 +649,7 @@ func TestPodmanSecretCreateSkipsCreateWhenRmFails(t *testing.T) {
 
 func TestPodmanSecretCreateReportsCreateFailure(t *testing.T) {
 	f := &fakeRunner{errByCall: map[int]error{1: fmt.Errorf("boom")}}
-	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t", false, nil)
+	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t", false, noApprovals)
 	if err == nil {
 		t.Fatal("a failed create must surface as an error")
 	}
@@ -630,7 +663,7 @@ func TestPodmanSecretCreateReportsCreateFailure(t *testing.T) {
 
 func TestPodmanSecretCreateRejectsUnsafeCommand(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := PodmanSecretCreate(f, "podman; rm -rf /", "name", "value", false, nil); err == nil {
+	if _, err := PodmanSecretCreate(f, "podman; rm -rf /", "name", "value", false, noApprovals); err == nil {
 		t.Fatal("unsafe command must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -641,7 +674,7 @@ func TestPodmanSecretCreateRejectsUnsafeCommand(t *testing.T) {
 func TestPodmanSecretRemoveBatchesNames(t *testing.T) {
 	f := &fakeRunner{}
 	names := []string{"mq-conn-1-user", "mq-conn-1-password", "truststore-password"}
-	if _, err := PodmanSecretRemove(f, "podman", names, nil); err != nil {
+	if _, err := PodmanSecretRemove(f, "podman", names, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.calls) != 1 {
@@ -655,7 +688,7 @@ func TestPodmanSecretRemoveBatchesNames(t *testing.T) {
 
 func TestPodmanSecretRemoveNoNamesIsNoop(t *testing.T) {
 	f := &fakeRunner{}
-	out, err := PodmanSecretRemove(f, "podman", nil, nil)
+	out, err := PodmanSecretRemove(f, "podman", nil, noApprovals)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -669,7 +702,7 @@ func TestPodmanSecretRemoveNoNamesIsNoop(t *testing.T) {
 
 func TestPodmanSecretRemoveRejectsUnsafeCommand(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := PodmanSecretRemove(f, "podman; rm -rf /", []string{"name"}, nil); err == nil {
+	if _, err := PodmanSecretRemove(f, "podman; rm -rf /", []string{"name"}, noApprovals); err == nil {
 		t.Fatal("unsafe command must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -679,7 +712,7 @@ func TestPodmanSecretRemoveRejectsUnsafeCommand(t *testing.T) {
 
 func TestPodmanSecretRemoveReportsFailure(t *testing.T) {
 	f := &fakeRunner{err: fmt.Errorf("boom")}
-	_, err := PodmanSecretRemove(f, "podman", []string{"name"}, nil)
+	_, err := PodmanSecretRemove(f, "podman", []string{"name"}, noApprovals)
 	if err == nil {
 		t.Fatal("a failed rm must surface as an error")
 	}
@@ -837,7 +870,7 @@ func TestOSRunRejectsUnresolvableArgv0(t *testing.T) {
 
 func TestPreflightKubernetesArgvDeployNoNamespace(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl --context prod", ActionDeploy, "", nil); err != nil {
+	if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl --context prod", ActionDeploy, "", noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"kubectl", "--context", "prod", "auth", "can-i", "create", "deployment"}
@@ -848,7 +881,7 @@ func TestPreflightKubernetesArgvDeployNoNamespace(t *testing.T) {
 
 func TestPreflightKubernetesArgvRemoveWithNamespace(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformKubernetes, "oc", ActionRemove, "solace", nil); err != nil {
+	if _, err := Preflight(f, validate.PlatformKubernetes, "oc", ActionRemove, "solace", noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"oc", "auth", "can-i", "delete", "deployment", "--namespace", "solace"}
@@ -859,7 +892,7 @@ func TestPreflightKubernetesArgvRemoveWithNamespace(t *testing.T) {
 
 func TestPreflightDockerArgvIsInfo(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformDocker, "docker --context foo", ActionDeploy, "", nil); err != nil {
+	if _, err := Preflight(f, validate.PlatformDocker, "docker --context foo", ActionDeploy, "", noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"docker", "--context", "foo", "info"}
@@ -870,7 +903,7 @@ func TestPreflightDockerArgvIsInfo(t *testing.T) {
 
 func TestPreflightPodmanArgvIsInfo(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformPodman, "podman", ActionRemove, "", nil); err != nil {
+	if _, err := Preflight(f, validate.PlatformPodman, "podman", ActionRemove, "", noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"podman", "info"}
@@ -891,7 +924,7 @@ func TestPreflightFailureWrapsPlatformHint(t *testing.T) {
 	}
 	for _, c := range cases {
 		f := &fakeRunner{err: fmt.Errorf("connection refused")}
-		_, err := Preflight(f, c.platform, c.command, ActionDeploy, "", nil)
+		_, err := Preflight(f, c.platform, c.command, ActionDeploy, "", noApprovals)
 		if err == nil {
 			t.Fatalf("%s: preflight failure must surface as an error", c.platform)
 		}
@@ -921,7 +954,7 @@ func TestPreflightReadVerbsAskOnlyWhatTheyUse(t *testing.T) {
 		{ActionCLI, []string{"kubectl", "auth", "can-i", "create", "pods", "--subresource", "exec", "--namespace", "prod"}},
 	} {
 		f := &fakeRunner{}
-		if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", c.action, "prod", nil); err != nil {
+		if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", c.action, "prod", noApprovals); err != nil {
 			t.Fatalf("%s: %v", c.action, err)
 		}
 		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
@@ -929,7 +962,7 @@ func TestPreflightReadVerbsAskOnlyWhatTheyUse(t *testing.T) {
 		}
 		// docker and podman have no permission to ask about: reachability only.
 		f = &fakeRunner{}
-		if _, err := Preflight(f, validate.PlatformDocker, "docker", c.action, "", nil); err != nil || !reflect.DeepEqual(f.calls[0].argv, []string{"docker", "info"}) {
+		if _, err := Preflight(f, validate.PlatformDocker, "docker", c.action, "", noApprovals); err != nil || !reflect.DeepEqual(f.calls[0].argv, []string{"docker", "info"}) {
 			t.Errorf("%s on docker: argv = %v, err = %v, want docker info", c.action, f.calls[0].argv, err)
 		}
 	}
@@ -946,7 +979,7 @@ func TestPreflightRefusalNamesThePermission(t *testing.T) {
 		{"Warning: something\nno - RBAC: access denied\n", "", `your account may not get pods/log in the current namespace (kubectl auth can-i answered "no - RBAC: access denied")`},
 	} {
 		f := &fakeRunner{out: c.out, err: fmt.Errorf("exit status 1")}
-		out, err := Preflight(f, validate.PlatformKubernetes, "kubectl", ActionLogs, c.ns, nil)
+		out, err := Preflight(f, validate.PlatformKubernetes, "kubectl", ActionLogs, c.ns, noApprovals)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("out %q: error = %v, want it to contain %s", c.out, err, c.want)
 		}
@@ -959,14 +992,14 @@ func TestPreflightRefusalNamesThePermission(t *testing.T) {
 	}
 	// An unreachable cluster still gets the login hint.
 	f := &fakeRunner{out: "error: You must be logged in to the server (Unauthorized)\n", err: fmt.Errorf("exit status 1")}
-	if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", ActionLogs, "prod", nil); err == nil || !strings.Contains(err.Error(), "oc login") {
+	if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", ActionLogs, "prod", noApprovals); err == nil || !strings.Contains(err.Error(), "oc login") {
 		t.Errorf("an unreachable cluster keeps the login hint, got %v", err)
 	}
 }
 
 func TestPreflightRejectsDisallowedBinaryBeforeRunning(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformKubernetes, "curl", ActionDeploy, "", nil); err == nil {
+	if _, err := Preflight(f, validate.PlatformKubernetes, "curl", ActionDeploy, "", noApprovals); err == nil {
 		t.Fatal("a binary outside the platform allowlist must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -976,22 +1009,32 @@ func TestPreflightRejectsDisallowedBinaryBeforeRunning(t *testing.T) {
 
 func TestPreflightExtraAllowedThreadsThrough(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformPodman, "sudo podman", ActionDeploy, "", nil); err == nil {
-		t.Fatal("sudo podman must be rejected without extraAllowed")
+	if _, err := Preflight(f, validate.PlatformPodman, "lima podman", ActionDeploy, "", noApprovals); err == nil {
+		t.Fatal("lima podman must be rejected without an approval")
 	}
 	f = &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformPodman, "sudo podman", ActionDeploy, "", []string{"sudo"}); err != nil {
-		t.Fatalf("sudo podman with extraAllowed=[sudo] unexpected error: %v", err)
+	if _, err := Preflight(f, validate.PlatformPodman, "lima podman", ActionDeploy, "", approve(t, "lima")); err != nil {
+		t.Fatalf("lima podman with lima approved unexpected error: %v", err)
 	}
-	want := []string{"sudo", "podman", "info"}
+	want := []string{"lima", "podman", "info"}
 	if !reflect.DeepEqual(f.calls[0].argv, want) {
 		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	}
+
+	// sudo is refused before the probe runs, approvals or not.
+	f = &fakeRunner{}
+	if _, err := Preflight(f, validate.PlatformPodman, "sudo podman", ActionDeploy, "", approve(t, "lima")); err == nil ||
+		!strings.Contains(err.Error(), "privilege-escalation wrapper") {
+		t.Fatalf("sudo podman must be refused as an escalation wrapper, got %v", err)
+	}
+	if len(f.calls) != 0 {
+		t.Fatal("the probe must never run when the command itself is rejected")
 	}
 }
 
 func TestPreflightUnknownAction(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", "rollback", "", nil); err == nil {
+	if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", "rollback", "", noApprovals); err == nil {
 		t.Fatal("unknown action must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -2125,7 +2168,7 @@ func TestParsingHelpersIgnoreAWarningOnStderr(t *testing.T) {
 	// line count wrong and the image check pass without comparing anything.
 	t.Run("DockerImageCommand", func(t *testing.T) {
 		r := &splitRunner{stdout: "[\"java\"]\n[\"--x\"]\n", stderr: warning}
-		ep, cmd, found, err := DockerImageCommand(r, "docker", "img:1", nil)
+		ep, cmd, found, err := DockerImageCommand(r, "docker", "img:1", noApprovals)
 		if err != nil || !found || !reflect.DeepEqual(ep, []string{"java"}) || !reflect.DeepEqual(cmd, []string{"--x"}) {
 			t.Errorf("ep=%q cmd=%q found=%v err=%v, want the stdout answer despite the warning", ep, cmd, found, err)
 		}
@@ -2189,7 +2232,7 @@ func TestParsedFailureCarriesBothStreams(t *testing.T) {
 // and an unsafe command never runs.
 func TestDockerImageCommand(t *testing.T) {
 	f := &fakeRunner{out: "[\"java\",\"-cp\",\"@/app/jib-classpath-file\"]\n[\"--x=1\"]\n"}
-	ep, cmd, found, err := DockerImageCommand(f, "docker", "img:1", nil)
+	ep, cmd, found, err := DockerImageCommand(f, "docker", "img:1", noApprovals)
 	if err != nil || !found || !reflect.DeepEqual(ep, []string{"java", "-cp", "@/app/jib-classpath-file"}) || !reflect.DeepEqual(cmd, []string{"--x=1"}) {
 		t.Fatalf("ep=%q cmd=%q found=%v err=%v", ep, cmd, found, err)
 	}
@@ -2205,12 +2248,12 @@ func TestDockerImageCommand(t *testing.T) {
 		{"one line", &fakeRunner{out: "[\"java\"]"}},
 		{"not json", &fakeRunner{out: "out\nout"}},
 	} {
-		if _, _, found, err := DockerImageCommand(c.f, "docker", "img:1", nil); found || err != nil {
+		if _, _, found, err := DockerImageCommand(c.f, "docker", "img:1", noApprovals); found || err != nil {
 			t.Errorf("%s: found=%v err=%v, want nothing to compare", c.name, found, err)
 		}
 	}
 	unsafe := &fakeRunner{}
-	if _, _, _, err := DockerImageCommand(unsafe, "docker; rm -rf /", "img:1", nil); err == nil || len(unsafe.calls) != 0 {
+	if _, _, _, err := DockerImageCommand(unsafe, "docker; rm -rf /", "img:1", noApprovals); err == nil || len(unsafe.calls) != 0 {
 		t.Errorf("an unsafe command must be rejected before running: err=%v calls=%d", err, len(unsafe.calls))
 	}
 }
@@ -2219,14 +2262,14 @@ func TestDockerImageCommand(t *testing.T) {
 // unsafe one before running anything.
 func TestDockerImagePull(t *testing.T) {
 	f := &fakeRunner{out: "pulled"}
-	if out, err := DockerImagePull(f, "docker --context remote", "img:1", nil); err != nil || out != "pulled" {
+	if out, err := DockerImagePull(f, "docker --context remote", "img:1", noApprovals); err != nil || out != "pulled" {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
 	if want := []string{"docker", "--context", "remote", "image", "pull", "img:1"}; len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) {
 		t.Errorf("argv = %v, want %v", f.calls, want)
 	}
 	unsafe := &fakeRunner{}
-	if _, err := DockerImagePull(unsafe, "docker; rm -rf /", "img:1", nil); err == nil || len(unsafe.calls) != 0 {
+	if _, err := DockerImagePull(unsafe, "docker; rm -rf /", "img:1", noApprovals); err == nil || len(unsafe.calls) != 0 {
 		t.Errorf("an unsafe command must be rejected before running: err=%v calls=%d", err, len(unsafe.calls))
 	}
 }
@@ -2242,19 +2285,19 @@ func TestLifecycleArgv(t *testing.T) {
 		want []string
 	}{
 		{"kubernetes stop", func(r Runner) (string, error) {
-			return KubernetesLifecycle(r, "kubectl", ActionStop, "ns", "c", 3, nil)
+			return KubernetesLifecycle(r, "kubectl", ActionStop, "ns", "c", 3, noApprovals)
 		}, []string{"kubectl", "--namespace", "ns", "scale", "deployment/c", "--replicas=0"}},
 		{"kubernetes start", func(r Runner) (string, error) {
-			return KubernetesLifecycle(r, "oc", ActionStart, "ns", "c", 3, nil)
+			return KubernetesLifecycle(r, "oc", ActionStart, "ns", "c", 3, noApprovals)
 		}, []string{"oc", "--namespace", "ns", "scale", "deployment/c", "--replicas=3"}},
 		{"kubernetes restart, current namespace", func(r Runner) (string, error) {
-			return KubernetesLifecycle(r, "kubectl", ActionRestart, "", "c", 1, nil)
+			return KubernetesLifecycle(r, "kubectl", ActionRestart, "", "c", 1, noApprovals)
 		}, []string{"kubectl", "rollout", "restart", "deployment/c"}},
 		{"docker stop", func(r Runner) (string, error) {
-			return DockerLifecycle(r, "docker --context prod", ActionStop, "connector", nil)
+			return DockerLifecycle(r, "docker --context prod", ActionStop, "connector", noApprovals)
 		}, []string{"docker", "--context", "prod", "stop", "connector"}},
 		{"docker restart", func(r Runner) (string, error) {
-			return DockerLifecycle(r, "docker", ActionRestart, "connector", nil)
+			return DockerLifecycle(r, "docker", ActionRestart, "connector", noApprovals)
 		}, []string{"docker", "restart", "connector"}},
 		{"podman start, user unit", func(r Runner) (string, error) {
 			return PodmanLifecycle(r, QuadletScope{UserMode: true}, ActionStart, "connector.service")
@@ -2274,11 +2317,13 @@ func TestLifecycleArgv(t *testing.T) {
 	}
 	for _, bad := range []func(r Runner) (string, error){
 		func(r Runner) (string, error) {
-			return KubernetesLifecycle(r, "kubectl", ActionDeploy, "ns", "c", 1, nil)
+			return KubernetesLifecycle(r, "kubectl", ActionDeploy, "ns", "c", 1, noApprovals)
 		},
-		func(r Runner) (string, error) { return DockerLifecycle(r, "docker", "kill", "c", nil) },
+		func(r Runner) (string, error) { return DockerLifecycle(r, "docker", "kill", "c", noApprovals) },
 		func(r Runner) (string, error) { return PodmanLifecycle(r, QuadletScope{}, ActionRemove, "c.service") },
-		func(r Runner) (string, error) { return DockerLifecycle(r, "docker; rm -rf /", ActionStop, "c", nil) },
+		func(r Runner) (string, error) {
+			return DockerLifecycle(r, "docker; rm -rf /", ActionStop, "c", noApprovals)
+		},
 	} {
 		f := &fakeRunner{}
 		if _, err := bad(f); err == nil || len(f.calls) != 0 {
@@ -2292,7 +2337,7 @@ func TestLifecycleArgv(t *testing.T) {
 func TestPreflightKubernetesLifecycleAsksToPatch(t *testing.T) {
 	for _, action := range []string{ActionStart, ActionStop, ActionRestart} {
 		f := &fakeRunner{}
-		if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", action, "ns", nil); err != nil {
+		if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", action, "ns", noApprovals); err != nil {
 			t.Fatalf("%s: %v", action, err)
 		}
 		if want := []string{"kubectl", "auth", "can-i", "patch", "deployment", "--namespace", "ns"}; !reflect.DeepEqual(f.calls[0].argv, want) {

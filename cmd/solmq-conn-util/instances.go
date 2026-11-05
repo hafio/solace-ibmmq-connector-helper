@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -45,7 +46,7 @@ type instanceRequest struct {
 	command  string
 	pods     []string
 	conts    []string
-	allow    []string
+	approved execguard.Approvals
 	all      bool
 }
 
@@ -106,7 +107,7 @@ func resolveInstanceSession(t instanceRequest) (instanceSession, error) {
 	}
 
 	command := instanceCommand(platform, t.command, e)
-	cmdArgv, err := runner.ParseCommand(platform, command, t.allow)
+	cmdArgv, err := runner.ParseCommand(platform, command, t.approved)
 	if err != nil {
 		return s, err
 	}
