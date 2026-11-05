@@ -357,7 +357,7 @@ func composeQuote(s string) string {
 //     first $( -- command substitution is not valid interpolation syntax.
 //   - application.yml's ${...} placeholders are Spring's, resolved from the
 //     configtree import of the secrets directory. Compose resolves them first, from the
-//     environment the CLI hands the compose child (runner.Cmd.Env), inlining
+//     environment the CLI hands the compose child (the shared runner's Cmd.Env), inlining
 //     the credential values as plaintext into the document and bypassing the
 //     secrets model entirely.
 //

@@ -12,6 +12,7 @@ import (
 
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
@@ -102,7 +103,7 @@ func (o logsOpts) forRunner() runner.LogsOpts {
 }
 
 // runLogs parses logs's flags and hands them to actLogs.
-func runLogs(args []string, r runner.Runner) int {
+func runLogs(args []string, r gdurunner.Runner) int {
 	fs := verbFlagSet("logs")
 	env := envFlag(fs)
 	platform := platformFlag(fs)
@@ -189,16 +190,7 @@ func checkLogsFlags(o logsOpts) int {
 // log. Everything that can fail the whole run -- an unreadable env.yaml, an
 // unsafe name, a platform that cannot be resolved, a failed preflight -- fails
 // here, before anything is read.
-func actLogs(o logsOpts, r runner.Runner) int {
-	// Both paths stream: a one-shot read wants the platform diagnostics on
-	// stderr just as much as a followed one does, because `logs > app.log` is
-	// the whole point of the verb and a redirect that swallowed them would be
-	// the first thing to confuse an operator.
-	s, ok := r.(runner.Streamer)
-	if !ok {
-		return errExit(errors.New("logs needs a runner that can stream command output, and this one cannot"))
-	}
-
+func actLogs(o logsOpts, r gdurunner.Runner) int {
 	sess, serr := resolveInstanceSession(instanceRequest{
 		verb:     verbLogs,
 		envPath:  o.envPath,
@@ -234,7 +226,7 @@ func actLogs(o logsOpts, r runner.Runner) int {
 		// exactly what to type next, which is not a failure.
 		return exitcode.OK
 	}
-	return readLog(s, sess, o, target)
+	return readLog(r, sess, o, target)
 }
 
 // logsInvocation rebuilds the command that was run, minus the instance, so the
@@ -280,9 +272,14 @@ func logsInvocation(sess instanceSession, o logsOpts) pickerLine {
 //
 // Follow mode is the same read with a cancellable context and a signal handler:
 // Ctrl-C is how a follow is meant to end, so it exits 0 -- the same reasoning
-// watchStatus records for --watch. Stream reports a cancelled context as
-// success, so there is nothing here to unpick.
-func readLog(s runner.Streamer, sess instanceSession, o logsOpts, t instanceRef) int {
+// watchStatus records for --watch. Both paths stream, a one-shot read as much
+// as a followed one: a read wants the platform diagnostics on stderr just as
+// much, because `logs > app.log` is the whole point of the verb and a redirect
+// that swallowed them would be the first thing to confuse an operator. The
+// shared runner reports a cancelled context as an error wrapping
+// context.Canceled rather than as success, so a follow whose own context was
+// cancelled is the clean end and is unpicked here; any other failure is one.
+func readLog(r gdurunner.Runner, sess instanceSession, o logsOpts, t instanceRef) int {
 	argv, err := runner.LogsArgv(sess.cmdArgv, sess.platform, t.name, t.namespace, o.forRunner())
 	if err != nil {
 		return errExit(err)
@@ -302,7 +299,10 @@ func readLog(s runner.Streamer, sess instanceSession, o logsOpts, t instanceRef)
 		}()
 	}
 
-	if err := s.Stream(ctx, runner.Cmd{Argv: argv}, os.Stdout, os.Stderr); err != nil {
+	if err := r.Run(ctx, gdurunner.Cmd{Argv: argv}, os.Stdout, os.Stderr); err != nil {
+		if o.follow && ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			return exitcode.OK
+		}
 		return errExit(fmt.Errorf("reading %s: %w", t.name, err))
 	}
 	return exitcode.OK

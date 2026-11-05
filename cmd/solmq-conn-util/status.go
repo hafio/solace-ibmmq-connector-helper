@@ -32,6 +32,7 @@ import (
 	"github.com/hafio/go-deploy-utility/confirm"
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -146,7 +147,7 @@ type statusOpts struct {
 }
 
 // runStatus parses status's target word and flags and hands them to actStatus.
-func runStatus(args []string, r runner.Runner) int {
+func runStatus(args []string, r gdurunner.Runner) int {
 	fs := verbFlagSet("status")
 	env := envFlag(fs)
 	install := fs.Bool("install", false, "install the status script on every target without prompting")
@@ -288,7 +289,7 @@ func checkStatusFlags(o statusOpts, output string) int {
 // or on a watch loop. Everything that can fail the whole run -- an unreadable
 // env.yaml, an unsafe name, a platform that cannot be resolved, a failed
 // preflight -- fails here, before any instance is queried.
-func actStatus(o statusOpts, r runner.Runner) int {
+func actStatus(o statusOpts, r gdurunner.Runner) int {
 	sess, serr := resolveInstanceSession(instanceRequest{
 		verb:     verbStatus,
 		envPath:  o.envPath,
@@ -374,7 +375,7 @@ type statusCollector struct {
 	platform string
 	cmdArgv  []string
 	env      *spec.Env
-	r        runner.Runner
+	r        gdurunner.Runner
 
 	// prog names the step each slow call is on while the operator waits. Built
 	// once in actStatus, since the first step is the preflight probe that runs
@@ -448,7 +449,7 @@ func (c *statusCollector) collectKubernetes(rep *statusreport.Report) error {
 	rep.Group = group
 
 	c.prog.step("list pods")
-	doc, err := runner.KubernetesPodsJSON(c.r, c.cmdArgv, o.ns, selector, o.pods, o.all)
+	doc, err := runner.KubernetesPodsJSON(bg(), c.r, c.cmdArgv, o.ns, selector, o.pods, o.all)
 	if err != nil {
 		return err
 	}
@@ -472,14 +473,14 @@ func (c *statusCollector) collectKubernetes(rep *statusreport.Report) error {
 	if c.wantsContainerFacts() && !o.all && c.env != nil && c.env.Kubernetes != nil {
 		name := c.env.Kubernetes.Deployment.Name
 		c.prog.step("read deployment %s", name)
-		if doc, derr := runner.KubernetesGetJSON(c.r, c.cmdArgv, o.ns, "deployment", name); derr != nil {
+		if doc, derr := runner.KubernetesGetJSON(bg(), c.r, c.cmdArgv, o.ns, "deployment", name); derr != nil {
 			rep.Notes = append(rep.Notes, fmt.Sprintf("could not read deployment %s: %v", name, derr))
 		} else if w, werr := statusreport.ParseDeployment(doc); werr == nil {
 			rep.Workload = w
 		}
 		if c.env.Kubernetes.Service.Enabled {
 			c.prog.step("read service %s", name)
-			if doc, serr := runner.KubernetesGetJSON(c.r, c.cmdArgv, o.ns, "service", name); serr == nil {
+			if doc, serr := runner.KubernetesGetJSON(bg(), c.r, c.cmdArgv, o.ns, "service", name); serr == nil {
 				rep.Workload, _ = statusreport.MergeService(rep.Workload, doc)
 			}
 		}
@@ -489,7 +490,7 @@ func (c *statusCollector) collectKubernetes(rep *statusreport.Report) error {
 		return nil
 	}
 	c.prog.step("sample resource use")
-	if out, terr := runner.KubernetesTop(c.r, c.cmdArgv, o.ns, selector, o.pods, o.all); terr != nil {
+	if out, terr := runner.KubernetesTop(bg(), c.r, c.cmdArgv, o.ns, selector, o.pods, o.all); terr != nil {
 		// The metrics API is an optional cluster add-on, so its absence is a
 		// note against the resource lines rather than a failed run.
 		rep.Notes = append(rep.Notes, fmt.Sprintf("no resource usage: %v; install metrics-server, or drop --details", terr))
@@ -528,7 +529,7 @@ func (c *statusCollector) checkComponents(rep *statusreport.Report) {
 				continue
 			}
 			c.prog.step("check %s %s", comp.Kind, comp.Name)
-			doc, err := runner.KubernetesGetJSON(c.r, c.cmdArgv, inst.Namespace, comp.Kind, comp.Name)
+			doc, err := runner.KubernetesGetJSON(bg(), c.r, c.cmdArgv, inst.Namespace, comp.Kind, comp.Name)
 			if err != nil {
 				comp.Status = "MISSING"
 			} else if ok, status := statusreport.ObjectExists(doc); ok {
@@ -562,7 +563,7 @@ func (c *statusCollector) collectEngine(rep *statusreport.Report) error {
 	}
 
 	c.prog.step("inspect containers")
-	doc, err := runner.EngineInspectJSON(c.r, c.cmdArgv, names)
+	doc, err := runner.EngineInspectJSON(bg(), c.r, c.cmdArgv, names)
 	if err != nil {
 		return err
 	}
@@ -592,7 +593,7 @@ func (c *statusCollector) collectEngine(rep *statusreport.Report) error {
 	// enrichment. On kubernetes it arrives free in the pod document either way.
 	c.applyDigests(rep)
 	c.prog.step("sample resource use")
-	if out, serr := runner.EngineStats(c.r, c.cmdArgv, names); serr != nil {
+	if out, serr := runner.EngineStats(bg(), c.r, c.cmdArgv, names); serr != nil {
 		rep.Notes = append(rep.Notes, fmt.Sprintf("no resource usage: %v", serr))
 	} else {
 		statusreport.ApplyStats(rep.Instances, out)
@@ -625,7 +626,7 @@ func (c *statusCollector) applyPodmanRestarts(rep *statusreport.Report) {
 			continue
 		}
 		c.prog.step("read restart count %s %d/%d", inst.Name, i+1, len(rep.Instances))
-		n, nerr := runner.SystemctlNRestarts(c.r, sc, gen.PodmanServiceName(inst.Name))
+		n, nerr := runner.SystemctlNRestarts(bg(), c.r, sc, gen.PodmanServiceName(inst.Name))
 		if nerr != nil {
 			continue
 		}
@@ -654,7 +655,7 @@ func (c *statusCollector) applyDigests(rep *statusreport.Report) {
 				continue
 			}
 			c.prog.step("read image digest %s", ref)
-			if doc, err := runner.EngineImageInspectJSON(c.r, c.cmdArgv, ref); err == nil {
+			if doc, err := runner.EngineImageInspectJSON(bg(), c.r, c.cmdArgv, ref); err == nil {
 				d = statusreport.ParseImageDigest(doc)
 			}
 			digests[ref] = d
@@ -769,7 +770,7 @@ func (c *statusCollector) collectApplication(rep *statusreport.Report) bool {
 	for i := range rep.Instances {
 		inst := &rep.Instances[i]
 		c.prog.step("install probe %s %d/%d", inst.Name, i+1, len(rep.Instances))
-		ok, err := runner.ScriptInstalled(c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerPath)
+		ok, err := runner.ScriptInstalled(bg(), c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerPath)
 		if err != nil {
 			inst.Error = fmt.Sprintf("could not check for the status script: %v", err)
 			failed = true
@@ -814,7 +815,7 @@ func (c *statusCollector) collectApplication(rep *statusreport.Report) bool {
 				continue
 			}
 			c.prog.step("install script %s %d/%d", inst.Name, n+1, len(missing))
-			if _, err := runner.InstallScript(c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerDir, statusscript.ContainerPath, script); err != nil {
+			if _, err := runner.InstallScript(bg(), c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerDir, statusscript.ContainerPath, script); err != nil {
 				inst.Error = fmt.Sprintf("could not install the status script: %v", err)
 				failed = true
 				continue
@@ -842,7 +843,7 @@ func (c *statusCollector) collectApplication(rep *statusreport.Report) bool {
 		// This is the run's dominant cost: one exec per instance, and seven
 		// sequential actuator calls inside each one.
 		c.prog.step("status script %s %d/%d", inst.Name, ran, total)
-		out, err := runner.RunStatusScript(c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerPath)
+		out, err := runner.RunStatusScript(bg(), c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerPath)
 		if err != nil {
 			inst.Error = fmt.Sprintf("could not run the status script: %v", err)
 			failed = true

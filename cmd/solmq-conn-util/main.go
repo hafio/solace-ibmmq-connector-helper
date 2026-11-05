@@ -18,6 +18,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -33,6 +34,7 @@ import (
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/hafio/go-deploy-utility/notice"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/examples"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/libs"
@@ -128,8 +130,13 @@ func main() {
 // run is the CLI entry point: it dispatches with the production Runner. Tests
 // that need to inspect what would run call dispatch directly with a fake.
 func run(args []string) int {
-	return dispatch(args, runner.OS{})
+	return dispatch(args, gdurunner.Exec{})
 }
+
+// bg is the context every runner helper call outside logs --follow runs under.
+// Ctrl-C keeps its default effect there: the process ends, and Exec's children
+// share the terminal's process group and see the same interrupt.
+func bg() context.Context { return context.Background() }
 
 // verbHandlers maps each modeled verb (cliVerbs in commands.go) to its
 // implementation, threading r down to whichever action ends up shelling out.
@@ -137,22 +144,22 @@ func run(args []string) int {
 // TestDispatchHandlersMatchModel gates: a verb added to one side and not the
 // other fails that test rather than drifting silently (see task 2's
 // examples-default-dir drift for what this class of bug looks like).
-var verbHandlers = map[string]func(args []string, r runner.Runner) int{
-	"generate":      func(args []string, r runner.Runner) int { return runGenerate(args) },
-	"deploy":        func(args []string, r runner.Runner) int { return runAction(runner.ActionDeploy, args, r) },
-	"remove":        func(args []string, r runner.Runner) int { return runAction(runner.ActionRemove, args, r) },
-	"start":         func(args []string, r runner.Runner) int { return runLifecycle(runner.ActionStart, args, r) },
-	"stop":          func(args []string, r runner.Runner) int { return runLifecycle(runner.ActionStop, args, r) },
-	"restart":       func(args []string, r runner.Runner) int { return runLifecycle(runner.ActionRestart, args, r) },
-	"status":        func(args []string, r runner.Runner) int { return runStatus(args, r) },
-	"logs":          func(args []string, r runner.Runner) int { return runLogs(args, r) },
-	"cli":           func(args []string, r runner.Runner) int { return runShell(args, r) },
-	"version":       func(args []string, r runner.Runner) int { return actVersion() },
-	"validate":      func(args []string, r runner.Runner) int { return runValidate(args) },
-	"examples":      func(args []string, r runner.Runner) int { return runExamples(args) },
-	"download":      func(args []string, r runner.Runner) int { return runDownload(args) },
-	"auto-complete": func(args []string, r runner.Runner) int { return runAutoComplete(args) },
-	"help":          func(args []string, r runner.Runner) int { return runHelp(args) },
+var verbHandlers = map[string]func(args []string, r gdurunner.Runner) int{
+	"generate":      func(args []string, r gdurunner.Runner) int { return runGenerate(args) },
+	"deploy":        func(args []string, r gdurunner.Runner) int { return runAction(runner.ActionDeploy, args, r) },
+	"remove":        func(args []string, r gdurunner.Runner) int { return runAction(runner.ActionRemove, args, r) },
+	"start":         func(args []string, r gdurunner.Runner) int { return runLifecycle(runner.ActionStart, args, r) },
+	"stop":          func(args []string, r gdurunner.Runner) int { return runLifecycle(runner.ActionStop, args, r) },
+	"restart":       func(args []string, r gdurunner.Runner) int { return runLifecycle(runner.ActionRestart, args, r) },
+	"status":        func(args []string, r gdurunner.Runner) int { return runStatus(args, r) },
+	"logs":          func(args []string, r gdurunner.Runner) int { return runLogs(args, r) },
+	"cli":           func(args []string, r gdurunner.Runner) int { return runShell(args, r) },
+	"version":       func(args []string, r gdurunner.Runner) int { return actVersion() },
+	"validate":      func(args []string, r gdurunner.Runner) int { return runValidate(args) },
+	"examples":      func(args []string, r gdurunner.Runner) int { return runExamples(args) },
+	"download":      func(args []string, r gdurunner.Runner) int { return runDownload(args) },
+	"auto-complete": func(args []string, r gdurunner.Runner) int { return runAutoComplete(args) },
+	"help":          func(args []string, r gdurunner.Runner) int { return runHelp(args) },
 }
 
 // commandAbbrev is cliVerbs (Name and Aliases in commands.go) as the shared
@@ -184,7 +191,7 @@ func resolveVerb(name string) string {
 // its canonical verb the same way, right after that -h/--help normalization;
 // the unknown-command message below still echoes args[0] as typed, never the
 // resolved name.
-func dispatch(args []string, r runner.Runner) int {
+func dispatch(args []string, r gdurunner.Runner) int {
 	if len(args) == 0 {
 		usage(os.Stderr)
 		return exitcode.Usage
@@ -457,7 +464,7 @@ type actionOpts struct {
 	noPrompt bool
 }
 
-var actTargets = map[string]func(o actionOpts, r runner.Runner) int{
+var actTargets = map[string]func(o actionOpts, r gdurunner.Runner) int{
 	tgtKubernetes: actKubernetes,
 	tgtDocker:     actDocker,
 	tgtPodman:     actPodman,
@@ -469,7 +476,7 @@ var actTargets = map[string]func(o actionOpts, r runner.Runner) int{
 // ...) is rejected with a hint at --platform, and anything else is an
 // unexpected argument -- both usage errors (exit 2), per
 // platformResolutionDetail in commands.go.
-func runAction(action string, args []string, r runner.Runner) int {
+func runAction(action string, args []string, r gdurunner.Runner) int {
 	fs := verbFlagSet(action)
 	env := envFlag(fs)
 	platform := platformFlag(fs)
@@ -533,15 +540,15 @@ func runAction(action string, args []string, r runner.Runner) int {
 // probe's combined output and wrapped error (which already names the platform
 // and carries a login hint) and the caller must stop without writing or
 // executing anything further.
-func preflight(r runner.Runner, action, platform, command, namespace string, approvals execguard.Approvals) (code int, ok bool) {
-	out, err := runner.Preflight(r, platform, command, action, namespace, approvals)
+func preflight(r gdurunner.Runner, action, platform, command, namespace string, approvals execguard.Approvals) (code int, ok bool) {
+	out, err := runner.Preflight(bg(), r, platform, command, action, namespace, approvals)
 	if err != nil {
 		return report(action, platform, out, err), false
 	}
 	return exitcode.OK, true
 }
 
-func actKubernetes(o actionOpts, r runner.Runner) int {
+func actKubernetes(o actionOpts, r gdurunner.Runner) int {
 	action, envPath, approvals := o.action, o.envPath, o.approvals
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
@@ -575,7 +582,7 @@ func actKubernetes(o actionOpts, r runner.Runner) int {
 			return failAll(perrs)
 		}
 	}
-	out, rerr := runner.Kubernetes(r, e.Kubernetes.Command, action, manifest, approvals)
+	out, rerr := runner.Kubernetes(bg(), r, e.Kubernetes.Command, action, manifest, approvals)
 	warnIfPVUnchanged(action, out)
 	if code := report(action, tgtKubernetes, out, rerr); code != 0 {
 		// A failed teardown leaves the namespace alone: whatever did not come
@@ -588,7 +595,7 @@ func actKubernetes(o actionOpts, r runner.Runner) int {
 	return exitcode.OK
 }
 
-func actDocker(o actionOpts, r runner.Runner) int {
+func actDocker(o actionOpts, r gdurunner.Runner) int {
 	action, envPath, approvals := o.action, o.envPath, o.approvals
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
@@ -648,7 +655,7 @@ func actDocker(o actionOpts, r runner.Runner) int {
 	// The compose file goes to compose on stdin and never touches the disk:
 	// every deploy and remove renders it afresh, so nothing needs it kept, and
 	// `generate --platform docker -o` writes one (0600) for a hand-run compose.
-	out, rerr := runner.Docker(r, e.Docker.Command, action, plan.Compose, envDir, envPairs(append(kvs, storeKVs...)), approvals)
+	out, rerr := runner.Docker(bg(), r, e.Docker.Command, action, plan.Compose, envDir, envPairs(append(kvs, storeKVs...)), approvals)
 	return report(action, tgtDocker, out, rerr)
 }
 
@@ -658,16 +665,16 @@ func actDocker(o actionOpts, r runner.Runner) int {
 // any other way fails the deploy before anything is written. An image the
 // engine does not have yet is pulled first and then inspected, so the check
 // never passes without comparing anything.
-func checkImageCommand(r runner.Runner, command, image string, approvals execguard.Approvals) error {
-	entrypoint, cmd, found, err := runner.DockerImageCommand(r, command, image, approvals)
+func checkImageCommand(r gdurunner.Runner, command, image string, approvals execguard.Approvals) error {
+	entrypoint, cmd, found, err := runner.DockerImageCommand(bg(), r, command, image, approvals)
 	if err != nil {
 		return err
 	}
 	if !found {
-		if out, perr := runner.DockerImagePull(r, command, image, approvals); perr != nil {
+		if out, perr := runner.DockerImagePull(bg(), r, command, image, approvals); perr != nil {
 			return fmt.Errorf("pulling %s to check how it starts before deploying a created store: %w\n%s", image, perr, strings.TrimSpace(out))
 		}
-		if entrypoint, cmd, found, err = runner.DockerImageCommand(r, command, image, approvals); err != nil {
+		if entrypoint, cmd, found, err = runner.DockerImageCommand(bg(), r, command, image, approvals); err != nil {
 			return err
 		}
 		if !found {
@@ -691,7 +698,7 @@ func envPairs(kvs []gen.KV) []string {
 	return out
 }
 
-func actPodman(o actionOpts, r runner.Runner) int {
+func actPodman(o actionOpts, r gdurunner.Runner) int {
 	action, envPath, approvals := o.action, o.envPath, o.approvals
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
@@ -732,7 +739,7 @@ func actPodman(o actionOpts, r runner.Runner) int {
 	return podmanDeploy(sc, plan, e.Podman, res, r, approvals)
 }
 
-func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, res gen.Resolver, r runner.Runner, approvals execguard.Approvals) int {
+func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, res gen.Resolver, r gdurunner.Runner, approvals execguard.Approvals) int {
 	// Everything the unit mounts is resolved first -- the credentials, then the
 	// documents and stores -- so a missing variable or an unreadable or
 	// oversized store stops the deploy before anything is created: the unit
@@ -750,10 +757,10 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	previous := previousStoreSecrets(sc, plan, p)
 	// podman 4.7 replaces a secret in one step; an older one, or a version that
 	// cannot be read, keeps to remove-then-create (runner.PodmanSecretCreate).
-	version, _ := runner.PodmanVersion(r, p.Command, approvals)
+	version, _ := runner.PodmanVersion(bg(), r, p.Command, approvals)
 	replace := runner.PodmanSupportsReplace(version)
 	for _, kv := range kvs {
-		out, err := runner.PodmanSecretCreate(r, p.Command, gen.PodmanSecretStoreName(p.Name, kv.Key), kv.Val, replace, approvals)
+		out, err := runner.PodmanSecretCreate(bg(), r, p.Command, gen.PodmanSecretStoreName(p.Name, kv.Key), kv.Val, replace, approvals)
 		if err != nil {
 			return report(runner.ActionDeploy, tgtPodman, out, err)
 		}
@@ -768,7 +775,7 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	mounted := make(map[string]bool, len(files))
 	for _, kv := range files {
 		mounted[kv.Key] = true
-		out, err := runner.PodmanSecretCreate(r, p.Command, kv.Key, kv.Val, replace, approvals)
+		out, err := runner.PodmanSecretCreate(bg(), r, p.Command, kv.Key, kv.Val, replace, approvals)
 		if err != nil {
 			return report(runner.ActionDeploy, tgtPodman, out, err)
 		}
@@ -782,17 +789,17 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 			stale = append(stale, n)
 		}
 	}
-	if out, err := runner.PodmanSecretRemove(r, p.Command, stale, approvals); err != nil {
+	if out, err := runner.PodmanSecretRemove(bg(), r, p.Command, stale, approvals); err != nil {
 		return report(runner.ActionDeploy, tgtPodman, out, err)
 	}
 	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.Unit.Filename), plan.Unit.Content, 0o644); err != nil {
 		return errExit(err)
 	}
-	out, rerr := runner.PodmanDeploy(r, sc, []string{plan.Service})
+	out, rerr := runner.PodmanDeploy(bg(), r, sc, []string{plan.Service})
 	return report(runner.ActionDeploy, tgtPodman, out, rerr)
 }
 
-func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r runner.Runner, approvals execguard.Approvals) int {
+func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r gdurunner.Runner, approvals execguard.Approvals) int {
 	// The stores the deployed unit mounts, read before the unit is deleted, and
 	// the ones this spec mounts, in case the unit is already gone.
 	stores := previousStoreSecrets(sc, plan, p)
@@ -803,7 +810,7 @@ func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 			stores = append(stores, f.StoreName)
 		}
 	}
-	out, rerr := runner.PodmanRemove(r, sc, []string{plan.Service}, []string{plan.Unit.Filename})
+	out, rerr := runner.PodmanRemove(bg(), r, sc, []string{plan.Service}, []string{plan.Unit.Filename})
 	// The secrets go last, after the unit that mounted them is gone: the
 	// credentials, and every file secret the instance can own, whether or not
 	// this spec still mounts it. Leaving credential or key material behind is
@@ -815,7 +822,7 @@ func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	}
 	names = append(names, gen.PodmanFileSecretNames(p.Name)...)
 	names = append(names, stores...)
-	so, serr := runner.PodmanSecretRemove(r, p.Command, names, approvals)
+	so, serr := runner.PodmanSecretRemove(bg(), r, p.Command, names, approvals)
 	out += so
 	if rerr == nil {
 		rerr = serr
@@ -1090,9 +1097,9 @@ var downloadSets = map[string]string{
 // downloadFn is the injectable seam behind runDownload's call into
 // internal/libs: libs.Download in production, a fake in tests that captures
 // the Input it received instead of touching the network -- mirrors the
-// runner.Runner seam dispatch threads explicitly, so this package's own tests
+// gdurunner.Runner seam dispatch threads explicitly, so this package's own tests
 // stay decoupled from internal/libs's HTTP/Maven behavior. download never
-// shells out, so it carries no runner.Runner of its own; this is its only
+// shells out, so it carries no gdurunner.Runner of its own; this is its only
 // injected boundary.
 var downloadFn = libs.Download
 

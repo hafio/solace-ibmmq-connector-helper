@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/hafio/go-deploy-utility/execguard"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -25,14 +26,14 @@ import (
 // at start if something is missing. Any other failure to read it is a warning
 // too, naming what kubectl said; the preflight probe has already shown the
 // cluster is reachable.
-func probeOperatorSecrets(r runner.Runner, k *spec.Kubernetes, probes []gen.SecretProbe, approvals execguard.Approvals) (errs []error, warns []string) {
+func probeOperatorSecrets(r gdurunner.Runner, k *spec.Kubernetes, probes []gen.SecretProbe, approvals execguard.Approvals) (errs []error, warns []string) {
 	argv, err := runner.ParseCommand(validate.PlatformKubernetes, k.Command, approvals)
 	if err != nil {
 		return []error{err}, nil
 	}
 	ns := k.Deployment.Namespace
 	for _, p := range probes {
-		doc, gerr := runner.KubernetesGetJSON(r, argv, ns, "secret", p.Name)
+		doc, gerr := runner.KubernetesGetJSON(bg(), r, argv, ns, "secret", p.Name)
 		if gerr != nil {
 			switch msg := gerr.Error(); {
 			case strings.Contains(msg, "NotFound") || strings.Contains(msg, "not found"):

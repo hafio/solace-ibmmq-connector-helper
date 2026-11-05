@@ -6,6 +6,7 @@ import (
 	"regexp"
 
 	"github.com/hafio/go-deploy-utility/exitcode"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
@@ -29,7 +30,7 @@ var lifecycleNameRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 //   - docker: `<command> stop|start|restart <docker.name>`; a created store is
 //     decoded again on every start.
 //   - podman: `systemctl [--user] stop|start|restart <name>.service`.
-func runLifecycle(action string, args []string, r runner.Runner) int {
+func runLifecycle(action string, args []string, r gdurunner.Runner) int {
 	fs := verbFlagSet(action)
 	env := envFlag(fs)
 	platform := platformFlag(fs)
@@ -76,7 +77,7 @@ func runLifecycle(action string, args []string, r runner.Runner) int {
 		if code, ok := preflight(r, action, name, k.Command, k.Deployment.Namespace, approvals); !ok {
 			return code
 		}
-		out, err = runner.KubernetesLifecycle(r, k.Command, action, k.Deployment.Namespace, k.Deployment.Name, k.Deployment.Replicas, approvals)
+		out, err = runner.KubernetesLifecycle(bg(), r, k.Command, action, k.Deployment.Namespace, k.Deployment.Name, k.Deployment.Replicas, approvals)
 	case validate.PlatformDocker:
 		d := e.Docker
 		if err := checkName("docker.name", d.Name); err != nil {
@@ -85,7 +86,7 @@ func runLifecycle(action string, args []string, r runner.Runner) int {
 		if code, ok := preflight(r, action, name, d.Command, "", approvals); !ok {
 			return code
 		}
-		out, err = runner.DockerLifecycle(r, d.Command, action, d.Name, approvals)
+		out, err = runner.DockerLifecycle(bg(), r, d.Command, action, d.Name, approvals)
 	default:
 		p := e.Podman
 		if err := checkName("podman.name", p.Name); err != nil {
@@ -98,7 +99,7 @@ func runLifecycle(action string, args []string, r runner.Runner) int {
 		if code, ok := preflight(r, action, name, p.Command, "", approvals); !ok {
 			return code
 		}
-		out, err = runner.PodmanLifecycle(r, sc, action, gen.PodmanServiceName(p.Name))
+		out, err = runner.PodmanLifecycle(bg(), r, sc, action, gen.PodmanServiceName(p.Name))
 	}
 	return report(action, name, out, err)
 }

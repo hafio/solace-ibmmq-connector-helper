@@ -9,6 +9,7 @@ import (
 
 	"github.com/hafio/go-deploy-utility/confirm"
 	"github.com/hafio/go-deploy-utility/exitcode"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -156,7 +157,7 @@ func isClusterDefault(it nsItem) bool {
 // well-known name, or any occupant at all leaves it in place. The exit code
 // stays 0 throughout -- the teardown the operator asked for did succeed, and
 // declining to delete a namespace is an outcome, not a failure.
-func removeNamespace(r runner.Runner, o actionOpts, k *spec.Kubernetes) int {
+func removeNamespace(r gdurunner.Runner, o actionOpts, k *spec.Kubernetes) int {
 	command, ns := k.Command, k.Deployment.Namespace
 	if ns == "" {
 		fmt.Fprintf(os.Stderr, "remove: no namespace in env.yaml to remove\n")
@@ -171,7 +172,7 @@ func removeNamespace(r runner.Runner, o actionOpts, k *spec.Kubernetes) int {
 	if err != nil {
 		return errExit(err)
 	}
-	doc, lerr := runner.KubernetesListJSON(r, argv, ns, namespaceProbeTypes)
+	doc, lerr := runner.KubernetesListJSON(bg(), r, argv, ns, namespaceProbeTypes)
 	if lerr != nil {
 		// A namespace is not worth deleting on a guess.
 		fmt.Fprintf(os.Stderr, "remove: could not check what is in namespace %s, so it was left in place: %v\n", ns, lerr)
@@ -201,7 +202,7 @@ func removeNamespace(r runner.Runner, o actionOpts, k *spec.Kubernetes) int {
 			return exitcode.OK
 		}
 	}
-	out, rerr := runner.Kubernetes(r, command, runner.ActionRemove, deploy.NamespaceManifest(ns), o.approvals)
+	out, rerr := runner.Kubernetes(bg(), r, command, runner.ActionRemove, deploy.NamespaceManifest(ns), o.approvals)
 	return report("remove namespace", tgtKubernetes, out, rerr)
 }
 

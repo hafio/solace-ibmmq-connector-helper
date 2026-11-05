@@ -10,6 +10,7 @@ import (
 
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusreport"
@@ -225,10 +226,10 @@ func noPodsFound(selector, ns string, all bool) error {
 // from the engine there rather than from the operator, so they are re-checked
 // before they can reach an argv, and a skip is said out loud rather than
 // silently narrowing the result.
-func engineNames(r runner.Runner, s instanceSession, conts []string, all bool) (names, notes []string, err error) {
+func engineNames(r gdurunner.Runner, s instanceSession, conts []string, all bool) (names, notes []string, err error) {
 	switch {
 	case all:
-		out, lerr := runner.EngineList(r, s.cmdArgv)
+		out, lerr := runner.EngineList(bg(), r, s.cmdArgv)
 		if lerr != nil {
 			return nil, nil, lerr
 		}
@@ -352,13 +353,13 @@ func sortInstances(insts []statusreport.Instance) {
 //
 // It is what both the logs picker and index resolution index into, so the two
 // cannot disagree about which instance is number 0.
-func instanceCandidates(r runner.Runner, s instanceSession, all bool) ([]instanceRef, error) {
+func instanceCandidates(r gdurunner.Runner, s instanceSession, all bool) ([]instanceRef, error) {
 	if s.platform == validate.PlatformKubernetes {
 		selector, match, _, err := kubeDiscovery(s, nil, all)
 		if err != nil {
 			return nil, err
 		}
-		doc, derr := runner.KubernetesPodsJSON(r, s.cmdArgv, s.ns, selector, nil, all)
+		doc, derr := runner.KubernetesPodsJSON(bg(), r, s.cmdArgv, s.ns, selector, nil, all)
 		if derr != nil {
 			return nil, derr
 		}
@@ -430,7 +431,7 @@ func anyIndex(names []string) bool {
 // candidate is actually named "0". That is why an all-digit value forces the
 // enumeration -- the name check needs the list to check against. When no entry
 // looks like an index, nothing is fetched and the names pass straight through.
-func resolveIndexes(r runner.Runner, s instanceSession, names []string, all bool) ([]string, error) {
+func resolveIndexes(r gdurunner.Runner, s instanceSession, names []string, all bool) ([]string, error) {
 	if !anyIndex(names) {
 		return names, nil
 	}
@@ -516,7 +517,7 @@ type pickerLine struct {
 // `get pods <name>` call on kubernetes was to learn which container to name,
 // and the namespace it also read back was the one the query was already scoped
 // by.
-func resolveOneInstance(r runner.Runner, sess instanceSession, named string, line pickerLine) (instanceRef, bool, error) {
+func resolveOneInstance(r gdurunner.Runner, sess instanceSession, named string, line pickerLine) (instanceRef, bool, error) {
 	var ref instanceRef
 	flag := podOrContainerFlag(sess.platform)
 

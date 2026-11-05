@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -9,6 +8,7 @@ import (
 
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
@@ -68,7 +68,7 @@ func splitAtSeparator(args []string) (before, after []string, sawSep bool) {
 }
 
 // runShell parses cli's flags and hands them to actShell.
-func runShell(args []string, r runner.Runner) int {
+func runShell(args []string, r gdurunner.Runner) int {
 	flagArgs, remote, sawSep := splitAtSeparator(args)
 
 	fs := verbFlagSet(verbShell)
@@ -142,16 +142,11 @@ func checkShellFlags(o shellOpts) int {
 }
 
 // actShell resolves the platform, settles on exactly one instance, and hands
-// the terminal to it. Everything that can fail the whole run -- a runner that
-// cannot attach, an unsafe command token, a non-interactive stdin, an
-// unreadable env.yaml, a platform that cannot be resolved, a failed preflight
-// -- fails here, before any process starts.
-func actShell(o shellOpts, r runner.Runner) int {
-	a, ok := r.(runner.Attacher)
-	if !ok {
-		return errExit(errors.New("cli needs a runner that can hand a command the terminal, and this one cannot"))
-	}
-
+// the terminal to it. Everything that can fail the whole run -- an unsafe
+// command token, a non-interactive stdin, an unreadable env.yaml, a platform
+// that cannot be resolved, a failed preflight -- fails here, before any process
+// starts.
+func actShell(o shellOpts, r gdurunner.Runner) int {
 	// Every token of the in-container command is held to the same charset every
 	// other operator-supplied argv token is. No shell is involved -- the tokens
 	// reach the engine as separate argv entries, never through sh -c -- so a
@@ -203,7 +198,7 @@ func actShell(o shellOpts, r runner.Runner) int {
 		// exactly what to type next, which is not a failure.
 		return exitcode.OK
 	}
-	return attachShell(a, sess, o, target)
+	return attachShell(r, sess, o, target)
 }
 
 // shellInvocation rebuilds the command that was run, minus the instance, so the
@@ -244,7 +239,7 @@ func shellInvocation(sess instanceSession, o shellOpts) pickerLine {
 // outright -- kubectl exec reports "the pod could not be reached" and "the
 // command exited 1" with the same status, so a non-zero cli exit means one of
 // the two and the engine's own message on stderr is what distinguishes them.
-func attachShell(a runner.Attacher, sess instanceSession, o shellOpts, t instanceRef) int {
+func attachShell(r gdurunner.Runner, sess instanceSession, o shellOpts, t instanceRef) int {
 	opts := runner.ExecOpts{Stdin: true, TTY: true}
 	payload := []string{runner.ContainerShell}
 	if !o.interactive() {
@@ -273,7 +268,7 @@ func attachShell(a runner.Attacher, sess instanceSession, o shellOpts, t instanc
 	restore := ignoreInterruptWhileAttached()
 	defer restore()
 
-	code, aerr := a.Attach(runner.Cmd{Argv: argv}, os.Stdin, os.Stdout, os.Stderr)
+	code, aerr := r.Attach(gdurunner.Cmd{Argv: argv}, os.Stdin, os.Stdout, os.Stderr)
 	if aerr != nil {
 		return errExit(fmt.Errorf("opening a session on %s: %w", t.name, aerr))
 	}

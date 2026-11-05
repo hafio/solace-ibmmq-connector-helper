@@ -136,8 +136,9 @@ safe charset first. The shared `execguard.Check` (rules from
 and requires later tokens to be flag-shaped, since the tool appends its own
 subcommand and a stray positional would land in the wrong place. The same
 function runs in the validator and in `runner.ParseCommand`, and a refusal is a
-usage error (exit 2) in both. argv[0] is resolved with `exec.LookPath`, rejecting an
-`exec.ErrDot` same-directory match.
+usage error (exit 2) in both. argv[0] is resolved by the shared `runner.Resolve`,
+which refuses an `exec.ErrDot` same-directory match and any other relative result.
+A binary that is not on `PATH` reads `x: not found on PATH`.
 
 **Authority lives with whoever runs the command.** `--allow-command` approves an
 extra binary for one invocation. It is a flag, not an `env.yaml` key, so a config
@@ -484,7 +485,7 @@ unauthenticated, which is right for a foreign instance with security disabled.
 ask for, so there is no `--shell` flag. A one-shot command reaches the engine as
 argv, never `sh -c`, so shell metacharacters are refused rather than misread.
 
-**`cli` attaches the real terminal.** See `runner.Attacher` in
+**`cli` attaches the real terminal.** See `Attach` in
 [section 12](#12-runner-seams).
 
 ## 11. download jar
@@ -531,34 +532,47 @@ with no opt-out.
 
 ## 12. Runner seams
 
-`runner.Runner` is one method, `Run`, fully buffered: it returns once the process
-has exited with stdout and stderr merged. Most Runners in tests are fakes that
-record argv, so the other capabilities are separate interfaces asked for by type
-assertion, and `var _ Streamer = OS{}` makes the production assertion a
-compile-time fact.
+Every external command crosses the shared `runner.Runner`
+(`github.com/hafio/go-deploy-utility/runner`, imported as `gdurunner` because this
+module's own package is also `runner`). It has two methods: `Run(ctx, cmd, stdout,
+stderr)` executes a `gdurunner.Cmd` (argv, stdin bytes, extra environment) and writes
+the two streams to the writers it is given, and `Attach(cmd, stdin, stdout, stderr)`
+hands the terminal to a session. `Combined`, `Split` and `Output` are capture helpers
+over `Run`, so a test fake implements two methods and every mode works.
 
-- **`Streamer`** is for `logs --follow`, where output must arrive while the
-  process runs. Its two writers are separate, so `logs > app.log` captures the
-  log and leaves the platform CLI's diagnostics on the terminal. A cancelled
-  context is reported as success: a follow the operator ended with Ctrl-C did
-  not fail. `cmd.Cancel` interrupts, falling back to `Kill` on Windows, with
-  `WaitDelay` as the backstop.
-- **`Splitter`** returns stdout and stderr apart, both buffered. `runParsed`
-  uses it for every helper that parses output (the five JSON readers,
-  `KubernetesTop`, `EngineList`, `EngineStats`, `SystemctlNRestarts`), because a
-  platform CLI writes warnings to stderr whenever it likes (OpenShift greets
-  `oc get` with a deprecation notice), and merged into stdout that line lands in
-  front of the JSON. `ScriptInstalled` and `RunStatusScript` still call `Run`:
-  they tolerate an extra line and want the script's stderr advisories.
-- **`Attacher`** is for `cli`, where the child must have the operator's real
-  terminal. Its parameters are `*os.File`, because `os/exec` interposes a pipe
-  for any other writer, a pipe is not a terminal, and the engine would refuse
-  the pty. It returns the child's own exit status and reserves the error for a
-  child that never started. No context: a session is ended from inside by
-  typing `exit`. Ctrl-C is handled by not handling it: `signal.Notify` onto a
-  channel nobody reads keeps the parent alive while the terminal delivers the
-  interrupt to the child. Not `signal.Ignore`, whose `SIG_IGN` would be
-  inherited across exec and leave the container's shell uninterruptible.
+- **Combined** is what each helper that reports output uses: stdout and stderr merged
+  in arrival order, returned even when the command fails.
+- **Split** is what `runParsed` uses for every helper that parses output (the JSON
+  readers, `KubernetesTop`, `EngineList`, `EngineStats`, `SystemctlNRestarts`, the
+  podman version and image-command reads), because a platform CLI writes warnings to
+  stderr whenever it likes (OpenShift greets `oc get` with a deprecation notice), and
+  merged into stdout that line lands in front of the JSON. A failure carries both
+  streams, trimmed, so the message is no less useful. `ScriptInstalled` and
+  `RunStatusScript` still capture combined: they tolerate an extra line and want the
+  script's stderr advisories.
+- **`logs`** calls `Run` with the process's own stdout and stderr, so output arrives
+  while the command runs and `logs > app.log` captures the log and leaves the platform
+  CLI's diagnostics on the terminal. Under `--follow` the operator's Ctrl-C cancels the
+  context; `Exec` interrupts the command, then kills it when its grace period ends, and
+  reports the cancel as an error wrapping `context.Canceled`. That is policy here, not
+  in the runner: `readLog` reads an error with `ctx.Err() != nil` that wraps
+  `context.Canceled` as the clean end of a follow and exits 0, and anything else is a
+  failure (exit 1).
+- **`cli`** calls `Attach`, where the child must have the operator's real terminal. Its
+  parameters are `*os.File`, because `os/exec` interposes a pipe for any other writer,
+  a pipe is not a terminal, and the engine would refuse the pty. It returns the child's
+  own exit status and reserves the error for a child that never started. No context: a
+  session is ended from inside by typing `exit`, and the runner never interrupts it.
+  Ctrl-C is handled by not handling it: `signal.Notify` onto a channel nobody reads
+  keeps the parent alive while the terminal delivers the interrupt to the child. Not
+  `signal.Ignore`, whose `SIG_IGN` would be inherited across exec and leave the
+  container's shell uninterruptible.
+- **Contexts.** Every helper in `internal/runner` takes a `context.Context` first.
+  `cmd/solmq-conn-util` passes `bg()` (`context.Background()`) at every helper call,
+  so Ctrl-C keeps its default effect everywhere except `logs --follow`. A context that
+  is already done starts nothing.
+- **Errors** read `<program>: <cause>` (`kubectl: exit status 1`) and never carry an
+  argument, the stdin bytes or an environment value.
 
 Every runner prints nothing of its own. The child's output is returned to the
 caller, which reports it followed by `ok: <action> <platform>` or `error: ...`.

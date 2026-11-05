@@ -41,16 +41,18 @@ measure coverage with the `cov` task.
 - **Golden-file tests** assert generated output byte-for-byte against fixtures under
   [`testdata/golden/`](../testdata/golden) (driven by `internal/gen/golden_test.go`);
   the deterministic ordered emitters make that output stable.
-- **The exec seam** (`internal/runner`) is faked by `fakeRunner`, which records the argv
-  and stdin crossing the boundary instead of starting a process; the real `os/exec` path
-  is exercised through the `TestHelperProcess` child-process pattern.
+- **The exec seam** is the shared `runner.Runner` (`github.com/hafio/go-deploy-utility/runner`),
+  faked by `fakeRunner` (and `queueRunner`, `streamRunner`, `attachRunner`, `splitRunner`),
+  which record the argv and stdin crossing the boundary instead of starting a process and
+  write their scripted output to the writers `Run` is handed. The real `os/exec` path, and
+  its child-process tests, live in the shared module's own suite.
 - **Columns**: a `-` in the Case column means the test runs once; otherwise Case carries
   the subtest name or the case's label/input value, in source order where the test defines
   one.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 1015 test functions, 1467 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 993 test functions, 1450 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -650,28 +652,15 @@ Tests: [podmangen_test.go](../internal/podmangen/podmangen_test.go)
 
 ## internal/runner
 
-The os/exec seam -- ParseCommand safe-tokenizing, kubectl/docker/podman deploy and remove argv, the status verb's read-only queries, the logs verb's streaming seam and per-platform argv, the cli verb's terminal-attach seam and the shared exec argv builder, quadlet scope resolution, and WriteFile modes.
+The helpers over the shared runner -- ParseCommand safe-tokenizing, kubectl/docker/podman deploy and remove argv, the status verb's read-only queries, the caller's context reaching the runner, the logs verb's per-platform argv, the cli verb's shared exec argv builder, quadlet scope resolution, and WriteFile modes.
 
 Tests: [runner_test.go](../internal/runner/runner_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
-| TestHelperProcess | - | helper child-process entry point guarded by GO_WANT_HELPER_PROCESS; dispatches stdin/both/fail/drip/env/stdiokind/unknown modes |
 | TestExecArgvPerPlatform | kubernetes bare / with a namespace / with stdin / with a terminal / docker / podman | the shape each engine's flag parser actually accepts: kubectl takes -n and -c after the pod and needs the `--` terminator, docker and podman stop parsing at the container name so their flags come first and no `--` is added; the container is a constant on every kubernetes row |
 | TestExecArgvRefusesATTYWithoutStdin | - | a terminal the child cannot read from can only be a caller mistake, so it is refused rather than quietly produced |
 | TestExecArgvUnknownPlatform | - | an unrecognised platform names the three that exist rather than producing a half-built argv |
-| TestOSAttachHandsTheChildTheCallersFilesNotPipes | - | the child reports that all three standard files are the caller's own regular files; os/exec substitutes a pipe for any writer that is not an *os.File, and a pipe would make the engine refuse the tty |
-| TestOSAttachStdinIsTheHandedFile | - | what the caller passes as stdin is what the child reads, with nothing copied through this process |
-| TestOSAttachReportsTheChildExitStatus | - | a session that ran and exited 3 is reported as 3 with no error, which is what the cli verb's exit-code contract rests on |
-| TestOSAttachEnvReachesChild | - | the third call site of the applyCmdEnv split: supplied values win over ambient ones here exactly as under Run |
-| TestOSAttachRefusesACmdCarryingStdinText | - | "write this string to the child" and "give the child the terminal" are contradictory, so the Cmd is refused by name rather than one of them silently honoured |
-| TestOSAttachRefusesANilFile | no stdin / no stdout / no stderr | refused here rather than at the child's first write, where os/exec panics on a typed-nil *os.File |
-| TestOSAttachRejectsEmptyAndUnresolvableArgv | - | mirrors the Run and Stream refusals; all three go through resolveArgv0 so the rules cannot drift apart |
-| TestOSRunWiresStdinToChild | text / binary | OS.Run passes stdin through to the child byte for byte: hello-stdin, and a JKS-like value with NUL, CR and non-UTF-8 bytes, as a TLS store loaded into podman's secret store is |
-| TestOSRunCombinesStdoutAndStderr | - | combined output contains both stdout-line and stderr-line |
-| TestOSRunNonZeroExitReturnsErrorWithOutput | - | non-zero exit returns non-nil error and output still contains before-exit |
-| TestOSRunAcceptsAbsolutePathArgv0 | - | absolute path as argv0 runs successfully, output equals abs-argv0-ok |
-| TestOSRunEnvReachesChildAndAmbientInherited | - | Cmd.Env entries reach the child and override an ambient var of the same name, while an ambient-only var still passes through |
 | TestParseCommand | kubectl | parses to [kubectl], ok |
 | TestParseCommand | kubectl.Exe | accepted: the .exe suffix is folded in any case |
 | TestParseCommand | kubectl --kubeconfig=C:/RUNNER~1/config | accepted: an embedded tilde is an 8.3 short name |
@@ -722,8 +711,6 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestWriteFileDoesNotTightenExistingFileMode | - | content replaced but existing 0644 mode left unchanged (non-windows) |
 | TestWriteFileParentIsFileReturnsError | - | parent path is a file: MkdirAll error surfaces naming the blocker path |
 | TestWriteFileTargetIsDirectoryReturnsError | - | target path is a directory: write error surfaces naming the target path |
-| TestOSRunWritesNothingToStderr | - | OS.Run writes nothing to stderr of its own; the child's output reaches the caller only through the returned combined output |
-| TestOSRunRejectsUnresolvableArgv0 | - | a binary LookPath cannot find on PATH is a Run error, not a deferred exec.Start failure |
 | TestPreflightKubernetesArgvDeployNoNamespace | - | kubernetes deploy preflight issues <argv> auth can-i create deployment with no `--namespace` when namespace is empty |
 | TestPreflightKubernetesArgvRemoveWithNamespace | - | kubernetes remove preflight issues <argv> auth can-i delete deployment `--namespace` <ns> |
 | TestPreflightDockerArgvIsInfo | - | docker preflight issues <argv> info |
@@ -762,19 +749,15 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestRunStatusScriptArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | RunStatusScript execs `sh <path>` through each platform's exec form |
 | TestRunStatusScriptReturnsOutputAlongsideNonZeroExit | - | a non-zero script exit (the status script's own 1/2 convention) is returned alongside its output, never swallowed |
 | TestRunStatusScriptUnknownPlatform | - | an unknown platform is rejected, zero runner calls |
-| TestOSStreamDeliversOutputBeforeExitAndCancelIsCleanEnd | - | the child prints one line then blocks far longer than the test waits, so seeing that line proves output is not buffered until exit; cancelling then ends the run and reports nil, because a follow the operator stopped did not fail |
-| TestOSStreamKeepsStdoutAndStderrApart | - | Stream's two writers stay separate where Run merges into one, so `logs > app.log` captures the log and leaves the platform's diagnostics on the terminal |
-| TestOSStreamReportsAFailureThatWasNotCancelled | - | an uncancelled non-zero exit is still an error, and output written before it still reaches the writer |
-| TestOSStreamRejectsEmptyAndUnresolvableArgv | - | Stream refuses exactly what Run refuses (both go through resolveArgv0), naming the binary it could not resolve |
 | TestLogsArgvPerPlatform | kubernetes bare / kubernetes without a namespace or container / kubernetes with every option / docker bare / docker with every option it has / podman reads the container, never the journal / tail zero is not tail all | kubectl takes the pod positionally with the namespace and container as flags; docker and podman take options first and the container name last; TailAll adds no flag while an explicit 0 does |
 | TestLogsArgvRefusesPreviousOffKubernetes | docker / podman | `--previous` is refused by name rather than dropped, so a caller asking for the previous log is never handed the current one |
 | TestLogsArgvUnknownPlatform | - | an unrecognised platform names all three that exist rather than producing a half-built argv |
-| TestOSRunSplitKeepsTheStreamsApart | - | RunSplit keeps stdout and stderr separate where Run merges them, so a stderr deprecation warning from `oc get -o json` cannot land ahead of the JSON and break the parse |
-| TestOSRunSplitWiresStdinAndEnv | - | the split path wires stdin and env exactly as Run does, so a helper's choice between them is invisible to its caller |
-| TestOSRunSplitRejectsEmptyAndUnresolvableArgv | - | RunSplit refuses an empty or unresolvable argv[0] through the same resolveArgv0 seam as Run, Stream and Attach |
-| TestParsingHelpersIgnoreAWarningOnStderr | KubernetesPodsJSON / KubernetesGetJSON / KubernetesListJSON / KubernetesTop / EngineInspectJSON / EngineImageInspectJSON / EngineStats / EngineList / SystemctlNRestarts / DockerImageCommand | every helper that parses rather than scans its output returns the payload alone when a warning sits on stderr, via the Splitter path |
-| TestParsingHelpersFallBackToRun | - | a Runner with no Splitter still works, on exactly the combined output Run has always returned |
+| TestParsingHelpersIgnoreAWarningOnStderr | KubernetesPodsJSON / KubernetesGetJSON / KubernetesListJSON / KubernetesTop / EngineInspectJSON / EngineImageInspectJSON / EngineStats / EngineList / SystemctlNRestarts / DockerImageCommand | every helper that parses rather than scans its output returns the payload alone when a warning sits on stderr, through `Split` with the two streams kept apart |
 | TestParsedFailureCarriesBothStreams | - | a failed command still reports what it said, on whichever stream it said it on, so splitting the streams did not cost the error context |
+| TestHelpersPassTheCallersContextToTheRunner | Kubernetes (combined) | a context that is already done starts nothing and the error wraps `context.Canceled`: the helper hands its caller's context to the shared runner rather than minting one |
+| TestHelpersPassTheCallersContextToTheRunner | KubernetesGetJSON (split) | the same through the parsed-output path |
+| TestHelpersPassTheCallersContextToTheRunner | PodmanDeploy (several commands) | the first of several commands is refused, so none of the sequence starts |
+| TestHelpersPassTheCallersContextToTheRunner | Preflight | the read-only probe is refused too, so a cancelled run reaches the platform with nothing |
 
 ## internal/validate
 
@@ -1633,6 +1616,10 @@ The `logs` verb shares status's platform resolution and instance discovery (inst
 | TestLogsPreviousIsKubernetesOnly | docker / podman | the one refusal that needs the resolved platform: `--previous` is refused by name, before the preflight probe, so a flag that cannot work does not first make the operator wait on a daemon |
 | TestLogsPreviousReachesTheKubernetesArgv | - | where the concept exists, `--previous` arrives as kubectl's own -p |
 | TestLogsFollowReadsTheOneInstance | - | the accepted case: -f reaches the argv and a clean end is exit 0 |
+| TestLogsFollowCancelledByTheOperatorEndsClean | - | the operator's Ctrl-C ends a follow with exit 0 and nothing on stderr: the shared runner reports the cancel as an error wrapping `context.Canceled`, and logs reads it as the clean end (skipped on windows, where a process cannot be sent an interrupt) |
+| TestLogsFollowFailureIsNotACleanEnd | follow, engine failure | a follow that fails without being cancelled exits 1 and names the instance |
+| TestLogsFollowFailureIsNotACleanEnd | follow, canceled error but a live context | an error that merely wraps `context.Canceled` while the follow's own context is live is a failure, not a cancel |
+| TestLogsFollowFailureIsNotACleanEnd | one-shot read, canceled error | only `--follow` has a clean end: a one-shot read that wraps `context.Canceled` is exit 1 |
 | TestLogsRejectsUnsafeNamesBeforeAnyCall | pod / container / namespace | an unsafe name exits 2 saying why, with zero calls -- the preflight probe included, so a rejected name is never even observed by the platform |
 | TestLogsSinceAndTailAreValidatedAtParse | since not a duration / since not positive / since with a metacharacter / tail not a number / tail above the ceiling / tail negative | the two flags carrying a value into an argv are validated at parse, exit 2, nothing runs |
 | TestLogsUnexpectedPositionalArgument | - | logs has no target word, so a bare word exits 2 naming `--pod`, `--container` rather than being guessed at |
@@ -1640,7 +1627,6 @@ The `logs` verb shares status's platform resolution and instance discovery (inst
 | TestLogsPlatformFlagSkipsTheMenu | - | `--platform` is the first step of the resolution order, so it wins before the prompter is consulted, and the instance still comes from that section |
 | TestLogsWithoutEnvFileNeedsAnExplicitPlatform | - | the explicit-target exception: instance plus `--platform` needs no env.yaml, while without `--platform` the missing file is reported by name (exit 2) and nothing runs |
 | TestLogsNoInstancesFoundNamesTheFix | - | an empty discovery result carries the selector and namespace it used, plus `--pod`, since those are what the operator would change |
-| TestLogsNeedsAStreamingRunner | - | logs reads through runner.Streamer and a Runner without it fails loudly, rather than silently falling back to a buffered read that would merge diagnostics into the log |
 | TestLogsWithoutASectionToDiscoverFrom | kubernetes / docker / podman | exit 2: the discovery branch with nothing to work from, reached by naming an instance with the other platform's flag (`--container` on kubernetes, `--pod` on docker/podman); the error names the missing section and the way forward, and must *not* name `--all`, which logs does not have |
 | TestLogsPlatformWithNoSectionAtAllIsLoud | - | an env.yaml that parses but describes no platform cannot answer `--platform` either (exit 2), and says so naming all three sections before discovery is attempted |
 | TestLogsNamedPodIsNotPreChecked | - | a name is taken at its word: no `get pods <name>` precedes the read (the preflight asks can-i get pods --subresource log), and a pod that is not there is reported by the platform on the read itself |
@@ -1662,7 +1648,6 @@ The `cli` verb reaches its instance through the same resolution `status` and `lo
 
 | Test | Case | Verifies |
 |------|------|----------|
-| TestCliNeedsAnAttachingRunner | - | a Runner that cannot hand over the terminal fails loudly before anything runs, rather than degrading to a session with no prompt |
 | TestCliRefusesAShellWithoutATerminal | - | the same non-TTY contract the platform menu and the remove confirmation keep, with the one-shot form named as the next step |
 | TestCliKubernetesArgvShape | - | `-i -t`, the namespace, `-c connector` and the `--` terminator, in that order; a named pod costs no discovery call, so the run is preflight plus attach |
 | TestCliEngineArgvShape | docker / podman | engine flags precede the container name, and neither `-c` nor `--` is added -- both would reach the container as arguments |

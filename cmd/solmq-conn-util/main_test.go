@@ -22,6 +22,7 @@ import (
 
 	"github.com/hafio/go-deploy-utility/confirm"
 	"github.com/hafio/go-deploy-utility/notice"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/certfixture"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/libs"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
@@ -264,9 +265,26 @@ func withPrompter(t *testing.T, terminal bool, input string) *bytes.Buffer {
 // precedes the mutating command). A test that needs the probe to succeed but
 // the real deploy/remove call to fail sets failFrom to the index of that call.
 type fakeRunner struct {
+	noAttach
 	calls    []fakeCall
 	err      error
 	failFrom int
+}
+
+// noAttach is the Attach half of gdurunner.Runner for the fakes that never open
+// a session: a call that reaches it is a bug in the test, so it fails loudly.
+type noAttach struct{}
+
+func (noAttach) Attach(c gdurunner.Cmd, _, _, _ *os.File) (int, error) {
+	return 0, fmt.Errorf("%s: this fake does not attach", c.Argv[0])
+}
+
+// scriptOut writes a fake's scripted output to the stream a caller handed it. A nil
+// writer discards the stream, as the shared runner's does.
+func scriptOut(w io.Writer, s string) {
+	if w != nil && s != "" {
+		fmt.Fprint(w, s)
+	}
 }
 
 type fakeCall struct {
@@ -275,18 +293,19 @@ type fakeCall struct {
 	env   []string
 }
 
-func (f *fakeRunner) Run(c runner.Cmd) (string, error) {
+func (f *fakeRunner) Run(_ context.Context, c gdurunner.Cmd, stdout, _ io.Writer) error {
 	idx := len(f.calls)
-	f.calls = append(f.calls, fakeCall{argv: c.Argv, stdin: c.Stdin, env: c.Env})
+	f.calls = append(f.calls, fakeCall{argv: c.Argv, stdin: string(c.Stdin), env: c.Env})
+	scriptOut(stdout, "out")
 	if f.err != nil && idx >= f.failFrom {
-		return "out", f.err
+		return f.err
 	}
-	return "out", nil
+	return nil
 }
 
 // useFakeRunner returns a fake that captures argv instead of starting a
 // process. Callers pass it to dispatch (not run, which always uses the
-// production runner.OS{}) so the fake reaches the deploy/remove seam as an
+// production gdurunner.Exec{}) so the fake reaches the deploy/remove seam as an
 // explicit argument rather than through mutable package state.
 func useFakeRunner(t *testing.T) *fakeRunner {
 	t.Helper()
@@ -304,17 +323,19 @@ type queuedResp struct {
 // install-succeeds, then run-standby) rather than fakeRunner's uniform
 // "fail from index N onward". Calls beyond len(resp) succeed with no output.
 type queueRunner struct {
+	noAttach
 	calls []fakeCall
 	resp  []queuedResp
 }
 
-func (q *queueRunner) Run(c runner.Cmd) (string, error) {
+func (q *queueRunner) Run(_ context.Context, c gdurunner.Cmd, stdout, _ io.Writer) error {
 	idx := len(q.calls)
-	q.calls = append(q.calls, fakeCall{argv: c.Argv, stdin: c.Stdin, env: c.Env})
+	q.calls = append(q.calls, fakeCall{argv: c.Argv, stdin: string(c.Stdin), env: c.Env})
 	if idx < len(q.resp) {
-		return q.resp[idx].out, q.resp[idx].err
+		scriptOut(stdout, q.resp[idx].out)
+		return q.resp[idx].err
 	}
-	return "", nil
+	return nil
 }
 
 // ---- a) exit-code contract -----------------------------------------------------
@@ -5215,20 +5236,24 @@ func TestStatusStdoutIsIdenticalWithAndWithoutTheSpinner(t *testing.T) {
 // query for every instance, and a regression to one query per instance would pass
 // every content assertion while quietly multiplying the cost.
 
-// streamed is one Stream call's canned result.
+// streamed is one log read's canned result. interrupt makes the fake deliver
+// an os.Interrupt to this process once the read is running and then wait for the
+// follow's context to end, as an operator's Ctrl-C does.
 type streamed struct {
-	stdout string
-	stderr string
-	err    error
+	stdout    string
+	stderr    string
+	err       error
+	interrupt bool
 }
 
-// streamRunner is the fake logs needs: it satisfies runner.Streamer as well as
-// runner.Runner, since logs reads every log through the streaming seam (so the
-// platform's own diagnostics stay on stderr rather than landing in a redirected
-// log). Both kinds of call are recorded in one ordered slice, while the canned
-// answers are queued per kind: Run serves the preflight probe and discovery,
-// Stream serves the log reads.
+// streamRunner is the fake logs needs: logs reads every log with Run writing to
+// the process's own stdout and stderr (so the platform's own diagnostics stay on
+// stderr rather than landing in a redirected log), while the preflight probe and
+// discovery capture theirs. Both kinds of call are recorded in one ordered slice,
+// while the canned answers are queued per kind, told apart by the stdout writer
+// the call carries: captured calls are served from resp, reads from streams.
 type streamRunner struct {
+	noAttach
 	calls []fakeCall
 
 	resp []queuedResp
@@ -5238,29 +5263,39 @@ type streamRunner struct {
 	streamN int
 }
 
-func (s *streamRunner) Run(c runner.Cmd) (string, error) {
-	s.calls = append(s.calls, fakeCall{argv: c.Argv, stdin: c.Stdin, env: c.Env})
-	i := s.runN
-	s.runN++
-	if i < len(s.resp) {
-		return s.resp[i].out, s.resp[i].err
+func (s *streamRunner) Run(ctx context.Context, c gdurunner.Cmd, stdout, stderr io.Writer) error {
+	s.calls = append(s.calls, fakeCall{argv: c.Argv, stdin: string(c.Stdin), env: c.Env})
+	if stdout != io.Writer(os.Stdout) {
+		i := s.runN
+		s.runN++
+		if i < len(s.resp) {
+			scriptOut(stdout, s.resp[i].out)
+			return s.resp[i].err
+		}
+		return nil
 	}
-	return "", nil
-}
-
-func (s *streamRunner) Stream(_ context.Context, c runner.Cmd, stdout, stderr io.Writer) error {
-	s.calls = append(s.calls, fakeCall{argv: c.Argv, stdin: c.Stdin, env: c.Env})
 	i := s.streamN
 	s.streamN++
 	if i >= len(s.streams) {
 		return nil
 	}
 	st := s.streams[i]
-	if st.stdout != "" {
-		fmt.Fprint(stdout, st.stdout)
-	}
-	if st.stderr != "" {
-		fmt.Fprint(stderr, st.stderr)
+	scriptOut(stdout, st.stdout)
+	scriptOut(stderr, st.stderr)
+	if st.interrupt {
+		p, err := os.FindProcess(os.Getpid())
+		if err == nil {
+			err = p.Signal(os.Interrupt)
+		}
+		if err != nil {
+			return fmt.Errorf("sending the interrupt: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%s: stopped: %w", c.Argv[0], ctx.Err())
+		case <-time.After(5 * time.Second):
+			return errors.New("the interrupt never ended the follow")
+		}
 	}
 	return st.err
 }
@@ -5411,6 +5446,62 @@ func TestLogsFollowReadsTheOneInstance(t *testing.T) {
 	}
 	if stdout != "tailing\n" {
 		t.Errorf("stdout = %q, want the streamed log", stdout)
+	}
+}
+
+// TestLogsFollowCancelledByTheOperatorEndsClean pins the A-specific policy over
+// the shared runner's cancel rule: the runner reports an interrupted follow as an
+// error wrapping context.Canceled, and logs reads that as the operator ending
+// the follow, so it exits 0 with nothing on stderr.
+func TestLogsFollowCancelledByTheOperatorEndsClean(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a process cannot be sent os.Interrupt on windows")
+	}
+	q := &streamRunner{
+		resp:    []queuedResp{{"", nil}},
+		streams: []streamed{{interrupt: true}},
+	}
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"logs", "--platform", "docker", "--container", "solmq-conn", "--follow"}, q)
+	})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0 (Ctrl-C is how a follow ends)", code)
+	}
+	if stderr != "" {
+		t.Errorf("a clean end should print nothing, got:\n%s", stderr)
+	}
+}
+
+// TestLogsFollowFailureIsNotACleanEnd pins the other half: a follow that fails
+// without the operator cancelling it exits 1 and names the instance -- including
+// a failure that merely wraps context.Canceled while the follow's own context
+// is still live -- and a one-shot read is never a clean end whatever it wraps.
+func TestLogsFollowFailureIsNotACleanEnd(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		args []string
+		err  error
+	}{
+		{"follow, engine failure", []string{"--follow"}, fmt.Errorf("docker: exit status 1")},
+		{"follow, canceled error but a live context", []string{"--follow"}, fmt.Errorf("docker: %w", context.Canceled)},
+		{"one-shot read, canceled error", nil, fmt.Errorf("docker: %w", context.Canceled)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			q := &streamRunner{
+				resp:    []queuedResp{{"", nil}},
+				streams: []streamed{{stderr: "daemon said no\n", err: c.err}},
+			}
+			args := append([]string{"logs", "--platform", "docker", "--container", "solmq-conn"}, c.args...)
+			var code int
+			stderr := captureStderr(t, func() { code = dispatch(args, q) })
+			if code != 1 {
+				t.Fatalf("exit=%d, want 1", code)
+			}
+			if !strings.Contains(stderr, "reading solmq-conn") {
+				t.Errorf("the error should name the instance, got:\n%s", stderr)
+			}
+		})
 	}
 }
 
@@ -5610,27 +5701,6 @@ func TestLogsNoInstancesFoundNamesTheFix(t *testing.T) {
 	}
 }
 
-// TestLogsNeedsAStreamingRunner pins the seam assertion itself: logs reads every
-// log through runner.Streamer, and a Runner without it fails loudly rather than
-// silently falling back to a buffered read that would merge the platform's
-// diagnostics into the log.
-func TestLogsNeedsAStreamingRunner(t *testing.T) {
-	f := &fakeRunner{} // Run only -- no Stream
-	var code int
-	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"logs", "--platform", "docker", "--container", "solmq-conn"}, f)
-	})
-	if code != 1 {
-		t.Fatalf("exit=%d, want 1", code)
-	}
-	if !strings.Contains(stderr, "stream") {
-		t.Errorf("the error should say what is missing, got:\n%s", stderr)
-	}
-	if len(f.calls) != 0 {
-		t.Errorf("nothing may run, got %d calls: %+v", len(f.calls), f.calls)
-	}
-}
-
 // TestLogsPlatformWithNoSectionAtAllIsLoud is the earlier failure: an env.yaml
 // that parses but describes no platform cannot answer --platform either, and
 // says so before discovery is even attempted.
@@ -5670,7 +5740,7 @@ func TestReadVerbsReportTheirOwnRefusal(t *testing.T) {
 	cli := &attachRunner{resp: refused}
 	for _, c := range []struct {
 		args  []string
-		r     runner.Runner
+		r     gdurunner.Runner
 		calls func() int
 		want  []string
 	}{
@@ -6490,11 +6560,10 @@ type attached struct {
 	err  error
 }
 
-// attachRunner is the fake cli needs: it satisfies runner.Attacher as well as
-// runner.Runner, since cli reaches its instance through the attaching seam
-// while the preflight probe and discovery still go through Run. Both kinds of
-// call are recorded in one ordered slice, while the canned answers are queued
-// per kind -- the same split streamRunner uses for logs.
+// attachRunner is the fake cli needs: cli reaches its instance through Attach
+// while the preflight probe and discovery go through Run. Both kinds of call are
+// recorded in one ordered slice, while the canned answers are queued per kind --
+// the same split streamRunner uses for logs.
 //
 // The three *os.File values are ignored outright, and that is exactly why the
 // seam takes them as parameters instead of reading os.Stdin itself: the fake
@@ -6509,45 +6578,25 @@ type attachRunner struct {
 	attachN  int
 }
 
-func (a *attachRunner) Run(c runner.Cmd) (string, error) {
-	a.calls = append(a.calls, fakeCall{argv: c.Argv, stdin: c.Stdin, env: c.Env})
+func (a *attachRunner) Run(_ context.Context, c gdurunner.Cmd, stdout, _ io.Writer) error {
+	a.calls = append(a.calls, fakeCall{argv: c.Argv, stdin: string(c.Stdin), env: c.Env})
 	i := a.runN
 	a.runN++
 	if i < len(a.resp) {
-		return a.resp[i].out, a.resp[i].err
+		scriptOut(stdout, a.resp[i].out)
+		return a.resp[i].err
 	}
-	return "", nil
+	return nil
 }
 
-func (a *attachRunner) Attach(c runner.Cmd, _, _, _ *os.File) (int, error) {
-	a.calls = append(a.calls, fakeCall{argv: c.Argv, stdin: c.Stdin, env: c.Env})
+func (a *attachRunner) Attach(c gdurunner.Cmd, _, _, _ *os.File) (int, error) {
+	a.calls = append(a.calls, fakeCall{argv: c.Argv, env: c.Env})
 	i := a.attachN
 	a.attachN++
 	if i >= len(a.attaches) {
 		return 0, nil
 	}
 	return a.attaches[i].code, a.attaches[i].err
-}
-
-// TestCliNeedsAnAttachingRunner pins the type assertion: a Runner that cannot
-// hand over the terminal fails loudly, before anything runs, rather than
-// silently degrading to a session with no prompt.
-func TestCliNeedsAnAttachingRunner(t *testing.T) {
-	withPrompter(t, true, "")
-	f := useFakeRunner(t)
-	var code int
-	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, f)
-	})
-	if code != 1 {
-		t.Fatalf("exit=%d, want 1", code)
-	}
-	if !strings.Contains(stderr, "terminal") {
-		t.Errorf("the error should say what the runner cannot do, got:\n%s", stderr)
-	}
-	if len(f.calls) != 0 {
-		t.Errorf("nothing may run, got %d calls: %+v", len(f.calls), f.calls)
-	}
 }
 
 // TestCliRefusesAShellWithoutATerminal is the same non-TTY contract the
