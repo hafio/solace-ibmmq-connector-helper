@@ -351,7 +351,7 @@ func checkRootlessRange(warn func(string, string, ...any), raw string) {
 		return
 	}
 	if id.UID > rootlessIDRange || id.GID > rootlessIDRange {
-		warn(fileEnv, "podman.run-as %q names an id above %d: deployed rootless, podman maps container ids 1 and up into the invoking user's subordinate uid and gid ranges, which useradd makes %d ids wide, so a larger id is unmapped and the unit will not start. Widen the ranges (usermod --add-subuids / --add-subgids, then podman system migrate), deploy as root, or pick a smaller id; deploy checks the actual ranges when it runs rootless", raw, rootlessIDRange, rootlessIDRange)
+		warn(fileEnv, "podman.run-as %q names an id above %d: deployed rootless, podman maps container ids 1 and up into the invoking user's subordinate uid and gid ranges, which useradd makes %d ids wide, so a larger id is unmapped and the unit will not start. Widen the ranges (usermod --add-subuids / --add-subgids, then podman system migrate), deploy rootful (podman.rootful: true, as root), or pick a smaller id; deploy checks the actual ranges when it runs rootless", raw, rootlessIDRange, rootlessIDRange)
 	}
 }
 

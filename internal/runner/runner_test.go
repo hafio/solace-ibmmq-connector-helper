@@ -14,6 +14,7 @@ import (
 
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/podman"
 	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/hafio/go-deploy-utility/runner/runnertest"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -245,76 +246,297 @@ func TestDockerRejectsUnsafeCommand(t *testing.T) {
 	}
 }
 
-// TestResolveQuadletScope pins the scope to the invoking user's effective uid,
-// which is the whole point of there no longer being a scope key: the mode and
-// the directory are derived from one fact, so they cannot disagree.
-//
-// It asserts the euid-consistent pairing rather than one fixed answer, because
-// the answer legitimately differs between a normal developer run and a run as
-// root (a CI container, say). What must always hold is that user mode goes with
-// the home directory and system mode with /etc.
+// scopeEnv is a ScopeEnv for a test: a fixed euid, the given environment, home
+// /home/alice, and a runtime directory that exists only where dirs says so. It
+// reads nothing from the real process.
+func scopeEnv(euid int, vars map[string]string, dirs ...string) ScopeEnv {
+	return ScopeEnv{
+		Euid:   euid,
+		Getenv: func(k string) string { return vars[k] },
+		Home:   func() (string, error) { return "/home/alice", nil },
+		IsDir: func(p string) (bool, error) {
+			for _, d := range dirs {
+				if d == p {
+					return true, nil
+				}
+			}
+			return false, nil
+		},
+		Linux: true,
+	}
+}
+
+// TestResolveQuadletScope pins the scope to the rootless rule, the quadlet
+// directory and the user session, each read from the inputs it is given rather
+// than from the process: so it needs no skip as root and redirects no HOME.
 func TestResolveQuadletScope(t *testing.T) {
-	sc, err := ResolveQuadletScope()
-	if err != nil {
+	const runtimeDir = "/run/user/1000"
+	user := "/home/alice/.config/containers/systemd"
+	sess := []string{"XDG_RUNTIME_DIR=" + runtimeDir, "DBUS_SESSION_BUS_ADDRESS=unix:path=" + runtimeDir + "/bus"}
+	t.Run("the six rootless decisions", func(t *testing.T) {
+		windows := scopeEnv(-1, nil)
+		windows.Linux = false
+		for _, c := range []struct {
+			name    string
+			env     ScopeEnv
+			rootful bool
+			want    QuadletScope
+			wantErr string
+		}{
+			{"non-root, rootful unset: rootless", scopeEnv(1000, nil, runtimeDir), false,
+				QuadletScope{Dir: user, UserMode: true, Euid: 1000, Env: sess}, ""},
+			{"non-root asking for rootful: refused", scopeEnv(1000, nil, runtimeDir), true,
+				QuadletScope{}, "podman.rootful=true requires root, but running as euid 1000"},
+			{"root asking for rootful: rootful", scopeEnv(0, nil), true,
+				QuadletScope{Dir: "/etc/containers/systemd", Euid: 0}, ""},
+			{"root, rootful unset: refused", scopeEnv(0, nil), false,
+				QuadletScope{}, "set podman.rootful=true to deploy the rootful engine"},
+			{"no euid, rootful unset: rootless, no session", windows, false,
+				QuadletScope{Dir: "/home/alice/.config/containers/systemd", UserMode: true, Euid: -1}, ""},
+			{"no euid, rootful: rootful", windows, true,
+				QuadletScope{Dir: "/etc/containers/systemd", Euid: -1}, ""},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				got, err := ResolveQuadletScope(c.env, c.rootful)
+				if c.wantErr != "" {
+					if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+						t.Fatalf("err = %v, want it to contain %q", err, c.wantErr)
+					}
+					if !exitcode.IsUsage(err) {
+						t.Errorf("a refused rootless rule is a usage error (exit 2), got %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(got, c.want) {
+					t.Errorf("scope = %+v, want %+v", got, c.want)
+				}
+			})
+		}
+	})
+
+	t.Run("XDG_CONFIG_HOME", func(t *testing.T) {
+		got, err := ResolveQuadletScope(scopeEnv(1000, map[string]string{"XDG_CONFIG_HOME": "/srv/xdg"}, runtimeDir), false)
+		if err != nil || got.Dir != "/srv/xdg/containers/systemd" {
+			t.Errorf("an absolute XDG_CONFIG_HOME is honoured: dir=%q err=%v", got.Dir, err)
+		}
+		_, err = ResolveQuadletScope(scopeEnv(1000, map[string]string{"XDG_CONFIG_HOME": "rel/xdg"}, runtimeDir), false)
+		if err == nil || !strings.Contains(err.Error(), "XDG_CONFIG_HOME") || !exitcode.IsUsage(err) {
+			t.Errorf("a relative XDG_CONFIG_HOME is a usage error naming it, got %v", err)
+		}
+		// Rootful never reads the user's config directory.
+		got, err = ResolveQuadletScope(scopeEnv(0, map[string]string{"XDG_CONFIG_HOME": "rel/xdg"}), true)
+		if err != nil || got.Dir != "/etc/containers/systemd" {
+			t.Errorf("rootful ignores XDG_CONFIG_HOME: dir=%q err=%v", got.Dir, err)
+		}
+	})
+
+	t.Run("unresolvable home", func(t *testing.T) {
+		env := scopeEnv(1000, nil, runtimeDir)
+		env.Home = func() (string, error) { return "", errors.New("$HOME is not defined") }
+		_, err := ResolveQuadletScope(env, false)
+		if err == nil || !strings.Contains(err.Error(), "$HOME is not defined") || !exitcode.IsUsage(err) {
+			t.Errorf("an unresolvable home is a usage error carrying the cause, got %v", err)
+		}
+	})
+
+	t.Run("session", func(t *testing.T) {
+		got, err := ResolveQuadletScope(scopeEnv(1000, nil, runtimeDir), false)
+		if err != nil || !reflect.DeepEqual(got.Env, sess) {
+			t.Errorf("a stripped session is derived: env=%v err=%v", got.Env, err)
+		}
+		inherited := map[string]string{
+			"XDG_RUNTIME_DIR":          "/run/user/1000",
+			"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+		}
+		got, err = ResolveQuadletScope(scopeEnv(1000, inherited, runtimeDir), false)
+		if err != nil || len(got.Env) != 0 {
+			t.Errorf("an inherited session is left as it is: env=%v err=%v", got.Env, err)
+		}
+		_, err = ResolveQuadletScope(scopeEnv(1000, nil), false)
+		if err == nil || exitcode.IsUsage(err) || !strings.Contains(err.Error(), runtimeDir) {
+			t.Errorf("a missing runtime directory is a plain failure (exit 1) naming it, got %v", err)
+		}
+		probeFails := scopeEnv(1000, nil)
+		probeFails.IsDir = func(string) (bool, error) { return false, errors.New("permission denied") }
+		if _, err = ResolveQuadletScope(probeFails, false); err == nil || !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("a probe that cannot run is an error carrying the cause, got %v", err)
+		}
+		// Off Linux there is no session to repair, and nothing is probed.
+		other := scopeEnv(1000, nil)
+		other.Linux = false
+		other.IsDir = func(string) (bool, error) { t.Error("no probe off Linux"); return false, nil }
+		if got, err = ResolveQuadletScope(other, false); err != nil || len(got.Env) != 0 {
+			t.Errorf("non-Linux has no session: env=%v err=%v", got.Env, err)
+		}
+		// A rootful scope has no user session either.
+		if got, err = ResolveQuadletScope(scopeEnv(0, nil), true); err != nil || len(got.Env) != 0 {
+			t.Errorf("a rootful scope has no session: env=%v err=%v", got.Env, err)
+		}
+	})
+}
+
+// LiveScopeEnv reads this process, and statIsDir tells a missing path (no
+// answer to give) from one that cannot be looked at (an error).
+func TestLiveScopeEnv(t *testing.T) {
+	env := LiveScopeEnv()
+	if env.Euid != os.Geteuid() || env.Linux != (runtime.GOOS == "linux") || env.Getenv == nil || env.Home == nil {
+		t.Errorf("LiveScopeEnv() = %+v, want this process's values", env)
+	}
+	dir := t.TempDir()
+	file := filepath.Join(dir, "f")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if sc.UserMode != (os.Geteuid() != 0) {
-		t.Errorf("UserMode = %v, want it to follow euid %d", sc.UserMode, os.Geteuid())
+	for _, c := range []struct {
+		path string
+		want bool
+	}{{dir, true}, {file, false}, {filepath.Join(dir, "gone"), false}} {
+		if got, err := env.IsDir(c.path); err != nil || got != c.want {
+			t.Errorf("IsDir(%q) = %v, %v, want %v, nil", c.path, got, err, c.want)
+		}
 	}
-	if sc.UserMode {
-		if !strings.HasSuffix(filepath.ToSlash(sc.Dir), quadletUserSub) {
-			t.Errorf("user mode must resolve under the home dir, got %+v", sc)
-		}
-	} else if sc.Dir != quadletSystem {
-		t.Errorf("system mode must resolve to %q, got %+v", quadletSystem, sc)
+	if _, err := env.IsDir("bad\x00path"); err == nil {
+		t.Error("a path that cannot be looked at is an error, not a missing directory")
 	}
-	// The user-mode directory tracks the home dir, which is what lets a test (and
-	// an operator with a relocated home) redirect it without a config key.
-	if sc.UserMode {
-		home := t.TempDir()
-		t.Setenv("HOME", home)        // unix
-		t.Setenv("USERPROFILE", home) // windows
-		moved, merr := ResolveQuadletScope()
-		if merr != nil {
-			t.Fatal(merr)
+}
+
+// WithEnv attaches the session to a rootless scope's commands, never aliasing the
+// scope's slice, and leaves a system scope's commands as they are.
+func TestQuadletScopeWithEnv(t *testing.T) {
+	user := QuadletScope{UserMode: true, Env: []string{"XDG_RUNTIME_DIR=/run/user/1000"}}
+	c := user.WithEnv(gdurunner.Cmd{Argv: []string{"x"}, Env: []string{"A=1"}})
+	if want := []string{"A=1", "XDG_RUNTIME_DIR=/run/user/1000"}; !reflect.DeepEqual(c.Env, want) {
+		t.Errorf("env = %v, want %v", c.Env, want)
+	}
+	c.Env[0] = "changed"
+	if user.Env[0] != "XDG_RUNTIME_DIR=/run/user/1000" {
+		t.Error("WithEnv must copy, not append into the scope's own slice")
+	}
+	if got := (QuadletScope{Env: user.Env}).WithEnv(gdurunner.Cmd{}); got.Env != nil {
+		t.Errorf("a system scope carries no session, got %v", got.Env)
+	}
+}
+
+// EnsureLinger asks logind, makes no change when the user lingers, enables it for
+// the user's own account when not, and says what to ask an administrator when
+// that is refused. Every call carries the session.
+func TestEnsureLinger(t *testing.T) {
+	sc := QuadletScope{UserMode: true, Euid: 1000, Env: []string{"XDG_RUNTIME_DIR=/run/user/1000"}}
+	show := []string{"loginctl", "show-user", "1000", "--property=Linger"}
+	enable := []string{"loginctl", "enable-linger"}
+	for _, c := range []struct {
+		name        string
+		f           *fakeRunner
+		wantEnabled bool
+		wantErr     []string
+		wantArgv    [][]string
+	}{
+		{"already lingers: no enable call", &fakeRunner{out: "Linger=yes\n"}, false, nil, [][]string{show}},
+		{"off: enabled", &fakeRunner{outByCall: map[int]string{0: "Linger=no\n"}}, true, nil, [][]string{show, enable}},
+		{"enable refused: the administrator form", &fakeRunner{outByCall: map[int]string{0: "Linger=no\n", 1: "Access denied"},
+			errByCall: map[int]error{1: errors.New("exit status 1")}}, false,
+			[]string{"Linger=no", "Access denied", "sudo loginctl enable-linger alice"}, [][]string{show, enable}},
+		{"probe fails: an error naming the command", &fakeRunner{err: errors.New("exit status 1")}, false,
+			[]string{"loginctl show-user 1000 --property=Linger", "logind"}, [][]string{show}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			enabled, err := EnsureLinger(bg(), c.f, sc, "alice")
+			if enabled != c.wantEnabled {
+				t.Errorf("enabled = %v, want %v", enabled, c.wantEnabled)
+			}
+			if len(c.wantErr) == 0 && err != nil {
+				t.Fatal(err)
+			}
+			for _, w := range c.wantErr {
+				if err == nil || !strings.Contains(err.Error(), w) {
+					t.Errorf("err = %v, want it to contain %q", err, w)
+				}
+			}
+			if len(c.f.calls) != len(c.wantArgv) {
+				t.Fatalf("calls = %+v, want %v", c.f.calls, c.wantArgv)
+			}
+			for i, w := range c.wantArgv {
+				if !reflect.DeepEqual(c.f.calls[i].argv, w) || !reflect.DeepEqual(c.f.calls[i].env, sc.Env) {
+					t.Errorf("call %d = %v env %v, want %v env %v", i, c.f.calls[i].argv, c.f.calls[i].env, w, sc.Env)
+				}
+			}
+		})
+	}
+	state, err := ProbeLinger(bg(), &splitRunner{stdout: "Linger=no\n", stderr: "a warning\n"}, sc)
+	if err != nil || state != "no" {
+		t.Errorf("ProbeLinger = %q, %v, want the stdout state alone", state, err)
+	}
+}
+
+// PodmanIDMap reads the mapping from stdout alone, for the uid map or the gid map.
+func TestPodmanIDMap(t *testing.T) {
+	for _, c := range []struct {
+		gid  bool
+		want string
+	}{{false, "UIDMap"}, {true, "GIDMap"}} {
+		r := &splitRunner{stdout: "0:1 1:65536 \n", stderr: "WARN[0000] a warning\n"}
+		out, err := PodmanIDMap(bg(), r, "podman", c.gid, noApprovals)
+		if err != nil || out != "0:1 1:65536 \n" {
+			t.Fatalf("out=%q err=%v", out, err)
 		}
-		if want := filepath.Join(home, filepath.FromSlash(quadletUserSub)); moved.Dir != want {
-			t.Errorf("user dir = %q, want %q", moved.Dir, want)
+		if want := podman.IDMap([]string{"podman"}, c.gid).Argv; !reflect.DeepEqual(r.calls[0].argv, want) {
+			t.Errorf("argv = %v, want the %s query %v", r.calls[0].argv, c.want, want)
 		}
+	}
+	if _, err := PodmanIDMap(bg(), &splitRunner{err: errors.New("boom")}, "podman", false, noApprovals); err == nil ||
+		!strings.Contains(err.Error(), "boom") {
+		t.Errorf("a failed query is an error carrying the cause, got %v", err)
+	}
+	f := &fakeRunner{}
+	if _, err := PodmanIDMap(bg(), f, "podman; rm -rf /", false, noApprovals); err == nil || len(f.calls) != 0 {
+		t.Errorf("an unsafe command is refused before anything runs: err=%v calls=%d", err, len(f.calls))
 	}
 }
 
 // TestPodmanDeployReloadThenStart pins how a deploy brings the unit up: reload,
-// ask systemd whether the service is running, then start it if it is not (a
-// new, stopped or failed unit) or restart it if it is -- a running container
-// keeps the secrets it was created with, so only a restart loads the new ones.
+// ask systemd for the service's state, then restart it when it is active or
+// reloading (a running container keeps the secrets it was created with, so only a
+// restart loads the new ones) and start it for any other answer, or none.
 func TestPodmanDeployReloadThenStart(t *testing.T) {
 	for _, c := range []struct {
-		name    string
-		user    bool
-		running bool
-		verb    string
+		name  string
+		user  bool
+		state string
+		verb  string
 	}{
-		{"new or stopped unit, user scope", true, false, "start"},
-		{"running unit, user scope", true, true, "restart"},
-		{"new or stopped unit, system scope", false, false, "start"},
-		{"running unit, system scope", false, true, "restart"},
+		{"inactive unit, user scope", true, "inactive\n", "start"},
+		{"active unit, user scope", true, "active\n", "restart"},
+		{"reloading unit, user scope", true, "reloading\n", "restart"},
+		{"failed unit, user scope", true, "failed\n", "start"},
+		{"unanswered probe starts, user scope", true, "", "start"},
+		{"inactive unit, system scope", false, "inactive\n", "start"},
+		{"active unit, system scope", false, "active\n", "restart"},
+		{"reloading unit, system scope", false, "reloading\n", "restart"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			f := &fakeRunner{}
-			if !c.running {
-				// is-active exits 3 for an inactive unit.
+			// is-active exits non-zero for every state but active, so a state
+			// other than active or reloading arrives with an exit error.
+			f := &fakeRunner{outByCall: map[int]string{1: c.state}}
+			if c.verb == "start" {
 				f.errByCall = map[int]error{1: fmt.Errorf("exit status 3")}
 			}
-			sc := QuadletScope{Dir: t.TempDir(), UserMode: c.user}
+			sc := QuadletScope{Dir: t.TempDir(), UserMode: c.user, Env: []string{"XDG_RUNTIME_DIR=/run/user/1000"}}
 			out, err := PodmanDeploy(bg(), f, sc, []string{"solmq-connector.service"})
 			if err != nil {
 				t.Fatal(err)
 			}
+			prefix := []string{"systemctl"}
+			if c.user {
+				prefix = append(prefix, "--user")
+			}
+			sysctl := func(args ...string) []string { return append(append([]string(nil), prefix...), args...) }
 			want := [][]string{
-				sc.systemctlArgs("daemon-reload"),
-				sc.systemctlArgs("is-active", "--quiet", "solmq-connector.service"),
-				sc.systemctlArgs(c.verb, "solmq-connector.service"),
+				sysctl("daemon-reload"),
+				sysctl("is-active", "solmq-connector.service"),
+				sysctl(c.verb, "solmq-connector.service"),
 			}
 			if len(f.calls) != len(want) {
 				t.Fatalf("want %d calls, got %+v", len(want), f.calls)
@@ -323,9 +545,15 @@ func TestPodmanDeployReloadThenStart(t *testing.T) {
 				if !reflect.DeepEqual(f.calls[i].argv, w) {
 					t.Errorf("call %d argv = %v, want %v", i, f.calls[i].argv, w)
 				}
+				if c.user && !reflect.DeepEqual(f.calls[i].env, sc.Env) {
+					t.Errorf("call %d env = %v, want the session %v", i, f.calls[i].env, sc.Env)
+				}
+				if !c.user && f.calls[i].env != nil {
+					t.Errorf("call %d env = %v, a system scope carries no session", i, f.calls[i].env)
+				}
 			}
-			if said := strings.Contains(out, "was running; restarting it"); said != c.running {
-				t.Errorf("output %q: restart notice present = %v, want %v", out, said, c.running)
+			if said := strings.Contains(out, "was running; restarting it"); said != (c.verb == "restart") {
+				t.Errorf("output %q: restart notice present = %v, want %v", out, said, c.verb == "restart")
 			}
 		})
 	}
@@ -373,19 +601,23 @@ func TestPodmanRemoveStopsRemovesReloads(t *testing.T) {
 func TestPodmanDeployStartFailureIsReported(t *testing.T) {
 	// daemon-reload is call 0 and is-active (call 1) decides the verb for the
 	// start or restart (call 2); a failure injected at any step must surface
-	// naming the step, and nothing after it may run.
+	// naming the step, and nothing after it may run. The verb follows the state
+	// is-active prints, as systemctl does: "inactive" with exit 3 starts, and
+	// "active" restarts.
 	for _, c := range []struct {
 		name      string
 		errs      map[int]error
+		probe     string
 		wantErr   string
 		wantCalls int
 	}{
-		{"daemon-reload", map[int]error{0: fmt.Errorf("boom")}, "systemctl daemon-reload: boom", 1},
-		{"start", map[int]error{1: fmt.Errorf("exit status 3"), 2: fmt.Errorf("boom")}, "systemctl start a.service: boom", 3},
-		{"restart", map[int]error{2: fmt.Errorf("boom")}, "systemctl restart a.service: boom", 3},
+		{"daemon-reload", map[int]error{0: fmt.Errorf("boom")}, "active\n", "systemctl daemon-reload: boom", 1},
+		{"start", map[int]error{1: fmt.Errorf("exit status 3"), 2: fmt.Errorf("boom")}, "inactive\n",
+			"systemctl start a.service: boom", 3},
+		{"restart", map[int]error{2: fmt.Errorf("boom")}, "active\n", "systemctl restart a.service: boom", 3},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			f := &fakeRunner{errByCall: c.errs}
+			f := &fakeRunner{errByCall: c.errs, outByCall: map[int]string{1: c.probe}}
 			sc := QuadletScope{Dir: t.TempDir(), UserMode: true}
 			_, err := PodmanDeploy(bg(), f, sc, []string{"a.service"})
 			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
@@ -474,7 +706,7 @@ func TestPodmanSecretCreateReplacesInOneCall(t *testing.T) {
 }
 
 // PodmanVersion reads the client version from stdout alone, and
-// PodmanSupportsReplace holds it to 4.7.
+// podman.SupportsReplace holds it to 4.7, whatever space surrounds it.
 func TestPodmanVersion(t *testing.T) {
 	r := &splitRunner{stdout: "5.8.2\n", stderr: "WARN[0000] a warning\n"}
 	v, err := PodmanVersion(bg(), r, "podman", noApprovals)
@@ -484,10 +716,20 @@ func TestPodmanVersion(t *testing.T) {
 	if want := []string{"podman", "version", "--format", "{{.Client.Version}}"}; !reflect.DeepEqual(r.calls[0].argv, want) {
 		t.Errorf("argv = %v, want %v", r.calls[0].argv, want)
 	}
-	for v, want := range map[string]bool{"5.8.2": true, "4.7.0": true, "4.9.4-rhel": true, "v4.7.1": true, "4.6.2": false, "4.5": false, "3.4.4": false, "": false, "out": false, "4": false} {
-		if got := PodmanSupportsReplace(v); got != want {
-			t.Errorf("PodmanSupportsReplace(%q) = %v, want %v", v, got, want)
+	for v, want := range map[string]bool{"5.8.2": true, "  5.8.2\n": true, "\t4.7.0 \n": true, "4.7.0": true, "4.9.4-rhel": true, "v4.7.1": true, "4.6.2": false, "4.5": false, "3.4.4": false, "": false, "out": false, "4": false} {
+		if got := podman.SupportsReplace(v); got != want {
+			t.Errorf("podman.SupportsReplace(%q) = %v, want %v", v, got, want)
 		}
+	}
+	padded := &splitRunner{stdout: "  4.7.0 \n"}
+	if v, err := PodmanVersion(bg(), padded, "podman", noApprovals); err != nil || !podman.SupportsReplace(v) {
+		t.Errorf("a version with surrounding space must parse: v=%q err=%v", v, err)
+	}
+	if _, err := PodmanVersion(bg(), &splitRunner{err: errors.New("boom")}, "podman", noApprovals); err == nil {
+		t.Error("a failed version call is an error")
+	}
+	if _, err := PodmanVersion(bg(), &splitRunner{}, "podman; id", noApprovals); err == nil {
+		t.Error("an unsafe command is refused")
 	}
 }
 
@@ -1119,6 +1361,11 @@ func TestSystemctlNRestarts(t *testing.T) {
 			// systemd answers an unknown unit with an empty property rather than a
 			// failure, so the caller has to be able to fall back.
 			name: "unknown unit answers nothing", scope: QuadletScope{}, out: "\n", wantErr: true,
+			wantArgv: []string{"systemctl", "show", "solmq-connector.service", "-p", "NRestarts", "--value"},
+		},
+		{
+			// A count below zero is no count at all.
+			name: "negative count is refused", scope: QuadletScope{}, out: "-1\n", wantErr: true,
 			wantArgv: []string{"systemctl", "show", "solmq-connector.service", "-p", "NRestarts", "--value"},
 		},
 		{

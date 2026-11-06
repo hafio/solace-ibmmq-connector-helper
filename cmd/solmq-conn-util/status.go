@@ -612,11 +612,10 @@ func (c *statusCollector) applyPodmanRestarts(rep *statusreport.Report) {
 	if c.platform != validate.PlatformPodman {
 		return
 	}
-	// Nothing is read from env.yaml here: the scope follows the invoking user, so
-	// it lands on the same directory and the same systemd instance a deploy by
-	// that user would have used. status can run with no env.yaml at all (see
-	// loadStatusEnv), and this now needs none.
-	sc, err := runner.ResolveQuadletScope()
+	// podman.rootful is the one setting read from env.yaml, and status can run
+	// with none (see loadStatusEnv), so an absent section is the rootless default.
+	// Any refusal or session failure leaves the container's own count in place.
+	sc, err := runner.ResolveQuadletScope(host().scope, c.podmanRootful())
 	if err != nil {
 		return
 	}
@@ -633,6 +632,12 @@ func (c *statusCollector) applyPodmanRestarts(rep *statusreport.Report) {
 		inst.Container.Restarts = n
 		inst.Container.RestartSource = "systemd"
 	}
+}
+
+// podmanRootful is env.yaml's podman.rootful, false (the rootless default) when
+// there is no env.yaml or no podman section.
+func (c *statusCollector) podmanRootful() bool {
+	return c.env != nil && c.env.Podman != nil && c.env.Podman.Rootful
 }
 
 // applyDigests fills in the registry digest each instance is actually running,

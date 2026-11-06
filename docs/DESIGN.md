@@ -297,10 +297,33 @@ mounting and `remove` can delete them all.
 under `/run/secrets`, and the connector reads credentials only from
 `/app/external/var/secrets/`. Requires podman 4.5 or newer.
 
+**Rootless is the default, and rootful is asked for.** `podman.rootful: true`
+deploys the rootful engine and needs root; `rootless.Decide` (the shared
+`rootless` package) refuses a non-root user who asks for it and root who does not,
+since deploying on behalf of a rootless user needs a key naming the user and a way
+to run podman as them, which is not built. The mode and the directory come from
+one decision, so they cannot disagree. Both are refused as usage errors (exit 2)
+before the preflight.
+
 **The unit directory is not configurable.** systemd scans only
-`/etc/containers/systemd` (root) and `~/.config/containers/systemd` (everyone
-else), so the deploy derives the directory from the invoking uid. A key could
-only name a directory systemd ignores or the account cannot write.
+`/etc/containers/systemd` (rootful) and the user's config directory under
+`containers/systemd`, so the deploy derives the directory from the mode:
+`podman.QuadletDir` takes `$XDG_CONFIG_HOME` or `$HOME/.config`, as podman's own
+generator does, and refuses a relative `XDG_CONFIG_HOME` and an unresolvable home.
+A key could only name a directory systemd ignores or the account cannot write.
+
+**Rootless needs a session, and linger.** `sudo`, `su` and cron strip
+`XDG_RUNTIME_DIR` and the bus address, which `systemctl --user` and `loginctl`
+need. `runner.ResolveQuadletScope` has `rootless.UserSession` derive what is
+missing (and refuse a runtime directory that does not exist, exit 1), and the scope
+carries the result as `Cmd.Env` for those calls alone: nothing is set
+process-wide, and podman's own calls never carry it. Without linger the user's
+manager stops at logout and starts nothing at boot, so a rootless deploy asks
+logind (`systemd.ShowLinger`) after the preflight and before any write, and turns
+it on for the user's own account (`systemd.EnableLinger`, which needs no
+privilege). A refusal ends the deploy with the `sudo loginctl enable-linger <user>`
+an administrator runs. `validate` changes nothing, so a user that does not linger
+is a host error there.
 
 **`restart` takes systemd's words.** The value lands in the unit as `Restart=`.
 systemd never restarts a unit you stopped, so its `always` is what compose's
@@ -310,13 +333,19 @@ systemd would ignore it and never restart the connector.
 **Restart counts come from systemd.** Under quadlet a restart recreates the
 container, so podman's own `RestartCount` reads 0 forever. `status` asks
 `systemctl show -p NRestarts` and falls back to the container's counter where
-systemd cannot answer.
+systemd cannot answer (`systemd.ParseNRestarts` refuses an empty or negative
+answer, and `status` also keeps the container's counter when the scope is
+refused).
 
 **`deploy` restarts a running unit.** Podman copies a mount secret into the
 container when it creates it, so only a new container sees the configuration
-this deploy loaded. A stopped or failed unit is started. On podman 4.7 and newer
-secrets are loaded with `--replace`, so a failed load leaves the previous secret
-intact.
+this deploy loaded. A unit `systemctl is-active` reports as `active` or
+`reloading` is restarted; any other answer, or none (the exit status is ignored,
+since every state but active exits non-zero), starts it. On podman 4.7 and newer
+secrets are loaded with `podman.CreateSecret(..., replace)`, so a failed load
+leaves the previous secret intact; below that it is `RemoveSecrets` then create.
+The `systemctl`, `loginctl` and `podman` argv come from the shared `systemd` and
+`podman` packages.
 
 **`HealthOnFailure=` is left unset.** The check reports a verdict and never
 restarts, kills or stops anything.
@@ -344,8 +373,17 @@ mount check (`cmd/solmq-conn-util/runas.go`) judges root by the mode bits like
 any uid. Group 0 is the default gid because the image's own files belong to it.
 
 **Rootless podman** maps uid 0 to the invoking user and higher ids into the
-subordinate ranges, which `useradd` sizes at 65536. `deploy` reads `/etc/subuid`
-and `/etc/subgid` and warns when the run-as ids need more than is granted.
+subordinate ranges, which `useradd` sizes at 65536. `deploy` and `validate` ask
+`podman info` what is actually mapped (`podman.IDMap`), which covers a range an NSS
+source such as SSSD grants and which the files cannot show, and `rootless.CheckIDMap`
+refuses a numeric run-as id outside it. A refusal appends `rootless.SubIDFix`, the
+`usermod` line for a range `rootless.NextFreeRange` computes from `/etc/subuid` and
+`/etc/subgid` (marked as not computed when they cannot be read), then this tool's
+own alternatives. Id 0 and `run-as: image` need no range. Deploy exits 1 before it
+stores or writes anything; validate reports a host error. The static
+`checkRootlessRange` lint in validate stays, for a host that is not this one. No
+core-limit check: the unit sets no core ulimit, so there is nothing to compare the
+session against.
 
 ## 8. TLS
 
@@ -554,7 +592,7 @@ over `Run`, so a test fake implements two methods and every mode works.
   in arrival order, returned even when the command fails.
 - **Split** is what `runParsed` uses for every helper that parses output (the JSON
   readers, `KubernetesTop`, `EngineList`, `EngineStats`, `SystemctlNRestarts`, the
-  podman version and image-command reads), because a platform CLI writes warnings to
+  podman version, id-map and image-command reads, and `systemctl is-active`'s state), because a platform CLI writes warnings to
   stderr whenever it likes (OpenShift greets `oc get` with a deprecation notice), and
   merged into stdout that line lands in front of the JSON. A failure carries both
   streams, trimmed, so the message is no less useful. `ScriptInstalled` and
@@ -577,6 +615,14 @@ over `Run`, so a test fake implements two methods and every mode works.
   keeps the parent alive while the terminal delivers the interrupt to the child. Not
   `signal.Ignore`, whose `SIG_IGN` would be inherited across exec and leave the
   container's shell uninterruptible.
+- **Process facts are inputs.** `runner.ResolveQuadletScope` takes a `ScopeEnv`
+  (euid, `getenv`, home, `isDir`, whether the host is Linux) and the `rootful`
+  setting instead of reading the process; `LiveScopeEnv` is the production value.
+  `cmd/solmq-conn-util` reaches it, the subid files and the user's name through the
+  `host` seam (`hostFacts`), so a test supplies its own euid and files and passes
+  the same as root or off Linux. `QuadletScope.WithEnv` attaches the session to
+  each `systemctl --user` and `loginctl` command as `Cmd.Env`; the runner allows an
+  environment on any command.
 - **Contexts.** Every helper in `internal/runner` takes a `context.Context` first.
   `cmd/solmq-conn-util` passes `bg()` (`context.Background()`) at every helper call,
   so Ctrl-C keeps its default effect everywhere except `logs --follow`. A context that

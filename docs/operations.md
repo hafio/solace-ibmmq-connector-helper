@@ -128,7 +128,7 @@ Generates for the resolved platform, then applies it through the section's
 |---|---|
 | kubernetes | reads every Secret you manage that the pod mounts and stops if one lacks a key; then `<command> apply -f -` with the manifest on stdin |
 | docker | `<command> compose -f - --project-directory <env.yaml's folder> up -d`, with the compose file on stdin and credentials in the child environment |
-| podman | loads secrets, writes the unit, `systemctl [--user] daemon-reload`, then `start` or `restart` |
+| podman | resolves the scope (below), loads secrets, writes the unit, `systemctl [--user] daemon-reload`, then `start` or `restart` |
 
 Before anything is written or applied, a read-only preflight runs: `info` on
 docker and podman, and on kubernetes `auth can-i` for the one permission the
@@ -150,11 +150,35 @@ giving a login hint. There is no skip flag.
 `docker`, `podman`). `--allow-command <name>` approves another one (a chained
 runner such as `lima`) for this run only. A privilege-escalation wrapper
 (`sudo`, `doas`, `su` and the like) is never approved, in the flag or in the
-file: run `sudo solmq-conn-util ...` instead. The command runs as an argv slice,
+file: run `sudo solmq-conn-util ...` instead (for podman, with `podman.rootful:
+true`). The command runs as an argv slice,
 never through a shell, and every token is checked against a safe charset.
 
+**Podman scope.** Podman is rootless unless `podman.rootful: true` asks for the
+rootful engine, which needs root. Resolved before the preflight, a non-root user
+asking for rootful, root without it, a relative `XDG_CONFIG_HOME` and an
+unresolvable home directory are refused (exit 2, nothing runs); a user runtime
+directory that does not exist is a failure (exit 1). Rootless on Linux the tool
+repairs the session `sudo`, `su` and cron strip, attaching `XDG_RUNTIME_DIR` and
+`DBUS_SESSION_BUS_ADDRESS` to its own `systemctl --user` and `loginctl` calls
+only. After the preflight and before anything is stored or written, a rootless
+deploy:
+
+1. asks logind for your linger state (`loginctl show-user <uid>
+   --property=Linger`; a probe that cannot run ends the deploy) and, when it is
+   not `yes`, runs `loginctl enable-linger` for your own account, printing one
+   `note:` line. A refused enable ends the deploy with `sudo loginctl
+   enable-linger <user>` for an administrator;
+2. for a numeric `run-as` other than `image` and id 0, asks `podman info` for
+   your uid and gid maps and refuses an id outside them, with the `usermod`
+   line for a range no other user holds and `podman system migrate`.
+
+Secrets are replaced in one `secret create --replace` on podman 4.7 and newer,
+and removed then created below that.
+
 **What a redeploy restarts.** Podman reloads systemd, then restarts the unit
-when it is active and starts it when it is not. Docker recreates the container
+when `systemctl is-active` answers `active` or `reloading`, and starts it for any
+other answer, or none. Docker recreates the container
 when the compose file or any selected store changed. Kubernetes does not
 restart pods when only `application.yml`, the status script or a store
 changed; follow such a deploy with `restart`.
@@ -344,7 +368,7 @@ a terminal. Progress never changes stdout or the exit code, so
 
 | View | kubernetes | docker | podman |
 |---|---|---|---|
-| `container` | preflight + 1 `get pods` (+ `get deployment`/`get service`) | preflight + 1 `inspect` | preflight + 1 `inspect` + 1 `systemctl show` per instance |
+| `container` | preflight + 1 `get pods` (+ `get deployment`/`get service`) | preflight + 1 `inspect` | preflight + 1 `inspect` + 1 `systemctl show` per instance (none when the podman scope cannot be resolved, which keeps podman's own count) |
 | `application` | + 1 probe and 1 script run per instance | same | same |
 | `-d` adds | 1 `top pod` + 1 `get` per referenced object | 1 `stats` + 1 `image inspect` per image | as docker |
 | `--all` adds | nothing | 1 `ps` | 1 `ps` |

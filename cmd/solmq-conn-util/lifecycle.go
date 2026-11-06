@@ -92,7 +92,7 @@ func runLifecycle(action string, args []string, r gdurunner.Runner) int {
 		if err := checkName("podman.name", p.Name); err != nil {
 			return usageExit(err)
 		}
-		sc, serr := runner.ResolveQuadletScope()
+		sc, serr := runner.ResolveQuadletScope(host().scope, p.Rootful)
 		if serr != nil {
 			return errExit(serr)
 		}

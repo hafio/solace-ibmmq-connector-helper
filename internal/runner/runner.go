@@ -23,12 +23,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/podman"
+	"github.com/hafio/go-deploy-utility/rootless"
 	gdurunner "github.com/hafio/go-deploy-utility/runner"
+	"github.com/hafio/go-deploy-utility/systemd"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
@@ -226,12 +230,18 @@ func DockerLifecycle(ctx context.Context, r gdurunner.Runner, command, action, c
 // policy, and a stopped unit's container is removed and created again from the
 // unit on start.
 func PodmanLifecycle(ctx context.Context, r gdurunner.Runner, sc QuadletScope, action, service string) (string, error) {
+	var c gdurunner.Cmd
 	switch action {
-	case ActionStart, ActionStop, ActionRestart:
+	case ActionStart:
+		c = systemd.Start(sc.UserMode, service)
+	case ActionStop:
+		c = systemd.Stop(sc.UserMode, service)
+	case ActionRestart:
+		c = systemd.Restart(sc.UserMode, service)
 	default:
 		return "", fmt.Errorf("unknown lifecycle action %q", action)
 	}
-	return gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: sc.systemctlArgs(action, service)})
+	return gdurunner.Combined(ctx, r, sc.WithEnv(c))
 }
 
 // DockerImageCommand reads an image's ENTRYPOINT and CMD from the local engine
@@ -378,45 +388,25 @@ func canIDenied(out string) (string, bool) {
 }
 
 // PodmanVersion is the podman client's version, as `podman version --format
-// {{.Client.Version}}` prints it (5.8.2), read from stdout alone.
+// {{.Client.Version}}` prints it (5.8.2), read from stdout alone. Pass it to
+// podman.SupportsReplace, which ignores surrounding space.
 func PodmanVersion(ctx context.Context, r gdurunner.Runner, command string, approvals execguard.Approvals) (string, error) {
 	argv, err := ParseCommand(validate.PlatformPodman, command, approvals)
 	if err != nil {
 		return "", err
 	}
-	out, err := runParsed(ctx, r, gdurunner.Cmd{Argv: append(argv, "version", "--format", "{{.Client.Version}}")})
+	out, err := runParsed(ctx, r, podman.Version(argv))
 	if err != nil {
 		return "", fmt.Errorf("podman version: %w", err)
 	}
 	return strings.TrimSpace(out), nil
 }
 
-// PodmanSupportsReplace reports whether a podman version is 4.7 or newer,
-// where `secret create --replace` exists. A version that does not parse is
-// not, so the caller keeps to remove-then-create.
-func PodmanSupportsReplace(version string) bool {
-	num := func(s string) (int, bool) {
-		end := 0
-		for end < len(s) && s[end] >= '0' && s[end] <= '9' {
-			end++
-		}
-		n, err := strconv.Atoi(s[:end])
-		return n, err == nil
-	}
-	parts := strings.SplitN(strings.TrimPrefix(version, "v"), ".", 3)
-	if len(parts) < 2 {
-		return false
-	}
-	major, ok1 := num(parts[0])
-	minor, ok2 := num(parts[1])
-	return ok1 && ok2 && (major > 4 || major == 4 && minor >= 7)
-}
-
 // PodmanSecretCreate stores one credential in podman's secret store, replacing
 // any previous entry of that name.
 //
 // The value crosses on stdin, never in argv. With replace -- podman 4.7 and
-// newer, PodmanSupportsReplace -- it is one `secret create --replace`, so a
+// newer, podman.SupportsReplace -- it is one `secret create --replace`, so a
 // failed create leaves the previous secret, and the unit still mounting it,
 // intact. Below 4.7, where the rest of the quadlet wiring still works, it is a
 // remove-then-create: a create that fails then leaves the installed unit
@@ -427,17 +417,18 @@ func PodmanSecretCreate(ctx context.Context, r gdurunner.Runner, command, name, 
 		return "", err
 	}
 	if replace {
-		out, err := gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: append(append([]string(nil), argv...), "secret", "create", "--replace", name, "-"), Stdin: []byte(value)})
+		out, err := gdurunner.Combined(ctx, r, podman.CreateSecret(argv, name, []byte(value), true))
 		if err != nil {
 			return out, fmt.Errorf("podman secret create --replace %s: %w", name, err)
 		}
 		return out, nil
 	}
-	out, err := gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: append(append([]string(nil), argv...), "secret", "rm", "--ignore", name)})
+	rm, _ := podman.RemoveSecrets(argv, name)
+	out, err := gdurunner.Combined(ctx, r, rm)
 	if err != nil {
 		return out, fmt.Errorf("podman secret rm %s: %w", name, err)
 	}
-	o, err := gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: append(append([]string(nil), argv...), "secret", "create", name, "-"), Stdin: []byte(value)})
+	o, err := gdurunner.Combined(ctx, r, podman.CreateSecret(argv, name, []byte(value), false))
 	out += o
 	if err != nil {
 		return out, fmt.Errorf("podman secret create %s: %w", name, err)
@@ -455,62 +446,165 @@ func PodmanSecretRemove(ctx context.Context, r gdurunner.Runner, command string,
 	if err != nil {
 		return "", err
 	}
-	argv = append(argv, "secret", "rm", "--ignore")
-	out, err := gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: append(argv, names...)})
+	rm, _ := podman.RemoveSecrets(argv, names...)
+	out, err := gdurunner.Combined(ctx, r, rm)
 	if err != nil {
 		return out, fmt.Errorf("podman secret rm: %w", err)
 	}
 	return out, nil
 }
 
+// PodmanIDMap is podman's id mapping for the invoking user, its gid map when gid
+// is set, read from stdout alone (see podman.IDMap). Ask only for a rootless
+// deploy, since rootful podman reports no mappings.
+func PodmanIDMap(ctx context.Context, r gdurunner.Runner, command string, gid bool, approvals execguard.Approvals) (string, error) {
+	argv, err := ParseCommand(validate.PlatformPodman, command, approvals)
+	if err != nil {
+		return "", err
+	}
+	out, err := runParsed(ctx, r, podman.IDMap(argv, gid))
+	if err != nil {
+		return "", fmt.Errorf("podman info (id mappings): %w", err)
+	}
+	return out, nil
+}
+
 // ---- podman quadlet ----------------------------------------------------------
 
-const (
-	systemctl      = "systemctl"
-	flagUser       = "--user"
-	quadletSystem  = "/etc/containers/systemd"
-	quadletUserSub = ".config/containers/systemd"
-)
-
 // QuadletScope is the resolved placement for podman quadlet units: the directory
-// the .container files live in and whether systemctl runs in --user mode.
+// the .container files live in, whether systemctl runs in --user mode, and for
+// a rootless scope the user session those commands need.
 type QuadletScope struct {
 	Dir      string
 	UserMode bool
+
+	// Euid is the effective uid the scope was resolved for, or -1 where there is
+	// none (Windows). loginctl names it.
+	Euid int
+
+	// Env is the repaired user session as KEY=VALUE entries (empty when the
+	// environment already carried it, and off Linux). It is attached to every
+	// `systemctl --user` and loginctl command as Cmd.Env, never set process-wide.
+	Env []string
 }
 
-// ResolveQuadletScope derives both the unit directory and the systemctl mode
-// from the effective uid of whoever is running: system for root, user otherwise.
-//
-// It takes no arguments on purpose. These are the only two combinations an
-// operator can both write to and start -- root owns /etc/containers/systemd and
-// drives the system systemd, everyone else owns their own home and drives their
-// own instance -- and systemd loads units only from its own generator
-// directories, so there is no third directory worth naming. Making it
-// unconfigurable is what turns a permission mismatch from something to validate
-// against into something that cannot be expressed.
-func ResolveQuadletScope() (QuadletScope, error) {
-	var sc QuadletScope
-	sc.UserMode = os.Geteuid() != 0
-	if !sc.UserMode {
-		sc.Dir = quadletSystem
-		return sc, nil
+// WithEnv attaches the scope's session to c. Only a rootless scope has one, so a
+// system scope returns c untouched.
+func (sc QuadletScope) WithEnv(c gdurunner.Cmd) gdurunner.Cmd {
+	if sc.UserMode && len(sc.Env) > 0 {
+		c.Env = append(append([]string(nil), c.Env...), sc.Env...)
 	}
-	home, err := os.UserHomeDir()
+	return c
+}
+
+// ScopeEnv is what ResolveQuadletScope reads from the process, as values and
+// functions so a test supplies its own and nothing is read from, or set in, the
+// real environment.
+type ScopeEnv struct {
+	Euid   int                        // effective uid, -1 where there is none
+	Getenv func(string) string        // os.Getenv
+	Home   func() (string, error)     // os.UserHomeDir
+	IsDir  func(string) (bool, error) // whether a directory exists; an error is a probe that could not run
+	Linux  bool                       // the host runs systemd, so a rootless scope has a session to repair
+}
+
+// LiveScopeEnv is ScopeEnv read from this process.
+func LiveScopeEnv() ScopeEnv {
+	return ScopeEnv{
+		Euid:   os.Geteuid(),
+		Getenv: os.Getenv,
+		Home:   os.UserHomeDir,
+		IsDir:  statIsDir,
+		Linux:  runtime.GOOS == "linux",
+	}
+}
+
+// statIsDir reports whether path is an existing directory: a missing path is
+// false with no error, and any other failure to look is an error.
+func statIsDir(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
 	if err != nil {
-		return QuadletScope{}, fmt.Errorf("resolving user quadlet dir: %w", err)
+		return false, err
 	}
-	sc.Dir = filepath.Join(home, quadletUserSub)
+	return info.IsDir(), nil
+}
+
+// ResolveQuadletScope derives the unit directory, the systemctl mode and the
+// user session from env and the podman.rootful setting.
+//
+// Rootless is the default: rootless.Decide refuses a non-root user who asks for
+// rootful and root who does not. The directory is podman.QuadletDir, so an
+// absolute XDG_CONFIG_HOME is honoured and a relative one is refused. There is
+// no key for the directory: these are the only placements an operator can both
+// write to and start, and systemd loads units only from its own generator
+// directories.
+//
+// A refusal from Decide or QuadletDir is marked as a usage error (exit 2), since
+// it is the operator's setting or environment that is wrong. A rootless scope on
+// Linux then repairs the session sudo, su and cron strip (rootless.UserSession); a
+// session that cannot be repaired is a plain error (exit 1), because the host is
+// what is not ready.
+func ResolveQuadletScope(env ScopeEnv, rootful bool) (QuadletScope, error) {
+	rootlessMode, err := rootless.Decide(env.Euid, rootful, "podman.rootful")
+	if err != nil {
+		return QuadletScope{}, exitcode.AsUsage(err)
+	}
+	dir, err := podman.QuadletDir(rootlessMode, env.Getenv, env.Home)
+	if err != nil {
+		return QuadletScope{}, exitcode.AsUsage(err)
+	}
+	sc := QuadletScope{Dir: dir, UserMode: rootlessMode, Euid: env.Euid}
+	if rootlessMode && env.Linux {
+		session, err := rootless.UserSession(env.Euid, env.Getenv, env.IsDir)
+		if err != nil {
+			return QuadletScope{}, err
+		}
+		sc.Env = session.Env()
+	}
 	return sc, nil
 }
 
-// systemctlArgs prefixes --user when the scope runs in user mode.
-func (sc QuadletScope) systemctlArgs(args ...string) []string {
-	argv := []string{systemctl}
-	if sc.UserMode {
-		argv = append(argv, flagUser)
+// EnsureLinger makes sure the rootless user's manager outlives its login, so the
+// quadlet unit survives logout and starts at boot. It asks logind, and when the
+// answer is not "yes" enables linger for the user's own account, which needs no
+// privilege. name is the user's login name, for the administrator form of the fix.
+//
+// A probe that cannot run is an error, since quadlets need logind; so is a refused
+// enable, which names `sudo loginctl enable-linger <name>`. enabled reports that
+// this call turned it on, for the caller to say so.
+func EnsureLinger(ctx context.Context, r gdurunner.Runner, sc QuadletScope, name string) (enabled bool, err error) {
+	state, err := ProbeLinger(ctx, r, sc)
+	if err != nil {
+		return false, err
 	}
-	return append(argv, args...)
+	if state == "yes" {
+		return false, nil
+	}
+	cmd := sc.WithEnv(systemd.EnableLinger())
+	if out, eerr := gdurunner.Combined(ctx, r, cmd); eerr != nil {
+		return false, fmt.Errorf("linger is not enabled for %s (Linger=%s), and enabling it failed: %w\n%s\n"+
+			"  Ask an administrator to run:\n"+
+			"    sudo loginctl enable-linger %s",
+			name, state, eerr, strings.TrimSpace(out), name)
+	}
+	return true, nil
+}
+
+// ProbeLinger is the user's linger state as logind reports it ("yes", "no"). A
+// probe that cannot run is an error naming the command: a rootless quadlet unit
+// needs logind, and a host without it cannot keep the unit up.
+func ProbeLinger(ctx context.Context, r gdurunner.Runner, sc QuadletScope) (string, error) {
+	cmd := sc.WithEnv(systemd.ShowLinger(sc.Euid))
+	out, errOut, err := gdurunner.Split(ctx, r, cmd)
+	if err != nil {
+		return "", fmt.Errorf("cannot read the linger state with `%s`: %w\n%s\n"+
+			"  Rootless quadlet units need systemd's logind: run on a systemd host, in the user's own login session",
+			strings.Join(cmd.Argv, " "), err, strings.TrimSpace(out+"\n"+errOut))
+	}
+	return systemd.ParseLinger(out), nil
 }
 
 // PodmanDeploy reloads the systemd generator and brings up one service per unit.
@@ -525,21 +619,24 @@ func (sc QuadletScope) systemctlArgs(args ...string) []string {
 // one -- is started.
 func PodmanDeploy(ctx context.Context, r gdurunner.Runner, sc QuadletScope, services []string) (string, error) {
 	var out strings.Builder
-	o, err := gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: sc.systemctlArgs("daemon-reload")})
+	o, err := gdurunner.Combined(ctx, r, sc.WithEnv(systemd.DaemonReload(sc.UserMode)))
 	out.WriteString(o)
 	if err != nil {
 		return out.String(), fmt.Errorf("systemctl daemon-reload: %w", err)
 	}
 	for _, s := range services {
-		verb := "start"
-		// is-active exits 0 only for an active unit. Any failure -- inactive,
-		// failed, unknown, or systemctl itself erroring -- means start, whose own
-		// error then says what is wrong.
-		if _, aerr := gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: sc.systemctlArgs("is-active", "--quiet", s)}); aerr == nil {
-			verb = "restart"
+		verb, build := "start", systemd.Start
+		// is-active exits non-zero for every state but an active one, so its
+		// stdout alone is read and the exit error ignored. A unit that is active
+		// or reloading is restarted; any other answer -- inactive, failed,
+		// unknown, or none because systemctl itself failed -- means start,
+		// whose own error then says what is wrong.
+		state, _, _ := gdurunner.Split(ctx, r, sc.WithEnv(systemd.IsActive(sc.UserMode, s)))
+		if st, answered := systemd.State(state); answered && systemd.Active(st) {
+			verb, build = "restart", systemd.Restart
 			out.WriteString(s + " was running; restarting it to load the new configuration\n")
 		}
-		o, err = gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: sc.systemctlArgs(verb, s)})
+		o, err = gdurunner.Combined(ctx, r, sc.WithEnv(build(sc.UserMode, s)))
 		out.WriteString(o)
 		if err != nil {
 			return out.String(), fmt.Errorf("systemctl %s %s: %w", verb, s, err)
@@ -558,7 +655,7 @@ func PodmanDeploy(ctx context.Context, r gdurunner.Runner, sc QuadletScope, serv
 func PodmanRemove(ctx context.Context, r gdurunner.Runner, sc QuadletScope, services, units []string) (string, error) {
 	var out strings.Builder
 	for _, s := range services {
-		o, err := gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: sc.systemctlArgs("stop", s)})
+		o, err := gdurunner.Combined(ctx, r, sc.WithEnv(systemd.Stop(sc.UserMode, s)))
 		out.WriteString(o)
 		if err != nil {
 			return out.String(), fmt.Errorf("systemctl stop %s: %w", s, err)
@@ -569,7 +666,7 @@ func PodmanRemove(ctx context.Context, r gdurunner.Runner, sc QuadletScope, serv
 			return out.String(), fmt.Errorf("removing unit %s: %w", u, err)
 		}
 	}
-	o, err := gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: sc.systemctlArgs("daemon-reload")})
+	o, err := gdurunner.Combined(ctx, r, sc.WithEnv(systemd.DaemonReload(sc.UserMode)))
 	out.WriteString(o)
 	if err != nil {
 		return out.String(), fmt.Errorf("systemctl daemon-reload: %w", err)
@@ -783,13 +880,13 @@ func EngineList(ctx context.Context, r gdurunner.Runner, cmd []string) (string, 
 // must already be validated by the caller. An empty or unparseable answer is an
 // error, so the caller can fall back to the container's own counter.
 func SystemctlNRestarts(ctx context.Context, r gdurunner.Runner, sc QuadletScope, unit string) (int, error) {
-	out, err := runParsed(ctx, r, gdurunner.Cmd{Argv: sc.systemctlArgs("show", unit, "-p", "NRestarts", "--value")})
+	out, err := runParsed(ctx, r, sc.WithEnv(systemd.NRestarts(sc.UserMode, unit)))
 	if err != nil {
 		return 0, fmt.Errorf("reading %s restart count from systemd: %w\n%s", unit, err, out)
 	}
-	n, cerr := strconv.Atoi(strings.TrimSpace(out))
-	if cerr != nil {
-		return 0, fmt.Errorf("reading %s restart count from systemd: unexpected answer %q", unit, strings.TrimSpace(out))
+	n, perr := systemd.ParseNRestarts(out)
+	if perr != nil {
+		return 0, fmt.Errorf("reading %s restart count from systemd: %w", unit, perr)
 	}
 	return n, nil
 }

@@ -1653,7 +1653,7 @@ func TestValidateWarnsAboutHostMountsTheConnectorCannotRead(t *testing.T) {
 		t.Skip("the mount check runs on Linux only")
 	}
 	f := useFakeRunner(t)
-	podmanQuadletHome(t) // skips as root, so podman is rootless
+	podmanQuadletHome(t) // podman is rootless, as an ordinary user
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, "certs"), 0o755); err != nil {
 		t.Fatal(err)
@@ -2365,23 +2365,59 @@ docker:
     - 8090
 `
 
-// podmanQuadletHome points HOME/USERPROFILE at a temp directory and returns the
-// unit directory ResolveQuadletScope will derive from it.
+// testHost is the host a podman test runs on unless it says otherwise: an
+// ordinary user (euid 1000, "alice") whose home is home, with an empty
+// environment, no session to repair (not Linux, so no linger or subordinate-id
+// probe) and no subuid or subgid file. It reads nothing from the real process, so
+// a podman test passes the same as root, as another user, or on Windows.
+func testHost(home string) hostFacts {
+	return hostFacts{
+		scope: runner.ScopeEnv{
+			Euid:   1000,
+			Getenv: func(string) string { return "" },
+			Home:   func() (string, error) { return home, nil },
+			IsDir:  func(string) (bool, error) { return true, nil },
+			Linux:  false,
+		},
+		readFile: func(string) ([]byte, error) { return nil, os.ErrNotExist },
+		userName: func() string { return "alice" },
+	}
+}
+
+// useHost installs h as the host the podman paths read for the length of the test.
+func useHost(t *testing.T, h hostFacts) {
+	t.Helper()
+	prev := host
+	host = func() hostFacts { return h }
+	t.Cleanup(func() { host = prev })
+}
+
+func init() {
+	// Whatever a test does not set up for itself runs as an ordinary user with
+	// no session, never as the euid of the machine the suite is on.
+	host = func() hostFacts {
+		h := liveHost()
+		h.scope.Euid, h.scope.Linux = 1000, false
+		return h
+	}
+}
+
+// podmanQuadletHome runs the test as an ordinary user whose home is a temp
+// directory (testHost) and returns the unit directory the scope derives from it.
 //
-// There is no config key for the unit directory any more -- it follows the
-// invoking user -- so redirecting the home is how a test keeps its units out of
-// the developer's real ~/.config. That means these tests exercise the actual
-// resolution path rather than an override, at the cost of only being meaningful
-// for a non-root run: as root the scope is system and the directory is /etc,
-// which a test has no business writing to. Hence the skip.
+// There is no config key for the unit directory -- it is $XDG_CONFIG_HOME or
+// $HOME/.config -- so a test keeps its units out of the developer's real
+// ~/.config by redirecting the home, through the host seam and, for whatever
+// else reads it, the environment, with XDG_CONFIG_HOME cleared so a developer's
+// own does not move the directory. It no longer depends on the euid of the
+// process, so nothing is skipped as root.
 func podmanQuadletHome(t *testing.T) string {
 	t.Helper()
-	if os.Geteuid() == 0 {
-		t.Skip("the quadlet dir follows the invoking uid; as root it is /etc/containers/systemd")
-	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)        // unix
 	t.Setenv("USERPROFILE", home) // windows
+	t.Setenv("XDG_CONFIG_HOME", "")
+	useHost(t, testHost(home))
 	return filepath.Join(home, ".config", "containers", "systemd")
 }
 
@@ -2948,9 +2984,10 @@ tls:
 	// (secret rm --ignore, then secret create) BEFORE daemon-reload/start: the
 	// unit being started references these secrets by name, so they must
 	// already exist. The file secrets this spec does not mount (no syslog, and
-	// the old-ca store the previous unit mounted) are deleted in one call. The fake answers every call, is-active included, so the unit
-	// counts as running and is restarted. Call 0 is the read-only preflight
-	// probe, which runs before any of that.
+	// the old-ca store the previous unit mounted) are deleted in one call. The fake answers
+	// every call with "out", is-active included, which is not a running state, so
+	// the unit is started. Call 0 is the read-only preflight probe, which runs
+	// before any of that.
 	wantCalls := [][]string{
 		{"podman", "info"},
 		{"podman", "version", "--format", "{{.Client.Version}}"},
@@ -2972,8 +3009,8 @@ tls:
 		{"podman", "secret", "create", "solmq-conn-status-script", "-"},
 		{"podman", "secret", "rm", "--ignore", "solmq-conn-logback-spring.xml", "solmq-conn-tls-old-ca"},
 		{"systemctl", "--user", "daemon-reload"},
-		{"systemctl", "--user", "is-active", "--quiet", "solmq-conn.service"},
-		{"systemctl", "--user", "restart", "solmq-conn.service"},
+		{"systemctl", "--user", "is-active", "solmq-conn.service"},
+		{"systemctl", "--user", "start", "solmq-conn.service"},
 	}
 	if len(f.calls) != len(wantCalls) {
 		t.Fatalf("want %d runner calls, got %+v", len(wantCalls), f.calls)
@@ -3003,7 +3040,7 @@ func TestDeployPodmanRootlessWarnsAboutAnUnlistableLibsDir(t *testing.T) {
 		t.Skip("the mount check runs on Linux only")
 	}
 	f := useFakeRunner(t)
-	podmanQuadletHome(t) // skips as root, so this deploy is rootless
+	podmanQuadletHome(t) // an ordinary user, so this deploy is rootless
 	dir := t.TempDir()
 	libs := filepath.Join(dir, "libs")
 	if err := os.Mkdir(libs, 0o700); err != nil {

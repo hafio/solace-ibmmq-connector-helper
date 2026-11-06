@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -213,7 +214,7 @@ func TestRootlessReaderSeesTheInvokersGroup(t *testing.T) {
 	}
 	// Container root, uid 0 or the image's own, is the invoking user.
 	for _, ra := range []spec.RunAsID{{UID: 0, GID: 0}, {Image: true}} {
-		if r3 := rootlessIDs(ra); r3.uid != os.Getuid() || r3.gid != os.Getgid() || !r3.can(pi, 0o4) {
+		if r3 := rootlessIDs(ra); r3.uid != os.Geteuid() || r3.gid != os.Getegid() || !r3.can(pi, 0o4) {
 			t.Errorf("rootless %s must be the invoking user and read its 0600 file: %+v", ra, r3)
 		}
 	}
@@ -230,50 +231,17 @@ func fakeHostFiles(files map[string]string) func(string) ([]byte, error) {
 	}
 }
 
-// TestSubIDWarningsNeedARangeWideEnough pins the rootless deploy check: a
-// non-zero run-as uid or gid needs a subordinate range at least that wide in
-// /etc/subuid or /etc/subgid, matched by the invoking user's name or uid, with
-// several ranges adding up. Id 0 (the invoker itself) and run-as image need
-// none, and an nsswitch.conf that takes subids from elsewhere leaves the files
-// unjudged.
-func TestSubIDWarningsNeedARangeWideEnough(t *testing.T) {
-	const stock = "deployer:100000:65536\n"
-	for _, c := range []struct {
-		name  string
-		ra    spec.RunAsID
-		files map[string]string
-		want  []string // one substring per warning, in order
-	}{
-		{"default fits a stock range", spec.RunAsID{UID: 1000}, map[string]string{"/etc/subuid": stock}, nil},
-		{"the range's last id fits", spec.RunAsID{UID: 65536, GID: 65536}, map[string]string{"/etc/subuid": stock, "/etc/subgid": stock}, nil},
-		{"one past the range", spec.RunAsID{UID: 65537}, map[string]string{"/etc/subuid": stock},
-			[]string{"podman.run-as 65537:0 needs uid 65537 mapped, but /etc/subuid grants deployer 65536 subordinate ids, which map container ids up to 65536, so the unit will not start. Widen the range (sudo usermod --add-subuids, then podman system migrate)"}},
-		{"ranges add up", spec.RunAsID{UID: 70000}, map[string]string{"/etc/subuid": "deployer:100000:40000\nother:200000:65536\ndeployer:300000:40000\n"}, nil},
-		{"matched by uid", spec.RunAsID{UID: 1000}, map[string]string{"/etc/subuid": "4242:100000:65536\n"}, nil},
-		{"no range at all", spec.RunAsID{UID: 1000}, map[string]string{"/etc/subuid": "other:100000:65536\n"},
-			[]string{"podman.run-as 1000:0 needs a subordinate uid range, but /etc/subuid grants deployer none, so rootless podman cannot map uid 1000 and the unit will not start. Add a range no other user holds (for example sudo usermod --add-subuids 100000-165535 deployer, then podman system migrate)"}},
-		{"no files at all, gid too", spec.RunAsID{UID: 1000, GID: 1000}, nil,
-			[]string{"needs a subordinate uid range, but /etc/subuid grants deployer none", "needs a subordinate gid range, but /etc/subgid grants deployer none"}},
-		{"root needs no range", spec.RunAsID{UID: 0, GID: 0}, nil, nil},
-		{"image needs no range", spec.RunAsID{Image: true}, nil, nil},
-		{"gid 0 needs no subgid", spec.RunAsID{UID: 1000}, map[string]string{"/etc/subuid": stock}, nil},
-		{"files named by nsswitch", spec.RunAsID{UID: 1000}, map[string]string{"/etc/nsswitch.conf": "passwd: files\nsubid:   files\n"},
-			[]string{"needs a subordinate uid range"}},
-		{"subids from sssd", spec.RunAsID{UID: 1000}, map[string]string{"/etc/nsswitch.conf": "# subid: files\nsubid: sss\n"}, nil},
-	} {
-		got := subIDWarnings(c.ra, fakeHostFiles(c.files), 4242, "deployer")
-		if len(got) != len(c.want) {
-			t.Errorf("%s: got %d warnings, want %d: %q", c.name, len(got), len(c.want), got)
-			continue
-		}
-		for i, w := range c.want {
-			if !strings.Contains(got[i], w) {
-				t.Errorf("%s: warning %d = %q, want it to contain %q", c.name, i, got[i], w)
-			}
-		}
+// currentUserName names the effective user, which is who rootless podman runs
+// as and whom an administrator's usermod line must name, and never comes back
+// empty: it falls back to the uid in decimal.
+func TestCurrentUserNameIsTheEffectiveUser(t *testing.T) {
+	euid := strconv.Itoa(os.Geteuid())
+	want := euid
+	if u, err := user.LookupId(euid); err == nil && u.Username != "" {
+		want = u.Username
 	}
-	if currentUserName() == "" {
-		t.Error("currentUserName must fall back to the uid, never return empty")
+	if got := currentUserName(); got == "" || got != want {
+		t.Errorf("currentUserName() = %q, want %q", got, want)
 	}
 }
 

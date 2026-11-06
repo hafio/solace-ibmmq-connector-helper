@@ -114,8 +114,21 @@ in [configuration.md](configuration.md), the verbs in
   every capability dropped. `deploy` warns on Linux about each unreadable
   mounted path.
 - **Rootless podman needs the run-as ids inside your subuid/subgid ranges.**
-  The default 1000 fits a standard 65536 range; a bigger id does not. Widen
-  the range, pick a smaller id, deploy as root, or set `run-as: image`.
+  The default 1000 fits a standard 65536 range; a bigger id does not. `deploy`
+  and `validate` ask `podman info` and refuse an id outside it, printing the
+  `usermod --add-subuids --add-subgids` line for a free range and `podman system
+  migrate`. Or pick an id inside the range, or set `run-as: image`.
+- **`podman.rootful=true requires root`, or `running as root ... rootful podman
+  is deployed only when asked for`.** Rootless is the default and runs as the
+  user itself, without `sudo`. Only root may deploy rootful, and only with
+  `podman.rootful: true`; root without it is refused, because deploying for a
+  rootless user is not built yet. Exit 2, nothing runs.
+- **`linger is not enabled`, or the user runtime directory does not exist.**
+  A rootless unit stops at logout and does not start at boot without linger.
+  `deploy` enables it for your own account; if that is refused, an
+  administrator runs `sudo loginctl enable-linger <user>`. A missing
+  `/run/user/<uid>` means no login session: run as the user in its own session
+  (not `sudo` or `su`), or enable linger first.
 - **OpenShift assigns its own ids.** Set `kubernetes.run-as: image`.
 - **The safe-charset gate covers more than `command:`.** `image`, `restart`,
   `timezone`, bind-mounted store files, `libs.dir`, referenced Secret names and
@@ -126,7 +139,7 @@ in [configuration.md](configuration.md), the verbs in
   leading `~`.
 - **`command: sudo podman` is refused, and so is `--allow-command sudo`.** A
   privilege-escalation wrapper would elevate every command for the life of the
-  env file. Run `sudo solmq-conn-util ...` instead.
+  env file. Run `sudo solmq-conn-util ...` instead, with `podman.rootful: true`.
 - **A set but empty `-env` variable fails deploy**, like an unset one; `validate`
   warns about both.
 - **`java-options` has its own gate.** Spaces separate options and shell
@@ -177,7 +190,9 @@ in [configuration.md](configuration.md), the verbs in
   reported. Read the report, or `--output json`, for the state.
 - **A standby shows no workflow lines.** That is the normal shape.
 - **Podman restart counts come from systemd.** A quadlet restart recreates the
-  container, so podman's own counter reads 0.
+  container, so podman's own counter reads 0. When systemd cannot answer (the
+  podman scope is refused, or `systemctl show` returns nothing or a negative
+  number), `status` keeps podman's own count rather than failing.
 - **`HEALTH` reads `n/a`.** The container declares no healthcheck: created
   before this tool emitted one, deployed without the script, or run by hand.
 - **A line you expect under `-d` is missing.** The installed script may be out

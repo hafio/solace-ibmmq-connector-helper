@@ -34,6 +34,7 @@ import (
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/hafio/go-deploy-utility/notice"
+	"github.com/hafio/go-deploy-utility/podman"
 	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/examples"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
@@ -155,7 +156,7 @@ var verbHandlers = map[string]func(args []string, r gdurunner.Runner) int{
 	"logs":          func(args []string, r gdurunner.Runner) int { return runLogs(args, r) },
 	"cli":           func(args []string, r gdurunner.Runner) int { return runShell(args, r) },
 	"version":       func(args []string, r gdurunner.Runner) int { return actVersion() },
-	"validate":      func(args []string, r gdurunner.Runner) int { return runValidate(args) },
+	"validate":      func(args []string, r gdurunner.Runner) int { return runValidate(args, r) },
 	"examples":      func(args []string, r gdurunner.Runner) int { return runExamples(args) },
 	"download":      func(args []string, r gdurunner.Runner) int { return runDownload(args) },
 	"auto-complete": func(args []string, r gdurunner.Runner) int { return runAutoComplete(args) },
@@ -707,7 +708,10 @@ func actPodman(o actionOpts, r gdurunner.Runner) int {
 	if e.Podman == nil {
 		return usageExit(fmt.Errorf("env.yaml has no podman: section to %s", action))
 	}
-	sc, serr := runner.ResolveQuadletScope()
+	// The refusals from the rootless rule and the quadlet directory exit 2, a
+	// session that cannot be repaired exits 1: see runner.ResolveQuadletScope.
+	h := host()
+	sc, serr := runner.ResolveQuadletScope(h.scope, e.Podman.Rootful)
 	if serr != nil {
 		return errExit(serr)
 	}
@@ -727,10 +731,15 @@ func actPodman(o actionOpts, r gdurunner.Runner) int {
 	// Everything but libs.dir reaches the container from podman's secret store,
 	// readable by any uid; the libs jars are a bind mount, read with the host's
 	// ids when deployed as root and through the subordinate ranges rootless --
-	// which also have to exist for the run-as ids to be mapped at all.
-	if sc.UserMode && runtime.GOOS == "linux" {
-		for _, w := range subIDWarnings(plan.RunAs, os.ReadFile, os.Getuid(), currentUserName()) {
-			fmt.Fprintln(os.Stderr, "warning:", w)
+	// which also have to exist for the run-as ids to be mapped at all. A rootless
+	// unit also needs the user's manager to outlive its login. Both are settled
+	// before anything is written.
+	if sc.UserMode && h.scope.Linux {
+		if err := ensureLinger(r, sc, h); err != nil {
+			return errExit(err)
+		}
+		if err := checkSubIDs(r, e.Podman, plan.RunAs, h, approvals); err != nil {
+			return errExit(err)
 		}
 	}
 	for _, w := range podmanHostChecks(plan, sc) {
@@ -758,7 +767,7 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	// podman 4.7 replaces a secret in one step; an older one, or a version that
 	// cannot be read, keeps to remove-then-create (runner.PodmanSecretCreate).
 	version, _ := runner.PodmanVersion(bg(), r, p.Command, approvals)
-	replace := runner.PodmanSupportsReplace(version)
+	replace := podman.SupportsReplace(version)
 	for _, kv := range kvs {
 		out, err := runner.PodmanSecretCreate(bg(), r, p.Command, gen.PodmanSecretStoreName(p.Name, kv.Key), kv.Val, replace, approvals)
 		if err != nil {
@@ -991,7 +1000,7 @@ func actVersion() int {
 
 // ---- validate / examples -----------------------------------------------------
 
-func runValidate(args []string) int {
+func runValidate(args []string, r gdurunner.Runner) int {
 	fs := verbFlagSet("validate")
 	env := envFlag(fs)
 	if _, err := collectFlagsAndDirs(fs, args); err != nil {
@@ -1003,9 +1012,9 @@ func runValidate(args []string) int {
 	}
 	res := resolver(envDir)
 	verrs, warns := gen.Validate(req, res)
-	herrs, hwarns := hostChecks(req, e, res)
-	nverr := len(verrs)
-	errs, warns := append(verrs, herrs...), append(warns, hwarns...)
+	eerrs, herrs, hwarns := hostChecks(req, e, res, r)
+	nverr := len(verrs) + len(eerrs)
+	errs, warns := append(append(verrs, eerrs...), herrs...), append(warns, hwarns...)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		for _, e := range errs { // validate: report every error
@@ -1026,10 +1035,15 @@ func runValidate(args []string) int {
 
 // hostChecks runs, for validate, the checks a docker or podman deploy makes on
 // this host before it starts anything, for each of those sections env.yaml
-// has: dockerHostChecks and podmanHostChecks. Each needs its platform's plan,
-// so it runs only once the spec generates for that platform; until then
-// gen.Validate's own errors are the ones to fix.
-func hostChecks(req gen.Request, e *spec.Env, res gen.Resolver) (errs, warns []gen.Issue) {
+// has: dockerHostChecks and podmanHostChecks, and for a rootless podman unit on
+// Linux the linger and subordinate-id probes, run through r. Each needs its
+// platform's plan, so it runs only once the spec generates for that platform;
+// until then gen.Validate's own errors are the ones to fix.
+//
+// envErrs are what env.yaml or the user running validate got wrong (the
+// rootless rule, the quadlet directory), which is a usage error like any other
+// validate error; errs are a host that is not ready, a failure.
+func hostChecks(req gen.Request, e *spec.Env, res gen.Resolver, r gdurunner.Runner) (envErrs, errs, warns []gen.Issue) {
 	issue := func(msg string) gen.Issue { return gen.Issue{File: defaultEnvFile, Msg: msg} }
 	if e.Docker != nil {
 		if plan, perrs, _ := gen.GenerateDocker(req, res); len(perrs) == 0 {
@@ -1043,14 +1057,26 @@ func hostChecks(req gen.Request, e *spec.Env, res gen.Resolver) (errs, warns []g
 		}
 	}
 	if e.Podman != nil {
-		sc, serr := runner.ResolveQuadletScope()
-		if plan, perrs, _ := gen.GeneratePodman(req, res); serr == nil && len(perrs) == 0 {
+		h := host()
+		sc, serr := runner.ResolveQuadletScope(h.scope, e.Podman.Rootful)
+		plan, perrs, _ := gen.GeneratePodman(req, res)
+		switch {
+		case serr != nil && exitcode.IsUsage(serr):
+			envErrs = append(envErrs, issue(serr.Error()))
+		case serr != nil:
+			errs = append(errs, issue(serr.Error()))
+		case len(perrs) == 0:
 			for _, w := range podmanHostChecks(plan, sc) {
 				warns = append(warns, issue(w))
 			}
+			if sc.UserMode && h.scope.Linux {
+				for _, err := range rootlessHostErrors(r, e.Podman, plan.RunAs, sc, h) {
+					errs = append(errs, issue(err.Error()))
+				}
+			}
 		}
 	}
-	return errs, warns
+	return envErrs, errs, warns
 }
 
 // runExamples writes the embedded starter env.yaml + workflows to dir (default
