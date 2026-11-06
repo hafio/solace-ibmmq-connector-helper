@@ -2455,7 +2455,7 @@ func TestGenerateDockerToFile(t *testing.T) {
 	}
 	// dockerEnv sets no project-name, so this is the defaulted value, and it is
 	// the document's first line -- the compose project this stack belongs to.
-	if want := "name: " + spec.DefaultComposeProject + "\n"; !strings.HasPrefix(string(b), want) {
+	if want := "name: \"" + spec.DefaultComposeProject + "\"\n"; !strings.HasPrefix(string(b), want) {
 		t.Errorf("compose must open with %q:\n%s", want, b)
 	}
 	for _, w := range []string{"services:", "image: img:1"} {

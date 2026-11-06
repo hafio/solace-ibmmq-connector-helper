@@ -9,8 +9,8 @@ package podmangen
 
 import (
 	"strconv"
-	"strings"
 
+	"github.com/hafio/go-deploy-utility/containerart/quadlet"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
@@ -100,31 +100,13 @@ type Unit struct {
 // call below passes indent 0 to Line.
 type sw = yamlwriter.Writer
 
-// systemdEnv renders one Environment= assignment for an operator-supplied value.
-// systemd expands % specifiers in unit files -- including in what quadlet
-// passes on to the generated service -- so a literal '%' (the %p in
-// -XX:ErrorFile=hs_err_%p.log) is doubled, or the container would get the
-// unit's name in its place. An assignment carrying a space has to be quoted
-// whole, or systemd splits it into several assignments. A value with neither
-// renders exactly as the unquoted form always has. Quotes and backslashes are
-// escaped too, though validate rejects both before anything renders.
-func systemdEnv(name, value string) string {
-	v := strings.ReplaceAll(value, "%", "%%")
-	if !strings.ContainsAny(v, " \t\"'\\") {
-		return "Environment=" + name + "=" + v
-	}
-	return `Environment="` + name + "=" + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(v) + `"`
-}
-
 // secretMount writes one Secret= line mounting the named secret as a file at
-// the absolute target. No mode= is set: podman's default, 0444 owned by root,
-// matches what compose gives a config and what the credentials already get. An
-// empty name writes nothing.
+// the absolute target, through quadlet.Secret. An empty name writes nothing.
 func secretMount(w *sw, name, target string) {
 	if name == "" {
 		return
 	}
-	w.Line(0, "Secret="+name+",type=mount,target="+target)
+	w.Line(0, quadlet.Secret(name, target))
 }
 
 // seconds spells a duration the way the quadlet Health* keys want it.
@@ -179,25 +161,24 @@ func RenderQuadlet(in Input) Unit {
 		w.Line(0, "User="+strconv.Itoa(inst.RunAs.UID))
 		w.Line(0, "Group="+strconv.Itoa(inst.RunAs.GID))
 	}
-	w.Line(0, "NoNewPrivileges=true")
-	w.Line(0, "DropCapability=all")
+	w.Raw(quadlet.Posture)
 	for _, port := range p.Ports {
 		w.Line(0, "PublishPort="+port.String())
 	}
 	if inst.Timezone != "" {
-		w.Line(0, "Environment=TZ="+inst.Timezone)
+		w.Line(0, quadlet.Environment("TZ", inst.Timezone))
 	}
 	tool, jdk := spec.JavaEnv(inst.MQTLS, inst.JavaOptions)
 	if tool != "" {
-		w.Line(0, systemdEnv("JAVA_TOOL_OPTIONS", tool))
+		w.Line(0, quadlet.Environment("JAVA_TOOL_OPTIONS", tool))
 	}
 	if jdk != "" {
-		w.Line(0, systemdEnv("JDK_JAVA_OPTIONS", jdk))
+		w.Line(0, quadlet.Environment("JDK_JAVA_OPTIONS", jdk))
 	}
 	if sl := in.Syslog; sl != nil {
-		w.Line(0, "Environment=LOGGING_SYSLOG_APPNAME="+inst.Name)
-		w.Line(0, "Environment=LOGGING_SYSLOG_HOST="+sl.Host)
-		w.Line(0, "Environment=LOGGING_SYSLOG_PORT="+strconv.Itoa(sl.Port))
+		w.Line(0, quadlet.Environment("LOGGING_SYSLOG_APPNAME", inst.Name))
+		w.Line(0, quadlet.Environment("LOGGING_SYSLOG_HOST", sl.Host))
+		w.Line(0, quadlet.Environment("LOGGING_SYSLOG_PORT", strconv.Itoa(sl.Port)))
 	}
 	for _, s := range in.Secrets {
 		// An absolute target rather than a bare file name: bare would leave the

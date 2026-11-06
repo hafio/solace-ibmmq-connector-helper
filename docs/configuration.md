@@ -642,7 +642,9 @@ java-options:
 - Each value is one string of space-separated options; a `>-` block is the same
   thing. A list is a parse error.
 - Quotes, backslash, backtick, a `$` left after expansion and control characters
-  are errors. A ` #` inside a `>-` block is an error (it would be part of the
+  (C0 and C1) are errors, as are invisible formatting characters (a zero-width
+  space, a bidirectional override) and invalid UTF-8; re-save the env file as
+  UTF-8. A ` #` inside a `>-` block is an error (it would be part of the
   value).
 - When an MQ binder uses TLS the tool sets
   `-Dcom.ibm.mq.cfg.useIBMCipherMappings=false` first and appends `tool` after

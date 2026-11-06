@@ -54,6 +54,9 @@ func TestJavaOptionsRejectsWhatThePlatformsReadDifferently(t *testing.T) {
 		{"a backslash", `-Dpath=C:\temp`, []string{`contains '\\'`, "no quoting is needed"}},
 		{"a backtick", "-Dx=`id`", []string{"contains '`'", "no quoting is needed"}},
 		{"a control character", "-Dx=a\x07b", []string{"control character", "remove it"}},
+		{"a C1 control character", "-Dx=a\u009bb", []string{"control character", "remove it"}},
+		{"an invisible formatting character", "-Dx=a\u200bb", []string{"invisible formatting character U+200B", "remove it"}},
+		{"invalid UTF-8", "-Dx=a\xffb", []string{"not valid UTF-8", "Re-save the env file as UTF-8"}},
 		// What a trailing comment inside a >- block leaves in the value.
 		{"a comment inside a block", "-Xms512m # initial heap\n-Xmx1g", []string{"reads as a comment", "above the java-options: key"}},
 		{"a block that opens with a comment", "# heap\n-Xmx1g", []string{"reads as a comment"}},

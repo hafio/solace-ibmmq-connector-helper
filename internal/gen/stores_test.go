@@ -232,7 +232,7 @@ func TestCreatedStoresOnEachPlatform(t *testing.T) {
 	if len(dp.Stores) != 1 || dp.Stores[0].Secret != "_GEN_TLS_TS_STORE" || !dp.Stores[0].Build.Trusted || dp.Image != "img:v1" || len(dp.Mounts) != 0 {
 		t.Fatalf("docker plan = %+v, want one trusted created store, no bind mount", dp)
 	}
-	if !strings.Contains(dp.Compose, "      - source: _GEN_TLS_TS_STORE\n        target: /app/external/var/stores/ts\n") {
+	if !strings.Contains(dp.Compose, "      - source: \"_GEN_TLS_TS_STORE\"\n        target: /app/external/var/stores/ts\n") {
 		t.Errorf("the compose does not carry the created store:\n%s", dp.Compose)
 	}
 	env, _, err := ResolveDockerStores(dp, res, 131072, "linux")

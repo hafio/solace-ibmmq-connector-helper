@@ -42,8 +42,14 @@ Packages: `scan`, `spec`, `consolidate`, `tls`, `render`, `deploy`, `dockergen`,
 **Byte-for-byte output.** `application.yml` and every artifact come from a
 deterministic ordered emitter, not generic YAML marshaling, which would re-sort
 keys. Regenerated files diff cleanly and match the golden fixture exactly.
-Scalars are quoted only when YAML would misread them. `${VAR}` expansion is the
-one exception: output then depends on the environment the tool runs in.
+Compose scalars follow one always-quote policy: a name or an operator value
+(project, service, container, config and secret names, `TZ`, syslog settings,
+the java options, ports, `user:` and bind-mount entries) goes through
+`compose.Quote`, so a name such as `yes` or `0123` stays a string; the image
+reference, numbers and the tool's own constants stay bare. A quadlet
+`Environment=` is quoted whole (`quadlet.Environment`). Both come from the shared
+`containerart` packages. `${VAR}` expansion is the one exception: output then
+depends on the environment the tool runs in.
 
 **One folder is one connector instance.** The connector binds workflow ids 0 to
 19 and silently ignores anything higher. A 21st workflow would generate, deploy
@@ -324,9 +330,13 @@ fixed set of restrictions: kubernetes `allowPrivilegeEscalation: false`,
 `privileged: false`, `capabilities.drop: [ALL]` and `seccompProfile:
 RuntimeDefault`; compose `privileged: false`, `cap_drop: [ALL]`,
 `security_opt: [no-new-privileges=true]`; quadlet `NoNewPrivileges=true` and
-`DropCapability=all`. `TestArtifactsStateTheirPosture` pins what each platform
-writes and `TestArtifactsCarryNoWideningTokens` forbids the spellings that would
-widen it.
+`DropCapability=all`. The compose and quadlet blocks are the shared
+`compose.Posture` and `quadlet.Posture`, and the checks come from
+`containerart/artifacttest`. `TestArtifactsStateTheirPosture` pins what each
+platform writes and `TestArtifactsCarryNoWideningTokens` forbids the spellings
+that would widen it. `TestQuadletKeysAreWithinTheFloor` holds every quadlet key
+to podman 4.5, and `TestSecretTargetsAreAbsolutePaths` holds every secret to an
+absolute target.
 
 **`run-as: image` keeps the restrictions.** It drops only the identity. Root
 without `CAP_DAC_OVERRIDE` reads only what the file modes allow, so deploy's

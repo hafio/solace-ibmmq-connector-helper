@@ -739,7 +739,7 @@ docker:
 	// The compose project comes from the spec, so it is the document's first
 	// line -- and it is the defaulted value here, since the docker: section
 	// above sets no project-name.
-	wantName := "name: " + spec.DefaultComposeProject + "\n"
+	wantName := "name: \"" + spec.DefaultComposeProject + "\"\n"
 	if !strings.HasPrefix(plan.Compose, wantName) {
 		t.Errorf("compose must open with %q:\n%s", wantName, plan.Compose)
 	}
@@ -765,10 +765,10 @@ docker:
 	// Every declared secret is a compose top-level secret (environment provider)
 	// and is listed under the service's own secrets:, never written as a value.
 	for _, s := range want {
-		if !strings.Contains(plan.Compose, s.Stable+":\n") {
+		if !strings.Contains(plan.Compose, `"`+s.Stable+"\":\n") {
 			t.Errorf("compose missing top-level secret %q:\n%s", s.Stable, plan.Compose)
 		}
-		if strings.Contains(plan.Compose, s.Stable+": "+s.Literal) {
+		if strings.Contains(plan.Compose, `"`+s.Stable+"\": "+s.Literal) {
 			t.Errorf("compose must never carry a secret value inline (%q):\n%s", s.Stable, plan.Compose)
 		}
 		// The ${STABLE} placeholder application.yml carries is Spring's, resolved
@@ -1166,8 +1166,8 @@ func TestGenerateJavaOptionsReachEveryPlatform(t *testing.T) {
 	if v := valueOf(quadlet.Unit.Content, "JAVA_TOOL_OPTIONS="); !strings.HasSuffix(v, `-Xms512m -Xmx768m"`) {
 		t.Errorf("quadlet JAVA_TOOL_OPTIONS = %s, want the quoted, folded, expanded options:\n%s", v, quadlet.Unit.Content)
 	}
-	if v := valueOf(quadlet.Unit.Content, "Environment=JDK_JAVA_OPTIONS="); v != "-Dregion=apac" {
-		t.Errorf("quadlet JDK_JAVA_OPTIONS = %s, want -Dregion=apac", v)
+	if v := valueOf(quadlet.Unit.Content, `Environment="JDK_JAVA_OPTIONS=`); v != `-Dregion=apac"` {
+		t.Errorf("quadlet JDK_JAVA_OPTIONS = %s, want -Dregion=apac\"", v)
 	}
 
 	// The gate runs before any renderer, on every platform.
@@ -1373,7 +1373,7 @@ func TestGenerateDockerCarriesStatusScript(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	if !strings.Contains(plan.Compose, "solmq-connector-status:\n    content: |\n") {
+	if !strings.Contains(plan.Compose, "\"solmq-connector-status\":\n    content: |\n") {
 		t.Errorf("compose missing the second (status) config entry:\n%s", plan.Compose)
 	}
 	if !strings.Contains(plan.Compose, "USER_NAME="+spec.StatusUserName) {
@@ -1547,7 +1547,7 @@ func TestStoresSharingAFileNameMountApart(t *testing.T) {
 			if len(errs) > 0 {
 				t.Fatalf("docker: unexpected errors: %v", errs)
 			}
-			for _, want := range []string{":" + tls.MountPath("ts") + ":ro\n", ":" + tls.MountPath("ks") + ":ro\n"} {
+			for _, want := range []string{":" + tls.MountPath("ts") + ":ro\"\n", ":" + tls.MountPath("ks") + ":ro\"\n"} {
 				if !strings.Contains(dp.Compose, want) {
 					t.Errorf("docker compose missing %q:\n%s", want, dp.Compose)
 				}

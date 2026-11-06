@@ -1495,6 +1495,10 @@ func javaOptionsProblem(s string) string {
 		return "contains ' #', which reads as a comment but is not one: inside a >- or | block a '#' is part of the value. " +
 			"Move the comment above the java-options: key"
 	}
+	if !utf8.ValidString(s) {
+		return fmt.Sprintf("is not valid UTF-8 (%q): the value would reach the compose file and the unit as different characters. "+
+			"Re-save the env file as UTF-8 and set the option again", s)
+	}
 	for _, r := range s {
 		switch {
 		case r == '$':
@@ -1504,8 +1508,10 @@ func javaOptionsProblem(s string) string {
 		case r == '"' || r == '\\' || r == '\'' || r == '`':
 			return fmt.Sprintf("contains %q: quoting and escaping mean different things in a compose file, a kubernetes manifest and a systemd unit. "+
 				"Remove it -- options are split on spaces, so no quoting is needed, and an option value cannot contain a space", r)
-		case r < 0x20 || r == 0x7f:
+		case execguard.IsControl(r):
 			return fmt.Sprintf("contains the control character %q; remove it", r)
+		case execguard.IsInvisible(r):
+			return fmt.Sprintf("contains the invisible formatting character U+%04X, which cannot be seen in a review or a log line; remove it", r)
 		}
 	}
 	return ""

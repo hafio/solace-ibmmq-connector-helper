@@ -9,6 +9,13 @@ for using the tool, see [getting-started.md](getting-started.md).
 Run the suite with `./scripts/dev.sh test` (`.\scripts\dev.ps1 test` on Windows);
 measure coverage with the `cov` task.
 
+Last recorded `cov` total, from `scripts/logs/cov.log` (2026-11-06): **95.9%**, down from
+96.0%. Adopting the shared `containerart` packages deleted the covered helpers
+`composeQuote`, `composeEscape`, `flowList`, `renderSecrets` and `systemdEnv`; their tests
+moved to go-deploy-utility with them. Removing covered statements lowers the ratio. No new uncovered
+statement came in: `internal/dockergen`, `internal/podmangen` and `javaOptionsProblem` are
+fully covered.
+
 ## Contents
 
 - [internal/scan](#internalscan)
@@ -598,13 +605,12 @@ Tests: [dockergen_test.go](../internal/dockergen/dockergen_test.go)
 
 | Test | Case | Verifies |
 |------|------|----------|
-| TestRenderFull_WithEverything | - | full golden output with project-name, creds, store, libs, MQTLS, ports, timezone and the default run-as with its posture (user, privileged false, cap_drop ALL, no-new-privileges) matches exactly; the compose project is the document's first line |
+| TestRenderFull_WithEverything | - | full golden output with project-name, creds, store, libs, MQTLS, ports, timezone and the default run-as with its posture (user, privileged false, cap_drop ALL, no-new-privileges) matches exactly; the compose project is the document's first line, and every name, bind-mount entry, port, user and config or secret key is a double-quoted scalar (compose.Quote) while the image, numbers and constants stay bare |
 | TestRenderFull_Minimal | - | minimal golden output omits the leading name: line along with restart, ports, environment, env_file, volumes blocks; run-as image drops the user: line and keeps the rest of the posture |
-| TestEnvironmentBranches | TZ only, MQTLS false | environment block contains only TZ: UTC, no JAVA_TOOL_OPTIONS |
+| TestEnvironmentBranches | TZ only, MQTLS false | environment block contains only the quoted TZ: "UTC", no JAVA_TOOL_OPTIONS |
 | TestEnvironmentBranches | MQTLS only, no timezone | environment block contains only JAVA_TOOL_OPTIONS line, no TZ |
-| TestJavaOptionsEnvironment | - | both JVM options variables land in the service environment, the MQ TLS flag first in JAVA_TOOL_OPTIONS, jdk options alone open the block, and an empty java-options block adds nothing |
-| TestComposeQuoteEscapes | - | composeQuote doubles '$' against compose interpolation and escapes quotes and backslashes -- the render-side half of the java-options gate |
-| TestSecretsBranches | at least one secret | the per-service secrets list and the top-level environment-provider secrets block are both emitted |
+| TestJavaOptionsEnvironment | - | both JVM options variables land, quoted by compose.Quote, in the service environment, the MQ TLS flag first in JAVA_TOOL_OPTIONS, jdk options alone open the block, and an empty java-options block adds nothing |
+| TestSecretsBranches | at least one secret | the per-service secrets list (long syntax, absolute target, quoted source) and the top-level environment-provider secrets block (quoted key, bare variable) are both emitted, through compose.ServiceSecrets and compose.TopSecrets |
 | TestSecretsBranches | no secrets | neither block, nor any env_file line, is ever emitted |
 | TestLabelsPerMode | empty defaults to standalone | le-mode label defaults to standalone and role: active is present |
 | TestLabelsPerMode | standalone / active_active | le-mode matches the mode and role: active is present |
@@ -615,13 +621,13 @@ Tests: [dockergen_test.go](../internal/dockergen/dockergen_test.go)
 | TestStoresOnlyAndLibsOnly | stores only | volumes block contains only the store mount line |
 | TestStoresOnlyAndLibsOnly | libs only | volumes block contains only the libs mount line |
 | TestSplitLinesNoTrailingNewline | - | app.yml lacking trailing newline still renders content line with no dropped element |
-| TestStatusScriptConfigSourceAndTarget | - | the service references a second `<name>-status` config and mounts it at /app/external/.status-script |
-| TestHealthcheckRunsTheStatusScript | - | the service declares a healthcheck built from the statusscript constants, in the exec form rather than CMD-SHELL, against the path the configs block mounts -- without it docker populates no .State.Health and the HEALTH column can only read n/a |
+| TestStatusScriptConfigSourceAndTarget | - | the service references a second quoted `<name>-status` config and mounts it at /app/external/.status-script |
+| TestHealthcheckRunsTheStatusScript | - | the service declares a healthcheck built from the statusscript constants, in the exec form (compose.FlowList) rather than CMD-SHELL, against the path the configs block mounts -- without it docker populates no .State.Health and the HEALTH column can only read n/a |
 | TestStatusScriptContentIsEscaped | - | the status script body is inlined under the status config's content: block, indented 6 spaces, blank line preserved as truly empty, and its shell `$` doubled |
 | TestContentEscapesDollarsForCompose | $VAR / ${VAR} / ${VAR:-default} / $(cmd) / $$ | each shape reaches the content block with every `$` doubled, so compose's interpolation pass delivers it unchanged instead of blanking it or rejecting the document |
 | TestContentEscapesDollarsForCompose | no lone `$` | dropping every `$$` pair from the rendered document leaves no `$` behind anywhere |
 | TestAppYAMLSecretPlaceholdersAreNotInterpolated | - | application.yml's ${...} credential placeholders render doubled so compose cannot substitute the values the CLI passes it, while the `secrets:` provider entries -- compose's own -- stay unescaped |
-| TestRenderSyslogAddsConfigAndEnv | - | compose inlines the logback config as a third configs entry targeted at logback.ContainerPath, and sets the three LOGGING_SYSLOG_* env vars the config reads at runtime |
+| TestRenderSyslogAddsConfigAndEnv | - | compose inlines the logback config as a third configs entry targeted at logback.ContainerPath, and sets the three quoted LOGGING_SYSLOG_* env vars the config reads at runtime |
 | TestRenderSyslogTCPUsesTheLogstashAppender | - | the protocol reaches the inlined config: tcp renders the logstash appender, since the two have different classpath requirements and the wrong one fails at runtime rather than at generate time |
 | TestRenderWithoutSyslogEmitsNeither | - | no block, no config entry, no env vars |
 | TestRenderCreatedStores | - | a created store makes the service start through the storescript with the image's own command handed over, mounts the encoded store at /app/external/var/stores/<name> after the credentials, adds the script as a config (its $ doubled), a 0700 tmpfs owned by the run-as uid:gid and the stores label filled from ${_GEN_TLS_STORES_SHA256}, and declares the store a top-level environment secret after the credentials; an existing store is still bind-mounted |
@@ -638,16 +644,15 @@ Tests: [podmangen_test.go](../internal/podmangen/podmangen_test.go)
 | Test | Case | Verifies |
 |------|------|----------|
 | TestRenderQuadletSecretsCarryNoValues | - | each credential appears only as a Secret= directive naming its store entry and absolute target; the value itself never reaches the unit, a world-readable file in the quadlet directory |
-| TestRenderQuadletFull | - | full input yields 1 unit named solmq-connector.container with content matching golden string: User=/Group= of the default run-as, NoNewPrivileges and DropCapability, application.yml, the truststore and the status script as Secret= mounts, the libs directory the only Volume= |
+| TestRenderQuadletFull | - | full input yields 1 unit named solmq-connector.container with content matching golden string: User=/Group= of the default run-as, NoNewPrivileges and DropCapability (quadlet.Posture), every Environment= quoted whole (quadlet.Environment), application.yml, the truststore and the status script as Secret= mounts, the libs directory the only Volume= |
 | TestRenderQuadletMinimal | - | minimal input yields 1 unit with content matching golden string (no Service section, no restart, no Volume=; run-as image writes no User=/Group= but keeps NoNewPrivileges and DropCapability) |
 | TestLeaderLabelsPerMode | empty defaults to standalone / standalone / active_active | the unit carries the le-mode label and role: active |
 | TestLeaderLabelsPerMode | active_standby | the unit carries le-mode active_standby and withholds role: active |
 | TestQuadletMountsNothingFromTheHostButLibs | - | with credentials, a store, the status script, syslog and libs all set, the libs directory is the one Volume= line and all six Secret= lines mount at an absolute target |
 | TestStatusScriptMountOmittedWhenSecretEmpty | - | an empty StatusScriptSecret omits the status mount and the healthcheck that execs it, rather than writing a Secret= line with no name or declaring a check that cannot run |
 | TestHealthcheckRunsTheStatusScript | - | the unit declares HealthCmd and its cadence inside [Container], built from the statusscript constants, and leaves HealthOnFailure unset so the check reports without restarting anything |
-| TestQuadletSyslogMountsAndSetsEnv | - | podman cannot inline file content, so the unit mounts the logback config from podman's secret store via Secret= and sets the three LOGGING_SYSLOG_* vars via Environment= |
-| TestQuadletJavaOptionsEnvironment | - | both JVM options variables are set in the unit, the MQ TLS flag first, a value with spaces quoted whole (or systemd would split it), and neither appears when nothing is set |
-| TestSystemdEnvEscapes | - | systemdEnv doubles '%' so systemd does not expand the %p of a JVM error-file path, quotes a value with a space, escapes quotes and backslashes inside the quotes, and leaves a single option unquoted |
+| TestQuadletSyslogMountsAndSetsEnv | - | podman cannot inline file content, so the unit mounts the logback config from podman's secret store via Secret= and sets the three LOGGING_SYSLOG_* vars via quoted Environment= lines |
+| TestQuadletJavaOptionsEnvironment | - | both JVM options variables are set in the unit, the MQ TLS flag first, every assignment quoted whole through quadlet.Environment (a value with spaces would otherwise split), and neither appears when nothing is set |
 | TestSyslogAbsentEmitsNoMountOrEnv | - | no block, no mount, no env |
 
 ## internal/runner
@@ -1019,7 +1024,7 @@ Tests: [validate_test.go](../internal/validate/validate_test.go), [validate_extr
 | TestImagePullSecretChecks | create, variable unset / set | an unset variable warns rather than errors, so a config can be linted without the deploy secrets |
 | TestRetiredPerPlatformTimezoneRejected | kubernetes / docker / podman | each per-platform timezone key errors and names the top-level timezone: key |
 | TestJavaOptionsAcceptsJVMSyntax | - | spaces, the '*' and ':' of -Xlog, an agent string, a '%p' error-file path, an @argfile, a '#' inside one option and a literal block's line breaks all pass, on both sub-keys |
-| TestJavaOptionsRejectsWhatThePlatformsReadDifferently | leftover variable reference / double quote / single quote / backslash / backtick / control character / a comment inside a block / a block that opens with a comment | each is exactly one error naming the key, the variable it feeds and the character, with what to do instead, on both sub-keys |
+| TestJavaOptionsRejectsWhatThePlatformsReadDifferently | leftover variable reference / double quote / single quote / backslash / backtick / control character / a comment inside a block / a block that opens with a comment / a C1 control character / an invisible formatting character (U+200B) / invalid UTF-8 | each is exactly one error naming the key, the variable it feeds and the character, with what to do instead, on both sub-keys |
 | TestJavaOptionsCheckedOnlyWhenAPlatformIsInPlay | - | a config-only run does not check java-options; a kubernetes, docker or podman run does |
 | TestTopLevelTimezoneUnsafe | unsafe / realistic | the top-level timezone keeps the charset gate the per-platform key had, and an empty value is not an error |
 | TestValidatePostureInlineSide | false warns | an inline tcps side's SSL_VALIDATE_CERTIFICATE: false warns, naming the host |
@@ -1161,9 +1166,11 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestGenerateKubernetesWorkflowCap | 21 workflows | GenerateKubernetes produces no manifest and the same workflow-cap error |
 | TestConfigCarriesSecurityUserRoles | - | end-to-end: a roles-bearing env.yaml validates clean and its role reaches the rendered application.yml, while the reserved account still renders none |
 | TestConfigNoSecretsLeak | - | every rendered password is a ${STABLE} placeholder except the one permitted literal: the reserved spec.StatusUserName account |
-| TestGenerateDockerBasics | - | generates non-empty compose opening with the defaulted `name: solace-ibmmq-connectors` project line and containing the image; all four credential positions render as top-level environment-provider secrets, never inlined as values, and each ${STABLE} placeholder in application.yml is doubled so compose cannot interpolate the value in |
-| TestArtifactsStateTheirPosture | default / 1234:5678 / 0 / image | kubernetes, compose and quadlet each carry the restrictions whatever the run-as, write its ids (fsGroup = the gid on kubernetes), add runAsNonRoot only for a non-root uid, write no ids for image, and harden the libs-download init container too |
-| TestArtifactsCarryNoWideningTokens | default / 1234:5678 / 0 / image | no artifact carries a spelling that would widen the container's privileges: privileged, privilege escalation, added capabilities, unconfined seccomp or SELinux, or the host's namespaces |
+| TestGenerateDockerBasics | - | generates non-empty compose opening with the defaulted, quoted `name: "solace-ibmmq-connectors"` project line and containing the image; all four credential positions render as top-level environment-provider secrets, never inlined as values, and each ${STABLE} placeholder in application.yml is doubled so compose cannot interpolate the value in |
+| TestArtifactsStateTheirPosture | default / 1234:5678 / 0 / image | kubernetes, compose and quadlet each carry the restrictions whatever the run-as (compose and quadlet through artifacttest.AssertComposePosture and AssertQuadletPosture: the block exactly once, quadlet inside [Container]), write its ids (fsGroup = the gid on kubernetes), add runAsNonRoot only for a non-root uid, write no ids for image, and harden the libs-download init container too |
+| TestArtifactsCarryNoWideningTokens | default / 1234:5678 / 0 / image | no artifact carries a spelling that would widen the container's privileges: privileged, privilege escalation, added capabilities, unconfined seccomp or SELinux, host devices or sysctls, or the host's namespaces and network -- the shared artifacttest list plus the kubernetes spellings, run over every run-as and over a compose file and a unit with every optional block set |
+| TestQuadletKeysAreWithinTheFloor | each run-as / every optional block | every [Container] key of every unit shape is known and within podman 4.5, the floor the tool documents (artifacttest.AssertQuadletKeys) |
+| TestSecretTargetsAreAbsolutePaths | each run-as / every optional block | every service secret of every compose file and every Secret= line of every unit shape mounts at an absolute target (artifacttest.AssertSecretTargets) |
 | TestRunAsOfRefusesWhatValidateRefuses | - | the renderers' own parse of a run-as refuses what validate refuses, as an issue naming the section, never as the zero identity, which is root |
 | TestPlansCarryTheExpandedHostPathsTheyMount | docker stores+libs / podman / docker without mounts | each plan lists the host paths its artifact bind-mounts, named by env.yaml key, after ${VAR} expansion and resolution against env.yaml: docker the selected stores (the keystore marked private) and libs.dir, podman libs.dir alone (its stores come from the secret store), and a docker spec with neither nothing |
 | TestGeneratePodmanQuadlet | - | produces the `<name>.container` unit with the application.yml and status-script file secrets, the service name and 4 credentials, each mounted from podman's store by its namespaced name at an absolute target under the secrets mount |
@@ -1472,7 +1479,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [lifecycle_test.go](
 | TestDownloadSetMapMatchesModel | - | downloadSets (main.go's set-name dispatch table), the model's download/jar Sets, and internal/libs.SetNames() all name exactly the same sets |
 | TestDownloadReadsDeployedImageFromEnv | default present / no env.yaml / explicit -e unreadable / defaulted malformed / no image block | the advisory config read: the image reaches libs.Input, an absent default is silent and still downloads, and only a file the operator named is systemic (exit 2) |
 | TestGenerateKubernetesStdout | - | exit 0 and stdout contains kind: Deployment |
-| TestGenerateDockerToFile | - | exit 0 and compose file opens with the defaulted project line, then contains services: and image: img:1 |
+| TestGenerateDockerToFile | - | exit 0 and compose file opens with the defaulted, quoted project line, then contains services: and image: img:1 |
 | TestGeneratePodmanQuadletStdout | - | exit 0 and stdout contains unit banner '# === solmq-conn-util.container ===' |
 | TestGeneratePodmanOnlyLibsIsAHostPath | -e env.yaml from the file's own dir | the libs Volume= source is absolute even when -e is spelled relatively, and it is the only Volume=: the store selected in the same spec is a Secret= mount. A relative source is not a near-miss in a quadlet: systemd starts the unit with no useful cwd, and podman reads a source with no ./ or / prefix as a named volume, so `Volume=libs:...` would silently mount an empty volume over the jars |
 | TestDeployDockerSeamPipesComposeAndRuns | - | exit 0, no compose file on disk, 2 runner calls (preflight then up) argv [docker compose -f - --project-directory <env.yaml's dir> up -d] with the compose file on stdin -- no -p, since the project is declared by the file's own name: key |
