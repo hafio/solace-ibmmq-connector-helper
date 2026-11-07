@@ -664,16 +664,37 @@ func TestApplyStats(t *testing.T) {
 	}
 }
 
-func TestEngineNamesByImage(t *testing.T) {
-	out := "solmq-connector\tsolace/solace-pubsub-connector-ibmmq:2.14.1\n" +
-		"old-connector\treg.internal/solace/solace-pubsub-connector-ibmmq:2.13.0\n" +
-		"redis\tredis:7\n" +
-		"broken-row\n" +
-		"\n"
-	got := EngineNamesByImage(out, ImageMatch)
-	want := []string{"solmq-connector", "old-connector"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("got %v, want %v", got, want)
+// Everything the engine supplies is printed in the report, about a container
+// this tool did not necessarily create, so a terminal escape inside any of it is
+// dropped at the parse boundary.
+func TestParseInspectDropsControlCharacters(t *testing.T) {
+	doc := `[{"Name":"/ev\u001b[31mil","Created":"2025-01-01T00:00:00Z",
+	  "State":{"Status":"running","Error":"bo\u0007om\u009b","Healthcheck":{"Status":"un\u001bhealthy"}},
+	  "Config":{"Image":"solace/solace-pubsub-connector-ibmmq:\u001b2","Labels":{"com.docker.compose.project":"p\u001brj"}},
+	  "Mounts":[{"Type":"bind","Source":"/srv/\u001bx","Destination":"/app/\u0007y"},{"Type":"volume","Name":"v\u001bol","Destination":"/d"}],
+	  "NetworkSettings":{"Networks":{"net\u001bw":{}}},
+	  "Secrets":[{"Name":"sec\u001bret"}]}]`
+	insts, err := ParseInspect(doc, now, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst := insts[0]
+	c := inst.Container
+	if inst.Name != "ev[31mil" || inst.Group != "prj" || c.Reason != "boom" || c.Health != "unhealthy" ||
+		c.Image != "solace/solace-pubsub-connector-ibmmq:2" {
+		t.Errorf("name=%q group=%q reason=%q health=%q image=%q", inst.Name, inst.Group, c.Reason, c.Health, c.Image)
+	}
+	got := map[string]string{}
+	for _, comp := range c.Components {
+		got[comp.Kind+"/"+comp.Name] = comp.Detail
+	}
+	for _, want := range []string{"bind//srv/x", "volume/vol", "network/netw", "secret/secret"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("component %q missing from %v", want, got)
+		}
+	}
+	if got["bind//srv/x"] != "/app/y" {
+		t.Errorf("mount destination = %q, want the control character dropped", got["bind//srv/x"])
 	}
 }
 

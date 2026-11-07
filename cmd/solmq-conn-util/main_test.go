@@ -21,9 +21,11 @@ import (
 	pkcs12 "software.sslmate.com/src/go-pkcs12"
 
 	"github.com/hafio/go-deploy-utility/confirm"
+	"github.com/hafio/go-deploy-utility/containercli"
 	"github.com/hafio/go-deploy-utility/notice"
 	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/certfixture"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/dockergen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/libs"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -994,37 +996,6 @@ func TestRemovePromptNamesWhatItWillDestroy(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestDeployNeverPromptsAndRejectsNoPrompt keeps the flag where it belongs. deploy is
-// additive and re-runnable, so it has nothing to confirm; accepting --no-prompt there
-// would be a flag that silently does nothing, which is what checkStatusFlags
-// refuses elsewhere for the same reason.
-func TestDeployNeverPromptsAndRejectsNoPrompt(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
-	write(t, dir, "10.yaml", validWF)
-
-	f := useFakeRunner(t)
-	out := withPrompter(t, true, "n\n")
-	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
-		t.Fatalf("deploy exit=%d, want 0", code)
-	}
-	if out.Len() != 0 {
-		t.Errorf("deploy must never prompt, got %q", out.String())
-	}
-
-	f2 := useFakeRunner(t)
-	var code int
-	captureStderr(t, func() {
-		code = dispatch([]string{"deploy", "--platform", "kubernetes", noPromptFlagName, "-e", filepath.Join(dir, "env.yaml")}, f2)
-	})
-	if code != 2 {
-		t.Fatalf("deploy %s should be an unknown flag (exit 2), got %d", noPromptFlagName, code)
-	}
-	if len(f2.calls) != 0 {
-		t.Fatalf("nothing may run, got %d calls", len(f2.calls))
 	}
 }
 
@@ -2674,11 +2645,13 @@ func TestDeployPodmanSetButEmptyCredentialFailsBeforeAnyWrite(t *testing.T) {
 // TestDeployPodmanFailureStopsBeforeSystemctl pins that a failing step --
 // storing a credential, storing a document, deleting a file secret the spec no
 // longer mounts, or writing the unit -- stops the deploy where it fails, and
-// systemctl never runs: the unit would mount a secret that is missing or stale,
-// or be the one left from the previous deploy. With validWF and no stores or
-// syslog the calls run: 0 preflight, 1-8 the four credentials (rm, create),
-// 9-12 application.yml and the status script, 13 the one batched rm of the
-// three unmounted file secrets; the unit is written after that.
+// systemctl never reloads or starts anything: the unit would mount a secret that
+// is missing or stale, or be the one left from the previous deploy. With validWF
+// and no stores or syslog the calls run: 0 preflight, 1 the podman version (the
+// fake's "out" is no version, so no value is read back), 2 the state probe, 3-10
+// the four credentials (rm, create), 11-14 application.yml and the status script,
+// 15 the one batched rm of the three unmounted file secrets; the unit is written
+// after that.
 func TestDeployPodmanFailureStopsBeforeSystemctl(t *testing.T) {
 	for _, c := range []struct {
 		name      string
@@ -2687,10 +2660,10 @@ func TestDeployPodmanFailureStopsBeforeSystemctl(t *testing.T) {
 		want      string
 		wantCalls int
 	}{
-		{"credential", 2, false, "podman secret rm solmq-conn-_GEN_MQ_CONN_1_USER: boom", 3},
-		{"document", 10, false, "podman secret rm solmq-conn-application.yml: boom", 11},
-		{"unmounted file secret", 14, false, "podman secret rm: boom", 15},
-		{"unit write", -1, true, "creating ", 15},
+		{"credential", 3, false, "podman secret rm solmq-conn-_GEN_MQ_CONN_1_USER: boom", 4},
+		{"document", 11, false, "podman secret rm solmq-conn-application.yml: boom", 12},
+		{"unmounted file secret", 15, false, "podman secret rm: boom", 16},
+		{"unit write", -1, true, "creating ", 16},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := useFakeRunner(t)
@@ -2726,8 +2699,9 @@ func TestDeployPodmanFailureStopsBeforeSystemctl(t *testing.T) {
 				t.Errorf("deploy must stop after %d calls, got %d: %+v", c.wantCalls, len(f.calls), f.calls)
 			}
 			for _, call := range f.calls {
-				if call.argv[0] == "systemctl" {
-					t.Errorf("systemctl must not run after a failed step, got %v", call.argv)
+				// The state probe is read-only and runs before anything is written.
+				if call.argv[0] == "systemctl" && !containsToken(call.argv, "is-active") {
+					t.Errorf("systemctl must not reload or start after a failed step, got %v", call.argv)
 				}
 			}
 			if _, err := os.Stat(filepath.Join(quadletDir, "solmq-conn.container")); err == nil {
@@ -2756,34 +2730,53 @@ func TestDeployDockerSeamPipesComposeAndRuns(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "docker-compose.yml")); !os.IsNotExist(err) {
 		t.Errorf("deploy must write no compose file, stat err=%v", err)
 	}
-	// Call 0 is the read-only preflight probe (runner.Preflight).
-	if len(f.calls) != 2 {
-		t.Fatalf("want 2 runner calls (preflight, up), got %d: %+v", len(f.calls), f.calls)
+	// Call 0 is the read-only preflight probe (runner.Preflight), call 1 the
+	// listing that says whether the container is running (it is not: the fake
+	// answers no row), call 2 compose up.
+	if len(f.calls) != 3 {
+		t.Fatalf("want 3 runner calls (preflight, ps, up), got %d: %+v", len(f.calls), f.calls)
 	}
 	if want := []string{"docker", "info"}; !reflect.DeepEqual(f.calls[0].argv, want) {
 		t.Errorf("preflight argv = %v, want %v", f.calls[0].argv, want)
+	}
+	if want := []string{"docker", "ps", "--all", "--no-trunc", "--filter", "status=running", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"}; !reflect.DeepEqual(f.calls[1].argv, want) {
+		t.Errorf("running probe argv = %v, want %v", f.calls[1].argv, want)
 	}
 	// No -p/--project-name: the compose project is declared by the file's own
 	// top-level name: key instead. Pinned here so the choice is a recorded one
 	// rather than an omission. --project-directory is env.yaml's directory, the
 	// one compose took from the file's location when it was written there.
 	want := []string{"docker", "compose", "-f", "-", "--project-directory", dir, "up", "-d"}
-	if !reflect.DeepEqual(f.calls[1].argv, want) {
-		t.Errorf("argv = %v, want %v", f.calls[1].argv, want)
+	if !reflect.DeepEqual(f.calls[2].argv, want) {
+		t.Errorf("argv = %v, want %v", f.calls[2].argv, want)
 	}
-	if in := f.calls[1].stdin; !strings.Contains(in, "\nservices:\n") || !strings.Contains(in, "content: |") {
+	in := f.calls[2].stdin
+	if !strings.Contains(in, "\nservices:\n") || !strings.Contains(in, "content: |") {
 		t.Errorf("the compose file must reach compose on stdin, got:\n%s", in)
+	}
+	// The file carries the deploy-digest label, and its value is the digest of the
+	// file and of the child's environment taken before the variable was added.
+	if !strings.Contains(in, "      "+spec.LabelDeployDigestKey+": ${"+dockergen.DeployDigestVar+":-}\n") {
+		t.Errorf("the compose file lacks the deploy digest label:\n%s", in)
+	}
+	env := f.calls[2].env
+	digest, ok := envValue(env, dockergen.DeployDigestVar)
+	if !ok || env[len(env)-1] != dockergen.DeployDigestVar+"="+digest {
+		t.Fatalf("the digest is the last entry of the child env, got %v", env)
+	}
+	if want := containercli.ComposeDigest([]byte(in), env[:len(env)-1]); digest != want {
+		t.Errorf("deploy digest = %q, want ComposeDigest of the file and the rest of the env %q", digest, want)
 	}
 }
 
 // TestDeployDockerSeamFailedRunLeavesNoComposeFile: a failed `up` used to keep
 // the compose file -- password and all -- for a `down` that remove renders
-// afresh anyway. failFrom: 1 lets the preflight probe (call 0) succeed and
-// fails only the real `up` call (call 1).
+// afresh anyway. failFrom: 2 lets the preflight probe (call 0) and the running
+// probe (call 1) succeed and fails only the real `up` call (call 2).
 func TestDeployDockerSeamFailedRunLeavesNoComposeFile(t *testing.T) {
 	f := useFakeRunner(t)
 	f.err = fmt.Errorf("boom")
-	f.failFrom = 1
+	f.failFrom = 2
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
@@ -2794,7 +2787,7 @@ func TestDeployDockerSeamFailedRunLeavesNoComposeFile(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "docker-compose.yml")); !os.IsNotExist(err) {
 		t.Errorf("a failed run must leave no compose file behind, stat err=%v", err)
 	}
-	if len(f.calls) != 2 || f.calls[1].stdin == "" {
+	if len(f.calls) != 3 || f.calls[2].stdin == "" {
 		t.Errorf("the failed up still had its file on stdin: %+v", f.calls)
 	}
 }
@@ -2819,10 +2812,11 @@ func TestDeployDockerSeamChildEnvCarriesCredentials(t *testing.T) {
 	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
-	// Call 0 is the preflight probe (no Env); call 1 is the real `up`, which
-	// carries the resolved credentials.
-	if len(f.calls) != 2 {
-		t.Fatalf("want 2 runner calls, got %d: %+v", len(f.calls), f.calls)
+	// Call 0 is the preflight probe (no Env), call 1 the running probe; call 2 is
+	// the real `up`, which carries the resolved credentials and, last, the deploy
+	// digest.
+	if len(f.calls) != 3 {
+		t.Fatalf("want 3 runner calls, got %d: %+v", len(f.calls), f.calls)
 	}
 	want := []string{
 		"_GEN_MQ_CONN_1_USER=app",
@@ -2830,8 +2824,9 @@ func TestDeployDockerSeamChildEnvCarriesCredentials(t *testing.T) {
 		"SOLACE_USER=envuser",
 		"SOLACE_PASS=envpass",
 	}
-	if !reflect.DeepEqual(f.calls[1].env, want) {
-		t.Errorf("child env = %v, want %v", f.calls[1].env, want)
+	env := f.calls[2].env
+	if len(env) != len(want)+1 || !reflect.DeepEqual(env[:len(want)], want) || !strings.HasPrefix(env[len(want)], "_GEN_DEPLOY_SHA256=") {
+		t.Errorf("child env = %v, want %v and then the deploy digest", env, want)
 	}
 }
 
@@ -2894,8 +2889,8 @@ tls:
 			t.Errorf("stderr should carry %q, got:\n%s", want, stderr)
 		}
 	}
-	if len(f.calls) != 2 {
-		t.Errorf("want the preflight and the up call, got %+v", f.calls)
+	if len(f.calls) != 3 {
+		t.Errorf("want the preflight, the running probe and the up call, got %+v", f.calls)
 	}
 }
 
@@ -2980,38 +2975,35 @@ tls:
 	}
 	// tlsWF's five credentials (mq user/password, the ts store's literal
 	// password, solace client-username/client-password), then
-	// application.yml, the ts store and the status script, must each be stored
-	// (secret rm --ignore, then secret create) BEFORE daemon-reload/start: the
-	// unit being started references these secrets by name, so they must
-	// already exist. The file secrets this spec does not mount (no syslog, and
-	// the old-ca store the previous unit mounted) are deleted in one call. The fake answers
-	// every call with "out", is-active included, which is not a running state, so
-	// the unit is started. Call 0 is the read-only preflight probe, which runs
-	// before any of that.
+	// application.yml, the ts store and the status script. Call 0 is the read-only
+	// preflight probe. Then the version is read BEFORE anything is compared; the
+	// fake answers every call with "out", which is not a version (so no value is
+	// read back and every secret counts as changed) and not a running state (so
+	// the unit is started); the unit's `is-active` follows. Only then is each
+	// secret stored (secret rm --ignore and secret create, no label) BEFORE
+	// daemon-reload/start: the unit being started references these secrets by
+	// name, so they must already exist. The file secrets this spec does not mount
+	// (no syslog, and the old-ca store the previous unit mounted) are deleted in
+	// one call.
+	names := []string{
+		"solmq-conn-_GEN_MQ_CONN_1_USER", "solmq-conn-_GEN_MQ_CONN_1_PASSWORD", "solmq-conn-_GEN_TLS_TS_PASSWORD",
+		"solmq-conn-_GEN_SOL_CONN_1_CLIENT_USERNAME", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_PASSWORD",
+		"solmq-conn-application.yml", "solmq-conn-tls-ts", "solmq-conn-status-script",
+	}
 	wantCalls := [][]string{
 		{"podman", "info"},
 		{"podman", "version", "--format", "{{.Client.Version}}"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_MQ_CONN_1_USER"},
-		{"podman", "secret", "create", "solmq-conn-_GEN_MQ_CONN_1_USER", "-"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_MQ_CONN_1_PASSWORD"},
-		{"podman", "secret", "create", "solmq-conn-_GEN_MQ_CONN_1_PASSWORD", "-"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_TLS_TS_PASSWORD"},
-		{"podman", "secret", "create", "solmq-conn-_GEN_TLS_TS_PASSWORD", "-"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_USERNAME"},
-		{"podman", "secret", "create", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_USERNAME", "-"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_PASSWORD"},
-		{"podman", "secret", "create", "solmq-conn-_GEN_SOL_CONN_1_CLIENT_PASSWORD", "-"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-application.yml"},
-		{"podman", "secret", "create", "solmq-conn-application.yml", "-"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-tls-ts"},
-		{"podman", "secret", "create", "solmq-conn-tls-ts", "-"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-status-script"},
-		{"podman", "secret", "create", "solmq-conn-status-script", "-"},
-		{"podman", "secret", "rm", "--ignore", "solmq-conn-logback-spring.xml", "solmq-conn-tls-old-ca"},
-		{"systemctl", "--user", "daemon-reload"},
 		{"systemctl", "--user", "is-active", "solmq-conn.service"},
-		{"systemctl", "--user", "start", "solmq-conn.service"},
 	}
+	first := len(wantCalls)
+	for _, n := range names {
+		wantCalls = append(wantCalls, []string{"podman", "secret", "rm", "--ignore", n}, []string{"podman", "secret", "create", n, "-"})
+	}
+	wantCalls = append(wantCalls,
+		[]string{"podman", "secret", "rm", "--ignore", "solmq-conn-logback-spring.xml", "solmq-conn-tls-old-ca"},
+		[]string{"systemctl", "--user", "daemon-reload"},
+		[]string{"systemctl", "--user", "start", "solmq-conn.service"},
+	)
 	if len(f.calls) != len(wantCalls) {
 		t.Fatalf("want %d runner calls, got %+v", len(wantCalls), f.calls)
 	}
@@ -3022,10 +3014,10 @@ tls:
 	}
 	// The values travel on stdin, never argv: the rendered application.yml, and
 	// the truststore byte for byte.
-	if app := f.calls[13].stdin; !strings.Contains(app, "solace:") || !strings.Contains(app, "conn-name: mqhost(1414)") {
+	if app := f.calls[first+2*5+1].stdin; !strings.Contains(app, "solace:") || !strings.Contains(app, "conn-name: mqhost(1414)") {
 		t.Errorf("application.yml secret should carry the rendered document, got %q", app)
 	}
-	if got := f.calls[15].stdin; got != truststore {
+	if got := f.calls[first+2*6+1].stdin; got != truststore {
 		t.Errorf("truststore secret = %q, want the file's bytes %q", got, truststore)
 	}
 }
@@ -4158,7 +4150,7 @@ func TestStatusAllSearchesByImage(t *testing.T) {
 	})
 
 	t.Run("docker lists then inspects the matches", func(t *testing.T) {
-		list := "solmq-connector\tsolace/solace-pubsub-connector-ibmmq:2.14.1\nredis\tredis:7\n"
+		list := "solmq-connector\tsolace/solace-pubsub-connector-ibmmq:2.14.1\tUp 3 days\nredis\tredis:7\tUp 3 days\n"
 		inspect := `[{"Name":"/solmq-connector","State":{"Status":"running","StartedAt":"2026-08-18T04:12:07Z"},
 		  "Config":{"Image":"solace/solace-pubsub-connector-ibmmq:2.14.1"},"HostConfig":{}}]`
 		q := &queueRunner{resp: []queuedResp{{"", nil}, {list, nil}, {inspect, nil}}}
@@ -4749,7 +4741,7 @@ func containsToken(argv []string, want string) bool {
 // reads one instance and has no image search.
 func TestStatusAllSkipsAnUnsafeNameOutLoud(t *testing.T) {
 	img := "reg/" + statusreport.ImageMatch + ":2.14.1"
-	list := "bad;name\t" + img + "\nsolmq-connector\t" + img + "\n"
+	list := "bad;name\t" + img + "\tUp 3 days\nev\x1b[2Jil\t" + img + "\tUp 3 days\nsolmq-connector\t" + img + "\tUp 3 days\n"
 	// The inspect doc has to carry a matching image too: under --all,
 	// ParseInspect filters by the same image match the ps list was filtered by.
 	inspect := `[{"Name":"/solmq-connector","State":{"Status":"running","StartedAt":"2026-08-18T04:12:07Z"},
@@ -4768,9 +4760,14 @@ func TestStatusAllSkipsAnUnsafeNameOutLoud(t *testing.T) {
 		}
 	}
 	for _, c := range q.calls {
-		if containsToken(c.argv, "bad;name") {
+		if containsToken(c.argv, "bad;name") || containsToken(c.argv, "ev\x1b[2Jil") {
 			t.Errorf("an unsafe name must never reach an argv: %v", c.argv)
 		}
+	}
+	// A name carrying a terminal escape is skipped too (containercli.ValidName),
+	// and the note quotes it, so the escape is printed as text, never sent.
+	if strings.Contains(stdout, "\x1b") {
+		t.Errorf("a control character from the engine reached the terminal: %q", stdout)
 	}
 	if !strings.Contains(stdout, "solmq-connector") {
 		t.Errorf("the safe instance should still be reported, got:\n%s", stdout)
@@ -4783,7 +4780,7 @@ func TestStatusAllSkipsAnUnsafeNameOutLoud(t *testing.T) {
 func TestStatusAllSortsRowsAlphabetically(t *testing.T) {
 	img := "reg/" + statusreport.ImageMatch + ":2.14.1"
 	// Newest first, which is what ps gives -- deliberately not alphabetical.
-	list := "zeta\t" + img + "\nalpha\t" + img + "\n"
+	list := "zeta\t" + img + "\tUp 3 days\nalpha\t" + img + "\tUp 3 days\n"
 	inspect := `[{"Name":"/zeta","State":{"Status":"running","StartedAt":"2026-08-18T04:12:07Z"},
 	  "RestartCount":0,"Config":{"Image":"` + img + `"},"HostConfig":{}},
 	 {"Name":"/alpha","State":{"Status":"running","StartedAt":"2026-08-18T04:12:07Z"},
@@ -5439,8 +5436,9 @@ func TestLogsPreviousIsKubernetesOnly(t *testing.T) {
 			if code != 2 {
 				t.Fatalf("exit=%d, want 2", code)
 			}
+			// containercli.NoPrevious spells the engine as a message does (Docker).
 			for _, w := range []string{"--previous", "kubernetes", platform} {
-				if !strings.Contains(stderr, w) {
+				if !strings.Contains(strings.ToLower(stderr), w) {
 					t.Errorf("stderr should name %q, got:\n%s", w, stderr)
 				}
 			}
@@ -6962,10 +6960,11 @@ func TestDeployDockerCarriesCreatedStores(t *testing.T) {
 	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
-	if len(f.calls) != 3 || f.calls[0].argv[1] != "info" || !reflect.DeepEqual(f.calls[1].argv[:3], []string{"docker", "image", "inspect"}) || f.calls[2].argv[len(f.calls[2].argv)-2] != "up" {
-		t.Fatalf("calls = %+v, want info, image inspect, compose up", f.calls)
+	if len(f.calls) != 4 || f.calls[0].argv[1] != "info" || !reflect.DeepEqual(f.calls[1].argv[:3], []string{"docker", "image", "inspect"}) ||
+		f.calls[2].argv[1] != "ps" || f.calls[3].argv[len(f.calls[3].argv)-2] != "up" {
+		t.Fatalf("calls = %+v, want info, image inspect, ps, compose up", f.calls)
 	}
-	up := f.calls[2]
+	up := f.calls[3]
 	enc, ok := envValue(up.env, "_GEN_TLS_TS_STORE")
 	if !ok {
 		t.Fatalf("compose up env carries no _GEN_TLS_TS_STORE: %v", up.env)
@@ -6998,7 +6997,7 @@ func TestDeployDockerPullsAnImageItCannotInspect(t *testing.T) {
 		code  int
 		calls []string // the verb after "docker" in each call
 	}{
-		{"pulled, then it starts as expected", []queuedResp{{out: "ok"}, noImage, {out: "pulled"}, {out: imageStartReply(t)}}, 0, []string{"info", "image", "image", "image", "compose"}},
+		{"pulled, then it starts as expected", []queuedResp{{out: "ok"}, noImage, {out: "pulled"}, {out: imageStartReply(t)}}, 0, []string{"info", "image", "image", "image", "ps", "compose"}},
 		{"pulled, still not described", []queuedResp{{out: "ok"}, noImage, {out: "pulled"}, noImage}, 1, []string{"info", "image", "image", "image"}},
 		{"the pull fails", []queuedResp{{out: "ok"}, noImage, {out: "denied", err: errors.New("exit status 1")}}, 1, []string{"info", "image", "image"}},
 	} {

@@ -48,16 +48,17 @@ const platformSpan = bt + platformFlagName + bt
 // installFlagName is status's --install flag (no short alias).
 const installFlagName = "--install"
 
-// noPromptFlagName is remove's confirmation skip (no short alias). It names
-// what it does -- ask nothing -- which covers both questions a teardown asks:
-// the confirmation, and whether to remove a namespace that turned out empty.
+// noPromptFlagName is the prompt skip of remove and deploy (no short alias). It
+// names what it does -- ask nothing -- which covers both questions a teardown
+// asks (the confirmation, and whether to remove a namespace that turned out
+// empty) and the one a redeploy asks before it restarts a running service.
 //
 // Deliberately not -f/--force: cliFlags is keyed by Short across every verb, and
 // -f already means "overwrite existing files" for examples/download. One key
 // carrying two unrelated meanings would make that entry's own prose untrue.
 const noPromptFlagName = "--no-prompt"
 
-// noPromptSpan is the markdown code span for --no-prompt, for the remove Detail.
+// noPromptSpan is the markdown code span for --no-prompt, for the remove and deploy Detail.
 const noPromptSpan = bt + noPromptFlagName + bt
 
 // urlFlagName is download's repeatable explicit-URL override (no short
@@ -277,7 +278,7 @@ var cliFlags = []cliFlag{
 	{Short: omitLibFileFlagName, Long: omitLibFileFlagName, AppliesTo: bt + "download" + bt, Meaning: "a jar list that replaces (never merges with) the built-in list the omission rule compares against; an empty file omits nothing", Arg: argFile, Usage: "replace the built-in jar list the omission rule compares against"},
 	{Short: includeProvidedFlagName, Long: includeProvidedFlagName, AppliesTo: bt + "download" + bt, Meaning: "download the whole closure even where the connector image already provides a jar, instead of omitting it", Arg: argNone, Usage: "download the whole closure even where the image already ships a jar"},
 	{Short: installFlagName, Long: installFlagName, AppliesTo: bt + "status" + bt, Meaning: "install the status script on every instance without prompting", Arg: argNone, Usage: "install the status script on every instance without prompting"},
-	{Short: noPromptFlagName, Long: noPromptFlagName, AppliesTo: bt + "remove" + bt, Meaning: "tear down without asking anything -- what a script or CI job passes, since the prompts refuse to read a non-TTY rather than hang. It covers both questions: the teardown confirmation, and whether to remove a namespace that turned out to be empty. It cannot authorise more than that: a namespace holding anything this release does not own is never removed, with or without it", Arg: argNone, Usage: "tear down without asking for confirmation"},
+	{Short: noPromptFlagName, Long: noPromptFlagName, AppliesTo: bt + "deploy" + bt + "/" + bt + "remove" + bt, Meaning: "approve without asking anything -- what a script or CI job passes, since the prompts refuse to read a non-TTY rather than hang. On " + bt + "remove" + bt + " it covers both questions: the teardown confirmation, and whether to remove a namespace that turned out to be empty. On " + bt + "deploy" + bt + " it approves restarting or recreating a docker or podman service that is running and whose artifact or secrets changed; kubernetes deploy asks nothing, so the flag is refused there (exit 2). It cannot authorise more than that: a namespace holding anything this release does not own is never removed, with or without it", Arg: argNone, Usage: "approve without asking (remove: the teardown; deploy: restarting a changed service)"},
 	{Short: detailsFlagShort, Long: detailsFlagName, AppliesTo: bt + "status" + bt, Meaning: "add the enrichment lines each view can report: worker node, CPU/memory use against allocation, image digest and referenced components; app version, java version, config path and heap", Arg: argNone, Usage: "add node, cpu/memory, digest, components; application version, java, config, heap"},
 	{Short: watchFlagShort, Long: watchFlagName, AppliesTo: bt + "status" + bt, Meaning: "re-render the report every 5s until interrupted (Ctrl-C)", Arg: argNone, Usage: "re-render the report every 5s until interrupted"},
 	{Short: verboseFlagShort, Long: verboseFlagName, AppliesTo: bt + "status" + bt, Meaning: "print one line per collection step, naming the call and how long it took, instead of the spinner a terminal gets by default. Both go to stderr, never to stdout, so the report stays byte-identical either way; the step lines are printed whether or not stderr is a terminal, which is what makes " + bt + "2>steps.log" + bt + " useful for finding which call is slow. Nothing is printed under " + bt + watchFlagName + bt, Arg: argNone, Usage: "print one line per collection step with its elapsed time, instead of the spinner"},
@@ -312,14 +313,16 @@ var cliVerbs = []cliVerb{
 		},
 	},
 	{
-		Name: "deploy", Args: platformArgBracket + " [-e env.yaml] [" + allowCommandFlagName + " name]",
-		Flags: []string{platformFlagName, "-e", allowCommandFlagName}, PosArg: posNone, Aliases: []string{"dp"},
+		Name: "deploy", Args: platformArgBracket + " [" + noPromptFlagName + "] [-e env.yaml] [" + allowCommandFlagName + " name]",
+		Flags: []string{noPromptFlagName, platformFlagName, "-e", allowCommandFlagName}, PosArg: posNone, Aliases: []string{"dp"},
 		Synopsis:   "deploy [flags]",
 		Summary:    "Generate for a platform, then apply it",
 		Example:    "solmq-conn-util deploy --platform kubernetes -e env.yaml",
-		TreeSuffix: bt + platformArgBracket + bt,
+		TreeSuffix: bt + platformArgBracket + bt + " " + bt + "[" + noPromptFlagName + "]" + bt,
 		Detail: "Generates for the platform, then applies it by shelling out to the section's " + cmdFieldSpan + " (" + bt + "kubectl" + bt + "/" + bt + "oc" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " + " + bt + "systemctl" + bt + ") through an argv slice -- never a shell. The env file must contain the matching section.\n\n" +
-			cmdFieldSpan + "'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); " + allowCommandSpan + " approves an extra binary for this invocation (e.g. a chained runner such as " + bt + "lima nerdctl" + bt + "). A privilege-escalation wrapper such as " + bt + "sudo" + bt + " is never approved: run " + bt + "sudo solmq-conn-util" + bt + " instead. Before anything is written or applied, a read-only preflight probe (on kubernetes, " + bt + "auth can-i create deployment" + bt + ") must succeed, or the run stops: naming the missing permission when the cluster answers no, with a login hint when it cannot be reached. " + platformResolutionPointer,
+			cmdFieldSpan + "'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); " + allowCommandSpan + " approves an extra binary for this invocation (e.g. a chained runner such as " + bt + "lima nerdctl" + bt + "). A privilege-escalation wrapper such as " + bt + "sudo" + bt + " is never approved: run " + bt + "sudo solmq-conn-util" + bt + " instead. Before anything is written or applied, a read-only preflight probe (on kubernetes, " + bt + "auth can-i create deployment" + bt + ") must succeed, or the run stops: naming the missing permission when the cluster answers no, with a login hint when it cannot be reached. " + platformResolutionPointer + "\n\n" +
+			"A redeploy leaves the decision to the platform and asks before anything is written. On docker, compose recreates the container when the file or any credential changed (a digest label records both) and leaves an unchanged one alone; on podman the unit and each secret are compared first, and only a change restarts the service. When a docker or podman service is running and would be recreated or restarted, " + bt + "deploy" + bt + " asks first, and answering anything but " + bt + "y" + bt + "/" + bt + "yes" + bt + " cancels and exits 0 having changed nothing, so the next deploy asks again. " +
+			noPromptSpan + " approves without asking, which is what a script or CI job passes -- without it a non-TTY run fails fast with that hint rather than hanging. Kubernetes asks nothing -- " + bt + "kubectl apply" + bt + " and the rollout decide -- so " + noPromptSpan + " is refused there as a flag that would do nothing (exit 2).",
 	},
 	{
 		Name: "remove", Args: platformArgBracket + " [" + noPromptFlagName + "] [-e env.yaml] [" + allowCommandFlagName + " name]",

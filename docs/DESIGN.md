@@ -168,8 +168,15 @@ secrets, kubernetes manifests and the compose file all travel that way.
 **`remove` asks before it probes.** It names what it will tear down, with the
 namespace or container name, because a run against the wrong `env.yaml` looks
 identical until you read that line. Declining exits 0 having read nothing.
-`deploy` has no prompt and rejects `--no-prompt`: it is additive and
-re-runnable.
+
+**`deploy` asks before it restarts something that is running.** On docker and
+podman, a deploy that would recreate or restart a running service whose artifact
+or secrets changed asks first, through the same prompter `remove` uses
+(`confirmRedeploy`). A "no" exits 0 having written nothing, so the next deploy
+asks again. `--no-prompt` approves without asking, and with no terminal and no
+flag the deploy fails with exit 1 naming it. An unchanged deploy asks nothing.
+Kubernetes asks nothing: `kubectl apply` and the rollout decide, so `--no-prompt`
+is refused there (exit 2) as a flag that would do nothing, as `solace-util` does.
 
 **The namespace is never in the manifest `remove` deletes.** Deleting a
 Namespace cascades. A namespace holding anything the release does not own is
@@ -252,6 +259,24 @@ the image's command, so the compose file carries it as `command:`; `deploy`
 compares that with the image the engine reports and refuses an image that starts
 any other way. A store too large for one environment variable (131072 bytes on
 Linux, 32767 characters on Windows) fails the deploy by name.
+
+**The `deploy-sha256` label makes compose recreate on any change, and tells
+`deploy` whether it will.** Compose compares a service's configuration, which
+covers the file but not the content of a secret, so a rotated credential would
+leave the old container running. `deploy` computes one digest of the file and
+every value the compose child receives (`containercli.ComposeDigest`), hands it
+to compose in `_GEN_DEPLOY_SHA256`, and the file writes it as the
+`solace-connector/deploy-sha256` label. Compose therefore recreates exactly when
+something changed and leaves an unchanged container alone, and `deploy` always
+runs a plain `up -d` and lets compose decide. Before `up` it lists the running
+containers (`ps --filter status=running`, matched by exact name in Go) and, for a
+running one, reads that label off `container inspect`: a different label, a
+missing one (a container an earlier build created) or a failed inspect counts as
+changed, and `deploy` asks first. A listing that cannot be read is an error, exit
+1, since the deploy could not say whether it would restart a running service. The
+digest holds the status account's password, which is derived from the credentials
+and the container name (see the `solmq-status` password below), so it is the same
+on every render until a credential changes and an unchanged redeploy is a no-op.
 
 **The `stores-sha256` label makes compose recreate on store change.** The stores
 are not in the compose file, so compose's own change detection cannot see them.
@@ -337,15 +362,36 @@ systemd cannot answer (`systemd.ParseNRestarts` refuses an empty or negative
 answer, and `status` also keeps the container's counter when the scope is
 refused).
 
-**`deploy` restarts a running unit.** Podman copies a mount secret into the
-container when it creates it, so only a new container sees the configuration
-this deploy loaded. A unit `systemctl is-active` reports as `active` or
-`reloading` is restarted; any other answer, or none (the exit status is ignored,
-since every state but active exits non-zero), starts it. On podman 4.7 and newer
-secrets are loaded with `podman.CreateSecret(..., replace)`, so a failed load
-leaves the previous secret intact; below that it is `RemoveSecrets` then create.
+**`deploy` compares, asks, writes, then restarts only what changed.** Podman
+copies a mount secret into the container when it creates it, so only a new
+container sees the configuration this deploy loaded, and `daemon-reload` never
+restarts a unit. Nothing is written before the answer:
+
+1. The podman version is read first. The rendered unit is compared with the
+   file on disk (a missing one is a change), and on podman 4.7 and newer each
+   secret's stored value is read back (`podman.SecretData`, `secret inspect
+   --showsecret`, the release that also brings `secret create --replace`) and
+   compared exactly (`podman.SecretMatches`); a missing secret or a failed probe
+   is a change. Below 4.7, or with a version that cannot be read, every secret
+   counts as changed and none is probed. No digest of a value is written as a
+   label, since a label goes on `secret create`'s argv, which any local user can
+   read; the value is read on stdout only and never printed.
+2. A unit `systemctl is-active` reports as `active` or `reloading` is running;
+   any other answer, or none (the exit status is ignored, since every state but
+   active exits non-zero), is not.
+3. If something changed and the unit is running, the deploy asks. A "no" exits 0
+   having written nothing.
+4. Only the changed secrets are written, and the
+   unit only if it changed; `daemon-reload` runs only if something was written.
+   On podman 4.7 and newer secrets are loaded with
+   `podman.CreateSecret(..., replace)`, so a failed load leaves the previous
+   secret intact; below that it is `RemoveSecrets` then create.
+5. A unit that is not running is started. A running one is restarted when
+   something changed, and left alone when nothing did: the deploy says so and
+   names `solmq-conn-util restart` for a restart anyway.
+
 The `systemctl`, `loginctl` and `podman` argv come from the shared `systemd` and
-`podman` packages.
+`podman` packages, and the docker commands from `containercli`.
 
 **`HealthOnFailure=` is left unset.** The check reports a verdict and never
 restarts, kills or stops anything.
@@ -461,8 +507,25 @@ fallback for a session on a broker no workflow uses.
 **The `solmq-status` password is a literal.** The status script reads it back
 out of the mounted `application.yml` at run time, so there is nothing for the
 secrets model to mount separately. Anyone who can read the artifact can read it:
-the ConfigMap, the compose file, or the podman secret entry. A generated password
-rotates on every regenerate unless `SECURITY_USER_SOLMQ_STATUS_PASSWORD` pins it.
+the ConfigMap, the compose file, or the podman secret entry. Unless
+`SECURITY_USER_SOLMQ_STATUS_PASSWORD` sets it, docker and podman derive the
+password rather than draw it: the first 16 bytes of an HMAC-SHA-256, hex-encoded
+(32 lowercase hex characters), keyed by every resolved credential (key and value,
+each length-prefixed, sorted by key) over a versioned label and the container
+name. The same spec therefore renders the same password on every generate and
+deploy, so an unchanged redeploy changes nothing. Rotating a credential rotates it,
+which changes the artifact anyway. Whoever can read a docker or podman artifact
+(the docker group, or the podman secret's owner) can read the credentials too, so
+the derivation exposes nothing new there. Kubernetes and `generate config` stay
+random (`Resolver.Rand`): on kubernetes the literal sits in a ConfigMap, which RBAC
+may let someone read who cannot read the credentials' Secrets, and a value derived
+from the credentials would let them check guesses at one offline. The credentials
+do not depend on the status password (it is a literal user, never a secret
+reference), so `gen.statusPasswordFor` builds the model once with a placeholder to
+collect them, derives, then builds for real. Docker and podman are random too when
+there is nothing to key on: no credentials, or an `-env` credential that cannot be
+resolved at that moment (generate and validate tolerate an unset variable; deploy
+refuses one separately). Empty material never keys the HMAC.
 The account is GET-only, and the tool never adds a role to it.
 
 **Management security is always on and the exposure list is fixed**
@@ -587,6 +650,15 @@ stderr)` executes a `gdurunner.Cmd` (argv, stdin bytes, extra environment) and w
 the two streams to the writers it is given, and `Attach(cmd, stdin, stdout, stderr)`
 hands the terminal to a session. `Combined`, `Split` and `Output` are capture helpers
 over `Run`, so a test fake implements two methods and every mode works.
+
+The docker and podman commands are built by the shared `containercli` package (the
+preflight `info` and its one failure message, compose with its file on stdin, the
+lifecycle verbs, the container listing, exec, upload and logs) and read back with
+`containercli/inspect`, which decodes `container inspect` and strips control
+characters (`inspect.Printable`) from anything the engine supplied before it is
+printed. This module keeps the `command:` allowlist and the `runner.Runner` calls;
+the package only builds `Cmd` values. Names read back from the engine are held to
+`containercli.ValidName` before they can reach an argv.
 
 - **Combined** is what each helper that reports output uses: stdout and stderr merged
   in arrival order, returned even when the command fails.

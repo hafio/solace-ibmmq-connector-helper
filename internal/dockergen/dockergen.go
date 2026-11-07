@@ -54,6 +54,13 @@ type CreatedStore struct {
 // the container.
 const StoresDigestVar = "_GEN_TLS_STORES_SHA256"
 
+// DeployDigestVar is the environment variable compose fills the
+// spec.LabelDeployDigestKey label from: deploy sets it to
+// containercli.ComposeDigest of the file and the rest of the compose
+// environment. Its name starts with the generated-variable prefix, so no
+// operator credential can collide with it.
+const DeployDigestVar = "_GEN_DEPLOY_SHA256"
+
 // Input is everything the compose renderer needs. The caller resolves stores/libs
 // to host bind mounts and reduces credentials to their stable names before
 // calling.
@@ -170,6 +177,9 @@ func renderService(w *yw, in Input, inst Instance) {
 	if in.Digest {
 		w.Line(6, spec.LabelStoresDigestKey+": ${"+StoresDigestVar+":-}")
 	}
+	// Always present, stores or not: it is what makes compose notice a rotated
+	// credential, whose value is not part of the service's configuration.
+	w.Line(6, spec.LabelDeployDigestKey+": ${"+DeployDigestVar+":-}")
 	if d.Restart != "" {
 		w.Line(4, "restart: "+d.Restart)
 	}

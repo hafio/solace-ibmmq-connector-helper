@@ -266,6 +266,16 @@ const (
 // something compose's own change detection sees.
 const LabelStoresDigestKey = "solace-connector/stores-sha256"
 
+// LabelDeployDigestKey labels every docker service with the digest of the whole
+// deploy: the compose file and every value the compose child receives (the
+// credentials, the created stores and the stores digest). Compose compares a
+// service's configuration, which does not cover a secret's content, so a rotated
+// credential would leave the old container running; the label's value changes with
+// it, so compose recreates exactly when anything changed, and an unchanged deploy
+// changes nothing. Deploy also reads it off the running container to know whether
+// compose is about to recreate it, and so whether to ask first.
+const LabelDeployDigestKey = "solace-connector/deploy-sha256"
+
 // Security mirrors solace.connector.security. Management security is always
 // on now (see StatusUserName), so there is no enabled/disabled toggle to
 // model here; Enabled only carries a parsed security.enabled value through

@@ -8,8 +8,10 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/containercli"
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/rootless"
 	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -69,6 +71,21 @@ type instanceSession struct {
 	command string
 	cmdArgv []string
 	ns      string
+}
+
+// rootless is whether this session's podman engine is a rootless one, which only
+// picks the hint a failed preflight carries. It is the rule deploy applies
+// (rootless.Decide over podman.rootful, absent meaning rootless), without
+// repairing the user session; a refusal from that rule is reported by the verbs
+// that resolve the full scope, so here it only reads as not rootless. False off
+// podman.
+func (s instanceSession) rootless() bool {
+	if s.platform != validate.PlatformPodman {
+		return false
+	}
+	rootful := s.env != nil && s.env.Podman != nil && s.env.Podman.Rootful
+	mode, err := rootless.Decide(host().scope.Euid, rootful, "podman.rootful")
+	return err == nil && mode
 }
 
 // resolveInstanceSession loads env.yaml, settles the platform and the namespace,
@@ -224,20 +241,21 @@ func noPodsFound(selector, ns string, all bool) error {
 //
 // notes carries the containers --all found but had to skip. Names come back
 // from the engine there rather than from the operator, so they are re-checked
-// before they can reach an argv, and a skip is said out loud rather than
-// silently narrowing the result.
+// before they can reach an argv (containercli.ValidName), and a skip is said out
+// loud rather than silently narrowing the result.
 func engineNames(r gdurunner.Runner, s instanceSession, conts []string, all bool) (names, notes []string, err error) {
 	switch {
 	case all:
-		out, lerr := runner.EngineList(bg(), r, s.cmdArgv)
+		out, lerr := runner.EngineList(bg(), r, s.cmdArgv, false)
 		if lerr != nil {
 			return nil, nil, lerr
 		}
-		for _, n := range statusreport.EngineNamesByImage(out, statusreport.ImageMatch) {
-			if validate.SafeToken(n) {
-				names = append(names, n)
+		for _, row := range containercli.ByImage(containercli.ParseList(out), statusreport.ImageMatch) {
+			if containercli.ValidName(row.Name) {
+				names = append(names, row.Name)
 			} else {
-				notes = append(notes, fmt.Sprintf("skipping container %q: its name contains an unsafe character (%s)", n, validate.UnsafeTokenReason))
+				// %q escapes whatever control character the engine put in the name.
+				notes = append(notes, fmt.Sprintf("skipping container %q: its name contains an unsafe character (docker and podman names are [A-Za-z0-9][A-Za-z0-9_.-]*)", row.Name))
 			}
 		}
 		if len(names) == 0 {

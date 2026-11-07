@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/containercli"
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
 	gdurunner "github.com/hafio/go-deploy-utility/runner"
@@ -206,14 +207,14 @@ func actLogs(o logsOpts, r gdurunner.Runner) int {
 	}
 
 	if o.previous && sess.platform != validate.PlatformKubernetes {
-		fmt.Fprintf(os.Stderr, "logs: %s is a kubernetes concept; %s keeps no prior-run log to read\n", previousFlagName, sess.platform)
+		fmt.Fprintln(os.Stderr, "logs:", containercli.NoPrevious(containercli.Engine(sess.platform)))
 		return exitcode.Usage
 	}
 
 	// The same read-only preflight probe status runs, for the same reason: fail
 	// on an unreachable engine once, up front, rather than at the point of read.
 	// On kubernetes it asks for the log subresource, what logs actually reads.
-	if code, ok := preflight(r, runner.ActionLogs, sess.platform, sess.command, sess.ns, o.approved); !ok {
+	if code, ok := preflight(r, runner.ActionLogs, sess.platform, sess.command, sess.ns, sess.rootless(), o.approved); !ok {
 		return code
 	}
 

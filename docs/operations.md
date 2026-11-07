@@ -118,7 +118,7 @@ solmq-conn-util generate --platform kubernetes -e env.yaml  # the manifest set
 ## 4. deploy
 
 ```sh
-solmq-conn-util deploy --platform kubernetes -e env.yaml [--allow-command name]
+solmq-conn-util deploy --platform kubernetes -e env.yaml [--no-prompt] [--allow-command name]
 ```
 
 Generates for the resolved platform, then applies it through the section's
@@ -127,12 +127,14 @@ Generates for the resolved platform, then applies it through the section's
 | Platform | Runs |
 |---|---|
 | kubernetes | reads every Secret you manage that the pod mounts and stops if one lacks a key; then `<command> apply -f -` with the manifest on stdin |
-| docker | `<command> compose -f - --project-directory <env.yaml's folder> up -d`, with the compose file on stdin and credentials in the child environment |
-| podman | resolves the scope (below), loads secrets, writes the unit, `systemctl [--user] daemon-reload`, then `start` or `restart` |
+| docker | lists the running containers (`ps --all --no-trunc --filter status=running`) and, for a running one, reads its deploy digest label (`container inspect`); asks if compose would recreate it (below); then `<command> compose -f - --project-directory <env.yaml's folder> up -d`, with the compose file on stdin and credentials and the deploy digest in the child environment |
+| podman | resolves the scope (below), compares the unit and each secret with what is installed, asks if a running unit would restart (below), then writes only what changed, `systemctl [--user] daemon-reload` if anything was written, and `start`, or `restart` if the unit was running and something changed |
 
 Before anything is written or applied, a read-only preflight runs: `info` on
 docker and podman, and on kubernetes `auth can-i` for the one permission the
-verb needs:
+verb needs. A failed `info` prints one message: the engine, the command, the
+engine's own output and one next step, which differs for Docker, rootless podman
+and rootful podman:
 
 | Verb | Asks |
 |---|---|
@@ -176,12 +178,43 @@ deploy:
 Secrets are replaced in one `secret create --replace` on podman 4.7 and newer,
 and removed then created below that.
 
-**What a redeploy restarts.** Podman reloads systemd, then restarts the unit
-when `systemctl is-active` answers `active` or `reloading`, and starts it for any
-other answer, or none. Docker recreates the container
-when the compose file or any selected store changed. Kubernetes does not
-restart pods when only `application.yml`, the status script or a store
-changed; follow such a deploy with `restart`.
+**What a redeploy restarts.** The platform decides, and an unchanged deploy
+changes nothing.
+
+- Docker: the compose file carries a `solace-connector/deploy-sha256` label set
+  from a digest of the file and every value the compose child receives (the
+  credentials, the created stores, the stores digest). Compose recreates the
+  container exactly when the label, or anything else in the service, changed, and
+  leaves an unchanged one running; a stopped one is started.
+- Podman: the unit is compared with the file on disk and, on podman 4.7 and
+  newer, each secret's stored value is read back (`secret inspect --showsecret`)
+  and compared with the one about to be written; below 4.7 every secret counts
+  as changed. Only a change is written, and only a change restarts an active (or `reloading`) unit.
+  A unit that is not running is started. An unchanged, running unit is left
+  alone, and the deploy says so and names `solmq-conn-util restart` for a restart
+  anyway.
+- Kubernetes does not restart pods when only `application.yml`, the status script
+  or a store changed; follow such a deploy with `restart`.
+
+**The redeploy question.** When a docker container is running and compose would
+recreate it, or a podman unit is running and something changed, `deploy` asks
+before anything is written:
+
+```text
+deploy: container solmq-connector is running and its compose file or credentials changed (or cannot be compared), so compose will recreate it -- continue? [y/N]
+deploy: solmq-connector.service is running and the secrets solmq-connector-application.yml changed, so it will be restarted -- continue? [y/N]
+```
+
+Anything but `y`/`yes` exits 0 having changed nothing, so the next deploy asks
+again. `--no-prompt` approves without asking, and with no terminal and no flag the
+deploy fails with exit 1 naming it, so a CI job passes `--no-prompt`. Kubernetes
+asks nothing, so `--no-prompt` there is refused (exit 2) as a flag that does
+nothing. A docker listing that cannot be read is an error, exit 1.
+
+The comparison includes the status account's password, which docker and podman
+derive from the credentials and the container name, so it is stable until a
+credential changes; rotating one rotates it, which is a change anyway. It is
+random only when the deployment has no secret at all.
 
 ## 5. remove
 
@@ -219,7 +252,7 @@ solmq-conn-util restart --platform kubernetes -e env.yaml
 | Platform | `stop` | `start` | `restart` |
 |---|---|---|---|
 | kubernetes | scale the Deployment to 0 | scale back to `replicas` | `kubectl rollout restart` |
-| docker | `docker stop` | `docker start` | `docker restart` |
+| docker | `docker stop <name>` | `docker start <name>` | `docker restart <name>` |
 | podman | `systemctl [--user] stop` | `start` | `restart` |
 
 They read only the section's names and `command:`. Nothing is rendered, no
@@ -236,7 +269,7 @@ solmq-conn-util status all          # both, container first
 
 | Word | Short | Answers | Read from |
 |---|---|---|---|
-| `container` | `cnt` | Is it up? How often has it died? Which image is running? | `kubectl get` / `docker inspect` / `podman inspect` |
+| `container` | `cnt` | Is it up? How often has it died? Which image is running? | `kubectl get` / `docker container inspect` / `podman container inspect` |
 | `application` | `app` | Is it active? Healthy? Are the workflows running? | the status script, run inside each instance |
 | `all` | | both | |
 

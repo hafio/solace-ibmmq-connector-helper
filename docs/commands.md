@@ -28,7 +28,7 @@ command model in
 ## Command tree
 
 - `generate` (`gen`) `[config]` `[--platform kubernetes|docker|podman]`
-- `deploy` (`dp`) `[--platform kubernetes|docker|podman]`
+- `deploy` (`dp`) `[--platform kubernetes|docker|podman]` `[--no-prompt]`
 - `remove` (`rm`) `[--platform kubernetes|docker|podman]` `[--no-prompt]`
 - `start` `[--platform kubernetes|docker|podman]`
 - `stop` `[--platform kubernetes|docker|podman]`
@@ -49,7 +49,7 @@ command model in
 |---------|---------|
 | `solmq-conn-util generate config [--platform kubernetes\|docker\|podman] [-e env.yaml] [-o out]` | Emit application.yml |
 | `solmq-conn-util generate [--platform kubernetes\|docker\|podman] [-e env.yaml] [-o out]` | Render the artifacts for the resolved platform to stdout or a file |
-| `solmq-conn-util deploy [--platform kubernetes\|docker\|podman] [-e env.yaml] [--allow-command name]` | Generate for a platform, then apply it |
+| `solmq-conn-util deploy [--platform kubernetes\|docker\|podman] [--no-prompt] [-e env.yaml] [--allow-command name]` | Generate for a platform, then apply it |
 | `solmq-conn-util remove [--platform kubernetes\|docker\|podman] [--no-prompt] [-e env.yaml] [--allow-command name]` | Tear down what deploy created for a platform |
 | `solmq-conn-util start [--platform kubernetes\|docker\|podman] [-e env.yaml] [--allow-command name]` | Start the instance deploy created, as it stands |
 | `solmq-conn-util stop [--platform kubernetes\|docker\|podman] [-e env.yaml] [--allow-command name]` | Stop the instance deploy created, keeping it to start again |
@@ -84,7 +84,7 @@ command model in
 | `--omit-lib-file` | `download` | a jar list that replaces (never merges with) the built-in list the omission rule compares against; an empty file omits nothing |
 | `--include-provided` | `download` | download the whole closure even where the connector image already provides a jar, instead of omitting it |
 | `--install` | `status` | install the status script on every instance without prompting |
-| `--no-prompt` | `remove` | tear down without asking anything -- what a script or CI job passes, since the prompts refuse to read a non-TTY rather than hang. It covers both questions: the teardown confirmation, and whether to remove a namespace that turned out to be empty. It cannot authorise more than that: a namespace holding anything this release does not own is never removed, with or without it |
+| `--no-prompt` | `deploy`/`remove` | approve without asking anything -- what a script or CI job passes, since the prompts refuse to read a non-TTY rather than hang. On `remove` it covers both questions: the teardown confirmation, and whether to remove a namespace that turned out to be empty. On `deploy` it approves restarting or recreating a docker or podman service that is running and whose artifact or secrets changed; kubernetes deploy asks nothing, so the flag is refused there (exit 2). It cannot authorise more than that: a namespace holding anything this release does not own is never removed, with or without it |
 | `-d`, `--details` | `status` | add the enrichment lines each view can report: worker node, CPU/memory use against allocation, image digest and referenced components; app version, java version, config path and heap |
 | `-w`, `--watch` | `status` | re-render the report every 5s until interrupted (Ctrl-C) |
 | `-v`, `--verbose` | `status` | print one line per collection step, naming the call and how long it took, instead of the spinner a terminal gets by default. Both go to stderr, never to stdout, so the report stays byte-identical either way; the step lines are printed whether or not stderr is a terminal, which is what makes `2>steps.log` useful for finding which call is slow. Nothing is printed under `--watch` |
@@ -153,7 +153,9 @@ Generates for the platform, then applies it by shelling out to the section's `co
 
 `command:`'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); `--allow-command` approves an extra binary for this invocation (e.g. a chained runner such as `lima nerdctl`). A privilege-escalation wrapper such as `sudo` is never approved: run `sudo solmq-conn-util` instead. Before anything is written or applied, a read-only preflight probe (on kubernetes, `auth can-i create deployment`) must succeed, or the run stops: naming the missing permission when the cluster answers no, with a login hint when it cannot be reached. For how the platform is picked, see [Platform resolution](#platform-resolution).
 
-Flags: `--platform`; `-e`, `--env`; `--allow-command`.
+A redeploy leaves the decision to the platform and asks before anything is written. On docker, compose recreates the container when the file or any credential changed (a digest label records both) and leaves an unchanged one alone; on podman the unit and each secret are compared first, and only a change restarts the service. When a docker or podman service is running and would be recreated or restarted, `deploy` asks first, and answering anything but `y`/`yes` cancels and exits 0 having changed nothing, so the next deploy asks again. `--no-prompt` approves without asking, which is what a script or CI job passes -- without it a non-TTY run fails fast with that hint rather than hanging. Kubernetes asks nothing -- `kubectl apply` and the rollout decide -- so `--no-prompt` is refused there as a flag that would do nothing (exit 2).
+
+Flags: `--no-prompt`; `--platform`; `-e`, `--env`; `--allow-command`.
 
 ```sh
 solmq-conn-util deploy --platform kubernetes -e env.yaml

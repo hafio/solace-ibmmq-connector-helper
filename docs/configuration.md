@@ -597,9 +597,13 @@ Every generated `application.yml` carries a read-only actuator account named
 - The name is reserved: a `security.users` entry called `solmq-status` is an
   error.
 - The password comes from `SECURITY_USER_SOLMQ_STATUS_PASSWORD` when that
-  variable is set and non-empty. Otherwise the tool generates one (32 lowercase hex characters from a
-  CSPRNG), and a generated password changes on every regenerate. Pin the variable if the value
-  must survive a redeploy.
+  variable is set and non-empty. Otherwise, on docker and podman, the tool derives one (32
+  lowercase hex characters, an HMAC keyed by the deployment's resolved credentials over its
+  name), so it is the same on every regenerate until a credential or the name changes. On
+  kubernetes, for `generate config`, and with no credential to key on, it generates a random
+  one from a CSPRNG instead: on kubernetes the password sits in a ConfigMap, which may be
+  readable where the credentials are not, and a derived value would let that reader check
+  guesses at a credential offline.
 - It is rendered as a literal inside `application.yml`, so anyone who can read
   the ConfigMap, the compose file or the podman secret can read it. Never reuse
   a password you use elsewhere.

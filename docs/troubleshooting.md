@@ -81,15 +81,20 @@ in [configuration.md](configuration.md), the verbs in
   `/app/external/classpath/truststores/<name>` on every platform, whatever its
   file is called. Two stores may share a file, or be one file.
 - **The connector reads stores at start only.** After rotating one, podman
-  `deploy` restarts the unit and docker `deploy` recreates the container, but
-  kubernetes needs `solmq-conn-util restart`.
+  `deploy` restarts the unit and docker `deploy` recreates the container (each
+  after asking, if it is running), but kubernetes needs `solmq-conn-util
+  restart`.
 
 ## Secrets and credentials
 
 - **The `solmq-status` password is a literal in `application.yml`.** Anyone
   who can read the ConfigMap, the compose file or the podman secret can read
-  it. Never reuse a password you use elsewhere, and pin
-  `SECURITY_USER_SOLMQ_STATUS_PASSWORD` if it must survive a redeploy.
+  it. Never reuse a password you use elsewhere. Unless
+  `SECURITY_USER_SOLMQ_STATUS_PASSWORD` sets it, docker and podman derive it from
+  the credentials and the deployment name, so it survives a redeploy unchanged and
+  changes only when a credential does. Kubernetes keeps it random, since its
+  ConfigMap may be readable where the credentials are not, and so does a docker
+  or podman deployment with no secret at all.
 - **`generate --platform kubernetes` embeds every Secret.** The manifest is
   written `0600` with `-o`; treat it as sensitive. Docker and podman write no
   credential to disk.
@@ -183,6 +188,21 @@ in [configuration.md](configuration.md), the verbs in
 - **A piped run hangs? It does not; it fails.** Every prompt refuses a
   non-TTY and names the flag to pass: `--platform`, `--install`, `--no-prompt`,
   or the one-shot `cli` form.
+- **`deploy` asks "continue?" on a service that is running.** Docker or podman
+  would recreate or restart it: the compose file or a credential changed
+  (docker), or the unit or a secret changed (podman). Answering `n` exits 0 and
+  changes nothing; `--no-prompt` approves, and a CI job needs it, since with no
+  terminal the deploy exits 1 naming the flag. A container an earlier build
+  created has no deploy digest label, so the first deploy after upgrading asks
+  once. On podman older than 4.7 every secret counts as changed (the stored value
+  cannot be read back), so a running unit always asks. It asks every time? Something in the artifact differs each run; a
+  deployment with no credentials at all gets a random status password.
+- **podman `deploy` says the unit is "unchanged and left running".** Nothing
+  differed, so nothing was written or restarted. `solmq-conn-util restart`
+  restarts it anyway.
+- **docker `deploy` fails with "checking whether ... is running".** The container
+  listing could not be read, so the deploy cannot say whether it would restart a
+  running service. Fix the engine error it carries and re-run.
 
 ## Status, logs and cli
 

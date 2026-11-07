@@ -22,11 +22,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/containercli"
+	"github.com/hafio/go-deploy-utility/containercli/inspect"
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/hafio/go-deploy-utility/podman"
@@ -37,13 +40,21 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
 
-// preflightHints gives an actionable next step per platform when Preflight's
-// read-only probe fails, keyed by the same platform constants CommandRules
-// uses.
-var preflightHints = map[string]string{
-	validate.PlatformKubernetes: "log in or select a context first (e.g. 'oc login', or check 'kubectl config current-context'), then re-run",
-	validate.PlatformDocker:     "the docker daemon is unreachable; start it or select a working context, then re-run",
-	validate.PlatformPodman:     "podman is unreachable; check the podman machine or socket, then re-run",
+// kubernetesPreflightHint is the next step when the kubernetes probe fails. The
+// docker and podman engines' hints come from containercli.EngineHint, which both
+// tools share.
+const kubernetesPreflightHint = "log in or select a context first (e.g. 'oc login', or check 'kubectl config current-context'), then re-run"
+
+// safeOut is an engine's output as it may be appended to an error: every line
+// has its control characters dropped (inspect.Printable), so a terminal escape
+// in a container name or an error text the engine echoes is never acted on by
+// the terminal that prints it. The line breaks themselves are kept.
+func safeOut(out string) string {
+	lines := strings.Split(out, "\n")
+	for i, l := range lines {
+		lines[i] = inspect.Printable(l)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // Deploy actions shared by every target. These are the CLI verbs, and they reach
@@ -153,11 +164,17 @@ func kubeVerb(action string) (string, error) {
 }
 
 // Docker runs `<command> compose -f - --project-directory <projectDir> up -d`
-// (deploy) or `... down` (remove), handing compose the file on stdin. The file
-// inlines application.yml, which carries the status account's password, so it
-// is never written to disk -- where it sat beside env.yaml, readable by whoever
-// could read that directory, and, kept by a failed run, was read as a workflow
-// by the next one (the default workflows.dir is env.yaml's own).
+// (deploy) or `... down` (remove), handing compose the file on stdin
+// (containercli.ComposeUp and ComposeDown). The file inlines application.yml,
+// which carries the status account's password, so it is never written to disk --
+// where it sat beside env.yaml, readable by whoever could read that directory,
+// and, kept by a failed run, was read as a workflow by the next one (the default
+// workflows.dir is env.yaml's own).
+//
+// Deploy never forces a recreate: compose decides, from the file's own
+// configuration hash, which carries the deploy digest label (see
+// dockergen.DeployDigestVar), so a changed file or credential recreates the
+// container and an unchanged one is left running.
 //
 // projectDir is env.yaml's directory, the one compose took from the file's
 // location when it was written there, so an .env file and any relative path
@@ -172,16 +189,54 @@ func Docker(ctx context.Context, r gdurunner.Runner, command, action, compose, p
 	if err != nil {
 		return "", err
 	}
-	argv = append(argv, "compose", "-f", "-", "--project-directory", projectDir)
+	base := append(argv, "compose")
+	var c gdurunner.Cmd
 	switch action {
 	case ActionDeploy:
-		argv = append(argv, "up", "-d")
+		c = containercli.ComposeUp(base, []byte(compose), projectDir, env, false)
 	case ActionRemove:
-		argv = append(argv, "down")
+		c = containercli.ComposeDown(base, []byte(compose), projectDir, env)
 	default:
 		return "", fmt.Errorf("unknown action %q (want %q or %q)", action, ActionDeploy, ActionRemove)
 	}
-	return gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: argv, Stdin: []byte(compose), Env: env})
+	return gdurunner.Combined(ctx, r, c)
+}
+
+// DockerDeployDigest reads what a redeploy needs to know before compose runs:
+// whether the container is running (`ps --all --no-trunc --filter status=running`,
+// matched by exact name in Go), and, when it is, the value of its label key -- the
+// deploy digest the last deploy stamped on it. A label that is absent, or an
+// inspect that fails, reads as "" (digest unknown), which the caller treats as a
+// change.
+//
+// A listing that cannot be read is an error: with no answer the deploy cannot tell
+// whether it would recreate a running service, and so cannot ask.
+func DockerDeployDigest(ctx context.Context, r gdurunner.Runner, command, name, key string, approvals execguard.Approvals) (running bool, digest string, err error) {
+	argv, err := ParseCommand(validate.PlatformDocker, command, approvals)
+	if err != nil {
+		return false, "", err
+	}
+	out, err := EngineList(ctx, r, argv, true)
+	if err != nil {
+		return false, "", fmt.Errorf("checking whether %s is running before deploying over it: %w", name, err)
+	}
+	if !containercli.HasName(containercli.ParseList(out), name) {
+		return false, "", nil
+	}
+	doc, ierr := EngineInspectJSON(ctx, r, argv, []string{name})
+	if ierr != nil {
+		return true, "", nil
+	}
+	cs, derr := inspect.Decode(doc)
+	if derr != nil {
+		return true, "", nil
+	}
+	for _, c := range cs {
+		if c.Name == name {
+			return true, c.Labels[key], nil
+		}
+	}
+	return true, "", nil
 }
 
 // KubernetesLifecycle stops, starts or restarts a Deployment in place: stop
@@ -216,12 +271,18 @@ func DockerLifecycle(ctx context.Context, r gdurunner.Runner, command, action, c
 	if err != nil {
 		return "", err
 	}
+	var c gdurunner.Cmd
 	switch action {
-	case ActionStart, ActionStop, ActionRestart:
+	case ActionStart:
+		c = containercli.Start(argv, container)
+	case ActionStop:
+		c = containercli.Stop(argv, container)
+	case ActionRestart:
+		c = containercli.Restart(argv, container)
 	default:
 		return "", fmt.Errorf("unknown lifecycle action %q", action)
 	}
-	return gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: append(argv, action, container)})
+	return gdurunner.Combined(ctx, r, c)
 }
 
 // PodmanLifecycle runs `systemctl [--user] start|stop|restart <service>` on
@@ -287,17 +348,20 @@ func DockerImagePull(ctx context.Context, r gdurunner.Runner, command, image str
 //   - kubernetes: `<argv> auth can-i <create|delete> deployment [--namespace <ns>]`
 //     -- create for deploy, delete for remove (can-i's own verbs, not apply/delete
 //     used by kubeVerb for the eventual manifest command).
-//   - docker/podman: `<argv> info`.
+//   - docker/podman: `<argv> info` (containercli.Info).
 //
 // A non-nil error wraps the probe's own output with a platform-specific hint
 // (log in, start the daemon, ...) so the operator gets a next step instead of a
-// bare CLI error.
-func Preflight(ctx context.Context, r gdurunner.Runner, platform, command, action, namespace string, approvals execguard.Approvals) (string, error) {
+// bare CLI error. rootless is whether a podman deployment runs rootless (the
+// resolved quadlet scope's UserMode): it picks containercli.EngineHint's hint, and
+// is ignored on every other platform.
+func Preflight(ctx context.Context, r gdurunner.Runner, platform, command, action, namespace string, rootless bool, approvals execguard.Approvals) (string, error) {
 	argv, err := ParseCommand(platform, command, approvals)
 	if err != nil {
 		return "", err
 	}
 	var probe canI
+	var cmd gdurunner.Cmd
 	switch platform {
 	case validate.PlatformKubernetes:
 		var perr error
@@ -311,12 +375,13 @@ func Preflight(ctx context.Context, r gdurunner.Runner, platform, command, actio
 		if namespace != "" {
 			argv = append(argv, "--namespace", namespace)
 		}
+		cmd = gdurunner.Cmd{Argv: argv}
 	case validate.PlatformDocker, validate.PlatformPodman:
-		argv = append(argv, "info")
+		cmd = containercli.Info(argv)
 	default:
 		return "", fmt.Errorf("unknown platform %q (want %q, %q, or %q)", platform, validate.PlatformKubernetes, validate.PlatformDocker, validate.PlatformPodman)
 	}
-	out, runErr := gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: argv})
+	out, runErr := gdurunner.Combined(ctx, r, cmd)
 	if runErr != nil {
 		// can-i exits 1 both when it cannot reach the cluster and when the
 		// answer is no; only the answer tells them apart, and a refusal is not
@@ -328,11 +393,11 @@ func Preflight(ctx context.Context, r gdurunner.Runner, platform, command, actio
 			}
 			return "", fmt.Errorf("preflight failed for %s: your account may not %s in %s (kubectl auth can-i answered %q): ask for that permission, or select a context that has it", platform, probe, where, answer)
 		}
-		hint, ok := preflightHints[platform]
-		if !ok {
-			return out, fmt.Errorf("preflight failed for %s: %w", platform, runErr)
+		if platform == validate.PlatformKubernetes {
+			return out, fmt.Errorf("preflight failed for %s: %w\n%s", platform, runErr, kubernetesPreflightHint)
 		}
-		return out, fmt.Errorf("preflight failed for %s: %w\n%s", platform, runErr, hint)
+		// The engine's own output is in the message, so report prints it once.
+		return "", containercli.InfoError(containercli.Engine(platform), argv, rootless, safeOut(out), runErr)
 	}
 	return out, nil
 }
@@ -452,6 +517,25 @@ func PodmanSecretRemove(ctx context.Context, r gdurunner.Runner, command string,
 		return out, fmt.Errorf("podman secret rm: %w", err)
 	}
 	return out, nil
+}
+
+// PodmanSecretMatches reports whether the named secret already holds value: it reads
+// the stored value back (podman.SecretData, podman 4.7 and newer, which the caller
+// has checked) from stdout alone and compares it exactly (podman.SecretMatches). The
+// value stays inside this function, is never printed, and no error carries it. A
+// missing secret, a probe that fails and a command the guard refuses all read as
+// false: none of them proves the stored value is the one about to be written.
+func PodmanSecretMatches(ctx context.Context, r gdurunner.Runner, command, name, value string, approvals execguard.Approvals) bool {
+	argv, err := ParseCommand(validate.PlatformPodman, command, approvals)
+	if err != nil {
+		return false
+	}
+	c, err := podman.SecretData(argv, name)
+	if err != nil {
+		return false
+	}
+	out, _, rerr := gdurunner.Split(ctx, r, c)
+	return rerr == nil && podman.SecretMatches(out, []byte(value))
 }
 
 // PodmanIDMap is podman's id mapping for the invoking user, its gid map when gid
@@ -607,42 +691,76 @@ func ProbeLinger(ctx context.Context, r gdurunner.Runner, sc QuadletScope) (stri
 	return systemd.ParseLinger(out), nil
 }
 
-// PodmanDeploy reloads the systemd generator and brings up one service per unit.
-// Unit files must already be written into sc.Dir, and the secrets they mount
-// already be in podman's store, by the caller. services are the systemd unit
-// names, e.g. "solmq-connector.service".
+// PodmanDeploy brings up one service per unit after the caller has compared what
+// this deploy would write with what is already installed. changed says that the
+// unit or a secret differs (or is missing), and write puts the changed secrets and
+// unit in place; it is not called when nothing changed. services are the systemd
+// unit names, e.g. "solmq-connector.service".
 //
-// A service that is already running is restarted rather than started: podman
-// copies a mount secret into the container when it creates it, so a running
-// container would keep the old application.yml and stores, and start on an
-// active unit does nothing. Anything else -- a new unit, a stopped or a failed
-// one -- is started.
-func PodmanDeploy(ctx context.Context, r gdurunner.Runner, sc QuadletScope, services []string) (string, error) {
-	var out strings.Builder
-	o, err := gdurunner.Combined(ctx, r, sc.WithEnv(systemd.DaemonReload(sc.UserMode)))
-	out.WriteString(o)
-	if err != nil {
-		return out.String(), fmt.Errorf("systemctl daemon-reload: %w", err)
+// The order is the point: nothing is written before the answer.
+//
+//  1. Every service's state is read (is-active, whose stdout alone is used: it
+//     exits non-zero for every state but an active one). A unit that is active or
+//     reloading counts as running; any other answer -- inactive, failed, unknown,
+//     or none because systemctl itself failed -- counts as not running, and start's
+//     own error then says what is wrong.
+//  2. When something changed and a service is running, approve is asked. An error
+//     from it ends the deploy; a "no" ends it with cancelled set and the host
+//     untouched, so the next deploy asks again.
+//  3. write runs, then daemon-reload, only when something changed.
+//  4. A service that is not running is started. A running one is restarted when
+//     something changed, because podman copies a mount secret into the container
+//     when it creates it, so a running container would keep the old application.yml
+//     and stores, and start on an active unit does nothing. A running service
+//     with nothing changed is left alone, and out says so.
+func PodmanDeploy(ctx context.Context, r gdurunner.Runner, sc QuadletScope, services []string, changed bool, approve func() (bool, error), write func() (string, error)) (out string, cancelled bool, err error) {
+	var b strings.Builder
+	running := make(map[string]bool, len(services))
+	anyRunning := false
+	for _, s := range services {
+		state, _, _ := gdurunner.Split(ctx, r, sc.WithEnv(systemd.IsActive(sc.UserMode, s)))
+		st, answered := systemd.State(state)
+		running[s] = answered && systemd.Active(st)
+		anyRunning = anyRunning || running[s]
+	}
+	if changed && anyRunning {
+		ok, aerr := approve()
+		if aerr != nil {
+			return "", false, aerr
+		}
+		if !ok {
+			return "", true, nil
+		}
+	}
+	if changed {
+		o, werr := write()
+		b.WriteString(o)
+		if werr != nil {
+			return b.String(), false, werr
+		}
+		o, rerr := gdurunner.Combined(ctx, r, sc.WithEnv(systemd.DaemonReload(sc.UserMode)))
+		b.WriteString(o)
+		if rerr != nil {
+			return b.String(), false, fmt.Errorf("systemctl daemon-reload: %w", rerr)
+		}
 	}
 	for _, s := range services {
 		verb, build := "start", systemd.Start
-		// is-active exits non-zero for every state but an active one, so its
-		// stdout alone is read and the exit error ignored. A unit that is active
-		// or reloading is restarted; any other answer -- inactive, failed,
-		// unknown, or none because systemctl itself failed -- means start,
-		// whose own error then says what is wrong.
-		state, _, _ := gdurunner.Split(ctx, r, sc.WithEnv(systemd.IsActive(sc.UserMode, s)))
-		if st, answered := systemd.State(state); answered && systemd.Active(st) {
+		switch {
+		case running[s] && !changed:
+			b.WriteString(s + " is unchanged and left running; `solmq-conn-util restart` restarts it\n")
+			continue
+		case running[s]:
 			verb, build = "restart", systemd.Restart
-			out.WriteString(s + " was running; restarting it to load the new configuration\n")
+			b.WriteString(s + " was running; restarting it to load the new configuration\n")
 		}
-		o, err = gdurunner.Combined(ctx, r, sc.WithEnv(build(sc.UserMode, s)))
-		out.WriteString(o)
-		if err != nil {
-			return out.String(), fmt.Errorf("systemctl %s %s: %w", verb, s, err)
+		o, serr := gdurunner.Combined(ctx, r, sc.WithEnv(build(sc.UserMode, s)))
+		b.WriteString(o)
+		if serr != nil {
+			return b.String(), false, fmt.Errorf("systemctl %s %s: %w", verb, s, serr)
 		}
 	}
-	return out.String(), nil
+	return b.String(), false, nil
 }
 
 // PodmanRemove stops each service, removes its unit file from sc.Dir, and
@@ -791,21 +909,23 @@ func KubernetesTop(ctx context.Context, r gdurunner.Runner, cmd []string, namesp
 	return out, nil
 }
 
-// EngineInspectJSON inspects one or more containers: `<cmd> inspect <names...>`
-// on docker or podman, which answers a JSON array in the order the names were
-// given. One call covers every target, and its output carries the compose
-// project label too, so nothing else has to be asked for it.
+// EngineInspectJSON inspects one or more containers: `<cmd> container inspect
+// <names...>` on docker or podman (inspect.Containers), which answers a JSON array
+// in the order the names were given. The container subcommand answers for
+// containers alone, so an image or a volume of the same name never does. One call
+// covers every target, and its output carries the compose project label too, so
+// nothing else has to be asked for it. Decode the answer with inspect.Decode.
 //
 // names are operator-supplied (or read back from the engine under --all) and
 // must already be validated by the caller.
 func EngineInspectJSON(ctx context.Context, r gdurunner.Runner, cmd []string, names []string) (string, error) {
-	if len(names) == 0 {
+	c, ok := inspect.Containers(cmd, names...)
+	if !ok {
 		return "", fmt.Errorf("no container named to inspect")
 	}
-	argv := append(append([]string(nil), cmd...), "inspect")
-	out, err := runParsed(ctx, r, gdurunner.Cmd{Argv: append(argv, names...)})
+	out, err := runParsed(ctx, r, c)
 	if err != nil {
-		return out, fmt.Errorf("inspecting %s: %w\n%s", strings.Join(names, ", "), err, out)
+		return out, fmt.Errorf("inspecting %s: %w\n%s", strings.Join(names, ", "), err, safeOut(out))
 	}
 	return out, nil
 }
@@ -820,7 +940,7 @@ func EngineImageInspectJSON(ctx context.Context, r gdurunner.Runner, cmd []strin
 	argv := append(append([]string(nil), cmd...), "image", "inspect", ref)
 	out, err := runParsed(ctx, r, gdurunner.Cmd{Argv: argv})
 	if err != nil {
-		return out, fmt.Errorf("inspecting image %s: %w\n%s", ref, err, out)
+		return out, fmt.Errorf("inspecting image %s: %w\n%s", ref, err, safeOut(out))
 	}
 	return out, nil
 }
@@ -843,27 +963,23 @@ func EngineStats(ctx context.Context, r gdurunner.Runner, cmd []string, names []
 	argv := append(append([]string(nil), cmd...), "stats", "--no-stream", "--format", engineStatsFormat)
 	out, err := runParsed(ctx, r, gdurunner.Cmd{Argv: append(argv, names...)})
 	if err != nil {
-		return out, fmt.Errorf("sampling container resource usage: %w\n%s", err, out)
+		return out, fmt.Errorf("sampling container resource usage: %w\n%s", err, safeOut(out))
 	}
 	return out, nil
 }
 
-// engineListFormat is the Go template `ps` renders each row with: the name a
-// container is addressed by, and the image reference --all matches against.
-const engineListFormat = "{{.Names}}\t{{.Image}}"
-
-// EngineList lists every container the engine knows about, running or not:
-// `<cmd> ps --all --no-trunc --format <template>`. --all discovery filters the
-// result by image reference, since without env.yaml or an explicit name the
-// image is the only thing that identifies a connector instance.
-//
-// Stopped containers are included on purpose: an instance that died is exactly
-// what a search like this is for.
-func EngineList(ctx context.Context, r gdurunner.Runner, cmd []string) (string, error) {
-	argv := append(append([]string(nil), cmd...), "ps", "--all", "--no-trunc", "--format", engineListFormat)
-	out, err := runParsed(ctx, r, gdurunner.Cmd{Argv: argv})
+// EngineList lists the containers the engine knows about, stopped ones included
+// (`<cmd> ps --all --no-trunc --format <name, image, status>`, containercli.List),
+// or only running ones when running is set. Read the answer with
+// containercli.ParseList. --all discovery filters the result by image reference
+// (containercli.ByImage), since without env.yaml or an explicit name the image is
+// the only thing that identifies a connector instance; a stopped container is
+// included on purpose, because an instance that died is exactly what a search like
+// this is for.
+func EngineList(ctx context.Context, r gdurunner.Runner, cmd []string, running bool) (string, error) {
+	out, err := runParsed(ctx, r, containercli.List(cmd, running))
 	if err != nil {
-		return out, fmt.Errorf("listing containers: %w\n%s", err, out)
+		return out, fmt.Errorf("listing containers: %w\n%s", err, safeOut(out))
 	}
 	return out, nil
 }
@@ -915,9 +1031,11 @@ type ExecOpts struct {
 	TTY   bool
 }
 
-// ExecArgv builds the `<cmd> exec` argv prefix shared by ScriptInstalled,
-// InstallScript, RunStatusScript and the cli verb's attached session, keeping
-// the per-platform shape in one place instead of repeating it in each caller.
+// ExecArgv builds the `<cmd> exec` argv shared by ScriptInstalled, InstallScript,
+// RunStatusScript and the cli verb's attached session, keeping the per-platform
+// shape in one place instead of repeating it in each caller. command is the
+// in-container program and its arguments, which the caller supplies and which must
+// not be empty.
 //
 // The shapes differ in more than spelling, and the difference is a parser
 // difference rather than a style one. kubectl leaves its flag parser
@@ -926,7 +1044,8 @@ type ExecOpts struct {
 // begins. docker and podman deliberately stop interspersing on exec, so that a
 // flag typed after the container name belongs to the in-container program --
 // which means their own flags must come first, and a "--" would be handed
-// through to the container as an argument rather than swallowed.
+// through to the container as an argument rather than swallowed. The two engines'
+// shape is containercli.Exec's.
 //
 // The container is always spec.ConnectorContainerName rather than a name
 // discovered from the pod. This tool renders that name, so naming it outright
@@ -937,37 +1056,44 @@ type ExecOpts struct {
 // not deploy, whose container is called something else, is no longer reachable;
 // accepted, because silently reading a sidecar is the worse of the two answers.
 //
-// The caller appends the in-container command itself, which is either
-// tool-authored (ContainerShell, or a payload built from constants) or already
-// SafeToken-validated. target and namespace are operator-supplied and must
-// already be validated by the caller before reaching this function.
-func ExecArgv(cmd []string, platform, target, namespace string, o ExecOpts) ([]string, error) {
+// The command is either tool-authored (ContainerShell, or a payload built from
+// constants) or already SafeToken-validated. target and namespace are
+// operator-supplied and must already be validated by the caller before reaching
+// this function.
+func ExecArgv(cmd []string, platform, target, namespace string, o ExecOpts, command ...string) ([]string, error) {
 	if o.TTY && !o.Stdin {
 		// Unreachable via the CLI, which never asks for one without the other.
 		// Guarded anyway so a future caller cannot quietly get a terminal it has
 		// no way to type into.
 		return nil, fmt.Errorf("a tty needs stdin: ask for both or neither")
 	}
-	argv := append(append([]string(nil), cmd...), "exec")
-	if o.Stdin {
-		argv = append(argv, "-i")
-	}
-	if o.TTY {
-		argv = append(argv, "-t")
-	}
 	switch platform {
 	case validate.PlatformKubernetes:
+		if len(command) == 0 {
+			return nil, fmt.Errorf("exec in %s needs a command to run", target)
+		}
+		argv := append(append([]string(nil), cmd...), "exec")
+		if o.Stdin {
+			argv = append(argv, "-i")
+		}
+		if o.TTY {
+			argv = append(argv, "-t")
+		}
 		argv = append(argv, target)
 		if namespace != "" {
 			argv = append(argv, "-n", namespace)
 		}
 		argv = append(argv, "-c", spec.ConnectorContainerName, "--")
+		return append(argv, command...), nil
 	case validate.PlatformDocker, validate.PlatformPodman:
-		argv = append(argv, target)
+		c, err := containercli.Exec(cmd, target, containercli.ExecOptions{Stdin: o.Stdin, TTY: o.TTY}, command...)
+		if err != nil {
+			return nil, err
+		}
+		return c.Argv, nil
 	default:
 		return nil, fmt.Errorf("unknown platform %q (want %q, %q, or %q)", platform, validate.PlatformKubernetes, validate.PlatformDocker, validate.PlatformPodman)
 	}
-	return argv, nil
 }
 
 // TailAll is the Tail value meaning "the whole log", spelled as a constant
@@ -995,8 +1121,8 @@ type LogsOpts struct {
 // positional with the namespace and container as flags, while docker and podman
 // take their options first and the container name last. Previous has no
 // docker/podman equivalent at all -- neither engine keeps a prior run's log
-// under the same name -- and is refused by the caller before it gets here
-// rather than being silently dropped.
+// under the same name (containercli.NoPrevious) -- and is refused by the caller
+// before it gets here rather than being silently dropped.
 //
 // The container is spec.ConnectorContainerName, named outright for the reason
 // ExecArgv records: the tool renders that name, and a pod it cannot find it in
@@ -1006,10 +1132,9 @@ type LogsOpts struct {
 // the caller. Everything else this function appends is a tool-authored constant
 // or a number.
 func LogsArgv(cmd []string, platform, target, namespace string, o LogsOpts) ([]string, error) {
-	argv := append(append([]string(nil), cmd...), "logs")
 	switch platform {
 	case validate.PlatformKubernetes:
-		argv = append(argv, target)
+		argv := append(append([]string(nil), cmd...), "logs", target)
 		if namespace != "" {
 			argv = append(argv, "-n", namespace)
 		}
@@ -1017,25 +1142,27 @@ func LogsArgv(cmd []string, platform, target, namespace string, o LogsOpts) ([]s
 		if o.Previous {
 			argv = append(argv, "-p")
 		}
-		argv = append(argv, logsCommonFlags(o)...)
+		return append(argv, logsCommonFlags(o)...), nil
 	case validate.PlatformDocker, validate.PlatformPodman:
 		if o.Previous {
-			// Unreachable via the CLI, which refuses the combination with a
-			// message naming the platform. Guarded anyway so a future caller
-			// cannot quietly get a log that ignores what it asked for.
-			return nil, fmt.Errorf("--previous is a kubernetes concept; %s has no prior-run log to read", platform)
+			// Unreachable via the CLI, which refuses the combination with the same
+			// message. Guarded anyway so a future caller cannot quietly get a log
+			// that ignores what it asked for.
+			return nil, containercli.NoPrevious(containercli.Engine(platform))
 		}
-		argv = append(argv, logsCommonFlags(o)...)
-		argv = append(argv, target)
+		lo := containercli.LogOptions{Follow: o.Follow, Timestamps: o.Timestamps, Since: o.Since}
+		if o.Tail != TailAll {
+			lo.Tail = strconv.Itoa(o.Tail)
+		}
+		return containercli.Logs(cmd, target, lo).Argv, nil
 	default:
 		return nil, fmt.Errorf("unknown platform %q (want %q, %q, or %q)", platform, validate.PlatformKubernetes, validate.PlatformDocker, validate.PlatformPodman)
 	}
-	return argv, nil
 }
 
-// logsCommonFlags are the options every platform spells identically. They are
-// appended in a fixed order so the argv a test asserts is the argv every run
-// produces.
+// logsCommonFlags are the options kubectl takes, appended in a fixed order so the
+// argv a test asserts is the argv every run produces. The engines' are
+// containercli.Logs's, in the same order.
 func logsCommonFlags(o LogsOpts) []string {
 	var argv []string
 	if o.Follow {
@@ -1076,10 +1203,6 @@ const (
 // into the sh -c payload as-is. target and namespace are operator-supplied and
 // must already be validated by the caller.
 func ScriptInstalled(ctx context.Context, r gdurunner.Runner, cmd []string, platform, target, namespace, path string) (bool, error) {
-	argv, err := ExecArgv(cmd, platform, target, namespace, ExecOpts{})
-	if err != nil {
-		return false, err
-	}
 	// The probe reports its answer as a marker on stdout and always exits 0,
 	// rather than letting "file missing" be a non-zero exit. kubectl exec
 	// surfaces a remote non-zero exit as its own failure plus a "command
@@ -1087,7 +1210,11 @@ func ScriptInstalled(ctx context.Context, r gdurunner.Runner, cmd []string, plat
 	// pod are indistinguishable by exit status alone -- and treating the wrong
 	// one as an error would refuse to install on exactly the targets that need
 	// it. path is a tool constant, never operator input.
-	argv = append(argv, ContainerShell, "-c", "if [ -f "+path+" ]; then echo "+ScriptPresentMarker+"; else echo "+ScriptAbsentMarker+"; fi")
+	argv, err := ExecArgv(cmd, platform, target, namespace, ExecOpts{},
+		ContainerShell, "-c", "if [ -f "+path+" ]; then echo "+ScriptPresentMarker+"; else echo "+ScriptAbsentMarker+"; fi")
+	if err != nil {
+		return false, err
+	}
 	out, runErr := gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: argv})
 	switch {
 	case strings.Contains(out, ScriptPresentMarker):
@@ -1095,26 +1222,36 @@ func ScriptInstalled(ctx context.Context, r gdurunner.Runner, cmd []string, plat
 	case strings.Contains(out, ScriptAbsentMarker):
 		return false, nil
 	case runErr != nil:
-		return false, fmt.Errorf("probing %s on %s: %w\n%s", path, target, runErr, out)
+		return false, fmt.Errorf("probing %s on %s: %w\n%s", path, target, runErr, safeOut(out))
 	}
-	return false, fmt.Errorf("probing %s on %s: expected %s or %s in the output, got:\n%s", path, target, ScriptPresentMarker, ScriptAbsentMarker, out)
+	return false, fmt.Errorf("probing %s on %s: expected %s or %s in the output, got:\n%s", path, target, ScriptPresentMarker, ScriptAbsentMarker, safeOut(out))
 }
 
 // InstallScript pipes script onto the target's stdin and writes it to path,
-// creating dir first: `sh -c "mkdir -p <dir> && cat > <path>"` with
+// creating path's directory first: `sh -c "mkdir -p <dir> && cat > <path>"` with
 // Cmd.Stdin = script. The script crosses only on stdin -- never cp, never a
-// download, never the script text in argv.
+// download, never the script text in argv. On docker and podman the command is
+// containercli.Upload, which single-quotes the path; kubectl's is built here.
 //
-// dir, path, and script are tool-authored constants, never operator input, so
-// the sh -c payload is built from them as-is. target and namespace are
-// operator-supplied and must already be validated by the caller.
-func InstallScript(ctx context.Context, r gdurunner.Runner, cmd []string, platform, target, namespace, dir, path, script string) (string, error) {
-	argv, err := ExecArgv(cmd, platform, target, namespace, ExecOpts{Stdin: true})
-	if err != nil {
-		return "", err
+// path and script are tool-authored constants, never operator input. target and
+// namespace are operator-supplied and must already be validated by the caller.
+func InstallScript(ctx context.Context, r gdurunner.Runner, cmd []string, platform, target, namespace, path, script string) (string, error) {
+	var c gdurunner.Cmd
+	switch platform {
+	case validate.PlatformDocker, validate.PlatformPodman:
+		var err error
+		if c, err = containercli.Upload(cmd, target, path, []byte(script), true); err != nil {
+			return "", err
+		}
+	default:
+		argv, err := ExecArgv(cmd, platform, target, namespace, ExecOpts{Stdin: true},
+			ContainerShell, "-c", "mkdir -p "+pathpkg.Dir(path)+" && cat > "+path)
+		if err != nil {
+			return "", err
+		}
+		c = gdurunner.Cmd{Argv: argv, Stdin: []byte(script)}
 	}
-	argv = append(argv, ContainerShell, "-c", "mkdir -p "+dir+" && cat > "+path)
-	return gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: argv, Stdin: []byte(script)})
+	return gdurunner.Combined(ctx, r, c)
 }
 
 // RunStatusScript runs the already-installed status script (`sh <path>`) and
@@ -1131,10 +1268,9 @@ func InstallScript(ctx context.Context, r gdurunner.Runner, cmd []string, platfo
 // namespace are operator-supplied and must already be validated by the
 // caller.
 func RunStatusScript(ctx context.Context, r gdurunner.Runner, cmd []string, platform, target, namespace, path string) (string, error) {
-	argv, err := ExecArgv(cmd, platform, target, namespace, ExecOpts{})
+	argv, err := ExecArgv(cmd, platform, target, namespace, ExecOpts{}, ContainerShell, path)
 	if err != nil {
 		return "", err
 	}
-	argv = append(argv, ContainerShell, path)
 	return gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: argv})
 }

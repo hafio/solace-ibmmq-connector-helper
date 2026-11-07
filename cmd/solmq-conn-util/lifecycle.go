@@ -74,7 +74,7 @@ func runLifecycle(action string, args []string, r gdurunner.Runner) int {
 				return usageExit(err)
 			}
 		}
-		if code, ok := preflight(r, action, name, k.Command, k.Deployment.Namespace, approvals); !ok {
+		if code, ok := preflight(r, action, name, k.Command, k.Deployment.Namespace, false, approvals); !ok {
 			return code
 		}
 		out, err = runner.KubernetesLifecycle(bg(), r, k.Command, action, k.Deployment.Namespace, k.Deployment.Name, k.Deployment.Replicas, approvals)
@@ -83,7 +83,7 @@ func runLifecycle(action string, args []string, r gdurunner.Runner) int {
 		if err := checkName("docker.name", d.Name); err != nil {
 			return usageExit(err)
 		}
-		if code, ok := preflight(r, action, name, d.Command, "", approvals); !ok {
+		if code, ok := preflight(r, action, name, d.Command, "", false, approvals); !ok {
 			return code
 		}
 		out, err = runner.DockerLifecycle(bg(), r, d.Command, action, d.Name, approvals)
@@ -96,7 +96,7 @@ func runLifecycle(action string, args []string, r gdurunner.Runner) int {
 		if serr != nil {
 			return errExit(serr)
 		}
-		if code, ok := preflight(r, action, name, p.Command, "", approvals); !ok {
+		if code, ok := preflight(r, action, name, p.Command, "", sc.UserMode, approvals); !ok {
 			return code
 		}
 		out, err = runner.PodmanLifecycle(bg(), r, sc, action, gen.PodmanServiceName(p.Name))

@@ -671,7 +671,9 @@ security:
 }
 
 func TestConfigNoSecretsLeak(t *testing.T) {
-	out, errs, _ := Config(Request{Workflows: synthWorkflowFiles(1)}, Resolver{Rand: fixedStatusRand})
+	wantStatusPW := strings.Repeat("ab", 16)
+	pin := func(k string) (string, bool) { return wantStatusPW, k == spec.StatusUserPasswordEnvVar }
+	out, errs, _ := Config(Request{Workflows: synthWorkflowFiles(1)}, Resolver{Env: pin, Rand: fixedStatusRand})
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -685,7 +687,6 @@ func TestConfigNoSecretsLeak(t *testing.T) {
 		t.Errorf("rendered config missing expected ${STABLE} placeholders:\n%s", out)
 	}
 
-	wantStatusPW := strings.Repeat("ab", 16)
 	if !strings.Contains(out, "password: "+wantStatusPW) {
 		t.Errorf("expected the reserved status account's literal test password %q:\n%s", wantStatusPW, out)
 	}
@@ -1248,7 +1249,7 @@ func TestResolveStatusPasswordFixedRand(t *testing.T) {
 		}
 		return nil
 	}}
-	got, err := resolveStatusPassword(res)
+	got, err := resolveStatusPassword(res, "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1272,7 +1273,7 @@ func TestResolveStatusPasswordEnvOverride(t *testing.T) {
 		},
 		Rand: func(b []byte) error { randCalled = true; return nil },
 	}
-	got, err := resolveStatusPassword(res)
+	got, err := resolveStatusPassword(res, "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1292,7 +1293,7 @@ func TestResolveStatusPasswordEmptyEnvFallsBackToRand(t *testing.T) {
 		Env:  func(string) (string, bool) { return "", true },
 		Rand: fixedStatusRand,
 	}
-	got, err := resolveStatusPassword(res)
+	got, err := resolveStatusPassword(res, "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1305,17 +1306,158 @@ func TestResolveStatusPasswordEmptyEnvFallsBackToRand(t *testing.T) {
 // failing must surface as an actionable error naming the underlying cause,
 // never a predictable fallback password.
 func TestResolveStatusPasswordRandError(t *testing.T) {
-	_, err := resolveStatusPassword(Resolver{Rand: func([]byte) error { return errors.New("entropy unavailable") }})
+	_, err := resolveStatusPassword(Resolver{Rand: func([]byte) error { return errors.New("entropy unavailable") }}, "", nil)
 	if err == nil || !strings.Contains(err.Error(), "entropy unavailable") {
 		t.Fatalf("err = %v, want an actionable error naming the underlying cause", err)
+	}
+}
+
+// ---- the derived status password ----
+
+// kvRefs are literal credential references, as the model would hand them over.
+func kvRefs(kv ...string) []consolidate.SecretRef {
+	var refs []consolidate.SecretRef
+	for i := 0; i+1 < len(kv); i += 2 {
+		refs = append(refs, consolidate.SecretRef{Stable: kv[i], Literal: kv[i+1]})
+	}
+	return refs
+}
+
+func derivedPW(t *testing.T, res Resolver, name string, refs []consolidate.SecretRef) string {
+	t.Helper()
+	got, err := resolveStatusPassword(res, name, refs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// With credentials the password is derived: the same inputs give the same 32
+// lowercase hex characters, a changed value or a different deployment name gives a
+// different one, and the order the credentials are listed in does not matter.
+// Rand is never consulted.
+func TestResolveStatusPasswordIsDerivedFromTheCredentialsAndName(t *testing.T) {
+	res := Resolver{Rand: func([]byte) error { t.Error("a deployment with credentials must not draw random bytes"); return nil }}
+	base := derivedPW(t, res, "solmq", kvRefs("A", "1", "B", "2"))
+	if len(base) != 32 || strings.Trim(base, "0123456789abcdef") != "" {
+		t.Fatalf("password = %q, want 32 lowercase hex characters", base)
+	}
+	if again := derivedPW(t, res, "solmq", kvRefs("A", "1", "B", "2")); again != base {
+		t.Errorf("same inputs gave %q then %q", base, again)
+	}
+	if swapped := derivedPW(t, res, "solmq", kvRefs("B", "2", "A", "1")); swapped != base {
+		t.Errorf("credential order changed the password: %q vs %q", swapped, base)
+	}
+	for _, c := range []struct{ name, got string }{
+		{"a changed value", derivedPW(t, res, "solmq", kvRefs("A", "1", "B", "3"))},
+		{"a different name", derivedPW(t, res, "other", kvRefs("A", "1", "B", "2"))},
+		{"a different key", derivedPW(t, res, "solmq", kvRefs("A", "1", "C", "2"))},
+		{"a field boundary moved", derivedPW(t, res, "solmq", kvRefs("A", "12", "B", ""))},
+		{"a credential added", derivedPW(t, res, "solmq", kvRefs("A", "1", "B", "2", "C", "3"))},
+		{"the config render's empty name", derivedPW(t, res, "", kvRefs("A", "1", "B", "2"))},
+	} {
+		if c.got == base {
+			t.Errorf("%s gave the same password %q", c.name, c.got)
+		}
+	}
+}
+
+// An -env credential is resolved and its value keys the password, so rotating the
+// variable rotates it; one that cannot be resolved here (generate and validate
+// tolerate an unset variable) falls back to the random path rather than keying on
+// part of the material.
+func TestResolveStatusPasswordUsesEnvCredentialsAndFallsBackWhenUnresolvable(t *testing.T) {
+	refs := []consolidate.SecretRef{{Stable: "SOL_PASSWORD", EnvVar: "SOL_PASSWORD"}}
+	withValue := func(v string) Resolver {
+		return Resolver{Env: func(k string) (string, bool) { return v, k == "SOL_PASSWORD" }, Rand: fixedStatusRand}
+	}
+	a, b := derivedPW(t, withValue("one"), "solmq", refs), derivedPW(t, withValue("two"), "solmq", refs)
+	if a == b || a == strings.Repeat("ab", 16) {
+		t.Errorf("an -env value must key the derivation: %q, %q", a, b)
+	}
+	unset := Resolver{Env: func(string) (string, bool) { return "", false }, Rand: fixedStatusRand}
+	if got := derivedPW(t, unset, "solmq", refs); got != strings.Repeat("ab", 16) {
+		t.Errorf("an unresolvable -env credential: %q, want the random fallback", got)
+	}
+	noEnv := Resolver{Rand: fixedStatusRand} // no environment access at all
+	if got := derivedPW(t, noEnv, "solmq", refs); got != strings.Repeat("ab", 16) {
+		t.Errorf("no environment access: %q, want the random fallback", got)
+	}
+}
+
+// No credentials at all is the one case with nothing to key on: random, and a Rand
+// failure still errors. The override beats the derivation.
+func TestResolveStatusPasswordNoMaterialIsRandomAndOverrideWins(t *testing.T) {
+	if got := derivedPW(t, Resolver{Rand: fixedStatusRand}, "solmq", nil); got != strings.Repeat("ab", 16) {
+		t.Errorf("no credentials: %q, want the random fallback", got)
+	}
+	failing := Resolver{Rand: func([]byte) error { return errors.New("entropy unavailable") }}
+	if _, err := resolveStatusPassword(failing, "solmq", nil); err == nil || !strings.Contains(err.Error(), "entropy unavailable") {
+		t.Errorf("err = %v, want the Rand failure", err)
+	}
+	override := Resolver{Env: func(k string) (string, bool) { return "operator-pw", k == spec.StatusUserPasswordEnvVar }}
+	if got := derivedPW(t, override, "solmq", kvRefs("A", "1")); got != "operator-pw" {
+		t.Errorf("override: %q, want it verbatim over the derivation", got)
+	}
+}
+
+// Through the real docker render: the same spec renders the same compose file, with
+// no random draw, and a changed credential changes it.
+func TestStatusPasswordIsStableAcrossRenders(t *testing.T) {
+	env := &File{Name: "env.yaml", Data: []byte("image:\n  name: img\n  tag: v1\ndocker:\n  command: docker\n  name: solmq\n  ports:\n    - 8090\n")}
+	render := func(wfs []File) string {
+		plan, errs, _ := GenerateDocker(Request{Env: env, Workflows: wfs}, Resolver{Rand: func([]byte) error { t.Error("Rand drawn"); return errors.New("no") }})
+		if len(errs) > 0 {
+			t.Fatalf("errs = %v", errs)
+		}
+		return plan.Compose
+	}
+	files := synthWorkflowFiles(1)
+	if a, b := render(files), render(files); a != b {
+		t.Error("the same spec rendered two different compose files")
+	}
+	changed := synthWorkflowFiles(1)
+	changed[0].Data = []byte(strings.Replace(string(changed[0].Data), "client-password: p", "client-password: q", 1))
+	if render(files) == render(changed) {
+		t.Error("a changed credential must change the derived password")
+	}
+}
+
+// TestStatusPasswordStaysRandomOffDockerAndPodman: generate config and kubernetes
+// never derive the password, since on kubernetes it sits in a ConfigMap that may be
+// readable where the credentials are not; both draw Resolver.Rand even when there
+// are credentials to derive from.
+func TestStatusPasswordStaysRandomOffDockerAndPodman(t *testing.T) {
+	drawn := 0
+	res := Resolver{Rand: func([]byte) error { drawn++; return nil }}
+	if _, errs, _ := Config(Request{Workflows: synthWorkflowFiles(1)}, res); len(errs) > 0 {
+		t.Fatalf("config errs = %v", errs)
+	}
+	if drawn != 1 {
+		t.Errorf("generate config drew Rand %d times, want 1", drawn)
+	}
+	drawn = 0
+	kube := &File{Name: "env.yaml", Data: []byte("image:\n  name: img\n  tag: v1\nkubernetes:\n  command: kubectl\n" +
+		"  deployment:\n    name: solmq\n    namespace: ns\n  secrets:\n    credentials:\n      existing: their-creds\n")}
+	if _, errs, _ := GenerateKubernetes(Request{Env: kube, Workflows: synthWorkflowFiles(1)}, res, KubeOpts{}); len(errs) > 0 {
+		t.Fatalf("kubernetes errs = %v", errs)
+	}
+	if drawn != 1 {
+		t.Errorf("kubernetes drew Rand %d times, want 1", drawn)
 	}
 }
 
 // TestConfigStatusPasswordRandErrorNoOutput covers the same failure through
 // the real Config path: a Rand error is a hard error and produces no output.
 func TestConfigStatusPasswordRandErrorNoOutput(t *testing.T) {
-	res := Resolver{Rand: func([]byte) error { return errors.New("entropy unavailable") }}
-	out, errs, _ := Config(Request{Workflows: synthWorkflowFiles(1)}, res)
+	// The credentials are -env references to an unset variable, so there is nothing
+	// to derive from and the random path -- which fails -- is the one taken.
+	files := synthWorkflowFiles(1)
+	for i := range files {
+		files[i].Data = []byte(strings.ReplaceAll(string(files[i].Data), "password: p\n", "password-env: UNSET_PW\n"))
+	}
+	res := Resolver{Env: func(string) (string, bool) { return "", false }, Rand: func([]byte) error { return errors.New("entropy unavailable") }}
+	out, errs, _ := Config(Request{Workflows: files}, res)
 	if out != "" {
 		t.Errorf("expected no output on a Rand failure, got:\n%s", out)
 	}

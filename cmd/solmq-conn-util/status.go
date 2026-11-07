@@ -335,7 +335,7 @@ func actStatus(o statusOpts, r gdurunner.Runner) int {
 	// (docker/podman ignore it): status asks to get pods, the one permission it
 	// cannot work without, so a view-only operator is not refused a write.
 	prog.step("preflight")
-	if code, ok := preflight(r, runner.ActionStatus, sess.platform, sess.command, sess.ns, o.approved); !ok {
+	if code, ok := preflight(r, runner.ActionStatus, sess.platform, sess.command, sess.ns, sess.rootless(), o.approved); !ok {
 		return code
 	}
 
@@ -820,7 +820,7 @@ func (c *statusCollector) collectApplication(rep *statusreport.Report) bool {
 				continue
 			}
 			c.prog.step("install script %s %d/%d", inst.Name, n+1, len(missing))
-			if _, err := runner.InstallScript(bg(), c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerDir, statusscript.ContainerPath, script); err != nil {
+			if _, err := runner.InstallScript(bg(), c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerPath, script); err != nil {
 				inst.Error = fmt.Sprintf("could not install the status script: %v", err)
 				failed = true
 				continue

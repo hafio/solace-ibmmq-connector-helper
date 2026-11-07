@@ -6,8 +6,11 @@
 package gen
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -115,7 +118,8 @@ func Config(r Request, res Resolver) (out string, errs, warns []Issue) {
 	if len(errs) > 0 {
 		return "", errs, warns
 	}
-	statusPW, err := resolveStatusPassword(res)
+	// No platform, so no artifact a redeploy compares: random, as on kubernetes.
+	statusPW, err := resolveStatusPassword(res, "", nil)
 	if err != nil {
 		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
@@ -241,7 +245,9 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts) (out string, err
 		return "", errs, warns
 	}
 
-	statusPW, err := resolveStatusPassword(res)
+	// Random, never derived: on kubernetes the literal sits in a ConfigMap, which
+	// may be readable where the credentials' Secrets are not (resolveStatusPassword).
+	statusPW, err := resolveStatusPassword(res, "", nil)
 	if err != nil {
 		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
@@ -398,7 +404,7 @@ func GenerateDocker(r Request, res Resolver) (plan DockerPlan, errs, warns []Iss
 		return DockerPlan{}, errs, warns
 	}
 
-	statusPW, err := resolveStatusPassword(res)
+	statusPW, err := statusPasswordFor(res, d.Name, wfs, &e.Defaults)
 	if err != nil {
 		return DockerPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
@@ -682,7 +688,7 @@ func GeneratePodman(r Request, res Resolver) (plan PodmanPlan, errs, warns []Iss
 		return PodmanPlan{}, errs, warns
 	}
 
-	statusPW, err := resolveStatusPassword(res)
+	statusPW, err := statusPasswordFor(res, p.Name, wfs, &e.Defaults)
 	if err != nil {
 		return PodmanPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
@@ -787,20 +793,68 @@ func ResolveCredentials(refs []consolidate.SecretRef, res Resolver) ([]KV, error
 	return out, nil
 }
 
+// statusPasswordLabel versions the derivation of the reserved status account's
+// password (see resolveStatusPassword): changing how it is derived must change
+// every password, so the label changes with it.
+const statusPasswordLabel = "solmq-conn-util/status-password/v1"
+
+// statusPasswordFor is the password for a docker or podman deployment name, resolved from
+// the workflows and defaults it will render. The credentials it is derived from are
+// the model's secret references, and those do not depend on the status password
+// (it is a literal user, never a secret reference), so the model is built once with a
+// placeholder to collect them and the real build follows with the result: no
+// circularity. A model that cannot be built (a mount-name collision) or whose
+// credentials cannot be resolved here -- generate and validate tolerate an unset
+// -env variable; deploy refuses one separately, before it uses the artifact --
+// gets no derived password: resolveStatusPassword then falls back to a random one,
+// and the real build reports the collision.
+func statusPasswordFor(res Resolver, name string, wfs []spec.Workflow, d *spec.Defaults) (string, error) {
+	var refs []consolidate.SecretRef
+	if b, _, err := build(wfs, d, statusPasswordPlaceholder); err == nil {
+		refs = b.model.Secrets
+	}
+	return resolveStatusPassword(res, name, refs)
+}
+
 // resolveStatusPassword returns the password for the tool-reserved status
 // actuator account (spec.StatusUserName): the operator's override from
 // spec.StatusUserPasswordEnvVar when set and non-empty (validate.Run has
-// already charset-checked it, so it is used verbatim), otherwise 16 random
-// bytes hex-encoded into a 32-lowercase-hex-char literal. The result is
-// rendered as a literal that the in-container status script (internal/
-// statusscript) reads back out of application.yml, so it must be strong by
-// default -- never a fixed or predictable fallback -- and it must stay
-// stable within one generate call, which is why every build() call site
-// resolves it exactly once and threads the same value through.
-func resolveStatusPassword(res Resolver) (string, error) {
+// already charset-checked it, so it is used verbatim); otherwise one derived from
+// the deployment's own secrets, so it is the same on every render until a
+// credential changes; and only when there is nothing to derive it from, 16
+// random bytes.
+//
+// The derivation is the first 16 bytes of an HMAC-SHA-256, hex-encoded into the
+// same 32-lowercase-hex-char literal a random one is. The key is every resolved
+// credential (key and value, each length-prefixed, sorted by key so the order the
+// spec lists them in does not matter); the message is the versioned label and the
+// deployment name. A random password on every render made every redeploy look
+// changed, while a credential rotation changes the artifact anyway. With no
+// credentials, or one that cannot be resolved, the key would be empty or partial,
+// so that case is the random path, never a keyed one.
+//
+// Only docker and podman pass refs: whoever can read their artifact (the docker
+// group, or the podman secret's owner) can read the credentials themselves. On
+// kubernetes the literal sits in a ConfigMap, which RBAC may let someone read who
+// cannot read the credentials' Secrets, and a value derived from the credentials
+// would give them an offline check for every guess at one. Kubernetes and
+// `generate config` therefore pass none and stay random.
+//
+// The result is rendered as a literal that the in-container status script
+// (internal/statusscript) reads back out of application.yml, so it must be strong:
+// never a fixed or predictable fallback. It stays stable within one generate call
+// because every call site resolves it exactly once and threads the same value
+// through. It is secret material: nothing here prints it, and an error never
+// carries a credential value.
+func resolveStatusPassword(res Resolver, name string, refs []consolidate.SecretRef) (string, error) {
 	if res.Env != nil {
 		if v, ok := res.Env(spec.StatusUserPasswordEnvVar); ok && v != "" {
 			return v, nil
+		}
+	}
+	if len(refs) > 0 {
+		if kvs, err := ResolveCredentials(refs, res); err == nil {
+			return deriveStatusPassword(kvs, name), nil
 		}
 	}
 	read := res.Rand
@@ -812,6 +866,26 @@ func resolveStatusPassword(res Resolver) (string, error) {
 		return "", fmt.Errorf("generating the %s account password: %v; set %s to provide one explicitly", spec.StatusUserName, err, spec.StatusUserPasswordEnvVar)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// deriveStatusPassword is the HMAC described on resolveStatusPassword. kvs must not
+// be empty. Every field is length-prefixed, so no two different inputs are the same
+// bytes ("a"+"bc" is not "ab"+"c").
+func deriveStatusPassword(kvs []KV, name string) string {
+	sorted := slices.Clone(kvs)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Key < sorted[j].Key })
+	var key []byte
+	for _, kv := range sorted {
+		key = appendField(appendField(key, kv.Key), kv.Val)
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write(appendField(appendField(nil, statusPasswordLabel), name))
+	return hex.EncodeToString(mac.Sum(nil)[:16])
+}
+
+// appendField appends s to b behind its length as eight big-endian bytes.
+func appendField(b []byte, s string) []byte {
+	return append(binary.BigEndian.AppendUint64(b, uint64(len(s))), s...)
 }
 
 // ---- config building ---------------------------------------------------------

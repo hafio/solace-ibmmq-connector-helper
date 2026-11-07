@@ -6,7 +6,7 @@
 // podman/systemctl.
 //
 //	solmq-conn-util generate [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
-//	solmq-conn-util deploy   [--platform kubernetes|docker|podman] [-e env.yaml]
+//	solmq-conn-util deploy   [--no-prompt] [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util remove   [--no-prompt] [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util status   <container|application|all> [-d] [-w] [--all] [--output table|json] [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util logs     [--follow] [--previous] [--tail N] [--since d] [--timestamps] [--pod name|index] [--container name|index] [--platform kubernetes|docker|podman] [-e env.yaml]
@@ -31,11 +31,13 @@ import (
 
 	"github.com/hafio/go-deploy-utility/abbrev"
 	"github.com/hafio/go-deploy-utility/confirm"
+	"github.com/hafio/go-deploy-utility/containercli"
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
 	"github.com/hafio/go-deploy-utility/notice"
 	"github.com/hafio/go-deploy-utility/podman"
 	gdurunner "github.com/hafio/go-deploy-utility/runner"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/dockergen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/examples"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/libs"
@@ -456,8 +458,10 @@ type actionOpts struct {
 	action    string
 	envPath   string
 	approvals execguard.Approvals
-	// noPrompt skips both questions a teardown asks: the confirmation and, when
-	// the namespace turns out to be empty, whether to remove it too.
+	// noPrompt skips the questions: both a teardown asks (the confirmation and,
+	// when the namespace turns out to be empty, whether to remove it too) and the
+	// one a docker or podman deploy asks before it restarts or recreates a
+	// running service.
 	//
 	// It cannot authorise more than that. A namespace holding anything this
 	// release does not own is never removed, with or without this set -- the
@@ -482,12 +486,7 @@ func runAction(action string, args []string, r gdurunner.Runner) int {
 	env := envFlag(fs)
 	platform := platformFlag(fs)
 	allow := allowCommandFlag(fs)
-	// remove only: deploy has nothing to confirm, so --no-prompt is an unknown flag
-	// there rather than a no-op that quietly accepts it.
-	var noPrompt *bool
-	if action == runner.ActionRemove {
-		noPrompt = noPromptFlag(fs)
-	}
+	noPrompt := noPromptFlag(fs)
 	pos, err := collectFlagsAndDirs(fs, args)
 	if err != nil {
 		return flagExit(action, err)
@@ -513,10 +512,15 @@ func runAction(action string, args []string, r gdurunner.Runner) int {
 	if perr != nil {
 		return usageExit(perr)
 	}
+	// A flag that would do nothing is refused, as solace-util refuses it: a
+	// kubernetes deploy asks nothing, so there is no question for it to answer.
+	if action == runner.ActionDeploy && platformName == validate.PlatformKubernetes && *noPrompt {
+		return usageExit(fmt.Errorf("%s has no effect on a kubernetes deploy, which asks nothing (kubectl apply and the rollout decide); leave it off", noPromptFlagName))
+	}
 	// The one destructive verb asks before it acts, and asks here -- ahead of
 	// the per-platform preflight probe -- so a cancelled teardown touches the
 	// cluster not at all, not even with a read.
-	if noPrompt != nil && !*noPrompt {
+	if action == runner.ActionRemove && !*noPrompt {
 		ok, cerr := confirmRemove(platformName, removeTarget(platformName, e))
 		if cerr != nil {
 			return errExit(cerr)
@@ -532,7 +536,7 @@ func runAction(action string, args []string, r gdurunner.Runner) int {
 		action:    action,
 		envPath:   *env,
 		approvals: approvals,
-		noPrompt:  noPrompt != nil && *noPrompt,
+		noPrompt:  *noPrompt,
 	}, r)
 }
 
@@ -541,8 +545,11 @@ func runAction(action string, args []string, r gdurunner.Runner) int {
 // probe's combined output and wrapped error (which already names the platform
 // and carries a login hint) and the caller must stop without writing or
 // executing anything further.
-func preflight(r gdurunner.Runner, action, platform, command, namespace string, approvals execguard.Approvals) (code int, ok bool) {
-	out, err := runner.Preflight(bg(), r, platform, command, action, namespace, approvals)
+//
+// rootless is whether a podman deployment runs rootless, which picks the hint the
+// failure carries; it is false on every other platform.
+func preflight(r gdurunner.Runner, action, platform, command, namespace string, rootless bool, approvals execguard.Approvals) (code int, ok bool) {
+	out, err := runner.Preflight(bg(), r, platform, command, action, namespace, rootless, approvals)
 	if err != nil {
 		return report(action, platform, out, err), false
 	}
@@ -571,7 +578,7 @@ func actKubernetes(o actionOpts, r gdurunner.Runner) int {
 	if len(errs) > 0 {
 		return failFast(errs)
 	}
-	if code, ok := preflight(r, action, validate.PlatformKubernetes, e.Kubernetes.Command, e.Kubernetes.Deployment.Namespace, approvals); !ok {
+	if code, ok := preflight(r, action, validate.PlatformKubernetes, e.Kubernetes.Command, e.Kubernetes.Deployment.Namespace, false, approvals); !ok {
 		return code
 	}
 	if action == runner.ActionDeploy && len(probes) > 0 {
@@ -645,7 +652,7 @@ func actDocker(o actionOpts, r gdurunner.Runner) int {
 		}
 		storeKVs = skvs
 	}
-	if code, ok := preflight(r, action, validate.PlatformDocker, e.Docker.Command, "", approvals); !ok {
+	if code, ok := preflight(r, action, validate.PlatformDocker, e.Docker.Command, "", false, approvals); !ok {
 		return code
 	}
 	if action == runner.ActionDeploy && len(plan.Stores) > 0 {
@@ -653,11 +660,56 @@ func actDocker(o actionOpts, r gdurunner.Runner) int {
 			return errExit(err)
 		}
 	}
+	env := envPairs(append(kvs, storeKVs...))
+	if action == runner.ActionDeploy {
+		// One digest covers the file and every value the compose child receives
+		// (credentials, created stores, the stores digest), computed before the
+		// digest variable itself is added. Compose fills the deploy-digest label
+		// from it, so a changed file or a rotated credential recreates the
+		// container and an unchanged deploy changes nothing; compose decides, and
+		// the digest only predicts whether it is about to recreate a running
+		// container, so as to ask first.
+		digest := containercli.ComposeDigest([]byte(plan.Compose), env)
+		if code, ok := confirmDockerRedeploy(r, o, e.Docker, digest); !ok {
+			return code
+		}
+		env = append(env, dockergen.DeployDigestVar+"="+digest)
+	}
 	// The compose file goes to compose on stdin and never touches the disk:
 	// every deploy and remove renders it afresh, so nothing needs it kept, and
 	// `generate --platform docker -o` writes one (0600) for a hand-run compose.
-	out, rerr := runner.Docker(bg(), r, e.Docker.Command, action, plan.Compose, envDir, envPairs(append(kvs, storeKVs...)), approvals)
+	out, rerr := runner.Docker(bg(), r, e.Docker.Command, action, plan.Compose, envDir, env, approvals)
 	return report(action, tgtDocker, out, rerr)
+}
+
+// confirmDockerRedeploy asks before a deploy that compose is about to answer by
+// recreating a running container. It is asked nothing of when the container is
+// not running, or when its deploy-digest label is the digest this deploy would
+// stamp: compose then starts it or leaves it alone, and nothing running changes.
+// A label that is missing (a container an earlier build created) or an inspect
+// that fails counts as changed, since neither proves the container is current.
+//
+// A listing that cannot be read is an error, exit 1: without it the deploy cannot
+// say whether it would restart a running service. A declined question leaves
+// everything as it was and exits 0. ok is false when the deploy must stop, with
+// the exit code to return.
+func confirmDockerRedeploy(r gdurunner.Runner, o actionOpts, d *spec.Docker, digest string) (code int, ok bool) {
+	running, have, err := runner.DockerDeployDigest(bg(), r, d.Command, d.Name, spec.LabelDeployDigestKey, o.approvals)
+	if err != nil {
+		return errExit(err), false
+	}
+	if !running || have == digest {
+		return exitcode.OK, true
+	}
+	approved, cerr := confirmRedeploy(o.noPrompt, fmt.Sprintf(
+		"container %s is running and its compose file or credentials changed (or cannot be compared), so compose will recreate it", d.Name))
+	if cerr != nil {
+		return errExit(cerr), false
+	}
+	if !approved {
+		return redeployCancelled(), false
+	}
+	return exitcode.OK, true
 }
 
 // checkImageCommand holds a docker deploy that carries created stores to the
@@ -722,7 +774,7 @@ func actPodman(o actionOpts, r gdurunner.Runner) int {
 	if len(errs) > 0 {
 		return failFast(errs)
 	}
-	if code, ok := preflight(r, action, validate.PlatformPodman, e.Podman.Command, "", approvals); !ok {
+	if code, ok := preflight(r, action, validate.PlatformPodman, e.Podman.Command, "", sc.UserMode, approvals); !ok {
 		return code
 	}
 	if action == runner.ActionRemove {
@@ -745,10 +797,14 @@ func actPodman(o actionOpts, r gdurunner.Runner) int {
 	for _, w := range podmanHostChecks(plan, sc) {
 		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
-	return podmanDeploy(sc, plan, e.Podman, res, r, approvals)
+	return podmanDeploy(sc, plan, e.Podman, res, r, approvals, o.noPrompt)
 }
 
-func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, res gen.Resolver, r gdurunner.Runner, approvals execguard.Approvals) int {
+// podmanSecret is one secret the unit mounts: its name in podman's store and the
+// value to store under it. The value is never printed.
+type podmanSecret struct{ name, value string }
+
+func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, res gen.Resolver, r gdurunner.Runner, approvals execguard.Approvals, noPrompt bool) int {
 	// Everything the unit mounts is resolved first -- the credentials, then the
 	// documents and stores -- so a missing variable or an unreadable or
 	// oversized store stops the deploy before anything is created: the unit
@@ -764,16 +820,6 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	}
 	// Read before the new unit replaces it: the stores the last deploy mounted.
 	previous := previousStoreSecrets(sc, plan, p)
-	// podman 4.7 replaces a secret in one step; an older one, or a version that
-	// cannot be read, keeps to remove-then-create (runner.PodmanSecretCreate).
-	version, _ := runner.PodmanVersion(bg(), r, p.Command, approvals)
-	replace := podman.SupportsReplace(version)
-	for _, kv := range kvs {
-		out, err := runner.PodmanSecretCreate(bg(), r, p.Command, gen.PodmanSecretStoreName(p.Name, kv.Key), kv.Val, replace, approvals)
-		if err != nil {
-			return report(runner.ActionDeploy, tgtPodman, out, err)
-		}
-	}
 	// application.yml carries a live credential (the reserved status account's
 	// password, read back out of this same file by the status script at run
 	// time -- see statusscript.Render) and the stores are key material, so the
@@ -781,12 +827,31 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	// secret store, and deploy writes none of them to a file of its own. Only
 	// the unit is written, to the quadlet directory, the one place systemd
 	// scans; where podman keeps the secrets is its secret driver's business.
+	var secrets []podmanSecret
+	for _, kv := range kvs {
+		secrets = append(secrets, podmanSecret{name: gen.PodmanSecretStoreName(p.Name, kv.Key), value: kv.Val})
+	}
 	mounted := make(map[string]bool, len(files))
 	for _, kv := range files {
 		mounted[kv.Key] = true
-		out, err := runner.PodmanSecretCreate(bg(), r, p.Command, kv.Key, kv.Val, replace, approvals)
-		if err != nil {
-			return report(runner.ActionDeploy, tgtPodman, out, err)
+		secrets = append(secrets, podmanSecret{name: kv.Key, value: kv.Val})
+	}
+	// Nothing is written before the answer, so first compare: the unit with the
+	// file on disk (a missing or unreadable one is a change), and each secret's
+	// stored value, read back from podman, with the one about to be written (a
+	// missing secret and a probe that fails are changes). Reading a value back
+	// needs podman 4.7, the release that also brings `secret create --replace`;
+	// an older podman, or a version that cannot be read, counts every secret as
+	// changed and probes none. The version is read first for that reason.
+	version, _ := runner.PodmanVersion(bg(), r, p.Command, approvals)
+	replace := podman.SupportsReplace(version)
+	unitPath := filepath.Join(sc.Dir, plan.Unit.Filename)
+	installed, rerr := os.ReadFile(unitPath)
+	unitChanged := rerr != nil || string(installed) != plan.Unit.Content
+	var changed []podmanSecret
+	for _, s := range secrets {
+		if !replace || !runner.PodmanSecretMatches(bg(), r, p.Command, s.name, s.value, approvals) {
+			changed = append(changed, s)
 		}
 	}
 	// A file secret this spec no longer mounts -- syslog dropped, or a store no
@@ -798,14 +863,55 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 			stale = append(stale, n)
 		}
 	}
-	if out, err := runner.PodmanSecretRemove(bg(), r, p.Command, stale, approvals); err != nil {
-		return report(runner.ActionDeploy, tgtPodman, out, err)
+	write := func() (string, error) {
+		var out strings.Builder
+		// podman 4.7 replaces a secret in one step; an older one, or a version that
+		// cannot be read, keeps to remove-then-create (runner.PodmanSecretCreate).
+		for _, s := range changed {
+			o, err := runner.PodmanSecretCreate(bg(), r, p.Command, s.name, s.value, replace, approvals)
+			out.WriteString(o)
+			if err != nil {
+				return out.String(), err
+			}
+		}
+		o, err := runner.PodmanSecretRemove(bg(), r, p.Command, stale, approvals)
+		out.WriteString(o)
+		if err != nil {
+			return out.String(), err
+		}
+		if unitChanged {
+			if err := runner.WriteFile(unitPath, plan.Unit.Content, 0o644); err != nil {
+				return out.String(), err
+			}
+		}
+		return out.String(), nil
 	}
-	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.Unit.Filename), plan.Unit.Content, 0o644); err != nil {
-		return errExit(err)
+	approve := func() (bool, error) {
+		return confirmRedeploy(noPrompt, fmt.Sprintf("%s is running and %s changed, so it will be restarted",
+			plan.Service, podmanChangeSummary(unitChanged, changed)))
 	}
-	out, rerr := runner.PodmanDeploy(bg(), r, sc, []string{plan.Service})
-	return report(runner.ActionDeploy, tgtPodman, out, rerr)
+	out, cancelled, err := runner.PodmanDeploy(bg(), r, sc, []string{plan.Service}, unitChanged || len(changed) > 0, approve, write)
+	if cancelled {
+		return redeployCancelled()
+	}
+	return report(runner.ActionDeploy, tgtPodman, out, err)
+}
+
+// podmanChangeSummary names what differs, for the redeploy question: the unit,
+// and the secrets by name -- never a value or a digest.
+func podmanChangeSummary(unit bool, secrets []podmanSecret) string {
+	var parts []string
+	if unit {
+		parts = append(parts, "its unit")
+	}
+	if len(secrets) > 0 {
+		names := make([]string, len(secrets))
+		for i, s := range secrets {
+			names[i] = s.name
+		}
+		parts = append(parts, "the secrets "+strings.Join(names, ", "))
+	}
+	return strings.Join(parts, " and ")
 }
 
 func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r gdurunner.Runner, approvals execguard.Approvals) int {
@@ -1413,14 +1519,33 @@ func approvalsFrom(vals []string) (execguard.Approvals, error) {
 	return a, exitcode.AsUsage(err)
 }
 
-// noPromptFlag registers remove's --no-prompt confirmation skip.
+// noPromptFlag registers the --no-prompt skip of remove and deploy.
 //
-// runAction registers it for remove only, never for deploy: deploy has nothing
-// to confirm, so accepting the flag there would silently do nothing -- the kind
-// of surprise checkStatusFlags refuses for the same reason. On deploy it is an
-// unknown flag, which is the honest answer.
+// On remove it answers the teardown questions. On deploy it approves restarting
+// or recreating a docker or podman service that is running and whose artifact or
+// secrets changed (confirmRedeploy). Kubernetes asks nothing, so runAction refuses
+// the flag there (exit 2) rather than accept one that does nothing.
 func noPromptFlag(fs *flag.FlagSet) *bool {
-	return fs.Bool("no-prompt", false, "tear down without asking for confirmation")
+	return fs.Bool("no-prompt", false, "approve without asking (remove: the teardown; deploy: restarting a changed service)")
+}
+
+// confirmRedeploy asks before a deploy restarts or recreates a service that is
+// running, through the same prompter and non-TTY refusal confirmRemove uses.
+// "y"/"yes" proceeds; anything else, a blank line included, declines.
+//
+// what is the service and the reason it would restart, so a run pointed at the
+// wrong env.yaml is caught here. With noPrompt it approves without asking; a
+// non-TTY with no flag is an error naming --no-prompt, exit 1.
+func confirmRedeploy(noPrompt bool, what string) (bool, error) {
+	return prompter.Gate(noPrompt, confirm.Lenient,
+		fmt.Sprintf("deploy: %s -- continue? [y/N] ", what), "the redeploy")
+}
+
+// redeployCancelled is what a declined redeploy says: the host is exactly as it
+// was, so the next deploy asks again.
+func redeployCancelled() int {
+	fmt.Fprintln(os.Stderr, "deploy: cancelled; nothing changed")
+	return exitcode.OK
 }
 
 // confirmRemove asks once before anything is torn down, through the same

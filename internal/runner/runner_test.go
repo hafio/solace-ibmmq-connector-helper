@@ -500,43 +500,70 @@ func TestPodmanIDMap(t *testing.T) {
 // ask systemd for the service's state, then restart it when it is active or
 // reloading (a running container keeps the secrets it was created with, so only a
 // restart loads the new ones) and start it for any other answer, or none.
+// deployFns are the two seams PodmanDeploy takes, recording when they ran so a test
+// can assert the order: the question comes before the write.
+type deployFns struct {
+	asked, wrote int
+	answer       bool
+	askErr       error
+	writeErr     error
+	callsAtWrite int
+	f            *fakeRunner
+}
+
+func (d *deployFns) approve() (bool, error) { d.asked++; return d.answer, d.askErr }
+func (d *deployFns) write() (string, error) {
+	d.wrote++
+	if d.f != nil { // nil where the test records calls on another runner
+		d.callsAtWrite = len(d.f.calls)
+	}
+	return "wrote\n", d.writeErr
+}
+
 func TestPodmanDeployReloadThenStart(t *testing.T) {
 	for _, c := range []struct {
-		name  string
-		user  bool
-		state string
-		verb  string
+		name    string
+		user    bool
+		state   string
+		changed bool
+		verb    string // "" leaves the service alone
 	}{
-		{"inactive unit, user scope", true, "inactive\n", "start"},
-		{"active unit, user scope", true, "active\n", "restart"},
-		{"reloading unit, user scope", true, "reloading\n", "restart"},
-		{"failed unit, user scope", true, "failed\n", "start"},
-		{"unanswered probe starts, user scope", true, "", "start"},
-		{"inactive unit, system scope", false, "inactive\n", "start"},
-		{"active unit, system scope", false, "active\n", "restart"},
-		{"reloading unit, system scope", false, "reloading\n", "restart"},
+		{"inactive unit, user scope", true, "inactive\n", true, "start"},
+		{"active unit, user scope", true, "active\n", true, "restart"},
+		{"reloading unit, user scope", true, "reloading\n", true, "restart"},
+		{"failed unit, user scope", true, "failed\n", true, "start"},
+		{"unanswered probe starts, user scope", true, "", true, "start"},
+		{"inactive unit, system scope", false, "inactive\n", true, "start"},
+		{"active unit, system scope", false, "active\n", true, "restart"},
+		{"reloading unit, system scope", false, "reloading\n", true, "restart"},
+		{"unchanged inactive unit is started, nothing reloaded", true, "inactive\n", false, "start"},
+		{"unchanged active unit is left running", true, "active\n", false, ""},
+		{"unchanged reloading unit is left running", false, "reloading\n", false, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			// is-active exits non-zero for every state but active, so a state
 			// other than active or reloading arrives with an exit error.
-			f := &fakeRunner{outByCall: map[int]string{1: c.state}}
-			if c.verb == "start" {
-				f.errByCall = map[int]error{1: fmt.Errorf("exit status 3")}
+			f := &fakeRunner{outByCall: map[int]string{0: c.state}}
+			if c.state != "active\n" && c.state != "reloading\n" {
+				f.errByCall = map[int]error{0: fmt.Errorf("exit status 3")}
 			}
+			d := &deployFns{answer: true, f: f}
 			sc := QuadletScope{Dir: t.TempDir(), UserMode: c.user, Env: []string{"XDG_RUNTIME_DIR=/run/user/1000"}}
-			out, err := PodmanDeploy(bg(), f, sc, []string{"solmq-connector.service"})
-			if err != nil {
-				t.Fatal(err)
+			out, cancelled, err := PodmanDeploy(bg(), f, sc, []string{"solmq-connector.service"}, c.changed, d.approve, d.write)
+			if err != nil || cancelled {
+				t.Fatalf("err = %v, cancelled = %v", err, cancelled)
 			}
 			prefix := []string{"systemctl"}
 			if c.user {
 				prefix = append(prefix, "--user")
 			}
 			sysctl := func(args ...string) []string { return append(append([]string(nil), prefix...), args...) }
-			want := [][]string{
-				sysctl("daemon-reload"),
-				sysctl("is-active", "solmq-connector.service"),
-				sysctl(c.verb, "solmq-connector.service"),
+			want := [][]string{sysctl("is-active", "solmq-connector.service")}
+			if c.changed {
+				want = append(want, sysctl("daemon-reload"))
+			}
+			if c.verb != "" {
+				want = append(want, sysctl(c.verb, "solmq-connector.service"))
 			}
 			if len(f.calls) != len(want) {
 				t.Fatalf("want %d calls, got %+v", len(want), f.calls)
@@ -552,24 +579,94 @@ func TestPodmanDeployReloadThenStart(t *testing.T) {
 					t.Errorf("call %d env = %v, a system scope carries no session", i, f.calls[i].env)
 				}
 			}
+			running := c.state == "active\n" || c.state == "reloading\n"
+			wantAsked := 0
+			if c.changed && running {
+				wantAsked = 1
+			}
+			wantWrote := 0
+			if c.changed {
+				wantWrote = 1
+			}
+			if d.asked != wantAsked || d.wrote != wantWrote {
+				t.Errorf("asked %d times (want %d), wrote %d times (want %d)", d.asked, wantAsked, d.wrote, wantWrote)
+			}
+			if d.wrote == 1 && d.callsAtWrite != 1 {
+				t.Errorf("write ran after %d calls, want after the is-active probe alone", d.callsAtWrite)
+			}
 			if said := strings.Contains(out, "was running; restarting it"); said != (c.verb == "restart") {
 				t.Errorf("output %q: restart notice present = %v, want %v", out, said, c.verb == "restart")
+			}
+			if said := strings.Contains(out, "unchanged and left running"); said != (c.verb == "" && running) {
+				t.Errorf("output %q: left-running note present = %v", out, said)
+			}
+			if c.verb == "" && !strings.Contains(out, "`solmq-conn-util restart`") {
+				t.Errorf("output %q should say how to restart it", out)
 			}
 		})
 	}
 }
 
+// A running service that would restart asks first, and a "no" leaves the host
+// exactly as it was: nothing written, nothing reloaded, nothing restarted.
+func TestPodmanDeployDeclinedChangesNothing(t *testing.T) {
+	f := &fakeRunner{outByCall: map[int]string{0: "active\n"}}
+	d := &deployFns{answer: false, f: f}
+	sc := QuadletScope{Dir: t.TempDir(), UserMode: true}
+	out, cancelled, err := PodmanDeploy(bg(), f, sc, []string{"a.service"}, true, d.approve, d.write)
+	if err != nil || !cancelled || out != "" {
+		t.Fatalf("out = %q, cancelled = %v, err = %v; want a cancelled, silent deploy", out, cancelled, err)
+	}
+	if d.asked != 1 || d.wrote != 0 {
+		t.Errorf("asked %d, wrote %d; want one question and no write", d.asked, d.wrote)
+	}
+	if len(f.calls) != 1 || f.calls[0].argv[len(f.calls[0].argv)-2] != "is-active" {
+		t.Errorf("only the state probe may run, got %+v", f.calls)
+	}
+}
+
+// A question that cannot be asked ends the deploy with its own error, before any
+// write: no terminal and no --no-prompt is the typical cause.
+func TestPodmanDeployUnaskableQuestionStopsBeforeAnyWrite(t *testing.T) {
+	f := &fakeRunner{outByCall: map[int]string{0: "active\n"}}
+	d := &deployFns{askErr: fmt.Errorf("confirming the redeploy interactively: no terminal; pass --no-prompt instead"), f: f}
+	sc := QuadletScope{Dir: t.TempDir()}
+	_, cancelled, err := PodmanDeploy(bg(), f, sc, []string{"a.service"}, true, d.approve, d.write)
+	if err == nil || cancelled || !strings.Contains(err.Error(), "--no-prompt") {
+		t.Fatalf("err = %v, cancelled = %v; want the question's own error", err, cancelled)
+	}
+	if d.wrote != 0 || len(f.calls) != 1 {
+		t.Errorf("wrote %d times, %d calls; want no write and only the probe", d.wrote, len(f.calls))
+	}
+}
+
+// A write that fails stops the deploy where it fails: no reload, no start.
+func TestPodmanDeployWriteFailureStopsBeforeSystemctl(t *testing.T) {
+	f := &fakeRunner{outByCall: map[int]string{0: "inactive\n"}, errByCall: map[int]error{0: fmt.Errorf("exit status 3")}}
+	d := &deployFns{writeErr: fmt.Errorf("boom"), f: f}
+	sc := QuadletScope{Dir: t.TempDir()}
+	out, _, err := PodmanDeploy(bg(), f, sc, []string{"a.service"}, true, d.approve, d.write)
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("err = %v, want the write's own", err)
+	}
+	if !strings.Contains(out, "wrote") || len(f.calls) != 1 {
+		t.Errorf("out = %q, %d calls; want the write's output kept and only the probe run", out, len(f.calls))
+	}
+}
+
 func TestPodmanDeploySystemModeNoUserFlag(t *testing.T) {
 	f := &fakeRunner{}
+	d := &deployFns{answer: true, f: f}
 	sc := QuadletScope{Dir: t.TempDir(), UserMode: false}
-	if _, err := PodmanDeploy(bg(), f, sc, []string{"a.service"}); err != nil {
+	if _, _, err := PodmanDeploy(bg(), f, sc, []string{"a.service"}, true, d.approve, d.write); err != nil {
 		t.Fatal(err)
 	}
-	if reflect.DeepEqual(f.calls[0].argv, []string{"systemctl", "--user", "daemon-reload"}) {
+	// Call 0 is the state probe, call 1 the reload.
+	if reflect.DeepEqual(f.calls[1].argv, []string{"systemctl", "--user", "daemon-reload"}) {
 		t.Error("system mode must not pass --user")
 	}
-	if !reflect.DeepEqual(f.calls[0].argv, []string{"systemctl", "daemon-reload"}) {
-		t.Errorf("argv = %v", f.calls[0].argv)
+	if !reflect.DeepEqual(f.calls[1].argv, []string{"systemctl", "daemon-reload"}) {
+		t.Errorf("argv = %v", f.calls[1].argv)
 	}
 }
 
@@ -599,8 +696,8 @@ func TestPodmanRemoveStopsRemovesReloads(t *testing.T) {
 }
 
 func TestPodmanDeployStartFailureIsReported(t *testing.T) {
-	// daemon-reload is call 0 and is-active (call 1) decides the verb for the
-	// start or restart (call 2); a failure injected at any step must surface
+	// is-active is call 0 and decides the verb, daemon-reload is call 1 and the
+	// start or restart is call 2; a failure injected at any step must surface
 	// naming the step, and nothing after it may run. The verb follows the state
 	// is-active prints, as systemctl does: "inactive" with exit 3 starts, and
 	// "active" restarts.
@@ -611,15 +708,16 @@ func TestPodmanDeployStartFailureIsReported(t *testing.T) {
 		wantErr   string
 		wantCalls int
 	}{
-		{"daemon-reload", map[int]error{0: fmt.Errorf("boom")}, "active\n", "systemctl daemon-reload: boom", 1},
-		{"start", map[int]error{1: fmt.Errorf("exit status 3"), 2: fmt.Errorf("boom")}, "inactive\n",
+		{"daemon-reload", map[int]error{1: fmt.Errorf("boom")}, "active\n", "systemctl daemon-reload: boom", 2},
+		{"start", map[int]error{0: fmt.Errorf("exit status 3"), 2: fmt.Errorf("boom")}, "inactive\n",
 			"systemctl start a.service: boom", 3},
 		{"restart", map[int]error{2: fmt.Errorf("boom")}, "active\n", "systemctl restart a.service: boom", 3},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			f := &fakeRunner{errByCall: c.errs, outByCall: map[int]string{1: c.probe}}
+			f := &fakeRunner{errByCall: c.errs, outByCall: map[int]string{0: c.probe}}
+			d := &deployFns{answer: true, f: f}
 			sc := QuadletScope{Dir: t.TempDir(), UserMode: true}
-			_, err := PodmanDeploy(bg(), f, sc, []string{"a.service"})
+			_, _, err := PodmanDeploy(bg(), f, sc, []string{"a.service"}, true, d.approve, d.write)
 			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
 				t.Fatalf("err = %v, want it to contain %q", err, c.wantErr)
 			}
@@ -919,7 +1017,7 @@ func TestWriteFileTargetIsDirectoryReturnsError(t *testing.T) {
 
 func TestPreflightKubernetesArgvDeployNoNamespace(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl --context prod", ActionDeploy, "", noApprovals); err != nil {
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl --context prod", ActionDeploy, "", false, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"kubectl", "--context", "prod", "auth", "can-i", "create", "deployment"}
@@ -930,7 +1028,7 @@ func TestPreflightKubernetesArgvDeployNoNamespace(t *testing.T) {
 
 func TestPreflightKubernetesArgvRemoveWithNamespace(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "oc", ActionRemove, "solace", noApprovals); err != nil {
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "oc", ActionRemove, "solace", false, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"oc", "auth", "can-i", "delete", "deployment", "--namespace", "solace"}
@@ -941,7 +1039,7 @@ func TestPreflightKubernetesArgvRemoveWithNamespace(t *testing.T) {
 
 func TestPreflightDockerArgvIsInfo(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformDocker, "docker --context foo", ActionDeploy, "", noApprovals); err != nil {
+	if _, err := Preflight(bg(), f, validate.PlatformDocker, "docker --context foo", ActionDeploy, "", false, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"docker", "--context", "foo", "info"}
@@ -952,7 +1050,7 @@ func TestPreflightDockerArgvIsInfo(t *testing.T) {
 
 func TestPreflightPodmanArgvIsInfo(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformPodman, "podman", ActionRemove, "", noApprovals); err != nil {
+	if _, err := Preflight(bg(), f, validate.PlatformPodman, "podman", ActionRemove, "", false, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"podman", "info"}
@@ -965,20 +1063,19 @@ func TestPreflightFailureWrapsPlatformHint(t *testing.T) {
 	cases := []struct {
 		platform string
 		command  string
+		rootless bool
 		hint     string
 	}{
-		{validate.PlatformKubernetes, "kubectl", "oc login"},
-		{validate.PlatformDocker, "docker", "docker daemon"},
-		{validate.PlatformPodman, "podman", "podman machine"},
+		{validate.PlatformKubernetes, "kubectl", false, "oc login"},
+		{validate.PlatformDocker, "docker", false, "sudo systemctl start docker"},
+		{validate.PlatformPodman, "podman", true, "systemctl --user start podman.socket"},
+		{validate.PlatformPodman, "podman", false, "sudo systemctl start podman.socket"},
 	}
 	for _, c := range cases {
-		f := &fakeRunner{err: fmt.Errorf("connection refused")}
-		_, err := Preflight(bg(), f, c.platform, c.command, ActionDeploy, "", noApprovals)
+		f := &fakeRunner{err: fmt.Errorf("connection refused"), out: "dial unix /run/podman.sock: no such file"}
+		out, err := Preflight(bg(), f, c.platform, c.command, ActionDeploy, "", c.rootless, noApprovals)
 		if err == nil {
 			t.Fatalf("%s: preflight failure must surface as an error", c.platform)
-		}
-		if !strings.Contains(err.Error(), "preflight failed for "+c.platform) {
-			t.Errorf("%s: error missing platform prefix: %v", c.platform, err)
 		}
 		if !strings.Contains(err.Error(), "connection refused") {
 			t.Errorf("%s: error must preserve the underlying cause: %v", c.platform, err)
@@ -986,6 +1083,31 @@ func TestPreflightFailureWrapsPlatformHint(t *testing.T) {
 		if !strings.Contains(err.Error(), c.hint) {
 			t.Errorf("%s: error missing actionable hint (want to contain %q): %v", c.platform, c.hint, err)
 		}
+		if c.platform == validate.PlatformKubernetes {
+			if !strings.Contains(err.Error(), "preflight failed for "+c.platform) {
+				t.Errorf("%s: error missing platform prefix: %v", c.platform, err)
+			}
+			continue
+		}
+		// One message: the engine's own output is inside the error, and the output
+		// the caller prints is empty, so nothing is said twice.
+		if !strings.Contains(err.Error(), "cannot talk to the") || !strings.Contains(err.Error(), fmt.Sprintf("%q info", c.command)) ||
+			!strings.Contains(err.Error(), "no such file") || out != "" {
+			t.Errorf("%s: want containercli's one message carrying the engine's output, got out=%q err=%v", c.platform, out, err)
+		}
+	}
+}
+
+// The engine's output is appended to the error, so a control character in it is
+// dropped there: a terminal escape from the engine is never acted on.
+func TestPreflightFailureDropsControlCharactersFromEngineOutput(t *testing.T) {
+	f := &fakeRunner{err: fmt.Errorf("refused"), out: "bad\x1b[2Jnews\nsecond line"}
+	_, err := Preflight(bg(), f, validate.PlatformDocker, "docker", ActionDeploy, "", false, noApprovals)
+	if err == nil || strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("want an error without the escape, got %q", err)
+	}
+	if !strings.Contains(err.Error(), "bad[2Jnews\nsecond line") {
+		t.Errorf("the output should survive with its line break, got %q", err)
 	}
 }
 
@@ -1003,7 +1125,7 @@ func TestPreflightReadVerbsAskOnlyWhatTheyUse(t *testing.T) {
 		{ActionCLI, []string{"kubectl", "auth", "can-i", "create", "pods", "--subresource", "exec", "--namespace", "prod"}},
 	} {
 		f := &fakeRunner{}
-		if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", c.action, "prod", noApprovals); err != nil {
+		if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", c.action, "prod", false, noApprovals); err != nil {
 			t.Fatalf("%s: %v", c.action, err)
 		}
 		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
@@ -1011,7 +1133,7 @@ func TestPreflightReadVerbsAskOnlyWhatTheyUse(t *testing.T) {
 		}
 		// docker and podman have no permission to ask about: reachability only.
 		f = &fakeRunner{}
-		if _, err := Preflight(bg(), f, validate.PlatformDocker, "docker", c.action, "", noApprovals); err != nil || !reflect.DeepEqual(f.calls[0].argv, []string{"docker", "info"}) {
+		if _, err := Preflight(bg(), f, validate.PlatformDocker, "docker", c.action, "", false, noApprovals); err != nil || !reflect.DeepEqual(f.calls[0].argv, []string{"docker", "info"}) {
 			t.Errorf("%s on docker: argv = %v, err = %v, want docker info", c.action, f.calls[0].argv, err)
 		}
 	}
@@ -1028,7 +1150,7 @@ func TestPreflightRefusalNamesThePermission(t *testing.T) {
 		{"Warning: something\nno - RBAC: access denied\n", "", `your account may not get pods/log in the current namespace (kubectl auth can-i answered "no - RBAC: access denied")`},
 	} {
 		f := &fakeRunner{out: c.out, err: fmt.Errorf("exit status 1")}
-		out, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", ActionLogs, c.ns, noApprovals)
+		out, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", ActionLogs, c.ns, false, noApprovals)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("out %q: error = %v, want it to contain %s", c.out, err, c.want)
 		}
@@ -1041,14 +1163,14 @@ func TestPreflightRefusalNamesThePermission(t *testing.T) {
 	}
 	// An unreachable cluster still gets the login hint.
 	f := &fakeRunner{out: "error: You must be logged in to the server (Unauthorized)\n", err: fmt.Errorf("exit status 1")}
-	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", ActionLogs, "prod", noApprovals); err == nil || !strings.Contains(err.Error(), "oc login") {
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", ActionLogs, "prod", false, noApprovals); err == nil || !strings.Contains(err.Error(), "oc login") {
 		t.Errorf("an unreachable cluster keeps the login hint, got %v", err)
 	}
 }
 
 func TestPreflightRejectsDisallowedBinaryBeforeRunning(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "curl", ActionDeploy, "", noApprovals); err == nil {
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "curl", ActionDeploy, "", false, noApprovals); err == nil {
 		t.Fatal("a binary outside the platform allowlist must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -1058,11 +1180,11 @@ func TestPreflightRejectsDisallowedBinaryBeforeRunning(t *testing.T) {
 
 func TestPreflightExtraAllowedThreadsThrough(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformPodman, "lima podman", ActionDeploy, "", noApprovals); err == nil {
+	if _, err := Preflight(bg(), f, validate.PlatformPodman, "lima podman", ActionDeploy, "", false, noApprovals); err == nil {
 		t.Fatal("lima podman must be rejected without an approval")
 	}
 	f = &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformPodman, "lima podman", ActionDeploy, "", approve(t, "lima")); err != nil {
+	if _, err := Preflight(bg(), f, validate.PlatformPodman, "lima podman", ActionDeploy, "", false, approve(t, "lima")); err != nil {
 		t.Fatalf("lima podman with lima approved unexpected error: %v", err)
 	}
 	want := []string{"lima", "podman", "info"}
@@ -1072,7 +1194,7 @@ func TestPreflightExtraAllowedThreadsThrough(t *testing.T) {
 
 	// sudo is refused before the probe runs, approvals or not.
 	f = &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformPodman, "sudo podman", ActionDeploy, "", approve(t, "lima")); err == nil ||
+	if _, err := Preflight(bg(), f, validate.PlatformPodman, "sudo podman", ActionDeploy, "", false, approve(t, "lima")); err == nil ||
 		!strings.Contains(err.Error(), "privilege-escalation wrapper") {
 		t.Fatalf("sudo podman must be refused as an escalation wrapper, got %v", err)
 	}
@@ -1083,7 +1205,7 @@ func TestPreflightExtraAllowedThreadsThrough(t *testing.T) {
 
 func TestPreflightUnknownAction(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", "rollback", "", noApprovals); err == nil {
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", "rollback", "", false, noApprovals); err == nil {
 		t.Fatal("unknown action must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -1244,7 +1366,7 @@ func TestEngineInspectJSONArgv(t *testing.T) {
 	if _, err := EngineInspectJSON(bg(), f, []string{"docker"}, []string{"a", "b", "c"}); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"docker", "inspect", "a", "b", "c"}
+	want := []string{"docker", "container", "inspect", "a", "b", "c"}
 	if !reflect.DeepEqual(f.calls[0].argv, want) {
 		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
 	}
@@ -1253,7 +1375,7 @@ func TestEngineInspectJSONArgv(t *testing.T) {
 	if _, err := EngineInspectJSON(bg(), f2, []string{"sudo", "podman"}, []string{"solmq"}); err != nil {
 		t.Fatal(err)
 	}
-	want2 := []string{"sudo", "podman", "inspect", "solmq"}
+	want2 := []string{"sudo", "podman", "container", "inspect", "solmq"}
 	if !reflect.DeepEqual(f2.calls[0].argv, want2) {
 		t.Errorf("argv = %v, want %v", f2.calls[0].argv, want2)
 	}
@@ -1277,6 +1399,37 @@ func TestEngineInspectJSONFailureNamesTheTargets(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "a, b") {
 		t.Errorf("error should name the targets, got %v", err)
+	}
+}
+
+// What the engine said is appended to the error; a terminal escape in it is dropped,
+// the line breaks are kept.
+func TestEngineFailuresDropControlCharactersFromTheEnginesOutput(t *testing.T) {
+	for name, call := range map[string]func(r gdurunner.Runner) error{
+		"EngineInspectJSON": func(r gdurunner.Runner) error {
+			_, err := EngineInspectJSON(bg(), r, []string{"docker"}, []string{"c"})
+			return err
+		},
+		"EngineImageInspectJSON": func(r gdurunner.Runner) error {
+			_, err := EngineImageInspectJSON(bg(), r, []string{"docker"}, "img:1")
+			return err
+		},
+		"EngineStats": func(r gdurunner.Runner) error {
+			_, err := EngineStats(bg(), r, []string{"docker"}, []string{"c"})
+			return err
+		},
+		"EngineList": func(r gdurunner.Runner) error {
+			_, err := EngineList(bg(), r, []string{"docker"}, false)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := &splitRunner{stderr: "no such\x1b[2J thing\nsecond", err: fmt.Errorf("exit status 1")}
+			err := call(r)
+			if err == nil || strings.Contains(err.Error(), "\x1b") || !strings.Contains(err.Error(), "no such[2J thing\nsecond") {
+				t.Errorf("err = %q, want the output with the escape dropped and the line break kept", err)
+			}
+		})
 	}
 }
 
@@ -1313,12 +1466,21 @@ func TestEngineStatsArgv(t *testing.T) {
 
 func TestEngineListArgv(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := EngineList(bg(), f, []string{"podman"}); err != nil {
+	if _, err := EngineList(bg(), f, []string{"podman"}, false); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"podman", "ps", "--all", "--no-trunc", "--format", "{{.Names}}\t{{.Image}}"}
+	want := []string{"podman", "ps", "--all", "--no-trunc", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"}
 	if !reflect.DeepEqual(f.calls[0].argv, want) {
 		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	}
+	// Only the running ones, for the redeploy check.
+	f = &fakeRunner{}
+	if _, err := EngineList(bg(), f, []string{"docker"}, true); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"docker", "ps", "--all", "--no-trunc", "--filter", "status=running", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"}
+	if !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("running argv = %v, want %v", f.calls[0].argv, want)
 	}
 	// --all is deliberate: an instance that died is exactly what a search like
 	// this is for.
@@ -1525,17 +1687,17 @@ func TestInstallScriptArgv(t *testing.T) {
 		{
 			name: "docker", cmd: []string{"docker"}, platform: validate.PlatformDocker,
 			target: "solmq-connector",
-			want:   []string{"docker", "exec", "-i", "solmq-connector", "sh", "-c", "mkdir -p /tmp && cat > /tmp/solmq-status.sh"},
+			want:   []string{"docker", "exec", "-i", "solmq-connector", "sh", "-c", "mkdir -p '/tmp' && cat > '/tmp/solmq-status.sh'"},
 		},
 		{
 			name: "podman", cmd: []string{"podman"}, platform: validate.PlatformPodman,
 			target: "solmq-connector",
-			want:   []string{"podman", "exec", "-i", "solmq-connector", "sh", "-c", "mkdir -p /tmp && cat > /tmp/solmq-status.sh"},
+			want:   []string{"podman", "exec", "-i", "solmq-connector", "sh", "-c", "mkdir -p '/tmp' && cat > '/tmp/solmq-status.sh'"},
 		},
 	}
 	for _, c := range cases {
 		f := &fakeRunner{}
-		if _, err := InstallScript(bg(), f, c.cmd, c.platform, c.target, c.namespace, "/tmp", "/tmp/solmq-status.sh", "#!/bin/sh\necho ok\n"); err != nil {
+		if _, err := InstallScript(bg(), f, c.cmd, c.platform, c.target, c.namespace, "/tmp/solmq-status.sh", "#!/bin/sh\necho ok\n"); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
@@ -1547,7 +1709,7 @@ func TestInstallScriptArgv(t *testing.T) {
 func TestInstallScriptPassesScriptOnStdinNotArgv(t *testing.T) {
 	f := &fakeRunner{}
 	script := "#!/bin/sh\necho ok\n"
-	if _, err := InstallScript(bg(), f, []string{"docker"}, validate.PlatformDocker, "solmq-connector", "", "/tmp", "/tmp/solmq-status.sh", script); err != nil {
+	if _, err := InstallScript(bg(), f, []string{"docker"}, validate.PlatformDocker, "solmq-connector", "", "/tmp/solmq-status.sh", script); err != nil {
 		t.Fatal(err)
 	}
 	if f.calls[0].stdin != script {
@@ -1560,9 +1722,21 @@ func TestInstallScriptPassesScriptOnStdinNotArgv(t *testing.T) {
 	}
 }
 
+// An engine upload with nothing to name is refused by containercli.Upload before
+// anything runs.
+func TestInstallScriptRefusesAnEmptyTargetOnAnEngine(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := InstallScript(bg(), f, []string{"docker"}, validate.PlatformDocker, "", "", "/tmp/x.sh", "x"); err == nil {
+		t.Fatal("an upload with no container must be refused")
+	}
+	if len(f.calls) != 0 {
+		t.Fatal("nothing must run")
+	}
+}
+
 func TestInstallScriptUnknownPlatform(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := InstallScript(bg(), f, []string{"kubectl"}, "bogus", "pod-0", "", "/tmp", "/tmp/x.sh", "x"); err == nil {
+	if _, err := InstallScript(bg(), f, []string{"kubectl"}, "bogus", "pod-0", "", "/tmp/x.sh", "x"); err == nil {
 		t.Fatal("unknown platform must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -1713,8 +1887,9 @@ func TestLogsArgvRefusesPreviousOffKubernetes(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s: --previous must be refused", platform)
 		}
-		if !strings.Contains(err.Error(), platform) {
-			t.Errorf("%s: the error should name the platform, got %v", platform, err)
+		// containercli.NoPrevious names the engine as a message spells it (Docker).
+		if !strings.Contains(strings.ToLower(err.Error()), platform) || !strings.Contains(err.Error(), "--previous is a kubernetes option") {
+			t.Errorf("%s: the error should name the platform and the option, got %v", platform, err)
 		}
 	}
 }
@@ -1784,14 +1959,26 @@ func TestExecArgvPerPlatform(t *testing.T) {
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := ExecArgv([]string{"cli"}, c.platform, "pod-0", c.namespace, c.opts)
+			// The in-container command is the caller's, appended after the flags
+			// (and after the "--" on kubernetes).
+			got, err := ExecArgv([]string{"cli"}, c.platform, "pod-0", c.namespace, c.opts, "id", "-u")
 			if err != nil {
 				t.Fatalf("ExecArgv: %v", err)
 			}
-			if !reflect.DeepEqual(got, c.want) {
-				t.Errorf("argv = %v, want %v", got, c.want)
+			if want := append(append([]string(nil), c.want...), "id", "-u"); !reflect.DeepEqual(got, want) {
+				t.Errorf("argv = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+// An exec with nothing to run is a caller mistake on every platform, refused rather
+// than built.
+func TestExecArgvRefusesAnEmptyCommand(t *testing.T) {
+	for _, platform := range []string{validate.PlatformKubernetes, validate.PlatformDocker, validate.PlatformPodman} {
+		if _, err := ExecArgv([]string{"cli"}, platform, "pod-0", "", ExecOpts{}); err == nil {
+			t.Errorf("%s: an exec with no command must be refused", platform)
+		}
 	}
 }
 
@@ -1885,7 +2072,7 @@ func TestParsingHelpersIgnoreAWarningOnStderr(t *testing.T) {
 			return EngineStats(bg(), r, []string{"docker"}, []string{"c"})
 		}},
 		{"EngineList", func(r gdurunner.Runner) (string, error) {
-			return EngineList(bg(), r, []string{"docker"})
+			return EngineList(bg(), r, []string{"docker"}, false)
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -1967,11 +2154,15 @@ func TestHelpersPassTheCallersContextToTheRunner(t *testing.T) {
 			return err
 		}},
 		{"PodmanDeploy (several commands)", func(r gdurunner.Runner) error {
-			_, err := PodmanDeploy(done, r, QuadletScope{}, []string{"a.service"})
+			// The state probe's error is ignored, so the service reads as not
+			// running and the write and the reload follow; the reload is what the
+			// done context stops.
+			d := &deployFns{answer: true}
+			_, _, err := PodmanDeploy(done, r, QuadletScope{}, []string{"a.service"}, true, d.approve, d.write)
 			return err
 		}},
 		{"Preflight", func(r gdurunner.Runner) error {
-			_, err := Preflight(done, r, validate.PlatformDocker, "docker", ActionDeploy, "", noApprovals)
+			_, err := Preflight(done, r, validate.PlatformDocker, "docker", ActionDeploy, "", false, noApprovals)
 			return err
 		}},
 	} {
@@ -2058,6 +2249,9 @@ func TestLifecycleArgv(t *testing.T) {
 		{"docker stop", func(r gdurunner.Runner) (string, error) {
 			return DockerLifecycle(bg(), r, "docker --context prod", ActionStop, "connector", noApprovals)
 		}, []string{"docker", "--context", "prod", "stop", "connector"}},
+		{"docker start", func(r gdurunner.Runner) (string, error) {
+			return DockerLifecycle(bg(), r, "docker", ActionStart, "connector", noApprovals)
+		}, []string{"docker", "start", "connector"}},
 		{"docker restart", func(r gdurunner.Runner) (string, error) {
 			return DockerLifecycle(bg(), r, "docker", ActionRestart, "connector", noApprovals)
 		}, []string{"docker", "restart", "connector"}},
@@ -2103,11 +2297,139 @@ func TestLifecycleArgv(t *testing.T) {
 func TestPreflightKubernetesLifecycleAsksToPatch(t *testing.T) {
 	for _, action := range []string{ActionStart, ActionStop, ActionRestart} {
 		f := &fakeRunner{}
-		if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", action, "ns", noApprovals); err != nil {
+		if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", action, "ns", false, noApprovals); err != nil {
 			t.Fatalf("%s: %v", action, err)
 		}
 		if want := []string{"kubectl", "auth", "can-i", "patch", "deployment", "--namespace", "ns"}; !reflect.DeepEqual(f.calls[0].argv, want) {
 			t.Errorf("%s: argv = %v, want %v", action, f.calls[0].argv, want)
 		}
+	}
+}
+
+// ---- redeploy probes: DockerDeployDigest, PodmanSecretMatches -------------------------
+
+// routeRunner answers each call from a function of its argv, on stdout, so a test
+// can give `ps` and `inspect` different answers. It records every argv.
+type routeRunner struct {
+	calls [][]string
+	reply func(argv []string) (string, error)
+}
+
+func (r *routeRunner) Run(_ context.Context, c gdurunner.Cmd, stdout, _ io.Writer) error {
+	r.calls = append(r.calls, c.Argv)
+	out, err := r.reply(c.Argv)
+	emit(stdout, out)
+	return err
+}
+
+func (r *routeRunner) Attach(c gdurunner.Cmd, _, _, _ *os.File) (int, error) {
+	return 0, fmt.Errorf("%s: this fake does not attach", c.Argv[0])
+}
+
+const deployKey = "solace-connector/deploy-sha256"
+
+// DockerDeployDigest asks `ps` for the running containers and matches the name
+// exactly in Go, so a sibling such as solmq-connector-2 is not solmq-connector; then,
+// for a running container, reads the deploy digest label off its inspect.
+func TestDockerDeployDigest(t *testing.T) {
+	inspectDoc := func(name, label string) string {
+		return `[{"Name":"/` + name + `","State":{"Status":"running"},"Config":{"Image":"i","Labels":{` + label + `}}}]`
+	}
+	for _, c := range []struct {
+		name        string
+		ps          string
+		psErr       error
+		inspect     string
+		inspectErr  error
+		wantRunning bool
+		wantDigest  string
+		wantErr     bool
+	}{
+		{name: "not running", ps: "other\timg\tUp 1 hour\n"},
+		{name: "a sibling is not the container", ps: "solmq-connector-2\timg\tUp 1 hour\n"},
+		{name: "running, label present", ps: "solmq-connector\timg\tUp 1 hour\n",
+			inspect: inspectDoc("solmq-connector", `"`+deployKey+`":"abc"`), wantRunning: true, wantDigest: "abc"},
+		{name: "running, label missing", ps: "solmq-connector\timg\tUp 1 hour\n",
+			inspect: inspectDoc("solmq-connector", `"other":"x"`), wantRunning: true},
+		{name: "running, inspect fails", ps: "solmq-connector\timg\tUp 1 hour\n",
+			inspectErr: fmt.Errorf("boom"), wantRunning: true},
+		{name: "running, inspect is not json", ps: "solmq-connector\timg\tUp 1 hour\n",
+			inspect: "not json", wantRunning: true},
+		{name: "running, inspect answers another name", ps: "solmq-connector\timg\tUp 1 hour\n",
+			inspect: inspectDoc("elsewhere", `"`+deployKey+`":"abc"`), wantRunning: true},
+		{name: "the listing fails", psErr: fmt.Errorf("daemon down"), wantErr: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := &routeRunner{reply: func(argv []string) (string, error) {
+				if contains(argv, "ps") {
+					return c.ps, c.psErr
+				}
+				return c.inspect, c.inspectErr
+			}}
+			running, digest, err := DockerDeployDigest(bg(), r, "docker", "solmq-connector", deployKey, noApprovals)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err = %v, want error = %v", err, c.wantErr)
+			}
+			if c.wantErr {
+				if !strings.Contains(err.Error(), "solmq-connector") || !strings.Contains(err.Error(), "daemon down") {
+					t.Errorf("the error should name the container and carry the cause, got %v", err)
+				}
+				return
+			}
+			if running != c.wantRunning || digest != c.wantDigest {
+				t.Errorf("running = %v, digest = %q; want %v, %q", running, digest, c.wantRunning, c.wantDigest)
+			}
+			wantPS := []string{"docker", "ps", "--all", "--no-trunc", "--filter", "status=running", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"}
+			if !reflect.DeepEqual(r.calls[0], wantPS) {
+				t.Errorf("listing argv = %v, want %v", r.calls[0], wantPS)
+			}
+			if c.wantRunning && !reflect.DeepEqual(r.calls[1], []string{"docker", "container", "inspect", "solmq-connector"}) {
+				t.Errorf("inspect argv = %v", r.calls[1])
+			}
+			if !c.wantRunning && len(r.calls) != 1 {
+				t.Errorf("a container that is not running is not inspected, got %v", r.calls)
+			}
+		})
+	}
+	if _, _, err := DockerDeployDigest(bg(), &routeRunner{reply: nil}, "docker; id", "c", deployKey, noApprovals); err == nil {
+		t.Error("an unsafe command is refused before anything runs")
+	}
+}
+
+// PodmanSecretMatches reads the stored value back from stdout alone and compares it
+// exactly. Anything that is not a clear match reads as false: the caller counts that
+// as a change. The value never appears in an argv.
+func TestPodmanSecretMatches(t *testing.T) {
+	const value = "s3cr3t"
+	r := &splitRunner{stdout: value + "\n", stderr: "WARN[0000] a warning\n"}
+	if !PodmanSecretMatches(bg(), r, "podman", "solmq-conn-app", value, noApprovals) {
+		t.Error("the stored value equal to the new one matches, despite a warning on stderr")
+	}
+	want := []string{"podman", "secret", "inspect", "--showsecret", "--format", "{{.SecretData}}", "solmq-conn-app"}
+	if !reflect.DeepEqual(r.calls[0].argv, want) {
+		t.Errorf("argv = %v, want %v", r.calls[0].argv, want)
+	}
+	for _, a := range r.calls[0].argv {
+		if strings.Contains(a, value) {
+			t.Errorf("the value reached argv: %q", a)
+		}
+	}
+	for name, rr := range map[string]*splitRunner{
+		"a different value":   {stdout: "other\n"},
+		"no trailing newline": {stdout: value},
+		"an extra newline":    {stdout: value + "\n\n"},
+		"a failed probe":      {stdout: value + "\n", err: fmt.Errorf("no such secret")},
+		"nothing printed":     {},
+	} {
+		if PodmanSecretMatches(bg(), rr, "podman", "n", value, noApprovals) {
+			t.Errorf("%s must read as a change", name)
+		}
+	}
+	unsafe := &splitRunner{stdout: value + "\n"}
+	if PodmanSecretMatches(bg(), unsafe, "podman; id", "n", value, noApprovals) || len(unsafe.calls) != 0 {
+		t.Errorf("an unsafe command runs nothing: calls=%d", len(unsafe.calls))
+	}
+	if PodmanSecretMatches(bg(), unsafe, "podman", "", value, noApprovals) || len(unsafe.calls) != 0 {
+		t.Errorf("an empty name runs nothing: calls=%d", len(unsafe.calls))
 	}
 }

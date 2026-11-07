@@ -67,6 +67,7 @@ services:
     labels:
       solace-connector/le-mode: active_active
       solace-connector/role: active
+      solace-connector/deploy-sha256: ${_GEN_DEPLOY_SHA256:-}
     restart: unless-stopped
     user: "1000:0"
     privileged: false
@@ -164,6 +165,7 @@ func TestRenderFull_Minimal(t *testing.T) {
     labels:
       solace-connector/le-mode: standalone
       solace-connector/role: active
+      solace-connector/deploy-sha256: ${_GEN_DEPLOY_SHA256:-}
     privileged: false
     cap_drop:
       - ALL
@@ -482,7 +484,11 @@ func TestContentEscapesDollarsForCompose(t *testing.T) {
 	// No lone '$' may survive anywhere in the document: compose reads one as the
 	// start of an interpolation, so a single survivor is the whole bug back
 	// again. Dropping every "$$" pair leaves exactly the unescaped ones behind.
-	if bare := strings.ReplaceAll(out, "$$", ""); strings.Contains(bare, "$") {
+	// The deploy-digest label is the one deliberate interpolation, once per
+	// service, so it is dropped once.
+	bare := strings.ReplaceAll(out, "$$", "")
+	bare = strings.Replace(bare, "${"+DeployDigestVar+":-}", "", 1)
+	if strings.Contains(bare, "$") {
 		t.Errorf("unescaped '$' survives in:\n%s", out)
 	}
 }
@@ -610,7 +616,7 @@ func TestRenderCreatedStores(t *testing.T) {
 	for _, want := range []string{
 		"    container_name: \"solmq\"\n    entrypoint: [\"/bin/sh\", \"/app/external/.stores-init\"]\n" +
 			"    command: [\"java\", \"-cp\", \"@/app/jib-classpath-file\", \"com.solace.connector.jms.JmsConnector\", \"--spring.config.additional-location=optional:file:/app/external/spring/config/,optional:file:/app/external/spring/config/*/\"]\n",
-		"      solace-connector/stores-sha256: ${_GEN_TLS_STORES_SHA256:-}\n",
+		"      solace-connector/stores-sha256: ${_GEN_TLS_STORES_SHA256:-}\n      solace-connector/deploy-sha256: ${_GEN_DEPLOY_SHA256:-}\n",
 		"    secrets:\n      - source: \"SOL_PASSWORD\"\n        target: /app/external/var/secrets/SOL_PASSWORD\n" +
 			"      - source: \"_GEN_TLS_SOLACE_CA_STORE\"\n        target: /app/external/var/stores/solace-ca\n",
 		"      - source: \"solmq-stores-init\"\n        target: /app/external/.stores-init\n",
@@ -644,6 +650,11 @@ func TestRenderCreatedStoresRunAsImageAndNone(t *testing.T) {
 		if strings.Contains(out, absent) {
 			t.Errorf("no store selected, but the compose holds %q:\n%s", absent, out)
 		}
+	}
+	// The deploy digest label does not depend on a store: it is what makes
+	// compose notice a rotated credential.
+	if !strings.Contains(out, "      solace-connector/deploy-sha256: ${_GEN_DEPLOY_SHA256:-}\n") {
+		t.Errorf("every service carries the deploy digest label:\n%s", out)
 	}
 	// Existing stores alone: the digest label, with a default so a hand-run
 	// compose up is silent, and nothing of the created-store machinery.
