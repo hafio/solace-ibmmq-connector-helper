@@ -20,7 +20,7 @@ package main
 // artifact and it owns stdout, so `status --output json > doc.json` is
 // byte-identical with and without progress. The in-place rewrite is a bare
 // `\r` and the erase blanks the line with spaces -- no ANSI at all, so
-// unlike clearScreen this needs no VT processing enabled and works in a plain
+// unlike the watch redraw this needs no VT processing enabled and works in a plain
 // console host.
 
 import (

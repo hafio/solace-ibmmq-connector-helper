@@ -24,6 +24,7 @@ import (
 	"github.com/hafio/go-deploy-utility/containercli"
 	"github.com/hafio/go-deploy-utility/notice"
 	gdurunner "github.com/hafio/go-deploy-utility/runner"
+	gduwatch "github.com/hafio/go-deploy-utility/watch"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/certfixture"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/dockergen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/libs"
@@ -3881,7 +3882,7 @@ func TestWatchFlagAcceptsBareAndInterval(t *testing.T) {
 	if !w.IsBoolFlag() {
 		t.Fatal("the bare -w spelling needs IsBoolFlag")
 	}
-	if err := w.Set("true"); err != nil || !w.on || w.interval != watchDefaultSeconds*time.Second {
+	if err := w.Set("true"); err != nil || !w.on || w.interval != time.Duration(watchDefaultSeconds)*time.Second {
 		t.Errorf("bare -w = %+v, err %v", w, err)
 	}
 	if err := w.Set("30"); err != nil || !w.on || w.interval != 30*time.Second {
@@ -3894,6 +3895,189 @@ func TestWatchFlagAcceptsBareAndInterval(t *testing.T) {
 		if err := (&watchFlag{}).Set(bad); err == nil {
 			t.Errorf("-w=%s should be rejected", bad)
 		}
+	}
+}
+
+// ---- --watch -------------------------------------------------------------------
+
+// watchTestCollector is a docker container-view collector over one scripted
+// runner, so a watch refresh costs one inspect call and prints one table.
+func watchTestCollector(r gdurunner.Runner, view statusreport.View) (*statusCollector, statusOpts) {
+	o := statusOpts{view: view, conts: []string{"solmq-connector"}, watch: watchFlag{on: true, interval: 5 * time.Second}}
+	return &statusCollector{opts: o, platform: validate.PlatformDocker, cmdArgv: []string{"docker"}, r: r}, o
+}
+
+// inspectRunner answers every call with the same inspect document, or fails
+// every call with err.
+type inspectRunner struct {
+	noAttach
+	err   error
+	calls int
+}
+
+func (i *inspectRunner) Run(_ context.Context, _ gdurunner.Cmd, stdout, _ io.Writer) error {
+	i.calls++
+	if i.err != nil {
+		return i.err
+	}
+	scriptOut(stdout, dockerInspect)
+	return nil
+}
+
+// sleepAfter returns a sleep seam that records each interval it is asked for and
+// cancels the context once it has been called n times, which is what ends the
+// loop in a test.
+func sleepAfter(n int, cancel context.CancelFunc, got *[]time.Duration) func(context.Context, time.Duration) error {
+	return func(ctx context.Context, d time.Duration) error {
+		*got = append(*got, d)
+		if len(*got) >= n {
+			cancel()
+			return ctx.Err()
+		}
+		return nil
+	}
+}
+
+// TestWatchStatusRedrawsUnderTheHeader covers a terminal: each refresh starts
+// with the shared clear-screen sequence and the header naming the interval, the
+// view and the time, and the report follows it.
+func TestWatchStatusRedrawsUnderTheHeader(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var slept []time.Duration
+	c, o := watchTestCollector(&inspectRunner{}, statusreport.ViewContainer)
+	o.view = statusreport.ViewAll // the title only; the collector stays on the engine view
+	var out bytes.Buffer
+	code := watchStatus(ctx, o, c, watchIO{redraw: true, out: &out, sleep: sleepAfter(1, cancel, &slept)})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	got := out.String()
+	if !strings.HasPrefix(got, gduwatch.ClearScreen+"Every 5s: solmq-conn-util status all   ") {
+		t.Errorf("a redraw should open with the clear and the header, got:\n%q", got)
+	}
+	if !strings.Contains(got, "   Ctrl-C to stop\n\n") || !strings.Contains(got, "solmq-connector") {
+		t.Errorf("the header should end the line and the report follow, got:\n%q", got)
+	}
+}
+
+// TestWatchStatusAppendsSectionsWhenNotATerminal covers a pipe or a file: each
+// refresh is appended under a timestamped section line and no escape byte is
+// written.
+func TestWatchStatusAppendsSectionsWhenNotATerminal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var slept []time.Duration
+	c, o := watchTestCollector(&inspectRunner{}, statusreport.ViewContainer)
+	var out bytes.Buffer
+	code := watchStatus(ctx, o, c, watchIO{out: &out, sleep: sleepAfter(2, cancel, &slept)})
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	got := out.String()
+	if strings.Contains(got, "\x1b") {
+		t.Errorf("no escape byte belongs in a pipe, got:\n%q", got)
+	}
+	if n := strings.Count("\n"+got, "\n=== "); n != 2 {
+		t.Errorf("want one section line per refresh (2), got %d in:\n%s", n, got)
+	}
+	if strings.Contains(got, "Every ") {
+		t.Errorf("the redraw header is for a terminal only, got:\n%s", got)
+	}
+}
+
+// TestWatchStatusSleepsTheIntervalAfterEachRefresh pins that the pause is the
+// flag's interval and is taken once per refresh, after the report.
+func TestWatchStatusSleepsTheIntervalAfterEachRefresh(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var slept []time.Duration
+	r := &inspectRunner{}
+	c, o := watchTestCollector(r, statusreport.ViewContainer)
+	o.watch.interval = 7 * time.Second
+	watchStatus(ctx, o, c, watchIO{out: io.Discard, sleep: sleepAfter(3, cancel, &slept)})
+	if !reflect.DeepEqual(slept, []time.Duration{7 * time.Second, 7 * time.Second, 7 * time.Second}) {
+		t.Errorf("slept %v, want 7s after each of 3 refreshes", slept)
+	}
+	if r.calls != 3 {
+		t.Errorf("want one collection per refresh (3), got %d", r.calls)
+	}
+}
+
+// TestWatchStatusReportsAFailedCollectionOnceAndCarriesOn covers a refresh the
+// engine refuses: renderOnce reports it on stderr once per refresh, the loop
+// does not add its own "trying again" warning, and the next refresh still runs.
+func TestWatchStatusReportsAFailedCollectionOnceAndCarriesOn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var slept []time.Duration
+	r := &inspectRunner{err: errors.New("engine down")}
+	c, o := watchTestCollector(r, statusreport.ViewContainer)
+	var code int
+	stderr := captureStderr(t, func() {
+		code = watchStatus(ctx, o, c, watchIO{out: io.Discard, sleep: sleepAfter(2, cancel, &slept)})
+	})
+	if code != 0 {
+		t.Errorf("exit=%d, want 0: a watch ended on purpose did not fail", code)
+	}
+	if n := strings.Count(stderr, "engine down"); n != 2 {
+		t.Errorf("want the failure once per refresh (2), got %d in:\n%s", n, stderr)
+	}
+	if strings.Contains(stderr, "trying again") || strings.Contains(stderr, "warning:") {
+		t.Errorf("the loop must not repeat what renderOnce already said, got:\n%s", stderr)
+	}
+	if r.calls != 2 {
+		t.Errorf("the loop should carry on after a failure, got %d collections", r.calls)
+	}
+}
+
+// TestWatchStatusCancelledContextExitsZero covers Ctrl-C arriving while the
+// loop is paused: the real sleep returns the interruption and the exit is 0.
+func TestWatchStatusCancelledContextExitsZero(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c, o := watchTestCollector(&inspectRunner{}, statusreport.ViewContainer)
+	if code := watchStatus(ctx, o, c, watchIO{out: io.Discard}); code != 0 {
+		t.Errorf("exit=%d, want 0", code)
+	}
+}
+
+// TestWatchStatusRejectsAnIntervalTheLoopCannotUse covers options the shared
+// loop refuses before any refresh: the error goes through errExit and nothing
+// is collected.
+func TestWatchStatusRejectsAnIntervalTheLoopCannotUse(t *testing.T) {
+	r := &inspectRunner{}
+	c, o := watchTestCollector(r, statusreport.ViewContainer)
+	o.watch.interval = 0
+	var code int
+	stderr := captureStderr(t, func() {
+		code = watchStatus(context.Background(), o, c, watchIO{out: io.Discard})
+	})
+	if code == 0 || !strings.Contains(stderr, "error:") || r.calls != 0 {
+		t.Errorf("exit=%d, collections=%d, stderr:\n%s", code, r.calls, stderr)
+	}
+}
+
+// TestWatchTitleNamesTheViewAndItsFlags pins what follows "Every <interval>: ".
+func TestWatchTitleNamesTheViewAndItsFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		opts statusOpts
+		want string
+	}{
+		{"container", statusOpts{view: statusreport.ViewContainer}, "solmq-conn-util status container"},
+		{"application", statusOpts{view: statusreport.ViewApplication}, "solmq-conn-util status application"},
+		{"all", statusOpts{view: statusreport.ViewAll}, "solmq-conn-util status all"},
+		{"details", statusOpts{view: statusreport.ViewAll, level: statusreport.LevelDetails}, "solmq-conn-util status all --details"},
+		{"all instances", statusOpts{view: statusreport.ViewContainer, all: true}, "solmq-conn-util status container --all"},
+		{"both", statusOpts{view: statusreport.ViewApplication, level: statusreport.LevelDetails, all: true}, "solmq-conn-util status application --details --all"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := watchTitle(c.opts); got != c.want {
+				t.Errorf("title = %q, want %q", got, c.want)
+			}
+		})
 	}
 }
 

@@ -350,7 +350,7 @@ the `application` and `all` views only; with `container` they are a usage error.
 |---|---|
 | `-d`, `--details` | add the enrichment lines below. Costs one sampling call (`kubectl top`, `docker stats`); kubernetes needs a metrics API |
 | `--all` | report every container whose image name contains `solace-pubsub-connector-ibmmq`: every namespace on kubernetes (a `NAMESPACE` column appears when they span several), every container on docker/podman, stopped ones included. Needs no `env.yaml` but still a `--platform`. Not with `--pod`/`--container` |
-| `-w`, `--watch` | re-render every 5s until Ctrl-C (exit 0). The install prompt is asked at most once |
+| `-w`, `--watch` | re-render every 5s until Ctrl-C (exit 0); the 5s is the pause after each refresh, so a slow collection never shortens it. On a terminal the screen is redrawn under an `Every 5s: ...` header; when stdout is not a terminal each refresh is appended under a `=== <time> ===` section line, with no escape bytes. A refresh that fails is reported on stderr and the next one still runs. The install prompt is asked at most once |
 | `--output json` | one document on stdout, notes on stderr. Fields are a compatibility contract under `schemaVersion`; empty fields are omitted. Not with `--watch` |
 | `-v`, `--verbose` | one `step:` line per engine call on stderr, with its elapsed time, instead of the spinner. Printed whether or not stderr is a terminal; nothing under `--watch` |
 | `--pod`, `--container` | limit to these instances, by name or by index into the listed (alphabetical) order; repeatable |

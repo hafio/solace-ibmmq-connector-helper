@@ -571,7 +571,8 @@ a sampling call (`top`, `stats`) and on kubernetes needs a metrics API.
 `--output json > report.json` produces the same bytes with a spinner, with `-v`
 or with neither. The spinner draws with carriage return and spaces, no ANSI,
 capped at 79 columns so a wrapped line never leaves residue above the cursor.
-`--watch` prints no progress: the redraw owns the screen.
+`--watch` prints no progress: the redraw owns the screen, and the same holds when
+stdout is a pipe, where each refresh is a section line instead of a redraw.
 
 **JSON is the same model the tables render from**, so they cannot disagree.
 Fields are a compatibility contract: additions keep `schemaVersion`, renames

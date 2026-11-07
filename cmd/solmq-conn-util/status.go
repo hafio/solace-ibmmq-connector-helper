@@ -22,7 +22,9 @@ package main
 // rendered from it, so the table view and --output json can never disagree.
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
@@ -33,6 +35,7 @@ import (
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
 	gdurunner "github.com/hafio/go-deploy-utility/runner"
+	gduwatch "github.com/hafio/go-deploy-utility/watch"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -57,12 +60,14 @@ const (
 	outputJSON  = "json"
 )
 
-// Watch interval bounds. The default is the only documented value; see
-// watchFlag for why an override exists but is not advertised.
+// Watch interval bounds, in whole seconds, taken from the shared watch package so
+// the flag and the loop agree on what is allowed. The default is the only
+// documented value; see watchFlag for why an override exists but is not
+// advertised.
 const (
-	watchDefaultSeconds = 5
-	watchMinSeconds     = 1
-	watchMaxSeconds     = 3600
+	watchDefaultSeconds = int(gduwatch.DefaultInterval / time.Second)
+	watchMinSeconds     = int(gduwatch.MinInterval / time.Second)
+	watchMaxSeconds     = int(gduwatch.MaxInterval / time.Second)
 )
 
 // repeatableName implements flag.Value for a repeatable, free-form name flag
@@ -102,7 +107,7 @@ func (w *watchFlag) String() string { return "" }
 func (w *watchFlag) Set(s string) error {
 	switch s {
 	case "true":
-		w.on, w.interval = true, watchDefaultSeconds*time.Second
+		w.on, w.interval = true, gduwatch.DefaultInterval
 		return nil
 	case "false":
 		w.on = false
@@ -360,7 +365,10 @@ func actStatus(o statusOpts, r gdurunner.Runner) int {
 
 	c := &statusCollector{opts: o, platform: sess.platform, cmdArgv: sess.cmdArgv, env: sess.env, r: r, prog: prog}
 	if o.watch.on {
-		return watchStatus(o, c)
+		// Ctrl-C ends the watch with success; the context is how the loop hears it.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		return watchStatus(ctx, o, c, watchIO{redraw: gduwatch.CanRedraw(os.Stdout), out: os.Stdout})
 	}
 	return c.renderOnce(os.Stdout)
 }
@@ -899,7 +907,7 @@ func confirmInstall(missing []string) (bool, error) {
 // the run (nothing to report on at all) goes to stderr with the exit code, the
 // way every other verb reports a failure; anything the report itself can carry
 // is already in it.
-func (c *statusCollector) renderOnce(w *os.File) int {
+func (c *statusCollector) renderOnce(w io.Writer) int {
 	rep, failed, err := c.collect()
 	if err != nil {
 		return errExit(err)
@@ -921,40 +929,64 @@ func (c *statusCollector) renderOnce(w *os.File) int {
 	return exitcode.OK
 }
 
-// watchStatus re-renders the report until the operator interrupts it. Each tick
-// clears the screen and prints a header naming the interval and the time, so a
-// glance tells whether what is on screen is current.
-//
-// Ctrl-C exits 0: a watch that was ended on purpose did not fail. The exit code
-// of an individual tick is deliberately not carried out here -- there is no
-// single answer for a loop that ran for an hour.
-func watchStatus(o statusOpts, c *statusCollector) int {
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt)
-	defer signal.Stop(stop)
+// watchIO is where a watch loop writes and how it pauses, so a test can drive
+// it without a terminal or a real clock.
+type watchIO struct {
+	// redraw clears the screen before each refresh; otherwise each refresh is
+	// appended under a section line (a pipe or a file never sees an escape byte).
+	redraw bool
+	out    io.Writer
 
-	tick := time.NewTicker(o.watch.interval)
-	defer tick.Stop()
-	for {
-		c.opts.now = time.Now()
-		clearScreen(os.Stdout)
-		fmt.Fprintf(os.Stdout, "Every %s: solmq-conn-util status  --  %s   (Ctrl-C to stop)\n\n",
-			o.watch.interval, c.opts.now.Format("15:04:05"))
-		c.renderOnce(os.Stdout)
-		select {
-		case <-stop:
-			fmt.Fprintln(os.Stdout)
-			return exitcode.OK
-		case <-tick.C:
-		}
-	}
+	// sleep pauses for d or until ctx is done; the shared watch.Sleep when nil.
+	sleep func(ctx context.Context, d time.Duration) error
 }
 
-// clearScreen moves the cursor home and clears what is below it, so a redraw
-// replaces the previous report instead of scrolling it away. ANSI, which every
-// terminal this tool targets understands once VT processing is on -- see
-// enableVirtualTerminal, which turns it on where it is not on by default.
-func clearScreen(w *os.File) {
-	enableVirtualTerminal(w)
-	fmt.Fprint(w, "\x1b[H\x1b[2J")
+// watchTitle is what follows "Every <interval>: " in the redraw header: the verb,
+// the view as the operator spelled it, and the flags that change what is shown.
+func watchTitle(o statusOpts) string {
+	title := "solmq-conn-util status"
+	switch o.view {
+	case statusreport.ViewContainer:
+		title += " " + statusTargetContainer
+	case statusreport.ViewApplication:
+		title += " " + statusTargetApplication
+	case statusreport.ViewAll:
+		title += " " + statusTargetAll
+	}
+	if o.level == statusreport.LevelDetails {
+		title += " " + detailsFlagName
+	}
+	if o.all {
+		title += " " + allFlagName
+	}
+	return title
+}
+
+// watchStatus re-renders the report until ctx is done, on the shared refresh
+// loop: a terminal is redrawn in place under a header naming the interval and
+// the time, anything else gets a timestamped section line per refresh. The pause
+// is taken after each refresh, so a slow collection never shortens it.
+//
+// Ctrl-C (ctx done) exits 0: a watch that was ended on purpose did not fail. The
+// exit code of an individual refresh is deliberately not carried out here --
+// there is no single answer for a loop that ran for an hour. A refresh that
+// fails reports itself on stderr (renderOnce) and returns nil to the loop, so the
+// loop's own warning is effectively unreachable and nothing is printed twice.
+func watchStatus(ctx context.Context, o statusOpts, c *statusCollector, wio watchIO) int {
+	err := gduwatch.Loop(ctx, gduwatch.Options{
+		Every:  o.watch.interval,
+		Title:  watchTitle(o),
+		Redraw: wio.redraw,
+		Out:    wio.out,
+		Warn:   func(msg string) { fmt.Fprintln(os.Stderr, "warning: "+msg) },
+		Sleep:  wio.sleep,
+	}, func(t time.Time) error {
+		c.opts.now = t
+		c.renderOnce(wio.out)
+		return nil
+	})
+	if err != nil {
+		return errExit(err)
+	}
+	return exitcode.OK
 }

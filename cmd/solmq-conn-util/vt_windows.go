@@ -9,16 +9,16 @@ import (
 )
 
 // enableVirtualTerminal turns on ANSI escape processing for w, which Windows
-// consoles need before the screen-clearing sequences --watch prints mean
-// anything. Windows Terminal and PowerShell enable it for themselves, but a
-// plain conhost window does not, and without it a redraw would print the escape
-// bytes as text.
+// consoles need before escape sequences such as cli's terminal handover mean
+// anything (--watch gets the same from the shared watch package). Windows
+// Terminal and PowerShell enable it for themselves, but a plain conhost window
+// does not, and without it the escape bytes would print as text.
 //
 // Best-effort and silent: a handle that is not a console (a redirected file, a
 // pipe into a pager) simply fails the call, which is the right outcome -- there
-// is no screen to clear there either. Called on every redraw rather than once,
-// because it is a single cheap syscall and that keeps the watch loop free of
-// setup state.
+// is no screen to clear there either. Called at each use rather than once,
+// because it is a single cheap syscall and that keeps callers free of setup
+// state.
 //
 // It uses syscall's lazy DLL loading rather than golang.org/x/sys/windows to
 // avoid promoting that module to a direct dependency for two calls.

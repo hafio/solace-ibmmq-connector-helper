@@ -9,7 +9,7 @@ for using the tool, see [getting-started.md](getting-started.md).
 Run the suite with `./scripts/dev.sh test` (`.\scripts\dev.ps1 test` on Windows);
 measure coverage with the `cov` task.
 
-Last recorded `cov` total, from `scripts/logs/cov.log` (2026-11-07): **96.2%**, after S7. An earlier
+Last recorded `cov` total, from `scripts/logs/cov.log` (2026-11-07): **96.3%**, after S8. An earlier
 adoption of the shared `containerart` packages deleted the covered helpers
 `composeQuote`, `composeEscape`, `flowList`, `renderSecrets` and `systemdEnv`; their tests
 moved to go-deploy-utility with them. Removing covered statements lowers the ratio. No new uncovered
@@ -19,6 +19,11 @@ fully covered.
 S7 (containercli and inspect, the redeploy prompt) adds a test for every branch it introduces and
 removes the covered `healthStatus`, `EngineNamesByImage` and the hand-built engine argv. The total
 rose from 96.0% to 96.2%, which is the new floor.
+
+S8 (the shared `watch` loop under `status -w`) replaces the untested `watchStatus` ticker and
+`clearScreen` with `gduwatch.Loop` behind a test seam, and covers it with the `TestWatchStatus*`
+tests and `TestWatchTitleNamesTheViewAndItsFlags`. The total rose from 96.2% to 96.3%, which is
+the new floor.
 
 ## Contents
 
@@ -63,7 +68,7 @@ rose from 96.0% to 96.2%, which is the new floor.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 1035 test functions, 1494 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 1042 test functions, 1501 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -1552,6 +1557,13 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [lifecycle_test.go](
 | TestStatusTargetAliasesResolve | cnt / app / container / all / unknown | resolveTarget maps each alias to its canonical word and passes an unknown one through; `sts cnt` really drives the container view, which costs one preflight and one get |
 | TestStatusRejectsImpossibleFlagCombinations | unknown --output / json with watch / --all with --pod / --all with --container / --install, --user and --management-port on the container view | every combination that cannot mean anything is refused (exit 2) before a single query runs, rather than being silently ignored |
 | TestWatchFlagAcceptsBareAndInterval | bare / interval / off / 3 rejected values | the flag is boolean in every documented sense (IsBoolFlag) but also takes the deliberately undocumented `-w=<seconds>` form, bounded |
+| TestWatchStatusRedrawsUnderTheHeader | - | on a terminal each refresh opens with the shared clear-screen sequence and the `Every 5s: solmq-conn-util status all   <time>   Ctrl-C to stop` header, then the report |
+| TestWatchStatusAppendsSectionsWhenNotATerminal | - | off a terminal each refresh is one `=== <time> ===` section line followed by the report, no escape byte and no redraw header |
+| TestWatchStatusSleepsTheIntervalAfterEachRefresh | - | the pause is the flag's interval, taken once after each refresh, and each refresh collects once |
+| TestWatchStatusReportsAFailedCollectionOnceAndCarriesOn | - | a refused collection is reported once per refresh on stderr by renderOnce, with no extra `trying again` warning from the loop, and the next refresh still runs; exit 0 |
+| TestWatchStatusCancelledContextExitsZero | - | Ctrl-C (a done context) ends the watch with exit 0 |
+| TestWatchStatusRejectsAnIntervalTheLoopCannotUse | - | an interval the shared loop refuses is reported through errExit (non-zero) before anything is collected |
+| TestWatchTitleNamesTheViewAndItsFlags | container / application / all / details / all instances / both | the header names the view and appends `--details` and `--all` when set |
 | TestStatusContainerViewReadsEngineFactsWithoutExecing | - | one read-only `get pods -o json` answers discovery and the whole table together (2 calls in all), nothing is exec'd into, and every column reaches the output |
 | TestStatusContainerDetailsSamplesAndChecksComponents | - | `--details` adds one sampling call for the run and one presence check per distinct referenced object (deduplicated across pods), plus the NODE column, digest and resource lines |
 | TestStatusContainerDetailsWithoutMetricsServerDegradesToANote | - | a cluster with no metrics API costs the resource lines and nothing else: a note naming what to install, the table still printed, exit 0 |
