@@ -6,9 +6,9 @@
     "semantic_hash": ""
   },
   "go.mod": {
-    "mtime": 1793837105.597609,
-    "seen": 1793838432.3187342,
-    "ast_hash": "dbd640cafb844f7ce555d3ee8f833d9c",
+    "mtime": 1794107167.406492,
+    "seen": 1794127470.5839646,
+    "ast_hash": "c9f1d67a853883a78765a38520e30726",
     "semantic_hash": ""
   },
   "internal/consolidate/consolidate.go": {
@@ -342,9 +342,9 @@
     "semantic_hash": ""
   },
   "docs/test.md": {
-    "mtime": 1794099161.1368766,
-    "seen": 1794099937.4678872,
-    "ast_hash": "5830fa7bc48f9cebd4c5068e7fa4c882",
+    "mtime": 1794100553.2563937,
+    "seen": 1794127470.5841577,
+    "ast_hash": "65c2b5d8363cd91367c40924c02b8274",
     "semantic_hash": ""
   },
   "docs/commands.md": {
