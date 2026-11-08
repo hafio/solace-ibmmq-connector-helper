@@ -18,6 +18,7 @@ import (
 
 	"github.com/hafio/go-deploy-utility/envref"
 	"github.com/hafio/go-deploy-utility/execguard"
+	"github.com/hafio/go-deploy-utility/kube"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
@@ -137,7 +138,6 @@ type Context struct {
 
 var (
 	connNameRE = regexp.MustCompile(`^[^()\s,]+\(\d+\)(,[^()\s,]+\(\d+\))*$`)
-	dns1123RE  = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 	hostRE     = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
 )
 
@@ -901,7 +901,7 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 	dep := ctx.Kube.Deployment
 	if dep.Name == "" {
 		add(fileEnv, "deployment.name is required")
-	} else if !isDNS1123(dep.Name) {
+	} else if !kube.ValidLabel(dep.Name) {
 		add(fileEnv, "deployment.name %q is not a valid DNS-1123 label", dep.Name)
 	} else {
 		// Every object the tool creates is named after deployment.name, and each
@@ -909,16 +909,16 @@ func checkKube(add, warn func(string, string, ...any), ctx Context) {
 		// rather than by the API server mid-apply. Which ones exist depends on
 		// what the config asks the tool to build, so the list is the instance's
 		// own rather than a fixed longest suffix.
-		for _, n := range ctx.Kube.CreatedNames() {
-			if len(n) > 63 {
-				add(fileEnv, "deployment.name %q is too long: it derives the name %q, which exceeds the 63-char DNS-1123 limit", dep.Name, n)
+		for _, o := range ctx.Kube.CreatedNames() {
+			if len(o.Name) > 63 {
+				add(fileEnv, "deployment.name %q is too long: it derives the name %q, which exceeds the 63-char DNS-1123 limit", dep.Name, o.Name)
 				break
 			}
 		}
 	}
 	if dep.Namespace == "" {
 		add(fileEnv, "deployment.namespace is required")
-	} else if !isDNS1123(dep.Namespace) {
+	} else if !kube.ValidLabel(dep.Namespace) {
 		add(fileEnv, "deployment.namespace %q is not a valid DNS-1123 label", dep.Namespace)
 	}
 	if dep.Image != "" {
@@ -1040,7 +1040,7 @@ func checkLibs(add func(string, string, ...any), k *spec.Kubernetes) {
 			add(fileEnv, "libs.pvc must set exactly one of 'create' or 'existing'")
 			return
 		}
-		if p.Existing != "" && !isDNS1123(p.Existing) {
+		if p.Existing != "" && !kube.ValidLabel(p.Existing) {
 			add(fileEnv, "libs.pvc.existing %q is not a valid DNS-1123 label", p.Existing)
 		}
 		if c := p.Create; c != nil {
@@ -1076,7 +1076,7 @@ func checkLibs(add func(string, string, ...any), k *spec.Kubernetes) {
 				add(fileEnv, "libs.download url %q must be http(s) and contain no spaces, quotes, or control characters", u)
 			}
 		}
-		if d.PVC != "" && !isDNS1123(d.PVC) {
+		if d.PVC != "" && !kube.ValidLabel(d.PVC) {
 			add(fileEnv, "libs.download.pvc %q is not a valid DNS-1123 label", d.PVC)
 		}
 		// The initContainer's image: line is written unquoted.
@@ -1305,8 +1305,6 @@ func usesCredentials(wfs []spec.Workflow, d *spec.Defaults) bool {
 	}
 	return false
 }
-
-func isDNS1123(s string) bool { return len(s) <= 63 && dns1123RE.MatchString(s) }
 
 // labelNameRE is a Kubernetes label name -- a key's part after any prefix, and
 // a non-empty value -- whose 63-character limit is checked beside it;
@@ -1616,7 +1614,7 @@ func checkSecretName(add func(string, string, ...any), field, name string) {
 		add(fileEnv, "%s is required", field)
 		return
 	}
-	if !isDNS1123(name) {
+	if !kube.ValidLabel(name) {
 		add(fileEnv, "%s %q is not a valid DNS-1123 label", field, name)
 	}
 }
@@ -1731,7 +1729,7 @@ func checkContainerTarget(add func(string, string, ...any), ctx Context, t conta
 		}
 		add(fileEnv, "%s.stores is no longer configured: the files of the tls.stores a connection selects are %s under %s. Remove the %s.stores section", section, how, spec.DefaultStoresMountPath, section)
 	}
-	if !isDNS1123(t.Name) {
+	if !kube.ValidLabel(t.Name) {
 		add(fileEnv, "%s.name %q is not a valid DNS-1123 label", section, t.Name)
 	}
 	if err := execguard.Check(CommandRules(t.Platform), strings.Fields(t.Command), ctx.AllowCommands); err != nil {
@@ -1813,7 +1811,7 @@ func checkDocker(add func(string, string, ...any), ctx Context) {
 		Stores:   d.Stores,
 		Libs:     d.Libs,
 	})
-	if !isDNS1123(d.ProjectName) {
+	if !kube.ValidLabel(d.ProjectName) {
 		add(fileEnv, "docker.project-name %q is not a valid DNS-1123 label", d.ProjectName)
 	}
 }

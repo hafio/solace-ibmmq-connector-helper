@@ -213,8 +213,8 @@ func actLogs(o logsOpts, r gdurunner.Runner) int {
 
 	// The same read-only preflight probe status runs, for the same reason: fail
 	// on an unreachable engine once, up front, rather than at the point of read.
-	// On kubernetes it asks for the log subresource, what logs actually reads.
-	if code, ok := preflight(r, runner.ActionLogs, sess.platform, sess.command, sess.ns, sess.rootless(), o.approved); !ok {
+	// Kubernetes asks nothing: the read itself reports a refusal.
+	if code, ok := preflightRead(r, runner.ActionLogs, sess.platform, sess.command, sess.rootless(), o.approved); !ok {
 		return code
 	}
 

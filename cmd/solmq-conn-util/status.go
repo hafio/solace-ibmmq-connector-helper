@@ -335,12 +335,15 @@ func actStatus(o statusOpts, r gdurunner.Runner) int {
 	prog := newProgress(o, os.Stderr)
 	defer prog.stop()
 
-	// Reuse the read-only preflight probe before touching anything, same as
-	// deploy/remove. The action only steers kubernetes' can-i question
-	// (docker/podman ignore it): status asks to get pods, the one permission it
-	// cannot work without, so a view-only operator is not refused a write.
-	prog.step("preflight")
-	if code, ok := preflight(r, runner.ActionStatus, sess.platform, sess.command, sess.ns, sess.rootless(), o.approved); !ok {
+	// Reuse the read-only engine probe before touching anything, same as
+	// deploy/remove. Kubernetes asks nothing up front: status reads what it is
+	// allowed to read and reports what it is refused, so a view-only operator is
+	// never turned away by a question, and the step is announced only where a call
+	// stands behind it.
+	if sess.platform != validate.PlatformKubernetes {
+		prog.step("preflight")
+	}
+	if code, ok := preflightRead(r, runner.ActionStatus, sess.platform, sess.command, sess.rootless(), o.approved); !ok {
 		return code
 	}
 

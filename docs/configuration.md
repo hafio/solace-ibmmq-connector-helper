@@ -747,7 +747,7 @@ kubernetes:
 
 | Key | Meaning |
 |---|---|
-| `deployment.name`, `namespace` | required DNS-1123 labels. A `kind: Namespace` document is always emitted first. `<name>-credentials` and `<namespace>-<name>-libs-pv` must stay within 63 characters |
+| `deployment.name`, `namespace` | required DNS-1123 labels. `generate kubernetes` emits a `kind: Namespace` document first, so a manual apply works; `deploy` applies none and creates the namespace on its own only when it is absent. `<name>-credentials` and `<namespace>-<name>-libs-pv` must stay within 63 characters |
 | `deployment.replicas` | default `1`; `standalone` requires `1` |
 | `deployment.resources` | `cpu` and `memory`, Kubernetes quantities, written as identical requests and limits |
 | `deployment.node-selector` | node labels the node must carry; keys written sorted |

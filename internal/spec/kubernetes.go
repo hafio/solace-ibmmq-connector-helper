@@ -3,6 +3,7 @@ package spec
 import (
 	"fmt"
 
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
 	"gopkg.in/yaml.v3"
 )
 
@@ -361,25 +362,32 @@ func (k *Kubernetes) LibsPVCName() string {
 }
 
 // CreatedNames lists every namespaced object the tool creates for this
-// instance, in a fixed order: the Deployment (and its Service, which shares the
-// name), the ConfigMap, then each Secret and claim the config asks it to build
-// -- the stores Secret always, since its name is reserved for the instance.
-// validate holds each to the DNS-1123 label limit, and remove uses the list to
-// tell a straggler of its own from someone else's object.
-func (k *Kubernetes) CreatedNames() []string {
+// instance, by kind and name, in a fixed order: the Deployment and its Service
+// (which shares the name), the ConfigMap, then each Secret and claim the config
+// asks it to build -- the stores Secret always, since its name is reserved for
+// the instance. validate holds each name to the DNS-1123 label limit, the
+// namespace gate passes the list to nsgate.Occupants to tell a straggler of
+// its own from someone else's object, and deploy.Written narrows it to what one
+// render writes, for the permission probes. The libs PersistentVolume is
+// cluster-scoped and not listed.
+func (k *Kubernetes) CreatedNames() []nsgate.Object {
 	name := k.Deployment.Name
-	out := []string{name, name + ConfigMapSuffix}
+	out := []nsgate.Object{
+		{Kind: "Deployment", Name: name},
+		{Kind: "Service", Name: name},
+		{Kind: "ConfigMap", Name: name + ConfigMapSuffix},
+	}
 	if n, created := k.CredentialsSecretName(); created {
-		out = append(out, n)
+		out = append(out, nsgate.Object{Kind: "Secret", Name: n})
 	}
 	if n, created := k.StoresSecretName(); created {
-		out = append(out, n)
+		out = append(out, nsgate.Object{Kind: "Secret", Name: n})
 	}
 	if n, created := k.ImagePullSecretName(); created {
-		out = append(out, n)
+		out = append(out, nsgate.Object{Kind: "Secret", Name: n})
 	}
 	if n := k.LibsPVCName(); n != "" {
-		out = append(out, n)
+		out = append(out, nsgate.Object{Kind: "PersistentVolumeClaim", Name: n})
 	}
 	return out
 }

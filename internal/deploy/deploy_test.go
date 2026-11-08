@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
 	"gopkg.in/yaml.v3"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
@@ -43,8 +45,19 @@ func fullFixtureInput() Input {
 	}
 }
 
+// mustRender is Render for an input whose namespace is a valid label, as every
+// fixture here holds; a refusal fails the test.
+func mustRender(t *testing.T, in Input) string {
+	t.Helper()
+	out, err := Render(in)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	return out
+}
+
 func TestRenderFull(t *testing.T) {
-	out := Render(fullFixtureInput())
+	out := mustRender(t, fullFixtureInput())
 	for _, w := range []string{
 		"kind: ConfigMap", "name: solmq-config", "application.yml: |", "    spring:",
 		"status: |", "    #!/bin/sh", "    echo status",
@@ -72,7 +85,7 @@ func TestRenderFull(t *testing.T) {
 // pass even if a doc were duplicated, mis-indented, or a field landed in the
 // wrong block -- this pins the entire byte-for-byte output.
 func TestRenderFull_ExactDocument(t *testing.T) {
-	got := Render(fullFixtureInput())
+	got := mustRender(t, fullFixtureInput())
 	if got != wantRenderFull {
 		t.Errorf("Render mismatch\n%s", lineDiff(wantRenderFull, got))
 	}
@@ -235,7 +248,7 @@ spec:
 func TestRenderDeploymentNodeSelector(t *testing.T) {
 	k := baseKube()
 	k.Deployment.NodeSelector = map[string]string{"zone": "a", "kubernetes.io/os": "linux", "gpu": "true", "spare": "", "2": "x"}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	want := "      automountServiceAccountToken: false\n" +
 		"      nodeSelector:\n" +
 		"        \"2\": x\n" +
@@ -248,7 +261,7 @@ func TestRenderDeploymentNodeSelector(t *testing.T) {
 		t.Errorf("want the sorted, quoted nodeSelector in the pod spec\n%s\n---\n%s", want, out)
 	}
 	k.Deployment.NodeSelector = nil
-	if out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})}); strings.Contains(out, "nodeSelector") {
+	if out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})}); strings.Contains(out, "nodeSelector") {
 		t.Errorf("no node selector set, so none may be written\n%s", out)
 	}
 }
@@ -262,7 +275,7 @@ func TestRenderDeploymentTolerations(t *testing.T) {
 		{Key: "dedicated", Operator: "Equal", Value: "true", Effect: "NoSchedule"},
 		{Operator: "Exists", Effect: "NoExecute", TolerationSeconds: &secs},
 	}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	want := "      tolerations:\n" +
 		"        - key: dedicated\n" +
 		"          operator: Equal\n" +
@@ -291,7 +304,7 @@ func TestRenderDeploymentAffinityAndSpread(t *testing.T) {
 		if aff != nil {
 			k.Deployment.Affinity = *aff
 		}
-		return Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+		return mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	}
 	verbatim := "      affinity:\n" +
 		"        nodeAffinity:\n" +
@@ -336,7 +349,7 @@ func TestRenderDeploymentAffinityAndSpread(t *testing.T) {
 // status script under its own key, alongside application.yml.
 func TestRenderConfigMapStatusScript(t *testing.T) {
 	k := baseKube()
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	for _, want := range []string{"status: |", "    #!/bin/sh", "    echo status"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q\n---\n%s", want, out)
@@ -371,7 +384,7 @@ func lineDiff(want, got string) string {
 func TestRenderNoSecretsNoServiceNoTLS(t *testing.T) {
 	k := baseKube()
 	k.Service.Enabled = false
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{MQTLS: false})})
+	out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{MQTLS: false})})
 	for _, no := range []string{
 		"JAVA_TOOL_OPTIONS", "- name: secrets", "mountPath: " + SecretsMountPath, "kind: Secret", "kind: Service", "- name: stores",
 		"logback-spring.xml", "LOGGING_SYSLOG_HOST", "- name: libs", "initContainers:",
@@ -390,7 +403,7 @@ func TestRenderJavaOptionsEnv(t *testing.T) {
 	k := baseKube()
 	inst := one(k.Deployment.Name, "x: 1\n", &consolidate.Model{MQTLS: true})
 	inst.JavaOptions = &spec.JavaOptions{Tool: "-Xms512m\n-Xmx1g", JDK: "-Duser.language=en"}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
+	out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
 	want := "            - name: JAVA_TOOL_OPTIONS\n" +
 		`              value: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false -Xms512m -Xmx1g"` + "\n" +
 		"            - name: JDK_JAVA_OPTIONS\n" +
@@ -402,7 +415,7 @@ func TestRenderJavaOptionsEnv(t *testing.T) {
 	bare := one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})
 	bare.Timezone = ""
 	bare.JavaOptions = &spec.JavaOptions{JDK: "-Duser.language=en"}
-	out = Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: bare})
+	out = mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: bare})
 	if !strings.Contains(out, "          env:\n            - name: JDK_JAVA_OPTIONS\n") {
 		t.Errorf("java-options alone must open the env: list:\n%s", out)
 	}
@@ -432,7 +445,7 @@ func TestEnvValueQuoteEscapes(t *testing.T) {
 func TestRenderSyslogUDP(t *testing.T) {
 	k := baseKube()
 	sys := &spec.Syslog{Host: "sys.host", Port: 514, Protocol: spec.SyslogUDP}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Syslog: sys, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Syslog: sys, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	for _, want := range []string{
 		"logback-spring.xml: |", "ch.qos.logback.classic.net.SyslogAppender",
 		"- name: LOGGING_SYSLOG_APPNAME", "value: solmq",
@@ -452,7 +465,7 @@ func TestRenderSyslogUDP(t *testing.T) {
 func TestRenderSyslogTCP(t *testing.T) {
 	k := baseKube()
 	sys := &spec.Syslog{Host: "sys.host", Port: 6514, Protocol: spec.SyslogTCP}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Syslog: sys, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Syslog: sys, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	for _, want := range []string{"LogstashTcpSocketAppender", "<destination>${SYSLOG_HOST}:${SYSLOG_PORT}</destination>"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q", want)
@@ -468,7 +481,7 @@ func TestRenderSyslogTCP(t *testing.T) {
 func TestRenderLibsPVCExisting(t *testing.T) {
 	k := baseKube()
 	k.Libs = &spec.Libs{PVC: &spec.LibsPVC{Existing: "my-pvc"}}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	for _, want := range []string{"claimName: my-pvc", "mountPath: /app/external/libs"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q\n%s", want, out)
@@ -493,7 +506,7 @@ func TestCreatedSecretsTakeDerivedNames(t *testing.T) {
 		Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{Name: "shared-creds"}},
 		Stores:      &spec.StoresSecret{Create: &spec.StoreCreate{Name: "shared-tls"}},
 	}
-	out := Render(Input{
+	out := mustRender(t, Input{
 		Kube: k, Defaults: &spec.Defaults{},
 		CredKVs:  []KV{{Key: "A", Val: "x"}},
 		Stores:   []StoreFile{{Name: "mq-ca", Base64: "QUJD"}},
@@ -522,7 +535,7 @@ func TestRenderLibsPVCCreate(t *testing.T) {
 	k.Libs = &spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{
 		Name: "jar-libs", Storage: "2Gi", NFS: spec.NFS{Server: "nfs1", Path: "/libs"},
 	}}}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	claim := k.Deployment.Name + spec.LibsPVCSuffix
 	for _, want := range []string{
 		// The claim is named after the deployment, so no other instance in the
@@ -552,7 +565,7 @@ func TestRenderLibsDownload(t *testing.T) {
 	k.Libs = &spec.Libs{Download: &spec.LibsDownload{
 		URLs: []string{"https://repo/a.jar", "https://repo/b.jar"}, Image: "busybox:1.37",
 	}}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	for _, want := range []string{
 		"initContainers:", "- name: libs-download", "image: busybox:1.37",
 		`wget -O '/libs/a.jar' 'https://repo/a.jar' && wget -O '/libs/b.jar' 'https://repo/b.jar'`,
@@ -564,7 +577,7 @@ func TestRenderLibsDownload(t *testing.T) {
 	}
 	// download into an existing PVC instead of emptyDir
 	k.Libs.Download.PVC = "dl-pvc"
-	out = Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	out = mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	if !strings.Contains(out, "claimName: dl-pvc") || strings.Contains(out, "emptyDir: {}") {
 		t.Errorf("download pvc volume wrong:\n%s", out)
 	}
@@ -576,7 +589,7 @@ func TestRenderLibsDownload(t *testing.T) {
 func TestRenderStatusScriptMountAfterLibs(t *testing.T) {
 	k := baseKube()
 	k.Libs = &spec.Libs{PVC: &spec.LibsPVC{Existing: "my-pvc"}}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	libsIdx := strings.Index(out, "mountPath: /app/external/libs\n")
 	statusIdx := strings.Index(out, "mountPath: /app/external/.status-script")
 	if libsIdx == -1 || statusIdx == -1 || statusIdx < libsIdx {
@@ -589,7 +602,7 @@ func TestRenderStatusScriptMountAfterLibs(t *testing.T) {
 
 func TestRenderNamespaceAlwaysFirst(t *testing.T) {
 	k := baseKube()
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	// The Namespace doc is always emitted first, before the ConfigMap, and names
 	// the deployment namespace.
 	nsDoc := "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ns\n"
@@ -607,7 +620,7 @@ func TestRenderExistingSecrets(t *testing.T) {
 		Credentials: &spec.CredentialsSecret{Existing: "my-creds"},
 	}
 	m := &consolidate.Model{Stores: []consolidate.StoreUse{{Name: "mq-ca", Secret: &spec.StoreSecret{Name: "my-tls"}}}}
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", m)})
+	out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", m)})
 	if strings.Contains(out, "kind: Secret") {
 		t.Error("existing secrets must not emit Secret docs")
 	}
@@ -649,7 +662,7 @@ func TestStoresVolumeProjectsEverySource(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			k := baseKube()
-			out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{Stores: c.uses})})
+			out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{Stores: c.uses})})
 			if c.sources == "" {
 				if strings.Contains(out, "- name: stores") {
 					t.Errorf("no store selected, no stores volume:\n%s", out)
@@ -682,7 +695,7 @@ func TestStoresVolumeProjectsEverySource(t *testing.T) {
 // restarts the container. Running the health check there would turn a slow or
 // flapping downstream into a restart loop.
 func TestProbesSplitLivenessFromReadiness(t *testing.T) {
-	out := Render(fullFixtureInput())
+	out := mustRender(t, fullFixtureInput())
 
 	live := strings.Index(out, "livenessProbe:")
 	ready := strings.Index(out, "readinessProbe:")
@@ -768,7 +781,7 @@ func TestRenderLeaderModeLabels(t *testing.T) {
 		{"active_standby", &spec.Defaults{LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveStby}}, spec.LeaderActiveStby, false},
 	}
 	for _, c := range cases {
-		out := Render(Input{Kube: baseKube(), Defaults: c.defs, Instance: one("solmq", "x: 1\n", &consolidate.Model{})})
+		out := mustRender(t, Input{Kube: baseKube(), Defaults: c.defs, Instance: one("solmq", "x: 1\n", &consolidate.Model{})})
 		wantMode := "        " + spec.LabelModeKey + ": " + c.mode
 		if !strings.Contains(out, wantMode) {
 			t.Errorf("%s: missing %q\n%s", c.name, wantMode, out)
@@ -787,7 +800,7 @@ func TestRenderLeaderModeLabels(t *testing.T) {
 func TestRenderSelectorMatchLabelsAppOnly(t *testing.T) {
 	k := baseKube()
 	defs := &spec.Defaults{LeaderElection: spec.LeaderElection{Present: true, Mode: spec.LeaderActiveActive}}
-	out := Render(Input{Kube: k, Defaults: defs, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	out := mustRender(t, Input{Kube: k, Defaults: defs, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
 	want := "  selector:\n    matchLabels:\n      app: solmq\n  template:"
 	if !strings.Contains(out, want) {
 		t.Errorf("selector must be app-only:\n%s", out)
@@ -803,7 +816,7 @@ func TestQuoteRes(t *testing.T) {
 func TestRenderNoResources(t *testing.T) {
 	k := baseKube()
 	k.Deployment.Resources = spec.Resources{}
-	if strings.Contains(Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x\n", &consolidate.Model{})}), "resources:") {
+	if strings.Contains(mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x\n", &consolidate.Model{})}), "resources:") {
 		t.Error("no resources block expected when all empty")
 	}
 }
@@ -819,7 +832,7 @@ func TestRenderServicePort(t *testing.T) {
 	render := func(port spec.Port, defs *spec.Defaults) string {
 		k := baseKube()
 		k.Service = spec.Service{Enabled: true, Port: port}
-		return Render(Input{Kube: k, Defaults: defs, Instance: one("solmq", "spring: {}\n", &consolidate.Model{})})
+		return mustRender(t, Input{Kube: k, Defaults: defs, Instance: one("solmq", "spring: {}\n", &consolidate.Model{})})
 	}
 	// The Service block is the only place both keys appear together, so matching
 	// the pair pins the service port rather than the container/probe ports.
@@ -852,12 +865,12 @@ func TestTeardownDropsTheNamespaceDocument(t *testing.T) {
 	k := baseKube()
 	inst := one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})
 
-	applyManifest := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
+	applyManifest := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
 	if !strings.Contains(applyManifest, "kind: Namespace") {
 		t.Errorf("apply still needs the Namespace document, got:\n%s", applyManifest)
 	}
 
-	deleteManifest := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst, Teardown: true})
+	deleteManifest := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst, Teardown: true})
 	if strings.Contains(deleteManifest, "kind: Namespace") {
 		t.Fatalf("a teardown manifest must carry no Namespace, got:\n%s", deleteManifest)
 	}
@@ -873,15 +886,91 @@ func TestTeardownDropsTheNamespaceDocument(t *testing.T) {
 	}
 }
 
-// TestNamespaceManifestMatchesWhatRenderEmits keeps the standalone document and
-// the one inside Render from drifting: the namespace delete pipes the former
-// through the same path the full manifest uses.
+// TestNamespaceManifestMatchesWhatRenderEmits: the manifest `generate kubernetes`
+// writes starts with exactly the shared kube.NamespaceManifest text a deploy applies
+// on its own, then a separator, so the two cannot drift.
 func TestNamespaceManifestMatchesWhatRenderEmits(t *testing.T) {
 	k := baseKube()
-	full := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
-	solo := NamespaceManifest(k.Deployment.Namespace)
-	if !strings.HasPrefix(full, solo) {
-		t.Errorf("Render should start with exactly NamespaceManifest, got:\n%s\nwant prefix:\n%s", full, solo)
+	full := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	shared, err := kube.NamespaceManifest(k.Deployment.Namespace)
+	if err != nil {
+		t.Fatalf("kube.NamespaceManifest(%q): %v", k.Deployment.Namespace, err)
+	}
+	if want := string(shared) + "---\n"; !strings.HasPrefix(full, want) {
+		t.Errorf("Render should start with exactly kube.NamespaceManifest, got:\n%s\nwant prefix:\n%s", full, want)
+	}
+}
+
+// TestRenderRefusesANamespaceThatIsNotALabel: validate refuses such a namespace
+// first, and Render, writing the Namespace document through kube.NamespaceManifest,
+// refuses it too: no manifest, and an error naming the namespace.
+func TestRenderRefusesANamespaceThatIsNotALabel(t *testing.T) {
+	k := baseKube()
+	k.Deployment.Namespace = "Bad_NS"
+	out, err := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})})
+	if err == nil || out != "" || !strings.Contains(err.Error(), `"Bad_NS"`) {
+		t.Fatalf("Render = %q, %v, want no manifest and an error naming the namespace", out, err)
+	}
+}
+
+// TestOmitNamespaceDropsOnlyTheNamespace: a deploy settles the namespace on its own
+// (create it only when absent), so its manifest starts at the ConfigMap with no
+// leading separator and carries everything else; `generate` leaves the flag off and
+// keeps the Namespace first.
+func TestOmitNamespaceDropsOnlyTheNamespace(t *testing.T) {
+	k := baseKube()
+	in := Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})}
+	withNS := mustRender(t, in)
+	in.OmitNamespace = true
+	out := mustRender(t, in)
+	if strings.Contains(out, "kind: Namespace") || strings.HasPrefix(out, "---") {
+		t.Fatalf("an omitted Namespace leaves no document and no leading separator, got:\n%s", out)
+	}
+	if !strings.HasPrefix(out, "apiVersion: v1\nkind: ConfigMap\n") {
+		t.Errorf("the ConfigMap should come first, got:\n%s", out)
+	}
+	if _, want, _ := strings.Cut(withNS, "---\n"); out != want {
+		t.Errorf("only the Namespace document may differ:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// TestWrittenIsWhatTheRenderEmits: the permission probes are asked about the kinds
+// one render writes, which is CreatedNames narrowed by the same conditions Render
+// uses -- the Service only when enabled, the stores Secret only when a store is
+// carried in it (always for a teardown, which deletes by name), the image-pull
+// Secret only when its pull secret is built.
+func TestWrittenIsWhatTheRenderEmits(t *testing.T) {
+	kinds := func(os []nsgate.Object) string {
+		var parts []string
+		for _, o := range os {
+			parts = append(parts, o.Kind+"/"+o.Name)
+		}
+		return strings.Join(parts, " ")
+	}
+	k := baseKube()
+	k.Secrets = spec.Secrets{
+		Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{}},
+		ImagePull:   &spec.ImagePullSecret{Create: true},
+	}
+	k.Libs = &spec.Libs{PVC: &spec.LibsPVC{Create: &spec.PVCCreate{Storage: "1Gi", NFS: spec.NFS{Server: "nfs1", Path: "/libs"}}}}
+	in := Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})}
+
+	if got, want := kinds(Written(in)), "Deployment/solmq Service/solmq ConfigMap/solmq-config Secret/solmq-credentials PersistentVolumeClaim/solmq-libs"; got != want {
+		t.Errorf("a deploy with no store and no pull secret written = %s, want %s", got, want)
+	}
+	in.Stores = []StoreFile{{Name: "mq-ca", Base64: "QUJD"}}
+	in.ImagePull = &PullSecret{Name: "solmq-image-pull", DockerConfigJSON: "e30="}
+	if got, want := kinds(Written(in)), "Deployment/solmq Service/solmq ConfigMap/solmq-config Secret/solmq-credentials Secret/solmq-stores Secret/solmq-image-pull PersistentVolumeClaim/solmq-libs"; got != want {
+		t.Errorf("a deploy carrying a store and a pull secret written = %s, want %s", got, want)
+	}
+	in.Teardown = true
+	in.Stores, in.ImagePull = nil, &PullSecret{Name: "solmq-image-pull"}
+	if got, want := kinds(Written(in)), "Deployment/solmq Service/solmq ConfigMap/solmq-config Secret/solmq-credentials Secret/solmq-stores Secret/solmq-image-pull PersistentVolumeClaim/solmq-libs"; got != want {
+		t.Errorf("a teardown deletes the stores and pull Secrets by name, written = %s, want %s", got, want)
+	}
+	in.Kube.Service.Enabled = false
+	if got := kinds(Written(in)); strings.Contains(got, "Service") {
+		t.Errorf("a disabled Service is not written, got %s", got)
 	}
 }
 
@@ -898,12 +987,12 @@ func TestTeardownReversesTheDocumentOrder(t *testing.T) {
 	}}}
 	inst := one(k.Deployment.Name, "x: 1\n", &consolidate.Model{})
 
-	apply := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
+	apply := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
 	if !before(apply, "kind: PersistentVolumeClaim", "kind: Deployment") {
 		t.Fatalf("apply must create the claim before the workload that mounts it:\n%s", apply)
 	}
 
-	del := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst, Teardown: true})
+	del := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst, Teardown: true})
 	if !before(del, "kind: Deployment", "kind: PersistentVolumeClaim") {
 		t.Errorf("a teardown must delete the workload before the claim it holds:\n%s", del)
 	}
@@ -939,7 +1028,7 @@ func TestTeardownNamesSecretsOnly(t *testing.T) {
 		Credentials: &spec.CredentialsSecret{Create: &spec.CredCreate{}},
 		ImagePull:   &spec.ImagePullSecret{Create: true},
 	}
-	del := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", m), Teardown: true,
+	del := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", m), Teardown: true,
 		ImagePull: &PullSecret{Name: "solmq-image-pull"}})
 	for _, want := range []string{nameOnly("solmq-credentials"), nameOnly("solmq-stores"), nameOnly("solmq-image-pull")} {
 		if !strings.Contains(del+"---", want) {
@@ -959,7 +1048,7 @@ func TestTeardownNamesSecretsOnly(t *testing.T) {
 		ImagePull:   &spec.ImagePullSecret{Name: "regcred"},
 	}
 	opm := &consolidate.Model{Stores: []consolidate.StoreUse{{Name: "cm-id", Secret: &spec.StoreSecret{Name: "broker-cert"}}}}
-	del = Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", opm), Teardown: true,
+	del = mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: one(k.Deployment.Name, "x: 1\n", opm), Teardown: true,
 		ImagePull: &PullSecret{Name: "regcred"}})
 	for _, theirs := range []string{"  name: their-creds\n", "  name: regcred\n", "  name: broker-cert\n  namespace"} {
 		if strings.Contains(del, theirs) {

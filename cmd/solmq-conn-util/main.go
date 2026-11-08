@@ -34,6 +34,8 @@ import (
 	"github.com/hafio/go-deploy-utility/containercli"
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
+	"github.com/hafio/go-deploy-utility/kube/rbac"
 	"github.com/hafio/go-deploy-utility/notice"
 	"github.com/hafio/go-deploy-utility/podman"
 	gdurunner "github.com/hafio/go-deploy-utility/runner"
@@ -540,20 +542,32 @@ func runAction(action string, args []string, r gdurunner.Runner) int {
 	}, r)
 }
 
-// preflight runs the read-only login/reachability probe (runner.Preflight)
-// before any generate-write or mutating exec. On failure it reports the
-// probe's combined output and wrapped error (which already names the platform
-// and carries a login hint) and the caller must stop without writing or
-// executing anything further.
+// preflight runs the read-only probes (runner.Preflight) before any
+// generate-write or mutating exec: the engine's info on docker and podman, and on
+// kubernetes each of probes (runner.KubernetesProbes), the writes the command is
+// about to make. On failure it reports the probe's output and wrapped error (which
+// already names the platform and says what to do) and the caller must stop without
+// writing or executing anything further.
 //
 // rootless is whether a podman deployment runs rootless, which picks the hint the
 // failure carries; it is false on every other platform.
-func preflight(r gdurunner.Runner, action, platform, command, namespace string, rootless bool, approvals execguard.Approvals) (code int, ok bool) {
-	out, err := runner.Preflight(bg(), r, platform, command, action, namespace, rootless, approvals)
+func preflight(r gdurunner.Runner, action, platform, command string, rootless bool, probes []rbac.Probe, approvals execguard.Approvals) (code int, ok bool) {
+	out, err := runner.Preflight(bg(), r, platform, command, rootless, probes, approvals)
 	if err != nil {
 		return report(action, platform, out, err), false
 	}
 	return exitcode.OK, true
+}
+
+// preflightRead is preflight for the read verbs (status, logs, cli): the engine
+// check on docker and podman, nothing on kubernetes, which asks for no permission
+// ahead of a read (runner.KubernetesProbes). It reports whether a probe ran, so a
+// caller announces its step only when there is a call behind it.
+func preflightRead(r gdurunner.Runner, action, platform, command string, rootless bool, approvals execguard.Approvals) (code int, ok bool) {
+	if platform == validate.PlatformKubernetes {
+		return exitcode.OK, true
+	}
+	return preflight(r, action, platform, command, rootless, nil, approvals)
 }
 
 func actKubernetes(o actionOpts, r gdurunner.Runner) int {
@@ -568,17 +582,32 @@ func actKubernetes(o actionOpts, r gdurunner.Runner) int {
 	// A teardown renders differently in three ways -- no Namespace document,
 	// the documents reversed so kubectl does not block deleting a PVC a running
 	// pod still holds, and every Secret by name alone, so nothing is resolved.
-	// See deploy.Input.Teardown.
+	// See deploy.Input.Teardown. A deploy renders without the Namespace too
+	// (OmitNamespace): ensureNamespace creates it, and only when it is absent.
 	var probes []gen.SecretProbe
+	var written []nsgate.Object
 	res := resolver(envDir)
 	res.Approvals = approvals
-	manifest, errs, warns := gen.GenerateKubernetes(req, res,
-		gen.KubeOpts{Teardown: action == runner.ActionRemove, Probes: &probes})
+	manifest, errs, warns := gen.GenerateKubernetes(req, res, gen.KubeOpts{Teardown: action == runner.ActionRemove,
+		OmitNamespace: action == runner.ActionDeploy, Written: &written, Probes: &probes})
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
 	}
-	if code, ok := preflight(r, action, validate.PlatformKubernetes, e.Kubernetes.Command, e.Kubernetes.Deployment.Namespace, false, approvals); !ok {
+	k := e.Kubernetes
+	ns := k.Deployment.Namespace
+	base, berr := runner.ParseCommand(validate.PlatformKubernetes, k.Command, approvals)
+	if berr != nil {
+		return report(action, tgtKubernetes, "", berr)
+	}
+	// Every probe of the command runs before its first write, the first refusal
+	// stopping it: the kinds the manifest writes, and persistentvolumes (cluster
+	// scoped) for the libs claim's volume.
+	kprobes, kerr := runner.KubernetesProbes(action, ns, written, k.LibsPVCName() != "")
+	if kerr != nil {
+		return errExit(kerr)
+	}
+	if code, ok := preflight(r, action, validate.PlatformKubernetes, k.Command, false, kprobes, approvals); !ok {
 		return code
 	}
 	if action == runner.ActionDeploy && len(probes) > 0 {
@@ -590,15 +619,23 @@ func actKubernetes(o actionOpts, r gdurunner.Runner) int {
 			return failAll(perrs)
 		}
 	}
-	out, rerr := runner.Kubernetes(bg(), r, e.Kubernetes.Command, action, manifest, approvals)
+	if action == runner.ActionDeploy {
+		if code, ok := ensureNamespace(r, base, k.Command, ns, approvals); !ok {
+			return code
+		}
+	}
+	out, rerr := runner.Kubernetes(bg(), r, k.Command, action, manifest, approvals)
 	warnIfPVUnchanged(action, out)
+	if action == runner.ActionDeploy && rerr == nil {
+		out, rerr = waitForRollout(r, k, out, approvals)
+	}
 	if code := report(action, tgtKubernetes, out, rerr); code != 0 {
 		// A failed teardown leaves the namespace alone: whatever did not come
 		// down is still in there.
 		return code
 	}
 	if action == runner.ActionRemove {
-		return removeNamespace(r, o, e.Kubernetes)
+		return removeNamespace(r, o, k, base)
 	}
 	return exitcode.OK
 }
@@ -652,7 +689,7 @@ func actDocker(o actionOpts, r gdurunner.Runner) int {
 		}
 		storeKVs = skvs
 	}
-	if code, ok := preflight(r, action, validate.PlatformDocker, e.Docker.Command, "", false, approvals); !ok {
+	if code, ok := preflight(r, action, validate.PlatformDocker, e.Docker.Command, false, nil, approvals); !ok {
 		return code
 	}
 	if action == runner.ActionDeploy && len(plan.Stores) > 0 {
@@ -774,7 +811,7 @@ func actPodman(o actionOpts, r gdurunner.Runner) int {
 	if len(errs) > 0 {
 		return failFast(errs)
 	}
-	if code, ok := preflight(r, action, validate.PlatformPodman, e.Podman.Command, "", sc.UserMode, approvals); !ok {
+	if code, ok := preflight(r, action, validate.PlatformPodman, e.Podman.Command, sc.UserMode, nil, approvals); !ok {
 		return code
 	}
 	if action == runner.ActionRemove {

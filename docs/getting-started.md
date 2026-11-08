@@ -154,8 +154,10 @@ solmq-conn-util generate --platform kubernetes -e specs/env.yaml   # inspect fir
 solmq-conn-util deploy   --platform kubernetes -e specs/env.yaml
 ```
 
-`deploy` renders the artifacts, runs a read-only preflight against the platform,
-then applies them by piping to `kubectl`, `docker compose` or `systemctl`.
+`deploy` renders the artifacts, runs a read-only preflight against the platform
+(on kubernetes, whether you may create what it is about to write), then applies
+them by piping to `kubectl`, `docker compose` or `systemctl`. On kubernetes it
+creates the namespace only if it is absent, and waits for the rollout.
 Credentials travel as mounted files, never as environment variables. With one
 platform section in `env.yaml`, `--platform` can be omitted.
 

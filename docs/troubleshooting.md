@@ -185,9 +185,24 @@ in [configuration.md](configuration.md), the verbs in
   `libs.pvc.existing` claim is never deleted.
 - **Kubernetes: a namespace with anything else in it is never removed.** The
   occupants are listed and the namespace kept, with or without `--no-prompt`.
+- **Kubernetes: `remove` says the namespace "was left in place".** The gate
+  never fails a remove that succeeded. The warning names why: the listing could
+  not be read, you may not `delete namespaces` (asked before the question), the
+  question has no terminal (pass `--no-prompt`), or the delete itself failed. The
+  exit code is 0 either way; delete the namespace by hand if you want it gone.
+- **Kubernetes: `deploy` says the namespace does not exist and you may not create
+  it.** The namespace is created only when absent, and only if you may. Have a
+  cluster admin run the `create namespace` command in the message, or ask for
+  `create namespaces`, then re-run.
+- **Kubernetes: `deploy` warns the rollout wait was refused.** The apply
+  succeeded; your identity just may not watch the Deployment. A wait that times
+  out, or a rollout that fails, exits 1: read `kubectl rollout status` and the
+  pod's logs.
 - **A piped run hangs? It does not; it fails.** Every prompt refuses a
   non-TTY and names the flag to pass: `--platform`, `--install`, `--no-prompt`,
-  or the one-shot `cli` form.
+  or the one-shot `cli` form. (The namespace question after a `remove` is the
+  exception: with no terminal it keeps the namespace with a warning instead of
+  failing.)
 - **`deploy` asks "continue?" on a service that is running.** Docker or podman
   would recreate or restart it: the compose file or a credential changed
   (docker), or the unit or a secret changed (podman). Answering `n` exits 0 and

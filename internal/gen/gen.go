@@ -22,6 +22,7 @@ import (
 
 	"github.com/hafio/go-deploy-utility/envref"
 	"github.com/hafio/go-deploy-utility/execguard"
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/dockergen"
@@ -205,6 +206,14 @@ type KubeOpts struct {
 	// every Secret is rendered by name alone (deploy.Input.Teardown), so remove
 	// needs no exported credential and no store source.
 	Teardown bool
+	// OmitNamespace renders a deploy without the Namespace document
+	// (deploy.Input.OmitNamespace), for a caller that creates the namespace on its
+	// own only when it is absent. `generate kubernetes` leaves it false.
+	OmitNamespace bool
+	// Written, when non-nil, receives the objects the rendered set writes, by kind
+	// and name (deploy.Written), for the permission probes that run before the
+	// apply or the delete.
+	Written *[]nsgate.Object
 	// Probes, when non-nil, receives the Secrets the rendered pod reads but the
 	// tool does not write -- each operator Secret a store names
 	// (existing.secret) and an existing credentials Secret -- with the keys the
@@ -261,7 +270,8 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts) (out string, err
 	if rerrs != nil {
 		return "", rerrs, warns
 	}
-	in := deploy.Input{Kube: k, Defaults: &e.Defaults, Syslog: e.Defaults.Syslog, Teardown: opts.Teardown}
+	in := deploy.Input{Kube: k, Defaults: &e.Defaults, Syslog: e.Defaults.Syslog, Teardown: opts.Teardown,
+		OmitNamespace: opts.OmitNamespace}
 	switch {
 	case opts.Teardown:
 		// Delete needs names only: no credential is resolved, no store opened.
@@ -308,7 +318,15 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts) (out string, err
 			return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 		}
 	}
-	return deploy.Render(in), nil, warns
+	if opts.Written != nil {
+		*opts.Written = deploy.Written(in)
+	}
+	// Render refuses only a namespace validate.Run has already reported above.
+	rendered, err := deploy.Render(in)
+	if err != nil {
+		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+	}
+	return rendered, nil, warns
 }
 
 // secretProbes lists the operator-managed Secrets the rendered pod mounts and

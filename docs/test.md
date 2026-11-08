@@ -9,7 +9,7 @@ for using the tool, see [getting-started.md](getting-started.md).
 Run the suite with `./scripts/dev.sh test` (`.\scripts\dev.ps1 test` on Windows);
 measure coverage with the `cov` task.
 
-Last recorded `cov` total, from `scripts/logs/cov.log` (2026-11-07): **96.3%**, after S8. An earlier
+Last recorded `cov` total, from `scripts/logs/cov.log` (2026-11-08): **96.3%**, after S9. An earlier
 adoption of the shared `containerart` packages deleted the covered helpers
 `composeQuote`, `composeEscape`, `flowList`, `renderSecrets` and `systemdEnv`; their tests
 moved to go-deploy-utility with them. Removing covered statements lowers the ratio. No new uncovered
@@ -24,6 +24,26 @@ S8 (the shared `watch` loop under `status -w`) replaces the untested `watchStatu
 `clearScreen` with `gduwatch.Loop` behind a test seam, and covers it with the `TestWatchStatus*`
 tests and `TestWatchTitleNamesTheViewAndItsFlags`. The total rose from 96.2% to 96.3%, which is
 the new floor.
+
+S9 (the shared `kube`, `kube/rbac` and `kube/nsgate` packages) removes the covered local `can-i`
+parser (`canIDenied`, `canIProbe`), the namespace occupancy parsers (`namespaceOccupants`, `isOurs`,
+`isClusterDefault`) and the hand-built kubectl argv, whose tests moved to go-deploy-utility with
+them (`TestNamespaceOccupants*` are deleted here for that reason). It adds a test for every
+branch it introduces: the probe sets (`TestKubernetesProbesDeployAndRemoveSets`,
+`TestKubernetesProbeSets`), the namespace flow (`TestDeployNamespaceFlow`), the rollout wait
+(`TestDeployWaitsForTheRollout`, `TestLifecycleRolloutWait`) and the namespace gate's new steps
+(`TestRemoveNamespaceAsksThePermissionBeforeTheQuestion`, `TestRemoveNamespaceDeleteOutcome`).
+`deploy.Render` now writes the Namespace document through `kube.NamespaceManifest` and returns its
+error, so the local copy is gone (`TestRenderRefusesANamespaceThatIsNotALabel`). Validation's
+`isDNS1123` gave way to `kube.ValidLabel`, the same rule.
+The first `cov` read 96.2%, under the 96.3% floor: the moved code was well covered, and five new
+guards cannot be reached. `TestKubernetesRolloutStatusRejectsUnsafeCommand` covers the rollout
+wait's guard, and `ExecArgv` no longer repeats `kube.Exec`'s empty-command check, so
+`TestExecArgvRefusesAnEmptyCommand` now reaches the shared refusal. With them the total is back at
+96.3%, which stays the floor. These stay uncovered on purpose, because validation refuses the
+input first: the probe-set errors in `actKubernetes` and the lifecycle path (an unknown action or kind),
+the command guard in `actKubernetes` (`validate.Run` already held the command to it), and the Namespace
+document's refusal in `ensureNamespace` and `GenerateKubernetes`.
 
 ## Contents
 
@@ -68,7 +88,7 @@ the new floor.
 - Tests are cross-referenced by file and test name only -- no line numbers (they rot as
   tests move).
 
-_Snapshot: 1042 test functions, 1501 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
+_Snapshot: 1059 test functions, 1518 case rows across 20 packages. (Functions counted from `func Test` in the source; case rows are the data rows of the tables below, not a suite run -- human, please confirm against `./scripts/dev.sh test` / `cov` output.)_
 
 ## internal/scan
 
@@ -222,7 +242,7 @@ Tests: [spec_test.go](../internal/spec/spec_test.go), [env_test.go](../internal/
 | TestSecretsCreateRejectsOtherShapes | a word / a list / stores, a word / a retired mapping with a list for its name (credentials, stores) / the block as a bare value (credentials, stores) | a create: value that is neither a boolean nor the retired mapping fails at parse naming the key, a wrongly-typed field inside the retired mapping is still a parse error, and a secrets block must itself be a mapping |
 | TestSecretsCreateFollowsAnAlias | - | a YAML alias (create: *on) is resolved before create: is read, so an aliased true creates the Secret |
 | TestDerivedObjectNames | - | every created Secret and the libs claim are named after deployment.name (-credentials, -stores, -image-pull, -libs) with any retired name key ignored, a referenced object keeps the operator's own name, no block yields nothing, and the stores Secret's name is the instance's whatever the retired stores block says |
-| TestCreatedNames | - | the Deployment, ConfigMap and stores Secret always, then exactly the Secrets and claim the config asks the tool to build -- a referenced object is not the tool's |
+| TestCreatedNames | - | the Deployment, its Service and ConfigMap always, then exactly the Secrets and claim the config asks the tool to build, each with its kind (the list the namespace gate and validate share) -- a referenced object is not the tool's, and the cluster-scoped PersistentVolume is not listed |
 | TestParseWorkflowTransformHeaders | - | a top-level transform-headers block is captured verbatim -- header order and each expression's quoting intact -- and is not reported as misplaced; an absent or empty block is none |
 | TestParseWorkflowTransform | - | a top-level transform block is captured verbatim -- key order, the list of one-key mappings and each expression's quoting intact -- beside a top-level transform-headers block, and neither is reported as misplaced; an absent or empty block is none |
 | TestMisplacedWorkflowTransforms | - | a transform-header: typo, the legacy transform-payload section (either spelling), and transform or transform-headers under a side, its solace:/mq: block (also when that block is an alias and the key reaches it through a << merge), or that block's consumer:/producer: are each reported as the dotted path they were found at, in file order, while both top-level blocks still parse |
@@ -600,6 +620,8 @@ Tests: [deploy_test.go](../internal/deploy/deploy_test.go), [imagepull_test.go](
 | TestRenderServicePort | resolved to a non-default management port | Render emits port/targetPort 9500 for a Port already resolved to defaults.management.port 9500 |
 | TestTeardownReversesTheDocumentOrder | - | with a libs PVC present, apply orders the claim before the Deployment that mounts it; teardown fully reverses the set -- Deployment before the claim, Service before ConfigMap -- with separators intact and as many as apply's (the Namespace dropped, the stores Secret named) |
 | TestTeardownNamesSecretsOnly | - | a teardown renders every Secret the tool owns by kind and name alone -- credentials and image-pull when created, the stores Secret always -- carries no Secret payload, and never names an operator's Secret |
+| TestOmitNamespaceDropsOnlyTheNamespace | - | Input.OmitNamespace leaves the Namespace document out of an apply -- the ConfigMap comes first with no leading separator and nothing else differs -- which is how a deploy settles the namespace on its own while `generate` keeps it |
+| TestWrittenIsWhatTheRenderEmits | no store, no pull secret / store and pull secret / teardown / Service disabled | Written narrows spec.CreatedNames to what one render writes -- the stores Secret only when a store is carried, the image-pull Secret only when built, both always for a teardown, the Service only when enabled -- so the permission probes and the owned objects cannot drift |
 | TestLibsPVNameIsNamespaced | - | the same `libs.pvc.create.name` in two different namespaces derives two different PV names, each suffixed `-pv` and carrying its own namespace |
 | TestImagePullSecretStates | no block / name alone / created | imagePullSecrets is absent, rendered without a Secret, or rendered with one -- the middle case is what stops an apply overwriting a Secret the operator built |
 | TestImagePullSecretPayloadIsOpaqueToDeploy | - | deploy places the already-encoded payload verbatim and the registry password appears nowhere outside it |
@@ -697,6 +719,7 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestKubernetesDeployApplyOnStdin | - | deploy issues one call kubectl `--context` prod apply `-f` - with manifest on stdin |
 | TestKubernetesRemoveUsesDeleteVerb | - | the remove action issues argv [oc delete -f - --ignore-not-found] |
 | TestKubernetesRejectsUnsafeCommand | - | unsafe command rejected, error returned, zero calls made |
+| TestKubernetesRolloutStatusRejectsUnsafeCommand | - | the rollout wait goes through the same guard as the apply: an unsafe command is rejected with zero calls made |
 | TestKubernetesUnknownAction | - | unknown action rejected, error returned, zero calls made |
 | TestDockerUpAndDown | - | deploy runs compose -f - --project-directory <dir> up -d, remove the same with down, each with the compose file on stdin and the credentials in the child env |
 | TestDockerRejectsUnsafeCommand | - | unsafe command rejected, error returned, zero calls made |
@@ -737,19 +760,25 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestWriteFileDoesNotTightenExistingFileMode | - | content replaced but existing 0644 mode left unchanged (non-windows) |
 | TestWriteFileParentIsFileReturnsError | - | parent path is a file: MkdirAll error surfaces naming the blocker path |
 | TestWriteFileTargetIsDirectoryReturnsError | - | target path is a directory: write error surfaces naming the target path |
-| TestPreflightKubernetesArgvDeployNoNamespace | - | kubernetes deploy preflight issues <argv> auth can-i create deployment with no `--namespace` when namespace is empty |
-| TestPreflightKubernetesArgvRemoveWithNamespace | - | kubernetes remove preflight issues <argv> auth can-i delete deployment `--namespace` <ns> |
+| TestPreflightKubernetesArgvDeployNoNamespace | - | a kubernetes preflight of one create probe issues <argv> auth can-i create deployments with no namespace flag when the probe names none, and no other call |
+| TestPreflightKubernetesArgvRemoveWithNamespace | - | a delete probe in a namespace issues <argv> auth can-i delete deployments -n <ns> |
 | TestPreflightDockerArgvIsInfo | - | docker preflight issues <argv> info |
 | TestPreflightPodmanArgvIsInfo | - | podman preflight issues <argv> info |
 | TestPreflightFailureWrapsPlatformHint | kubernetes / docker / rootless podman / rootful podman | a failing kubernetes probe says "preflight failed for kubernetes", keeps the cause and carries the login hint; docker and podman give containercli.InfoError's one message -- engine, `<command> info`, the cause, the engine's own output and the hint for Docker, rootless podman (`systemctl --user start podman.socket`) or rootful podman -- with nothing left to print twice |
 | TestPreflightFailureDropsControlCharactersFromEngineOutput | - | the engine's output inside the error loses its control characters (a terminal escape) and keeps its line breaks |
-| TestPreflightReadVerbsAskOnlyWhatTheyUse | status / logs / cli | kubernetes asks can-i get pods, get pods --subresource log, and create pods --subresource exec (never deploy's create deployment); docker still runs info |
-| TestPreflightRefusalNamesThePermission | "no" / "no - reason" / unreachable | a can-i "no" names the permission, the namespace (or the current one) and the answer, without the login hint and with nothing else to print; an unreachable cluster keeps the login hint |
+| TestKubernetesReadVerbsAskNothing | status / logs / cli | KubernetesProbes returns nothing for the read verbs and Preflight makes no call on kubernetes -- a view-only operator is never turned away by a question; docker still runs info |
+| TestPreflightRefusalNamesThePermission | "no" / "no - reason" / unreachable | a can-i "no" is a *rbac.RefusedError behind "preflight failed for kubernetes" naming the permission, the namespace (or the current one) and the answer, without the login hint and with nothing else to print; an unreachable cluster still gets the login hint |
 | TestPreflightRejectsDisallowedBinaryBeforeRunning | - | a command outside the platform allowlist (curl) is rejected before the probe ever runs, zero runner calls |
 | TestPreflightExtraAllowedThreadsThrough | - | "lima podman" is rejected without an approval and accepted with lima approved, running argv [lima podman info]; "sudo podman" is refused as an escalation wrapper before any probe runs |
-| TestPreflightUnknownAction | - | an action other than deploy/remove/start/stop/restart is rejected, zero runner calls |
-| TestPreflightKubernetesLifecycleAsksToPatch | - | start, stop and restart ask kubectl auth can-i to patch the Deployment |
-| TestLifecycleArgv | kubernetes stop / start / restart | scale to 0, scale to the replicas, rollout restart, each under --namespace when one is set |
+| TestKubernetesProbesUnknownAction | unknown action / unmapped kind | an action other than deploy/remove/start/stop/restart/status/logs/cli, and an object kind with no resource mapped, are errors naming what is wrong, with no probe built |
+| TestPreflightKubernetesLifecycleAsksToPatch | - | start, stop and restart ask kubectl auth can-i to patch deployments in the namespace, one call |
+| TestPreflightStopsAtTheFirstRefusal | refused second probe / all allowed | every probe of a command runs in order before its first write and the first refusal ends the run -- the later probes are not asked |
+| TestPreflightRefusesAnAnswerThatIsNotYes | - | an exit 0 whose answer is not "yes" (a wrapper changed the output) is refused, never taken for a permission nobody confirmed |
+| TestKubernetesProbesDeployAndRemoveSets | no secret, no volume / secrets / libs claim with its volume | create (deploy) and delete (remove) of the plural resource of every written object, once each, plus persistentvolumes (asked with --all-namespaces) for the libs claim and never namespaces |
+| TestKubernetesNamespaceState | exists / absent / somebody else's / read refused | exactly namespace/<ns> exists, nothing is absent, anything else and any failure is unknown, read from stdout alone with the argv `get namespace <ns> --ignore-not-found -o name` |
+| TestKubernetesNamespaceGateArgv | - | the gate's listing is nsgate.List's one query and its delete is `delete namespace <ns> --ignore-not-found` |
+| TestCheckProbeReadsStdoutAlone | - | a "yes" on stdout passes even with a warning on stderr after it |
+| TestLifecycleArgv | kubernetes stop / start / restart / rollout status | scale to 0, scale to the replicas, rollout restart and rollout status (--timeout=300s), each with `-n <ns>` after the subcommand when one is set |
 | TestLifecycleArgv | docker stop / start / restart | containercli.Stop, Start and Restart: the engine command, its flags kept, then the action and the container |
 | TestLifecycleArgv | podman start, user unit / stop, system unit | systemctl in the unit's scope |
 | TestLifecycleArgv | unknown action / unsafe command | refused before anything runs |
@@ -771,7 +800,7 @@ Tests: [runner_test.go](../internal/runner/runner_test.go)
 | TestScriptInstalledReadsMarkers | present / absent / marker among engine chatter / present despite a non-zero exit | the answer comes from the marker on stdout, so a marker is believed even when the engine also reported a non-zero exit |
 | TestScriptInstalledUnreachableTargetIsError | engine error with no marker / clean exit with no marker | no marker at all means the probe never ran, so it errors rather than silently reporting absent |
 | TestScriptInstalledUnknownPlatform | - | an unknown platform is rejected, zero runner calls |
-| TestInstallScriptArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | InstallScript execs `mkdir -p <dir> && cat > <path>`; on kubernetes through its exec form (`-i`, `-n <namespace>` when given), on docker and podman as containercli.Upload, which single-quotes both paths |
+| TestInstallScriptArgv | kubernetes no namespace / kubernetes with namespace / docker / podman | InstallScript execs `mkdir -p '<dir>' && cat > '<path>'`; on kubernetes as kube.Upload (`-i`, `-n <namespace>` when given, the connector container), on docker and podman as containercli.Upload, each single-quoting both paths |
 | TestInstallScriptPassesScriptOnStdinNotArgv | - | the script body travels on stdin, never appearing in any argv token |
 | TestInstallScriptRefusesAnEmptyTargetOnAnEngine | - | an engine upload that names no container is refused by containercli.Upload, zero runner calls |
 | TestInstallScriptUnknownPlatform | - | an unknown platform is rejected, zero runner calls |
@@ -1188,6 +1217,7 @@ Tests: [gen_extra_test.go](../internal/gen/gen_extra_test.go), [gen_runas_test.g
 | TestConfigWorkflowCap | 21 workflows | Config produces no output and one error naming the count, the 20 cap, and the split-into-folders remedy |
 | TestConfigWorkflowCap | 20 workflows | exactly at the cap does not error |
 | TestGenerateKubernetesWorkflowCap | 21 workflows | GenerateKubernetes produces no manifest and the same workflow-cap error |
+| TestGenerateKubernetesOmitNamespaceAndWritten | - | KubeOpts.OmitNamespace renders a deploy without the Namespace document while the default (generate) keeps it first, and Written receives the kinds the manifest writes for the probes |
 | TestConfigCarriesSecurityUserRoles | - | end-to-end: a roles-bearing env.yaml validates clean and its role reaches the rendered application.yml, while the reserved account still renders none |
 | TestConfigNoSecretsLeak | - | every rendered password is a ${STABLE} placeholder except the one permitted literal: the reserved spec.StatusUserName account, whose value the override pins for the test |
 | TestGenerateDockerBasics | - | generates non-empty compose opening with the defaulted, quoted `name: "solace-ibmmq-connectors"` project line and containing the image; all four credential positions render as top-level environment-provider secrets, never inlined as values, and each ${STABLE} placeholder in application.yml is doubled so compose cannot interpolate the value in |
@@ -1468,11 +1498,12 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [lifecycle_test.go](
 | TestGenerateConfigEmitWriteError | - | emit to path with missing parent dir returns exit code 1 |
 | TestLoadEnvWorkflowsDirRelativeToEnvFile | - | workflows.dir resolved relative to env file not cwd; exit 0 and stdout has spring: |
 | TestLoadEnvExcludesEnvFileFromWorkflowSet | - | env.yaml excluded from its own workflow scan; exit code 0 |
-| TestDeployKubernetesSeamHappyPath | - | exit 0, 2 runner calls (preflight then apply) with argv [kubectl apply -f -], stdin contains kind: Deployment |
-| TestRemoveKubernetesSeamHappyPath | - | exit 0, runner calls preflight then delete with argv [kubectl delete -f - --ignore-not-found] |
-| TestDeployKubernetesProbesOperatorSecrets | missing Secret / missing key | after the preflight, a get secret per operator Secret; a missing Secret or key stops the deploy before apply, naming the Secret |
+| TestDeployKubernetesSeamHappyPath | - | exit 0 and 6 runner calls: a create probe each for deployments, configmaps and secrets, the namespace read (it exists, so nothing is created), the apply with argv [kubectl apply -f -] and kind: Deployment on stdin, and the rollout wait |
+| TestRemoveKubernetesSeamHappyPath | - | exit 0, a delete probe per kind (deployments, configmaps, secrets), the manifest delete [kubectl delete -f - --ignore-not-found], the occupancy listing, the delete-namespaces probe and the namespace delete |
+| TestDeployKubernetesProbesOperatorSecrets | missing Secret / missing key | after the permission probes, a get secret per operator Secret; a missing Secret or key stops the deploy before apply, naming the Secret |
 | TestDeployKubernetesProbesOperatorSecrets | not allowed to read it / complete | a Secret the identity may not read only warns, and a complete one lets the apply through |
-| TestLifecycleVerbsActInPlace | stop / start / restart x kubernetes / docker / podman | the platform's preflight, then one call acting on the instance env.yaml names -- scale, rollout restart, the engine's own verb, or systemctl -- with no -env variable exported and no store file present |
+| TestLifecycleVerbsActInPlace | stop / start / restart x kubernetes / docker / podman | the platform's preflight, then one call acting on the instance env.yaml names -- scale, rollout restart, the engine's own verb, or systemctl -- -- on kubernetes start and restart then wait for the rollout, stop does not -- with no -env variable exported and no store file present |
+| TestLifecycleRolloutWait | start and restart x refused / timed out / rollout failed; stop | a wait kubectl refuses is a warning and exit 0 with the ok line, a timeout or failed rollout is "<verb> kubernetes failed" and exit 1, and stop makes no wait |
 | TestLifecycleVerbsRefuseBeforeActing | - | a failed preflight stops before acting, a name that is not a DNS-1123 label is refused before anything runs (exit 2), a positional argument is a usage error, and no compose file is written |
 | TestDeployKubernetesSeamRejectsUnsafeCommand | - | unsafe kubernetes.command yields exit 2 and zero runner calls |
 | TestAllowCommandFlagBadValueExitsUsageError | path value | `--allow-command` /usr/bin/lima exits 2 naming the bare-name rule, zero runner calls |
@@ -1482,7 +1513,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [lifecycle_test.go](
 | TestAllowCommandFlagRejectedOnGenerateAndValidate | generate config / validate | `--allow-command` is undefined on generate/validate; exit 2 as an unknown flag |
 | TestAllowCommandFlagRepeatableThreadsToRunner | - | "lima podman" rejects (exit 2) with zero runner calls without the flag; repeating `--allow-command` lima twice threads through to preflight (argv [lima podman info]) and to the podman secret calls |
 | TestDeployRefusesSudoCommandWhateverIsApproved | no approval / an unrelated approval | podman.command `sudo podman` exits 2, naming the escalation wrapper and "run the tool itself under sudo instead", zero runner calls |
-| TestDeployKubernetesPreflightFailureStopsBeforeApply | - | a failing kubernetes preflight (auth can-i argv incl. `--namespace`) stops with exit 1 and exactly 1 runner call |
+| TestDeployKubernetesPreflightFailureStopsBeforeApply | - | a failing kubernetes preflight (auth can-i create deployments -n <ns>) stops with exit 1 and exactly 1 runner call |
 | TestDeployDockerPreflightFailureStopsBeforeWrite | - | a failing docker preflight (argv [docker info]) stops before the compose file is written, exit 1, exactly 1 runner call |
 | TestDeployPodmanPreflightFailureStopsBeforeWrite | - | a failing podman preflight (argv [podman info]) stops before the unit is written, exit 1, exactly 1 runner call |
 | TestValidateOKAndErrors | valid spec | validate exits 0 |
@@ -1554,7 +1585,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [lifecycle_test.go](
 | TestStatusTargetWordIsRequired | - | a bare `status` prints the target words and the verb's own help page, exits 2, and runs nothing, since neither view is a safe default; the short spellings (cnt, app) are deliberately absent, since aliases are documented only in the markdown docs |
 | TestStatusUnknownAndExtraTargetWords | unknown word / a second word | each is a usage error (exit 2) naming the problem, with nothing run |
 | TestStatusTargetsMatchModel | - | the drift gate between the modeled target words, the constants the views switch on, and statusTargetArgBracket (which cannot be built from the model, since cliVerbs' own initialiser uses it) |
-| TestStatusTargetAliasesResolve | cnt / app / container / all / unknown | resolveTarget maps each alias to its canonical word and passes an unknown one through; `sts cnt` really drives the container view, which costs one preflight and one get |
+| TestStatusTargetAliasesResolve | cnt / app / container / all / unknown | resolveTarget maps each alias to its canonical word and passes an unknown one through; `sts cnt` really drives the container view, which costs one get on kubernetes (no preflight) |
 | TestStatusRejectsImpossibleFlagCombinations | unknown --output / json with watch / --all with --pod / --all with --container / --install, --user and --management-port on the container view | every combination that cannot mean anything is refused (exit 2) before a single query runs, rather than being silently ignored |
 | TestWatchFlagAcceptsBareAndInterval | bare / interval / off / 3 rejected values | the flag is boolean in every documented sense (IsBoolFlag) but also takes the deliberately undocumented `-w=<seconds>` form, bounded |
 | TestWatchStatusRedrawsUnderTheHeader | - | on a terminal each refresh opens with the shared clear-screen sequence and the `Every 5s: solmq-conn-util status all   <time>   Ctrl-C to stop` header, then the report |
@@ -1564,7 +1595,7 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [lifecycle_test.go](
 | TestWatchStatusCancelledContextExitsZero | - | Ctrl-C (a done context) ends the watch with exit 0 |
 | TestWatchStatusRejectsAnIntervalTheLoopCannotUse | - | an interval the shared loop refuses is reported through errExit (non-zero) before anything is collected |
 | TestWatchTitleNamesTheViewAndItsFlags | container / application / all / details / all instances / both | the header names the view and appends `--details` and `--all` when set |
-| TestStatusContainerViewReadsEngineFactsWithoutExecing | - | one read-only `get pods -o json` answers discovery and the whole table together (2 calls in all), nothing is exec'd into, and every column reaches the output |
+| TestStatusContainerViewReadsEngineFactsWithoutExecing | - | one read-only `get pods -o json` answers discovery and the whole table together (1 call in all, no permission probe first), nothing is exec'd into, and every column reaches the output |
 | TestStatusContainerDetailsSamplesAndChecksComponents | - | `--details` adds one sampling call for the run and one presence check per distinct referenced object (deduplicated across pods), plus the NODE column, digest and resource lines |
 | TestStatusContainerDetailsWithoutMetricsServerDegradesToANote | - | a cluster with no metrics API costs the resource lines and nothing else: a note naming what to install, the table still printed, exit 0 |
 | TestStatusDockerContainerViewIsOneInspect | - | one inspect answers every docker target and carries the compose project too; docker reports HEALTH where kubernetes reports READY |
@@ -1601,8 +1632,8 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [lifecycle_test.go](
 | TestProgressElapsedShapes | -1s / 0 / 300ms / 4.1s / 59.5s / 1m / 2m05s | tenths below a minute and `NmSSs` above it, with a negative clock reading clamped to 0.0s rather than printed |
 | TestProgressTrimElidesTheMiddle | shorter than the line / exactly the line / middle elided / odd remainder / a real label / no room for the elision / one column / no columns / negative | a label wider than the row is cut in the middle so the call at the front and the `i/N` at the end both survive, and the result never exceeds the columns asked for -- narrower than `...` the label is cut hard, and at zero or less nothing is drawn |
 | TestProgressSpinnerNeverExceedsOneRow | - | a 120-character label still leaves every `\r`-delimited segment -- the draws and the blanking alike -- inside the 79-column cap, with the elision and the `i/N` both still present, because a line that wrapped would leave a row the carriage return cannot reach |
-| TestStatusVerboseNamesEverySlowCall | - | `status application -v` over two instances prints exactly one `step:` line per slow call, in call order (preflight, list pods, then install probe and status script per instance with i/N), each carrying its elapsed time, and none of it on stdout -- and no `resolve instance names` line, since both `--pod` values are names rather than indexes so no enumeration is made |
-| TestStatusVerboseUnderWatchSaysWhichWins | -v / --verbose | both spellings reach the field and print the precedence note on stderr rather than a usage error -- the flags do not conflict, one just wins; the note is the last thing the flag checks do, so what ends this run instead is a failing preflight (exit 1, that probe the only call made) |
+| TestStatusVerboseNamesEverySlowCall | - | `status application -v` over two instances prints exactly one `step:` line per slow call, in call order (list pods -- kubernetes has no preflight step -- then install probe and status script per instance with i/N), each carrying its elapsed time, and none of it on stdout -- and no `resolve instance names` line, since both `--pod` values are names rather than indexes so no enumeration is made |
+| TestStatusVerboseUnderWatchSaysWhichWins | -v / --verbose | both spellings reach the field and print the precedence note on stderr rather than a usage error -- the flags do not conflict, one just wins; the note is the last thing the flag checks do, so what ends this run instead is a failing docker preflight (exit 1, that probe the only call made) |
 | TestStatusStdoutIsIdenticalWithAndWithoutTheSpinner | - | the stream contract the feature rests on: `status application --output json` yields byte-identical stdout with and without a terminal (and still parses), while only the terminal run writes a spinner to stderr |
 | TestVersionOutputShape | - | `version` prints `solmq-conn-util <version> <go version> <GOOS>/<GOARCH>` as its unchanged first line, then the two-line support notice (notice.Short()), exit 0; the package-level version var defaults to "dev" in an un-injected test build |
 | TestSupportNoticeInHandWrittenDocs | README.md and every hand-written doc under docs/ (getting-started, configuration, operations, troubleshooting, DESIGN, DEVELOPMENT) | each carries supportNotice (the shared notice package's Markdown block) verbatim, with a blank line either side (a line directly after a blockquote folds into it), ahead of its first `## ` heading, checked with noticetest.AssertDocs; both forms of the notice are plain ASCII |
@@ -1677,8 +1708,8 @@ The `logs` verb shares status's platform resolution and instance discovery (inst
 | TestLogsNoInstancesFoundNamesTheFix | - | an empty discovery result carries the selector and namespace it used, plus `--pod`, since those are what the operator would change |
 | TestLogsWithoutASectionToDiscoverFrom | kubernetes / docker / podman | exit 2: the discovery branch with nothing to work from, reached by naming an instance with the other platform's flag (`--container` on kubernetes, `--pod` on docker/podman); the error names the missing section and the way forward, and must *not* name `--all`, which logs does not have |
 | TestLogsPlatformWithNoSectionAtAllIsLoud | - | an env.yaml that parses but describes no platform cannot answer `--platform` either (exit 2), and says so naming all three sections before discovery is attempted |
-| TestLogsNamedPodIsNotPreChecked | - | a name is taken at its word: no `get pods <name>` precedes the read (the preflight asks can-i get pods --subresource log), and a pod that is not there is reported by the platform on the read itself |
-| TestReadVerbsReportTheirOwnRefusal | status / logs / cli | a can-i "no" exits 1 with "<verb> kubernetes failed" and the permission it lacked, and nothing runs past the probe |
+| TestLogsNamedPodIsNotPreChecked | - | a name is taken at its word: no `get pods <name>` precedes the read (and kubernetes asks no permission first: the read is the only call), and a pod that is not there is reported by the platform on the read itself |
+| TestReadVerbsAskKubernetesNoPermissionFirst | status / logs / cli | on kubernetes the first call is the read itself (get pods, logs, exec) and no can-i is ever asked, so a view-only operator is not turned away by a question; a refused read exits non-zero with the platform's own words |
 | TestLogsUsesTheSectionCommandOverride | - | logs reaches for the binary env.yaml names (oc, not kubectl) on every call, through the shared instanceCommand resolution |
 | TestLogsCommandFlagOverridesTheSection | - | `--command` wins over the section, and a binary outside the per-platform allowlist is refused by name before anything runs, with exit 2 |
 | TestLogsAllIsNotALogsFlag | - | `--all` searches by image and returns many, the one thing logs cannot do, so it is an unknown flag here rather than one accepted and then refused |
@@ -1697,7 +1728,7 @@ The `cli` verb reaches its instance through the same resolution `status` and `lo
 | Test | Case | Verifies |
 |------|------|----------|
 | TestCliRefusesAShellWithoutATerminal | - | the same non-TTY contract the platform menu and the remove confirmation keep, with the one-shot form named as the next step |
-| TestCliKubernetesArgvShape | - | `-i -t`, the namespace, `-c connector` and the `--` terminator, in that order; a named pod costs no discovery call, so the run is preflight plus attach |
+| TestCliKubernetesArgvShape | - | `-i -t`, the namespace, `-c connector` and the `--` terminator, in that order; a named pod costs no discovery call, and kubernetes asks nothing first, so the run is the attach alone |
 | TestCliEngineArgvShape | docker / podman | engine flags precede the container name, and neither `-c` nor `--` is added -- both would reach the container as arguments |
 | TestCliOneShotRunsTheCommandWithNoTerminal | - | everything after `--` replaces the shell, with no `-t` and no `-i` while stdin is a terminal |
 | TestCliOneShotAttachesStdinWhenSomethingIsPiped | - | a stdin that is not a terminal is one something is piped into, so `-i` is added; also the case proving the one-shot form needs no terminal |
@@ -1725,26 +1756,32 @@ manifest-parity cases)
 | TestInstanceNamespaceResolution | override / section / absent / nil env / docker / podman | the same three steps for the namespace, and that it stays empty on docker/podman, which have no such concept |
 | TestConfiguredInstanceName | docker / podman / each section absent / nil env | the single container name each engine section names, and that a missing-section error names the section that is absent rather than just reporting nothing found |
 | TestNoPodsFoundExplainsTheBranchItCameFrom | image search / selector / named pods | an empty result is explained in the terms of whichever discovery produced it, so a selector is never quoted back at someone who named pods directly |
-| TestRemoveTeardownManifestOmitsTheNamespace | - | the invariant this pins: the manifest piped to `kubectl delete -f -` carries no Namespace, since deleting one cascades to every object inside it including workloads this tool never deployed; the separate namespace step is the only place a Namespace document is piped, and deploy still emits it in the manifest or the objects have nowhere to land |
-| TestRemoveNamespaceOccupiedLeavesItAlone | - | anything living in the namespace that the release does not own is listed as kind/name and the namespace is kept, with no fourth call |
-| TestRemoveNamespaceEmptyPromptsSeparately | y / n / blank | an empty namespace asks its own question, because saying yes to removing a deployment is not saying yes to removing the namespace around it; declining leaves it |
+| TestRemoveTeardownManifestOmitsTheNamespace | - | the invariant this pins: the manifest piped to `kubectl delete -f -` carries no Namespace, since deleting one cascades to every object inside it including workloads this tool never deployed; the namespace goes by its own `delete namespace <ns> --ignore-not-found` with no stdin, only after the occupancy check and the permission probe passed |
+| TestDeployManifestOmitsTheNamespace | - | the manifest a deploy applies carries no Namespace document, while `generate --platform kubernetes` still emits one first |
+| TestDeployNamespaceFlow | exists / absent allowed / absent refused / absent unanswered / unknown allowed / unknown refused / unknown unanswered / Namespace apply fails | an existing namespace asks no cluster permission and applies nothing extra; an absent or unreadable one asks `create namespaces` and applies the Namespace on its own before the manifest; absent and refused is MissingNamespace (exit 1, nothing applied); unreadable and refused warns and carries on; an unanswered probe or a failed Namespace apply is an error |
+| TestDeployWaitsForTheRollout | rolled out / refused / timed out; failed apply | the deploy waits for the Deployment after the apply and keeps one ok: line; a refused wait warns and exits 0, a timeout exits 1, and a failed apply is not waited on |
+| TestKubernetesProbeSets | credentials secret / service and libs claim with volume / no created secret | a deploy asks create and a remove asks delete of each kind the manifest writes -- once each, the Secret only when written, the Service only when enabled, persistentvolumes with --all-namespaces for libs.pvc.create -- and never a namespaces probe other than the gate's delete |
+| TestKubernetesRefusedProbeStopsBeforeAnyWrite | - | every probe runs before the first write and the first refusal stops the deploy, naming the permission; the later probes and the apply never run |
+| TestRemoveNamespaceOccupiedLeavesItAlone | - | anything living in the namespace that the release does not own is listed as kind/name and the namespace is kept, with no call after the listing |
+| TestRemoveNamespaceEmptyPromptsSeparately | y / n / blank | an empty namespace asks its own question, after the delete-namespaces probe, because saying yes to removing a deployment is not saying yes to removing the namespace around it; declining leaves it |
 | TestRemoveSharesOneReaderAcrossBothQuestions | - | one input `y\ny\n` answers both the teardown and the namespace question, because the run holds a single buffered reader (the shared confirm package) and the first read does not swallow the second answer |
 | TestRemoveNoPromptNeverRemovesAnOccupiedNamespace | - | the invariant: no flag removes a namespace still holding someone else's work. `--no-prompt` approves the questions, never a cascade -- the occupancy check runs first and an occupant of any kind ends it, silently or not |
-| TestRemovePlainRunChecksTheNamespace | - | a plain remove with no flags probes the namespace and asks both questions -- teardown, then namespace |
-| TestRemoveNamespaceRefusesClusterNamespaces | default / kube-system / kube-public / kube-node-lease | refused before the occupancy probe even runs, so no emptiness result can authorise deleting one |
-| TestRemoveNamespaceProbeFailureLeavesItAlone | - | a failed occupancy query leaves the namespace in place and says so; a namespace is not worth deleting on a guess |
+| TestRemovePlainRunChecksTheNamespace | - | a plain remove with no flags lists the namespace, probes the delete permission and asks both questions -- teardown, then namespace |
+| TestRemoveNamespaceRefusesClusterNamespaces | default / kube-system / kube-public / kube-node-lease | refused before the occupancy listing even runs, so no emptiness result can authorise deleting one |
+| TestRemoveNamespaceProbeFailureLeavesItAlone | - | a failed listing leaves the namespace in place and says so, exit 0; a namespace is not worth deleting on a guess |
 | TestRemoveFailedTeardownSkipsTheNamespace | - | a failed teardown never probes or deletes the namespace: whatever did not come down is still in there |
-| TestNamespaceOccupantsRules | foreign deployment/statefulset/pvc/service; our own; owned pod; terminating; the three cluster defaults | the exclusion table -- each non-occupant would otherwise keep a namespace alive forever, the likeliest being the release deleted moments ago and still terminating |
-| TestNamespaceOccupantsAreSortedAndLabelled | - | kind/name, lower-cased and sorted, so the list is stable between runs |
-| TestNamespaceOccupantsRejectsUnreadableOutput | - | a parse failure is an error, never an empty list: unreadable output must not read as "empty" and authorise the delete |
 | TestTeardownDropsTheNamespaceDocument | - | apply keeps the Namespace document, a teardown drops it, dropping the first document leaves no leading separator, and the ConfigMap and Deployment still render |
-| TestNamespaceManifestMatchesWhatRenderEmits | - | the standalone document the namespace delete pipes is exactly the one Render emits, so the two cannot drift |
-| TestOwnedNamesCoversEverythingThisReleaseCreates | created secrets/PVC / referenced ones / nil section | the safety net behind the occupancy check: everything this release creates counts as ours under the name it was actually created with (derived from deployment.name, never a retired name key), an empty name never does, and objects merely referenced (existing:) are *not* ours -- the operator manages them and their presence is a real reason to keep the namespace |
+| TestNamespaceManifestMatchesWhatRenderEmits | - | the manifest `generate` writes starts with exactly the shared kube.NamespaceManifest text a deploy applies on its own, then a separator, so the two cannot drift |
+| TestRenderRefusesANamespaceThatIsNotALabel | - | Render writes the Namespace document through kube.NamespaceManifest, so a namespace that is not a DNS-1123 label (validate refuses it first) gets no manifest and an error naming it |
+| TestOwnedObjectsCoverEverythingThisReleaseCreates | created secrets/PVC / referenced ones | the safety net behind the occupancy check: CreatedNames carries everything this release creates, with its kind, under the name it was actually created with (derived from deployment.name, never a retired name key), and objects merely referenced (existing:) are *not* ours -- the operator manages them and their presence is a real reason to keep the namespace |
 | TestRemoveNamespaceWithoutANamespaceSaysSo | - | a kubernetes section with no namespace has nothing to remove, and says so rather than acting on an empty name |
-| TestRemoveNamespaceRejectsAnUnsafeCommand | - | the namespace delete goes through the same binary allowlist as everything else, rather than being a second path around it; the refusal exits 2 |
-| TestRemoveNamespaceUnreadableProbeLeavesItAlone | - | output that cannot be parsed must not read as "empty" and authorise the delete |
-| TestRemoveNamespaceNonTTYFailsFastNamingTheFlag | - | the namespace question refuses a non-TTY naming `--no-prompt`, the same shape every other prompt uses; the namespace is not deleted |
-| TestRemoveNamespaceProbeArgvIsOneQuery | - | one call listing every kind whose loss would matter, in the namespace being considered |
+| TestRemoveKubernetesSeamRejectsUnsafeCommand | - | a remove whose command the guard refuses exits 2 with nothing run: the namespace gate takes the argv the command was guarded into, so there is no second path around the allowlist |
+| TestRemoveNamespaceUnreadableProbeLeavesItAlone | not JSON / no items (`{}`) / empty | a listing that cannot be read, has no items, or came back empty is an error from nsgate.Occupants and the namespace is kept with a warning naming why -- it must never read as "empty" and authorise the delete |
+| TestRemoveNamespaceNonTTYKeepsItNamingTheFlag | - | the namespace question with no terminal keeps the namespace with a warning that names `--no-prompt` and exits 0 -- the gate never fails a remove that succeeded; nothing is deleted |
+| TestRemoveNamespaceProbeArgvIsOneQuery | - | one nsgate.List call listing every kind whose loss would matter, in the namespace being considered |
+| TestRemoveNamespaceDiscountsWhatTheReleaseOwnsByKind | - | the release's own objects are passed with their kinds: the Deployment, its ConfigMap and the ReplicaSet and Pod it owns do not count, but a ConfigMap that merely shares the Deployment's name does |
+| TestRemoveNamespaceAsksThePermissionBeforeTheQuestion | refused / unanswered | `auth can-i delete namespaces` runs after the listing and before the prompt, so nobody is asked a question that would be refused; a refusal or no answer keeps the namespace with a warning and exit 0 |
+| TestRemoveNamespaceDeleteOutcome | deleted / delete fails | a confirmed delete reports "ok: remove namespace kubernetes"; a failed delete is a warning that keeps the namespace, exit 0, with neither an ok nor an error line |
 | TestRemoveKubernetesSeamPromptsBeforeTearingDown | y / yes / YES / Y | an accepted confirmation runs the full teardown: preflight, delete, occupancy probe and, since the same answer approves the namespace question, the namespace delete |
 | TestRemoveDeclinedTouchesNothing | n / no / blank / whitespace / anything else | a declined teardown exits 0 having run nothing at all, not even the read-only preflight probe, and says "cancelled"; a blank line declines, so the safe answer is the one Enter gives |
 | TestRemoveNoPromptSkipsThePromptEntirely | - | `--no-prompt` writes no question at all (asserted on the injected prompter's output), and covers both questions: the empty namespace is removed without asking |

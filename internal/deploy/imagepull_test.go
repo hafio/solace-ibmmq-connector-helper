@@ -11,9 +11,10 @@ import (
 )
 
 // renderWithPull renders the manifest set for a given pull-secret wiring.
-func renderWithPull(ps *PullSecret) string {
+func renderWithPull(t *testing.T, ps *PullSecret) string {
+	t.Helper()
 	k := baseKube()
-	return Render(Input{
+	return mustRender(t, Input{
 		Kube: k, Defaults: &spec.Defaults{}, ImagePull: ps,
 		Instance: one(k.Deployment.Name, "x: 1\n", &consolidate.Model{}),
 	})
@@ -26,7 +27,7 @@ func renderWithPull(ps *PullSecret) string {
 // deploy would still look like it succeeded.
 func TestImagePullSecretStates(t *testing.T) {
 	t.Run("no block: no reference and no Secret", func(t *testing.T) {
-		out := renderWithPull(nil)
+		out := renderWithPull(t, nil)
 		if strings.Contains(out, "imagePullSecrets") {
 			t.Errorf("imagePullSecrets should be absent:\n%s", out)
 		}
@@ -36,7 +37,7 @@ func TestImagePullSecretStates(t *testing.T) {
 	})
 
 	t.Run("name alone: reference only", func(t *testing.T) {
-		out := renderWithPull(&PullSecret{Name: "regcred"})
+		out := renderWithPull(t, &PullSecret{Name: "regcred"})
 		if !strings.Contains(out, "      imagePullSecrets:\n        - name: regcred\n") {
 			t.Errorf("imagePullSecrets entry missing:\n%s", out)
 		}
@@ -46,7 +47,7 @@ func TestImagePullSecretStates(t *testing.T) {
 	})
 
 	t.Run("created: reference and Secret", func(t *testing.T) {
-		out := renderWithPull(&PullSecret{Name: "regcred", DockerConfigJSON: "PAYLOAD"})
+		out := renderWithPull(t, &PullSecret{Name: "regcred", DockerConfigJSON: "PAYLOAD"})
 		if !strings.Contains(out, "      imagePullSecrets:\n        - name: regcred\n") {
 			t.Errorf("imagePullSecrets entry missing:\n%s", out)
 		}
@@ -73,7 +74,7 @@ func TestImagePullSecretPayloadIsOpaqueToDeploy(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := base64.StdEncoding.EncodeToString(doc)
-	out := renderWithPull(&PullSecret{Name: "regcred", DockerConfigJSON: payload})
+	out := renderWithPull(t, &PullSecret{Name: "regcred", DockerConfigJSON: payload})
 
 	if !strings.Contains(out, ".dockerconfigjson: "+payload+"\n") {
 		t.Errorf("payload not placed verbatim:\n%s", out)
@@ -94,21 +95,21 @@ func TestEnvBlockOmittedWhenEmpty(t *testing.T) {
 	k := baseKube()
 	inst := one(k.Deployment.Name, "x: 1\n", &consolidate.Model{MQTLS: false})
 	inst.Timezone = ""
-	out := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
+	out := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
 	if strings.Contains(out, "env:") {
 		t.Errorf("env: should be omitted when nothing goes under it:\n%s", out)
 	}
 
 	// Any one of the three entries brings the block back.
 	inst.Timezone = "UTC"
-	withTZ := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
+	withTZ := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
 	if !strings.Contains(withTZ, "          env:\n            - name: TZ\n              value: UTC\n") {
 		t.Errorf("TZ entry missing:\n%s", withTZ)
 	}
 
 	inst.Timezone = ""
 	inst.Model = &consolidate.Model{MQTLS: true}
-	withMQTLS := Render(Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
+	withMQTLS := mustRender(t, Input{Kube: k, Defaults: &spec.Defaults{}, Instance: inst})
 	if !strings.Contains(withMQTLS, "env:") || !strings.Contains(withMQTLS, "JAVA_TOOL_OPTIONS") {
 		t.Errorf("MQTLS alone should still open the env block:\n%s", withMQTLS)
 	}

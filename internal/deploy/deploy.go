@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
 	"gopkg.in/yaml.v3"
 
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
@@ -126,12 +128,11 @@ type Input struct {
 	// Teardown renders the set for `kubectl delete -f -` rather than `apply -f -`,
 	// which changes three things.
 	//
-	// The Namespace document is dropped. Piping one to delete removes the
-	// namespace and cascades to everything inside it, including workloads this
-	// tool never deployed -- so remove renders without it and handles the
-	// namespace as its own, separately confirmed step. apply always wants it:
-	// creating a namespace that already exists is a no-op, and the objects below
-	// need it to exist in the same apply.
+	// The Namespace document is dropped (OmitNamespace, which Teardown implies).
+	// Piping one to delete removes the namespace and cascades to everything
+	// inside it, including workloads this tool never deployed -- so remove
+	// renders without it and handles the namespace as its own, separately
+	// confirmed step.
 	//
 	// And the documents come out in reverse. kubectl deletes them in file order
 	// and waits for each one to go, so creation order deadlocks: the PVC is
@@ -145,7 +146,13 @@ type Input struct {
 	// stores Secret is always among them: its name belongs to the instance, so
 	// one an earlier deploy left is removed even when this spec renders none.
 	Teardown bool
-	CredKVs  []KV // resolved credential values (only when credentials.create)
+	// OmitNamespace drops the Namespace document, for a deploy that settles the
+	// namespace on its own: created only when it is absent, and only when this
+	// identity may, which a Namespace in the apply would ask of it every time.
+	// `generate kubernetes` leaves it false, so a manifest applied by hand still
+	// creates the namespace it needs.
+	OmitNamespace bool
+	CredKVs       []KV // resolved credential values (only when credentials.create)
 	// Stores are the bytes of the tool's stores Secret, base64: every selected
 	// store not kept in an operator's Secret, an existing one's PKCS12 read, a
 	// created one built. Empty renders no stores Secret.
@@ -299,8 +306,11 @@ func leaderMode(d *spec.Defaults) string {
 
 // Render produces the full multi-doc manifest set, in the order Namespace,
 // ConfigMap, Secrets, libs PV/PVC, Deployment, Service -- reversed when
-// in.Teardown, for the reason recorded there.
-func Render(in Input) string {
+// in.Teardown, for the reason recorded there. The Namespace document is
+// kube.NamespaceManifest's, the same text a deploy applies when it creates the
+// namespace on its own. It refuses a namespace that is not a DNS-1123 label, the
+// only error here, which validate has already reported for any input gen builds.
+func Render(in Input) (string, error) {
 	dep := in.Kube.Deployment
 	ns := dep.Namespace
 
@@ -332,10 +342,15 @@ func Render(in Input) string {
 
 	// 0. Namespace: emitted first so the objects below land in a namespace that
 	// exists in the same apply (applying it when it already exists is a no-op).
-	// Omitted for a teardown -- see Input.OmitNamespace for why that matters.
-	if !in.Teardown {
+	// Omitted for a teardown and when the caller creates the namespace itself --
+	// see Input.Teardown and Input.OmitNamespace.
+	if !in.Teardown && !in.OmitNamespace {
+		doc, err := kube.NamespaceManifest(ns)
+		if err != nil {
+			return "", err
+		}
 		sep()
-		w.Raw(NamespaceManifest(ns))
+		w.Raw(string(doc))
 	}
 
 	// 1. ConfigMap.
@@ -459,7 +474,7 @@ func Render(in Input) string {
 			docs[i], docs[j] = docs[j], docs[i]
 		}
 	}
-	return strings.Join(docs, "---\n")
+	return strings.Join(docs, "---\n"), nil
 }
 
 // nameOnlySecret emits a Secret by kind and name alone: what a teardown hands
@@ -781,17 +796,28 @@ func ManagementPort(in Input) int {
 	return in.Defaults.EffectiveManagementPort()
 }
 
-// NamespaceManifest is the Namespace document on its own, so the one caller
-// that deletes a namespace can pipe it through the same runner.Kubernetes path
-// (and therefore the same binary allowlist and verb mapping) as every other
-// manifest, instead of building a bespoke argv.
-//
-// It is the same four lines Render emits, spelled once so the two cannot drift.
-func NamespaceManifest(ns string) string {
-	w := &yw{}
-	w.Line(0, "apiVersion: v1")
-	w.Line(0, "kind: Namespace")
-	w.Line(0, "metadata:")
-	w.Line(2, "name: "+ns)
-	return w.String()
+// Written lists the namespaced objects Render writes for in, by kind and name: what
+// the permission probes of a deploy (create) or a teardown (delete) are asked
+// about. It is spec's CreatedNames narrowed to what this render emits -- the
+// Service only when enabled, and, for a deploy, the stores Secret only when a store
+// is carried in it and the image-pull Secret only when its pull secret is built --
+// so the probes and the objects owned for the namespace gate cannot drift. The libs
+// PersistentVolume is cluster-scoped and not listed.
+func Written(in Input) []nsgate.Object {
+	storesName, _ := in.Kube.StoresSecretName()
+	pullName, _ := in.Kube.ImagePullSecretName()
+	var out []nsgate.Object
+	for _, o := range in.Kube.CreatedNames() {
+		switch {
+		case o.Kind == "Service" && !in.Kube.Service.Enabled:
+			continue
+		case o.Kind != "Secret" || in.Teardown:
+		case o.Name == storesName && len(in.Stores) == 0:
+			continue
+		case o.Name == pullName && (in.ImagePull == nil || in.ImagePull.DockerConfigJSON == ""):
+			continue
+		}
+		out = append(out, o)
+	}
+	return out
 }

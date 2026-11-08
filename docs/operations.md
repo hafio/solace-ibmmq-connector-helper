@@ -126,27 +126,47 @@ Generates for the resolved platform, then applies it through the section's
 
 | Platform | Runs |
 |---|---|
-| kubernetes | reads every Secret you manage that the pod mounts and stops if one lacks a key; then `<command> apply -f -` with the manifest on stdin |
+| kubernetes | asks `auth can-i create` of each kind it writes (below); reads every Secret you manage that the pod mounts and stops if one lacks a key; reads the namespace and creates it, on its own, only if it is absent; then `<command> apply -f -` with the manifest on stdin, which carries no Namespace document; then waits for the rollout |
 | docker | lists the running containers (`ps --all --no-trunc --filter status=running`) and, for a running one, reads its deploy digest label (`container inspect`); asks if compose would recreate it (below); then `<command> compose -f - --project-directory <env.yaml's folder> up -d`, with the compose file on stdin and credentials and the deploy digest in the child environment |
 | podman | resolves the scope (below), compares the unit and each secret with what is installed, asks if a running unit would restart (below), then writes only what changed, `systemctl [--user] daemon-reload` if anything was written, and `start`, or `restart` if the unit was running and something changed |
 
 Before anything is written or applied, a read-only preflight runs: `info` on
-docker and podman, and on kubernetes `auth can-i` for the one permission the
-verb needs. A failed `info` prints one message: the engine, the command, the
+docker and podman, and on kubernetes `auth can-i` for each write the verb is
+about to make. A failed `info` prints one message: the engine, the command, the
 engine's own output and one next step, which differs for Docker, rootless podman
 and rootful podman:
 
 | Verb | Asks |
 |---|---|
-| `deploy` | `create deployment` |
-| `remove` | `delete deployment` |
-| `start`, `stop`, `restart` | `patch deployment` |
-| `status` | `get pods` |
-| `logs` | `get pods --subresource log` |
-| `cli` | `create pods --subresource exec` |
+| `deploy` | `create` of each kind the manifest writes: `deployments`, `configmaps` and, when written, `services`, `secrets` (a Secret only when one is written: the credentials Secret when created, the stores Secret when a store is carried in it, the image-pull Secret when built), `persistentvolumeclaims` and, for `libs.pvc.create`, `persistentvolumes` (asked cluster-wide, since it is cluster-scoped) |
+| `remove` | `delete` of the same set (a teardown always names the stores Secret) |
+| `start`, `stop`, `restart` | `patch deployments` |
+| `status`, `logs`, `cli` | nothing on kubernetes: they read what they may and report what they are refused. docker and podman still run `info` |
 
-A failing probe stops the run, naming the missing permission and namespace, or
-giving a login hint. There is no skip flag.
+Every probe of a command runs before its first write, and the first refusal
+stops the run, naming the missing permission and namespace (or the cluster, for a
+cluster-scoped one), or giving a login hint when the cluster cannot be reached.
+There is no skip flag. The Namespace is not among the probes.
+
+**The namespace on deploy.** The deploy manifest carries no Namespace document
+(`generate` still emits one first, for a manual `kubectl apply`). After the
+probes and before the apply, the tool reads the namespace (`get namespace <ns>`):
+
+- it exists: nothing more, and no cluster-wide permission is asked;
+- it is absent: `auth can-i create namespaces` is asked, and the Namespace is
+  applied on its own, before the manifest. If this identity may not create it,
+  the deploy stops with the namespace's name and who can create it (`kubectl
+  create namespace <ns>`); a probe that cannot be answered (no login) is its own
+  error;
+- the read was refused (no `get namespaces`): the same probe. Allowed, the
+  Namespace is applied; refused, a warning says the namespace could not be read
+  and this identity may not create it, and the deploy carries on, since the
+  first write stops it if the namespace is missing.
+
+**The rollout wait.** After a successful apply the tool runs `kubectl rollout
+status deployment/<name> --timeout=300s`. It is a convenience, and the change is
+already applied: if kubectl refuses it (Forbidden) the tool prints a `warning:`
+and exits 0; a timeout or a rollout that fails is an error, exit 1.
 
 `command:` must start with an allowlisted bare binary (`kubectl`/`oc`,
 `docker`, `podman`). `--allow-command <name>` approves another one (a chained
@@ -229,15 +249,29 @@ remove kubernetes: this tears down deployment solmq-connector in namespace prod 
 ```
 
 Anything but `y`/`yes` exits 0 having touched nothing. `--no-prompt` answers
-yes to both questions and is required when stdin is not a terminal.
+yes to both questions and is required when stdin is not a terminal for the first;
+the namespace question never fails a remove (below).
 
 - kubernetes: pipes the manifest set, minus the Namespace, to `<command>
   delete -f - --ignore-not-found`, in reverse order. Secrets the tool owns are
-  deleted by name; nothing is resolved. Then it lists what is left in the
-  namespace. A namespace holding anything the release does not own is kept and
-  the occupants listed, on every path. An empty one is offered for removal as a
-  separate question. The cluster namespaces (`default`, `kube-system`, `kube-public`,
-  `kube-node-lease`) are never removed.
+  deleted by name; nothing is resolved. Then the namespace gate runs, in this
+  order, and nothing in it fails the remove (exit 0 throughout; the namespace is
+  kept with a message):
+  1. the cluster namespaces (`default`, `kube-system`, `kube-public`,
+     `kube-node-lease`) are never removed;
+  2. what is left in the namespace is listed in one `get`
+     (`all,persistentvolumeclaims,secrets,configmaps`). A listing that fails or
+     cannot be read keeps the namespace. Anything the release does not own is kept
+     and the occupants listed, on every path; the release's own objects are
+     matched by kind and name, with what they own, so a ConfigMap that merely
+     shares the Deployment's name is an occupant;
+  3. `auth can-i delete namespaces` is asked before the question, so nobody is
+     asked and then refused; a refusal, or no answer, keeps the namespace with a
+     warning;
+  4. an empty namespace is offered for removal as a separate question.
+     `--no-prompt` answers it. With no terminal and no `--no-prompt` the
+     namespace is kept with a warning that names the flag; a "no" keeps it;
+  5. `delete namespace <ns>`; if it fails the namespace is kept with a warning.
 - docker: `compose down` against the configured project. Store secrets are
   handed to compose as placeholders, so no store source is needed.
 - podman: stops the unit, removes it, reloads systemd, then removes every
@@ -251,13 +285,17 @@ solmq-conn-util restart --platform kubernetes -e env.yaml
 
 | Platform | `stop` | `start` | `restart` |
 |---|---|---|---|
-| kubernetes | scale the Deployment to 0 | scale back to `replicas` | `kubectl rollout restart` |
+| kubernetes | scale the Deployment to 0 | scale back to `replicas`, then wait for the rollout | `kubectl rollout restart`, then wait for the rollout |
 | docker | `docker stop <name>` | `docker start <name>` | `docker restart <name>` |
 | podman | `systemctl [--user] stop` | `start` | `restart` |
 
 They read only the section's names and `command:`. Nothing is rendered, no
 credential resolved, no store opened. `restart` is how the connector picks up a
 rotated store or a changed `application.yml` where `deploy` does not restart it.
+
+On kubernetes `start` and `restart` then wait for the rollout (`rollout status`,
+300s); `stop` does not. A wait kubectl refuses prints a `warning:` and the verb
+exits 0, since the change is made; a timeout or failed rollout is exit 1.
 
 ## 7. status
 
@@ -401,7 +439,7 @@ a terminal. Progress never changes stdout or the exit code, so
 
 | View | kubernetes | docker | podman |
 |---|---|---|---|
-| `container` | preflight + 1 `get pods` (+ `get deployment`/`get service`) | preflight + 1 `inspect` | preflight + 1 `inspect` + 1 `systemctl show` per instance (none when the podman scope cannot be resolved, which keeps podman's own count) |
+| `container` | 1 `get pods` (+ `get deployment`/`get service`); no preflight | preflight + 1 `inspect` | preflight + 1 `inspect` + 1 `systemctl show` per instance (none when the podman scope cannot be resolved, which keeps podman's own count) |
 | `application` | + 1 probe and 1 script run per instance | same | same |
 | `-d` adds | 1 `top pod` + 1 `get` per referenced object | 1 `stats` + 1 `image inspect` per image | as docker |
 | `--all` adds | nothing | 1 `ps` | 1 `ps` |
@@ -492,7 +530,8 @@ echo hi | solmq-conn-util cli -e env.yaml -- cat             # stdin is attached
 Opens a shell in one instance, for the questions `status` and `logs` cannot
 answer: did the truststore mount, what is in `/app/external/libs`, which
 `application.yml` is loaded. Same resolution, allowlist, preflight and picker
-as `logs`. The picker keeps a one-shot command behind its `--`.
+as `logs`; on kubernetes nothing is asked up front, and a refused exec is kubectl's
+own message. The picker keeps a one-shot command behind its `--`.
 
 - The shell is `sh`: the image is Alpine with busybox, and there is no `bash`.
 - Everything after `--` reaches the engine as argv, never `sh -c`. A pipe,

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/certfixture"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
@@ -610,6 +611,30 @@ func TestGenerateKubernetesWorkflowCap(t *testing.T) {
 	}
 	if !issuesContain(errs, "21 workflows found, but one connector instance runs at most 20") {
 		t.Fatalf("errs = %v, want the workflow-cap message", errs)
+	}
+}
+
+// TestGenerateKubernetesOmitNamespaceAndWritten: a deploy renders without the Namespace
+// document (it creates the namespace itself, only when absent) and reports the kinds
+// the manifest writes for its permission probes; the default render, which
+// `generate kubernetes` prints, keeps the Namespace first.
+func TestGenerateKubernetesOmitNamespaceAndWritten(t *testing.T) {
+	kube := &File{Name: "env.yaml", Data: []byte("image:\n  name: img\n  tag: v1\nkubernetes:\n  command: kubectl\n" +
+		"  deployment:\n    name: solmq\n    namespace: ns\n  secrets:\n    credentials:\n      existing: their-creds\n")}
+	req := Request{Env: kube, Workflows: synthWorkflowFiles(1)}
+	res := Resolver{Rand: fixedStatusRand}
+
+	full, errs, _ := GenerateKubernetes(req, res, KubeOpts{})
+	if len(errs) > 0 || !strings.HasPrefix(full, "apiVersion: v1\nkind: Namespace\n") {
+		t.Fatalf("generate keeps the Namespace first, errs %v, got:\n%s", errs, full)
+	}
+	var written []nsgate.Object
+	out, errs, _ := GenerateKubernetes(req, res, KubeOpts{OmitNamespace: true, Written: &written})
+	if len(errs) > 0 || strings.Contains(out, "kind: Namespace") {
+		t.Fatalf("a deploy render carries no Namespace, errs %v, got:\n%s", errs, out)
+	}
+	if want := []nsgate.Object{{Kind: "Deployment", Name: "solmq"}, {Kind: "ConfigMap", Name: "solmq-config"}}; !slices.Equal(written, want) {
+		t.Errorf("written = %v, want %v (no Service: it is not enabled; no stores Secret: no store is carried)", written, want)
 	}
 }
 

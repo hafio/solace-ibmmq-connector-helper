@@ -156,11 +156,16 @@ executable configuration: its `command:` runs with your privileges, so review it
 like a Makefile. `generate` is the dry run.
 
 **Preflight is read-only and asks for the least it needs.** Docker and podman run
-`info`. Kubernetes asks `auth can-i` for the one permission the verb needs
-(`create deployment` for deploy, `get pods --subresource log` for logs, and so
-on), so a read-only account can still run `status` and `logs`. A failing probe
-stops the run before anything is written. There is no skip flag: the real
-command would fail anyway.
+`info`. Kubernetes asks `auth can-i` only for what the command is about to write:
+`create` (deploy) or `delete` (remove) of each kind the manifest holds
+(deployments, configmaps and, when written, services, secrets,
+persistentvolumeclaims, and cluster-wide persistentvolumes), `patch deployments`
+for start, stop and restart. `status`, `logs` and `cli` are not probed at all on
+kubernetes: they read what they may and report what they are refused, so a
+read-only account is never turned away by a question. Every probe of a command
+runs before its first write, and the first refusal stops it. The namespace is not
+among them: the namespace flow asks `create namespaces` only when it is absent.
+There is no skip flag: the real command would fail anyway.
 
 **Secret material crosses on stdin, never argv**, and is never logged. Podman
 secrets, kubernetes manifests and the compose file all travel that way.
@@ -178,12 +183,21 @@ flag the deploy fails with exit 1 naming it. An unchanged deploy asks nothing.
 Kubernetes asks nothing: `kubectl apply` and the rollout decide, so `--no-prompt`
 is refused there (exit 2) as a flag that would do nothing, as `solace-util` does.
 
-**The namespace is never in the manifest `remove` deletes.** Deleting a
-Namespace cascades. A namespace holding anything the release does not own is
-never removed, on any path, with or without `--no-prompt`. An empty one is
-offered as a separate question, because consenting to a deployment's removal is
-not consenting to the namespace's. Cluster namespaces are never removed, and a
-check that cannot run leaves the namespace alone.
+**The namespace is never in the manifest `remove` deletes, and the deploy creates
+it only when it is absent.** Deleting a Namespace cascades. A namespace holding
+anything the release does not own is never removed, on any path, with or without
+`--no-prompt`. The gate (`kube/nsgate`) runs after a successful remove in a fixed
+order: cluster namespaces are protected; the listing and the occupants (this
+release's objects are passed by kind and name, with what they own); then the
+permission to delete namespaces, probed before anyone is asked; then the question,
+because consenting to a deployment's removal is not consenting to the
+namespace's; then the delete. Nothing in the gate fails the remove, which has
+already succeeded: a refusal, a listing that cannot be read, an occupant, a
+declined question, no terminal to ask on (`--no-prompt` answers it) and a failed
+delete each keep the namespace with a warning and exit 0. The deploy manifest
+carries no Namespace document either (`generate` still does, for a manual apply):
+the namespace is read, and only an absent one is created, on its own, when this
+identity may.
 
 **Teardown reverses the manifest order.** kubectl deletes documents in file
 order and waits on each. In creation order a `libs.pvc.create` claim precedes the
@@ -197,7 +211,9 @@ resolves no credential and opens no store.
 **`deploy` does not restart pods.** `application.yml` and the status script are
 mounted from the ConfigMap with `subPath`, and kubernetes never refreshes a
 `subPath` mount when its ConfigMap changes. The `restart` verb exists for this:
-it runs `kubectl rollout restart`.
+it runs `kubectl rollout restart`. After a deploy, start and restart the tool
+waits for the rollout (300s). The wait is a convenience: a refusal warns and the
+command succeeds, a timeout or failed rollout is exit 1.
 
 **Everything is named after `deployment.name`.** `<name>-config`,
 `<name>-credentials`, `<name>-stores`, `<name>-image-pull`, `<name>-libs`. A
@@ -206,6 +222,10 @@ let each object take its own name, and two instances given the same one shared
 it: each deploy overwrote the other's credentials, either `remove` deleted them
 for both, and a shared libs claim made `remove` hang on `pvc-protection`. A
 PersistentVolume is cluster-scoped, so its name also carries the namespace.
+`spec.CreatedNames` lists them by kind and name (Deployment, Service, ConfigMap,
+each Secret, the claim), the one list that `validate` holds to 63 characters and
+that `remove` passes to the namespace gate as its own, so another kind of object
+that merely shares a name still keeps the namespace.
 
 **Liveness and readiness are different checks.** Liveness is a `tcpSocket` probe
 on the management port, because it decides whether kubelet restarts the

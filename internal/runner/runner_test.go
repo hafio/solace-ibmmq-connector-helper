@@ -14,6 +14,9 @@ import (
 
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
+	"github.com/hafio/go-deploy-utility/kube/rbac"
 	"github.com/hafio/go-deploy-utility/podman"
 	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/hafio/go-deploy-utility/runner/runnertest"
@@ -41,7 +44,7 @@ type fakeRunner struct {
 	calls     []call
 	err       error         // returned by every Run when errByCall has no entry (nil = success)
 	errByCall map[int]error // per-call-index override, so a later call can fail while earlier ones succeed
-	out       string        // returned by every Run when outByCall has no entry ("" falls back to "out")
+	out       string        // returned by every Run when outByCall has no entry ("" falls back to "out", or "yes" for auth can-i)
 	outByCall map[int]string
 }
 
@@ -57,7 +60,13 @@ func (f *fakeRunner) Run(_ context.Context, c gdurunner.Cmd, stdout, _ io.Writer
 	out, ok := f.outByCall[idx]
 	if !ok {
 		out = f.out
-		if out == "" {
+		switch {
+		case out != "":
+		case isCanI(c.Argv):
+			// rbac.Check refuses anything but a "yes", so a probe answers it by
+			// default and a test scripts the refusal it wants.
+			out = "yes\n"
+		default:
 			out = "out"
 		}
 	}
@@ -79,6 +88,16 @@ func emit(w io.Writer, s string) {
 	if w != nil && s != "" {
 		fmt.Fprint(w, s)
 	}
+}
+
+// isCanI reports whether argv is a `kubectl auth can-i` probe.
+func isCanI(argv []string) bool {
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "auth" && argv[i+1] == "can-i" {
+			return true
+		}
+	}
+	return false
 }
 
 // bg is the context the helper tests run under.
@@ -187,6 +206,18 @@ func TestKubernetesRemoveUsesDeleteVerb(t *testing.T) {
 func TestKubernetesRejectsUnsafeCommand(t *testing.T) {
 	f := &fakeRunner{}
 	if _, err := Kubernetes(bg(), f, "kubectl; rm -rf /", ActionDeploy, "x", noApprovals); err == nil {
+		t.Fatal("unsafe command must be rejected")
+	}
+	if len(f.calls) != 0 {
+		t.Fatal("nothing must be executed when the command is rejected")
+	}
+}
+
+// TestKubernetesRolloutStatusRejectsUnsafeCommand: the rollout wait goes through the
+// same guard as the apply it follows, so a refused command waits on nothing.
+func TestKubernetesRolloutStatusRejectsUnsafeCommand(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := KubernetesRolloutStatus(bg(), f, "kubectl; rm -rf /", "ns", "c", noApprovals); err == nil {
 		t.Fatal("unsafe command must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -1015,31 +1046,35 @@ func TestWriteFileTargetIsDirectoryReturnsError(t *testing.T) {
 
 // ---- Preflight ----------------------------------------------------------------
 
+// deployProbe is the one probe the failure tests hand a kubernetes Preflight.
+var deployProbe = []rbac.Probe{{Verb: "create", Resource: "deployments"}}
+
 func TestPreflightKubernetesArgvDeployNoNamespace(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl --context prod", ActionDeploy, "", false, noApprovals); err != nil {
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl --context prod", false, deployProbe, noApprovals); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"kubectl", "--context", "prod", "auth", "can-i", "create", "deployment"}
-	if !reflect.DeepEqual(f.calls[0].argv, want) {
-		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	want := []string{"kubectl", "--context", "prod", "auth", "can-i", "create", "deployments"}
+	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("calls = %+v, want one with argv %v", f.calls, want)
 	}
 }
 
 func TestPreflightKubernetesArgvRemoveWithNamespace(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "oc", ActionRemove, "solace", false, noApprovals); err != nil {
+	probes := []rbac.Probe{{Verb: "delete", Resource: "deployments", Namespace: "solace"}}
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "oc", false, probes, noApprovals); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"oc", "auth", "can-i", "delete", "deployment", "--namespace", "solace"}
-	if !reflect.DeepEqual(f.calls[0].argv, want) {
-		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	want := []string{"oc", "auth", "can-i", "delete", "deployments", "-n", "solace"}
+	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("calls = %+v, want one with argv %v", f.calls, want)
 	}
 }
 
 func TestPreflightDockerArgvIsInfo(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformDocker, "docker --context foo", ActionDeploy, "", false, noApprovals); err != nil {
+	if _, err := Preflight(bg(), f, validate.PlatformDocker, "docker --context foo", false, nil, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"docker", "--context", "foo", "info"}
@@ -1050,7 +1085,7 @@ func TestPreflightDockerArgvIsInfo(t *testing.T) {
 
 func TestPreflightPodmanArgvIsInfo(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformPodman, "podman", ActionRemove, "", false, noApprovals); err != nil {
+	if _, err := Preflight(bg(), f, validate.PlatformPodman, "podman", false, nil, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"podman", "info"}
@@ -1073,7 +1108,11 @@ func TestPreflightFailureWrapsPlatformHint(t *testing.T) {
 	}
 	for _, c := range cases {
 		f := &fakeRunner{err: fmt.Errorf("connection refused"), out: "dial unix /run/podman.sock: no such file"}
-		out, err := Preflight(bg(), f, c.platform, c.command, ActionDeploy, "", c.rootless, noApprovals)
+		var probes []rbac.Probe
+		if c.platform == validate.PlatformKubernetes {
+			probes = deployProbe
+		}
+		out, err := Preflight(bg(), f, c.platform, c.command, c.rootless, probes, noApprovals)
 		if err == nil {
 			t.Fatalf("%s: preflight failure must surface as an error", c.platform)
 		}
@@ -1102,7 +1141,7 @@ func TestPreflightFailureWrapsPlatformHint(t *testing.T) {
 // dropped there: a terminal escape from the engine is never acted on.
 func TestPreflightFailureDropsControlCharactersFromEngineOutput(t *testing.T) {
 	f := &fakeRunner{err: fmt.Errorf("refused"), out: "bad\x1b[2Jnews\nsecond line"}
-	_, err := Preflight(bg(), f, validate.PlatformDocker, "docker", ActionDeploy, "", false, noApprovals)
+	_, err := Preflight(bg(), f, validate.PlatformDocker, "docker", false, nil, noApprovals)
 	if err == nil || strings.Contains(err.Error(), "\x1b") {
 		t.Fatalf("want an error without the escape, got %q", err)
 	}
@@ -1111,51 +1150,47 @@ func TestPreflightFailureDropsControlCharactersFromEngineOutput(t *testing.T) {
 	}
 }
 
-// TestPreflightReadVerbsAskOnlyWhatTheyUse is CR-0006: status, logs and cli
-// change nothing, so their probe asks for the one read or exec they need rather
-// than deploy's create -- which refused every view-only operator up front. A
-// subresource travels in --subresource: "pods/log" would name a pod called log.
-func TestPreflightReadVerbsAskOnlyWhatTheyUse(t *testing.T) {
-	for _, c := range []struct {
-		action string
-		want   []string
-	}{
-		{ActionStatus, []string{"kubectl", "auth", "can-i", "get", "pods", "--namespace", "prod"}},
-		{ActionLogs, []string{"kubectl", "auth", "can-i", "get", "pods", "--subresource", "log", "--namespace", "prod"}},
-		{ActionCLI, []string{"kubectl", "auth", "can-i", "create", "pods", "--subresource", "exec", "--namespace", "prod"}},
-	} {
+// TestKubernetesReadVerbsAskNothing: status, logs and cli change nothing, so on
+// kubernetes they ask for no permission up front -- the read or exec itself reports
+// a refusal -- and a view-only operator is never turned away by a question. docker
+// and podman have no permission to ask about: reachability only.
+func TestKubernetesReadVerbsAskNothing(t *testing.T) {
+	for _, action := range []string{ActionStatus, ActionLogs, ActionCLI} {
+		probes, err := KubernetesProbes(action, "prod", nil, false)
+		if err != nil || len(probes) != 0 {
+			t.Errorf("%s: probes = %+v, err = %v, want none", action, probes, err)
+		}
 		f := &fakeRunner{}
-		if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", c.action, "prod", false, noApprovals); err != nil {
-			t.Fatalf("%s: %v", c.action, err)
+		if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", false, probes, noApprovals); err != nil || len(f.calls) != 0 {
+			t.Errorf("%s: err = %v, calls = %+v, want nothing run", action, err, f.calls)
 		}
-		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
-			t.Errorf("%s: argv = %v, want %v", c.action, f.calls[0].argv, c.want)
-		}
-		// docker and podman have no permission to ask about: reachability only.
 		f = &fakeRunner{}
-		if _, err := Preflight(bg(), f, validate.PlatformDocker, "docker", c.action, "", false, noApprovals); err != nil || !reflect.DeepEqual(f.calls[0].argv, []string{"docker", "info"}) {
-			t.Errorf("%s on docker: argv = %v, err = %v, want docker info", c.action, f.calls[0].argv, err)
+		if _, err := Preflight(bg(), f, validate.PlatformDocker, "docker", false, nil, noApprovals); err != nil || !reflect.DeepEqual(f.calls[0].argv, []string{"docker", "info"}) {
+			t.Errorf("%s on docker: argv = %v, err = %v, want docker info", action, f.calls[0].argv, err)
 		}
 	}
 }
 
 // TestPreflightRefusalNamesThePermission: can-i exits 1 both when the cluster
 // is unreachable and when the answer is no. A no is not fixed by logging in, so
-// it names the permission and the namespace instead of the login hint.
+// it names the permission and the namespace instead of the login hint, and is a
+// *rbac.RefusedError behind the platform prefix.
 func TestPreflightRefusalNamesThePermission(t *testing.T) {
 	for _, c := range []struct {
 		out, ns, want string
 	}{
-		{"no\n", "prod", `your account may not get pods/log in namespace "prod" (kubectl auth can-i answered "no")`},
-		{"Warning: something\nno - RBAC: access denied\n", "", `your account may not get pods/log in the current namespace (kubectl auth can-i answered "no - RBAC: access denied")`},
+		{"no\n", "prod", `not allowed to create deployments in namespace "prod" (auth can-i answered "no")`},
+		{"Warning: something\nno - RBAC: access denied\n", "", `not allowed to create deployments in the current namespace (auth can-i answered "no - RBAC: access denied")`},
 	} {
 		f := &fakeRunner{out: c.out, err: fmt.Errorf("exit status 1")}
-		out, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", ActionLogs, c.ns, false, noApprovals)
-		if err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("out %q: error = %v, want it to contain %s", c.out, err, c.want)
+		probes := []rbac.Probe{{Verb: "create", Resource: "deployments", Namespace: c.ns}}
+		out, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", false, probes, noApprovals)
+		var refused *rbac.RefusedError
+		if err == nil || !strings.Contains(err.Error(), c.want) || !errors.As(err, &refused) {
+			t.Errorf("out %q: error = %v, want a *RefusedError containing %s", c.out, err, c.want)
 		}
-		if err != nil && strings.Contains(err.Error(), "oc login") {
-			t.Errorf("out %q: a refusal must not blame the login: %v", c.out, err)
+		if err != nil && (strings.Contains(err.Error(), "oc login") || !strings.Contains(err.Error(), "preflight failed for kubernetes")) {
+			t.Errorf("out %q: a refusal must not blame the login, and names the platform: %v", c.out, err)
 		}
 		if out != "" {
 			t.Errorf("out %q: the answer is in the error; nothing else to print, got %q", c.out, out)
@@ -1163,14 +1198,48 @@ func TestPreflightRefusalNamesThePermission(t *testing.T) {
 	}
 	// An unreachable cluster still gets the login hint.
 	f := &fakeRunner{out: "error: You must be logged in to the server (Unauthorized)\n", err: fmt.Errorf("exit status 1")}
-	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", ActionLogs, "prod", false, noApprovals); err == nil || !strings.Contains(err.Error(), "oc login") {
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", false, deployProbe, noApprovals); err == nil || !strings.Contains(err.Error(), "oc login") {
 		t.Errorf("an unreachable cluster keeps the login hint, got %v", err)
+	}
+}
+
+// TestPreflightStopsAtTheFirstRefusal: every probe of a command runs before its
+// first write, in order, and the first refusal ends the run -- later ones are not
+// asked.
+func TestPreflightStopsAtTheFirstRefusal(t *testing.T) {
+	probes := []rbac.Probe{
+		{Verb: "create", Resource: "deployments", Namespace: "ns"},
+		{Verb: "create", Resource: "secrets", Namespace: "ns"},
+		{Verb: "create", Resource: "services", Namespace: "ns"},
+	}
+	f := &fakeRunner{outByCall: map[int]string{1: "no\n"}, errByCall: map[int]error{1: fmt.Errorf("exit status 1")}}
+	_, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", false, probes, noApprovals)
+	var refused *rbac.RefusedError
+	if !errors.As(err, &refused) || refused.Probe.Resource != "secrets" {
+		t.Fatalf("want a refusal of secrets, got %v", err)
+	}
+	if len(f.calls) != 2 {
+		t.Errorf("want 2 probes asked (deployments, secrets), got %+v", f.calls)
+	}
+	f = &fakeRunner{}
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", false, probes, noApprovals); err != nil || len(f.calls) != 3 {
+		t.Errorf("all allowed: err = %v, want 3 probes asked, got %+v", err, f.calls)
+	}
+}
+
+// A probe whose answer is not a yes is never taken for one: a wrapper that changed
+// can-i's output exits 0 without a verdict.
+func TestPreflightRefusesAnAnswerThatIsNotYes(t *testing.T) {
+	f := &fakeRunner{out: "ok\n"}
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", false, deployProbe, noApprovals); err == nil ||
+		!strings.Contains(err.Error(), "could not read the answer") {
+		t.Errorf("an exit 0 without yes must be refused, got %v", err)
 	}
 }
 
 func TestPreflightRejectsDisallowedBinaryBeforeRunning(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "curl", ActionDeploy, "", false, noApprovals); err == nil {
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "curl", false, nil, noApprovals); err == nil {
 		t.Fatal("a binary outside the platform allowlist must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -1180,11 +1249,11 @@ func TestPreflightRejectsDisallowedBinaryBeforeRunning(t *testing.T) {
 
 func TestPreflightExtraAllowedThreadsThrough(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformPodman, "lima podman", ActionDeploy, "", false, noApprovals); err == nil {
+	if _, err := Preflight(bg(), f, validate.PlatformPodman, "lima podman", false, nil, noApprovals); err == nil {
 		t.Fatal("lima podman must be rejected without an approval")
 	}
 	f = &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformPodman, "lima podman", ActionDeploy, "", false, approve(t, "lima")); err != nil {
+	if _, err := Preflight(bg(), f, validate.PlatformPodman, "lima podman", false, nil, approve(t, "lima")); err != nil {
 		t.Fatalf("lima podman with lima approved unexpected error: %v", err)
 	}
 	want := []string{"lima", "podman", "info"}
@@ -1194,7 +1263,7 @@ func TestPreflightExtraAllowedThreadsThrough(t *testing.T) {
 
 	// sudo is refused before the probe runs, approvals or not.
 	f = &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformPodman, "sudo podman", ActionDeploy, "", false, approve(t, "lima")); err == nil ||
+	if _, err := Preflight(bg(), f, validate.PlatformPodman, "sudo podman", false, nil, approve(t, "lima")); err == nil ||
 		!strings.Contains(err.Error(), "privilege-escalation wrapper") {
 		t.Fatalf("sudo podman must be refused as an escalation wrapper, got %v", err)
 	}
@@ -1203,13 +1272,58 @@ func TestPreflightExtraAllowedThreadsThrough(t *testing.T) {
 	}
 }
 
-func TestPreflightUnknownAction(t *testing.T) {
-	f := &fakeRunner{}
-	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", "rollback", "", false, noApprovals); err == nil {
-		t.Fatal("unknown action must be rejected")
+func TestKubernetesProbesUnknownAction(t *testing.T) {
+	if probes, err := KubernetesProbes("rollback", "", nil, false); err == nil || len(probes) != 0 {
+		t.Fatalf("unknown action must be rejected, got %+v, %v", probes, err)
 	}
-	if len(f.calls) != 0 {
-		t.Fatal("nothing must run for an unknown action")
+	if _, err := KubernetesProbes(ActionDeploy, "", []nsgate.Object{{Kind: "CronJob", Name: "x"}}, false); err == nil ||
+		!strings.Contains(err.Error(), "CronJob") {
+		t.Fatalf("a kind with no resource mapped must be an error naming it, got %v", err)
+	}
+}
+
+// The probe set of a deploy and a remove is the plural resource of every object the
+// manifest writes, once each, plus persistentvolumes (cluster-wide) for the libs
+// claim's volume, and never namespaces: the namespace flow asks for that only when
+// the namespace is absent.
+func TestKubernetesProbesDeployAndRemoveSets(t *testing.T) {
+	base := []nsgate.Object{{Kind: "Deployment", Name: "d"}, {Kind: "Service", Name: "d"}, {Kind: "ConfigMap", Name: "d-config"}}
+	withSecrets := append(append([]nsgate.Object(nil), base...),
+		nsgate.Object{Kind: "Secret", Name: "d-credentials"}, nsgate.Object{Kind: "Secret", Name: "d-stores"})
+	withPVC := append(append([]nsgate.Object(nil), withSecrets...), nsgate.Object{Kind: "PersistentVolumeClaim", Name: "d-libs"})
+	for _, c := range []struct {
+		name    string
+		written []nsgate.Object
+		pv      bool
+		want    []string
+	}{
+		{"no secret, no volume", base, false, []string{"deployments", "services", "configmaps"}},
+		{"secrets are asked once", withSecrets, false, []string{"deployments", "services", "configmaps", "secrets"}},
+		{"libs claim adds the claim and the volume", withPVC, true,
+			[]string{"deployments", "services", "configmaps", "secrets", "persistentvolumeclaims", "persistentvolumes"}},
+	} {
+		for _, verb := range []struct{ action, can string }{{ActionDeploy, "create"}, {ActionRemove, "delete"}} {
+			probes, err := KubernetesProbes(verb.action, "ns", c.written, c.pv)
+			if err != nil {
+				t.Fatalf("%s %s: %v", c.name, verb.action, err)
+			}
+			var got []string
+			for _, p := range probes {
+				got = append(got, p.Resource)
+				if p.Verb != verb.can || p.Namespace != "ns" || p.Resource == "namespaces" {
+					t.Errorf("%s %s: probe %+v, want verb %s in ns", c.name, verb.action, p, verb.can)
+				}
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("%s %s: resources = %v, want %v", c.name, verb.action, got, c.want)
+			}
+		}
+	}
+	// The volume is cluster-scoped, so rbac.CanI asks it of the whole cluster.
+	probes, _ := KubernetesProbes(ActionDeploy, "ns", withPVC, true)
+	argv := rbac.CanI([]string{"kubectl"}, probes[len(probes)-1]).Argv
+	if want := []string{"kubectl", "auth", "can-i", "create", "persistentvolumes", "--all-namespaces"}; !reflect.DeepEqual(argv, want) {
+		t.Errorf("persistentvolumes probe argv = %v, want %v", argv, want)
 	}
 }
 
@@ -1677,12 +1791,12 @@ func TestInstallScriptArgv(t *testing.T) {
 		{
 			name: "kubernetes no namespace", cmd: []string{"kubectl"}, platform: validate.PlatformKubernetes,
 			target: "pod-0",
-			want:   []string{"kubectl", "exec", "-i", "pod-0", "-c", spec.ConnectorContainerName, "--", "sh", "-c", "mkdir -p /tmp && cat > /tmp/solmq-status.sh"},
+			want:   []string{"kubectl", "exec", "-i", "pod-0", "-c", spec.ConnectorContainerName, "--", "sh", "-c", "mkdir -p '/tmp' && cat > '/tmp/solmq-status.sh'"},
 		},
 		{
 			name: "kubernetes with namespace", cmd: []string{"oc"}, platform: validate.PlatformKubernetes,
 			target: "pod-0", namespace: "solace",
-			want: []string{"oc", "exec", "-i", "pod-0", "-n", "solace", "-c", spec.ConnectorContainerName, "--", "sh", "-c", "mkdir -p /tmp && cat > /tmp/solmq-status.sh"},
+			want: []string{"oc", "exec", "-i", "pod-0", "-n", "solace", "-c", spec.ConnectorContainerName, "--", "sh", "-c", "mkdir -p '/tmp' && cat > '/tmp/solmq-status.sh'"},
 		},
 		{
 			name: "docker", cmd: []string{"docker"}, platform: validate.PlatformDocker,
@@ -2057,7 +2171,7 @@ func TestParsingHelpersIgnoreAWarningOnStderr(t *testing.T) {
 			return KubernetesGetJSON(bg(), r, []string{"oc"}, "ns", "deployment", "d")
 		}},
 		{"KubernetesListJSON", func(r gdurunner.Runner) (string, error) {
-			return KubernetesListJSON(bg(), r, []string{"oc"}, "ns", "all")
+			return KubernetesListJSON(bg(), r, []string{"oc"}, "ns")
 		}},
 		{"KubernetesTop", func(r gdurunner.Runner) (string, error) {
 			return KubernetesTop(bg(), r, []string{"oc"}, "ns", "", nil, false)
@@ -2121,7 +2235,7 @@ func TestParsedFailureCarriesBothStreams(t *testing.T) {
 		stderr: "Error from server (Forbidden): pods is forbidden",
 		err:    fmt.Errorf("exit status 1"),
 	}
-	_, err := KubernetesListJSON(bg(), r, []string{"oc"}, "ns", "all")
+	_, err := KubernetesListJSON(bg(), r, []string{"oc"}, "ns")
 	if err == nil {
 		t.Fatal("a failed command must be reported")
 	}
@@ -2162,7 +2276,7 @@ func TestHelpersPassTheCallersContextToTheRunner(t *testing.T) {
 			return err
 		}},
 		{"Preflight", func(r gdurunner.Runner) error {
-			_, err := Preflight(done, r, validate.PlatformDocker, "docker", ActionDeploy, "", false, noApprovals)
+			_, err := Preflight(done, r, validate.PlatformDocker, "docker", false, nil, noApprovals)
 			return err
 		}},
 	} {
@@ -2239,13 +2353,19 @@ func TestLifecycleArgv(t *testing.T) {
 	}{
 		{"kubernetes stop", func(r gdurunner.Runner) (string, error) {
 			return KubernetesLifecycle(bg(), r, "kubectl", ActionStop, "ns", "c", 3, noApprovals)
-		}, []string{"kubectl", "--namespace", "ns", "scale", "deployment/c", "--replicas=0"}},
+		}, []string{"kubectl", "scale", "deployment/c", "-n", "ns", "--replicas=0"}},
 		{"kubernetes start", func(r gdurunner.Runner) (string, error) {
 			return KubernetesLifecycle(bg(), r, "oc", ActionStart, "ns", "c", 3, noApprovals)
-		}, []string{"oc", "--namespace", "ns", "scale", "deployment/c", "--replicas=3"}},
+		}, []string{"oc", "scale", "deployment/c", "-n", "ns", "--replicas=3"}},
 		{"kubernetes restart, current namespace", func(r gdurunner.Runner) (string, error) {
 			return KubernetesLifecycle(bg(), r, "kubectl", ActionRestart, "", "c", 1, noApprovals)
 		}, []string{"kubectl", "rollout", "restart", "deployment/c"}},
+		{"kubernetes restart, in a namespace", func(r gdurunner.Runner) (string, error) {
+			return KubernetesLifecycle(bg(), r, "kubectl", ActionRestart, "ns", "c", 1, noApprovals)
+		}, []string{"kubectl", "rollout", "restart", "deployment/c", "-n", "ns"}},
+		{"kubernetes rollout status", func(r gdurunner.Runner) (string, error) {
+			return KubernetesRolloutStatus(bg(), r, "kubectl", "ns", "c", noApprovals)
+		}, []string{"kubectl", "rollout", "status", "deployment/c", "-n", "ns", "--timeout=300s"}},
 		{"docker stop", func(r gdurunner.Runner) (string, error) {
 			return DockerLifecycle(bg(), r, "docker --context prod", ActionStop, "connector", noApprovals)
 		}, []string{"docker", "--context", "prod", "stop", "connector"}},
@@ -2296,13 +2416,67 @@ func TestLifecycleArgv(t *testing.T) {
 // which scale and rollout restart both do.
 func TestPreflightKubernetesLifecycleAsksToPatch(t *testing.T) {
 	for _, action := range []string{ActionStart, ActionStop, ActionRestart} {
-		f := &fakeRunner{}
-		if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", action, "ns", false, noApprovals); err != nil {
+		probes, err := KubernetesProbes(action, "ns", nil, false)
+		if err != nil {
 			t.Fatalf("%s: %v", action, err)
 		}
-		if want := []string{"kubectl", "auth", "can-i", "patch", "deployment", "--namespace", "ns"}; !reflect.DeepEqual(f.calls[0].argv, want) {
-			t.Errorf("%s: argv = %v, want %v", action, f.calls[0].argv, want)
+		f := &fakeRunner{}
+		if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", false, probes, noApprovals); err != nil {
+			t.Fatalf("%s: %v", action, err)
 		}
+		if want := []string{"kubectl", "auth", "can-i", "patch", "deployments", "-n", "ns"}; len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) {
+			t.Errorf("%s: calls = %+v, want one with argv %v", action, f.calls, want)
+		}
+	}
+}
+
+// The namespace read is stdout alone and never taken for an answer it is not: exactly
+// namespace/<ns> exists, nothing is absent, anything else and any failure is unknown.
+func TestKubernetesNamespaceState(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		out  string
+		err  error
+		want kube.NamespaceState
+	}{
+		{"exists", "namespace/ns\n", nil, kube.NamespaceExists},
+		{"absent", "", nil, kube.NamespaceAbsent},
+		{"somebody else's", "namespace/other\n", nil, kube.NamespaceUnknown},
+		{"read refused", "namespace/ns", fmt.Errorf("exit status 1"), kube.NamespaceUnknown},
+	} {
+		f := &fakeRunner{outByCall: map[int]string{0: c.out}, err: c.err}
+		if got := KubernetesNamespaceState(bg(), f, []string{"kubectl"}, "ns"); got != c.want {
+			t.Errorf("%s: state = %v, want %v", c.name, got, c.want)
+		}
+		if want := []string{"kubectl", "get", "namespace", "ns", "--ignore-not-found", "-o", "name"}; !reflect.DeepEqual(f.calls[0].argv, want) {
+			t.Errorf("%s: argv = %v, want %v", c.name, f.calls[0].argv, want)
+		}
+	}
+}
+
+// The namespace gate's two calls: nsgate.List's one query, and kube.DeleteNamespace.
+func TestKubernetesNamespaceGateArgv(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := KubernetesListJSON(bg(), f, []string{"oc", "--context", "p"}, "ns"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"oc", "--context", "p", "get", "all,persistentvolumeclaims,secrets,configmaps", "-n", "ns", "-o", "json"}; !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("list argv = %v, want %v", f.calls[0].argv, want)
+	}
+	if _, err := KubernetesDeleteNamespace(bg(), f, []string{"oc"}, "ns"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"oc", "delete", "namespace", "ns", "--ignore-not-found"}; !reflect.DeepEqual(f.calls[1].argv, want) {
+		t.Errorf("delete argv = %v, want %v", f.calls[1].argv, want)
+	}
+}
+
+// CheckProbe reads the verdict from stdout alone, so a warning kubectl prints on
+// stderr after it cannot hide it.
+func TestCheckProbeReadsStdoutAlone(t *testing.T) {
+	r := &splitRunner{stdout: "yes\n", stderr: "Warning: a deprecated flag\n"}
+	if err := CheckProbe(bg(), r, []string{"kubectl"}, rbac.Probe{Verb: "create", Resource: "secrets"}); err != nil {
+		t.Errorf("a yes with a warning on stderr must pass, got %v", err)
 	}
 }
 

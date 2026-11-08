@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -32,6 +31,9 @@ import (
 	"github.com/hafio/go-deploy-utility/containercli/inspect"
 	"github.com/hafio/go-deploy-utility/execguard"
 	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
+	"github.com/hafio/go-deploy-utility/kube/rbac"
 	"github.com/hafio/go-deploy-utility/podman"
 	"github.com/hafio/go-deploy-utility/rootless"
 	gdurunner "github.com/hafio/go-deploy-utility/runner"
@@ -39,11 +41,6 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
-
-// kubernetesPreflightHint is the next step when the kubernetes probe fails. The
-// docker and podman engines' hints come from containercli.EngineHint, which both
-// tools share.
-const kubernetesPreflightHint = "log in or select a context first (e.g. 'oc login', or check 'kubectl config current-context'), then re-run"
 
 // safeOut is an engine's output as it may be appended to an error: every line
 // has its control characters dropped (inspect.Printable), so a terminal escape
@@ -60,8 +57,8 @@ func safeOut(out string) string {
 // Deploy actions shared by every target. These are the CLI verbs, and they reach
 // the operator verbatim (report's "ok: remove kubernetes", runAction's flag-error
 // prefix), so they stay spelled as the verbs are. The platform subcommands they
-// map to are separate literals -- kubeVerb returns kubectl's own "delete",
-// canIProbe the can-i permission of the same name, Docker compose's "down".
+// map to are separate literals -- kube.Delete is kubectl's own "delete", the
+// probe's verb the can-i permission of the same name, Docker compose's "down".
 const (
 	ActionDeploy = "deploy"
 	ActionRemove = "remove"
@@ -72,9 +69,9 @@ const (
 	ActionStop    = "stop"
 	ActionRestart = "restart"
 
-	// The read-only verbs change nothing; they name only the permission their
-	// preflight asks for, so a view-only operator is not refused a write it
-	// never makes.
+	// The read-only verbs change nothing and ask kubernetes for no permission
+	// ahead of time, so a view-only operator is never refused a write it never
+	// makes; what they cannot read, the command itself reports.
 	ActionStatus = "status"
 	ActionLogs   = "logs"
 	ActionCLI    = "cli"
@@ -128,8 +125,8 @@ func WriteFile(path, content string, mode os.FileMode) error {
 	return nil
 }
 
-// Kubernetes applies (deploy) or deletes (remove) the manifest by running
-// `<command> apply -f -` / `<command> delete -f - --ignore-not-found` with the
+// Kubernetes applies (deploy) or deletes (remove) the manifest through kube.Apply
+// (`apply -f -`) or kube.Delete (`delete -f - --ignore-not-found`), with the
 // manifest on stdin, so the manifest bytes never appear on a command line.
 //
 // A teardown names every object the instance can own -- the stores Secret
@@ -141,26 +138,16 @@ func Kubernetes(ctx context.Context, r gdurunner.Runner, command, action, manife
 	if err != nil {
 		return "", err
 	}
-	verb, err := kubeVerb(action)
-	if err != nil {
-		return "", err
-	}
-	argv = append(argv, verb, "-f", "-")
-	if action == ActionRemove {
-		argv = append(argv, "--ignore-not-found")
-	}
-	return gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: argv, Stdin: []byte(manifest)})
-}
-
-func kubeVerb(action string) (string, error) {
+	var c gdurunner.Cmd
 	switch action {
 	case ActionDeploy:
-		return "apply", nil
+		c = kube.Apply(argv, []byte(manifest))
 	case ActionRemove:
-		return "delete", nil
+		c = kube.Delete(argv, []byte(manifest))
 	default:
 		return "", fmt.Errorf("unknown action %q (want %q or %q)", action, ActionDeploy, ActionRemove)
 	}
+	return gdurunner.Combined(ctx, r, c)
 }
 
 // Docker runs `<command> compose -f - --project-directory <projectDir> up -d`
@@ -242,26 +229,54 @@ func DockerDeployDigest(ctx context.Context, r gdurunner.Runner, command, name, 
 // KubernetesLifecycle stops, starts or restarts a Deployment in place: stop
 // scales it to 0, start scales it back to replicas (the env.yaml value), and
 // restart is `rollout restart`, which replaces the pods one by one as a
-// rollout does.
+// rollout does (kube.Scale and kube.RolloutRestart).
 func KubernetesLifecycle(ctx context.Context, r gdurunner.Runner, command, action, namespace, name string, replicas int, approvals execguard.Approvals) (string, error) {
 	argv, err := ParseCommand(validate.PlatformKubernetes, command, approvals)
 	if err != nil {
 		return "", err
 	}
-	if namespace != "" {
-		argv = append(argv, "--namespace", namespace)
-	}
+	var c gdurunner.Cmd
 	switch action {
 	case ActionStop:
-		argv = append(argv, "scale", "deployment/"+name, "--replicas=0")
+		c = kube.Scale(argv, "deployment", name, namespace, 0)
 	case ActionStart:
-		argv = append(argv, "scale", "deployment/"+name, "--replicas="+strconv.Itoa(replicas))
+		c = kube.Scale(argv, "deployment", name, namespace, replicas)
 	case ActionRestart:
-		argv = append(argv, "rollout", "restart", "deployment/"+name)
+		c = kube.RolloutRestart(argv, "deployment", name, namespace)
 	default:
 		return "", fmt.Errorf("unknown lifecycle action %q", action)
 	}
-	return gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: argv})
+	return gdurunner.Combined(ctx, r, c)
+}
+
+// KubernetesRolloutStatus waits for the Deployment to roll out (kube.RolloutStatus,
+// kube.RolloutTimeout) after a deploy, start or restart. The wait is a convenience:
+// the caller turns a refusal (kube.Forbidden of the output) into a warning, and a
+// timeout or a failed rollout into an error. The output is stdout and stderr merged,
+// since both carry progress and the refusal.
+func KubernetesRolloutStatus(ctx context.Context, r gdurunner.Runner, command, namespace, name string, approvals execguard.Approvals) (string, error) {
+	argv, err := ParseCommand(validate.PlatformKubernetes, command, approvals)
+	if err != nil {
+		return "", err
+	}
+	return gdurunner.Combined(ctx, r, kube.RolloutStatus(argv, "deployment", name, namespace, ""))
+}
+
+// KubernetesNamespaceState reads whether namespace exists (kube.GetNamespace,
+// stdout alone). A read that fails -- typically an identity that may not get
+// namespaces -- is kube.NamespaceUnknown, never taken for absent.
+func KubernetesNamespaceState(ctx context.Context, r gdurunner.Runner, base []string, namespace string) kube.NamespaceState {
+	out, err := runParsed(ctx, r, kube.GetNamespace(base, namespace))
+	if err != nil {
+		return kube.NamespaceUnknown
+	}
+	return kube.ParseNamespace(out, namespace)
+}
+
+// KubernetesDeleteNamespace deletes the namespace (kube.DeleteNamespace). Run it
+// only through the gate in nsgate order, which removeNamespace follows.
+func KubernetesDeleteNamespace(ctx context.Context, r gdurunner.Runner, base []string, namespace string) (string, error) {
+	return gdurunner.Combined(ctx, r, kube.DeleteNamespace(base, namespace))
 }
 
 // DockerLifecycle runs `<command> start|stop|restart <container>` on the
@@ -341,41 +356,37 @@ func DockerImagePull(ctx context.Context, r gdurunner.Runner, command, image str
 	return gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: append(argv, "image", "pull", image)})
 }
 
-// Preflight runs a cheap, read-only probe before any generated file is written
+// Preflight runs cheap, read-only probes before any generated file is written
 // or any mutating command runs, so a deploy/remove that can never succeed
-// (not logged in, daemon down) stops before touching anything:
+// (not logged in, daemon down, a write the account may not make) stops before
+// touching anything:
 //
-//   - kubernetes: `<argv> auth can-i <create|delete> deployment [--namespace <ns>]`
-//     -- create for deploy, delete for remove (can-i's own verbs, not apply/delete
-//     used by kubeVerb for the eventual manifest command).
+//   - kubernetes: `<argv> auth can-i <verb> <resource>` for each of probes, in
+//     order, stopping at the first that is refused or unanswered (rbac.CanI and
+//     rbac.Check; KubernetesProbes builds the set for an action). No probes, no
+//     calls: the read verbs ask nothing ahead of time.
 //   - docker/podman: `<argv> info` (containercli.Info).
 //
-// A non-nil error wraps the probe's own output with a platform-specific hint
-// (log in, start the daemon, ...) so the operator gets a next step instead of a
-// bare CLI error. rootless is whether a podman deployment runs rootless (the
-// resolved quadlet scope's UserMode): it picks containercli.EngineHint's hint, and
-// is ignored on every other platform.
-func Preflight(ctx context.Context, r gdurunner.Runner, platform, command, action, namespace string, rootless bool, approvals execguard.Approvals) (string, error) {
+// A non-nil error says what to do next: a refusal wraps *rbac.RefusedError (find it
+// with errors.As) naming the permission to ask for, and an engine failure carries
+// a platform-specific hint (log in, start the daemon, ...) so the operator gets a
+// next step instead of a bare CLI error. rootless is whether a podman deployment
+// runs rootless (the resolved quadlet scope's UserMode): it picks
+// containercli.EngineHint's hint, and is ignored on every other platform.
+func Preflight(ctx context.Context, r gdurunner.Runner, platform, command string, rootless bool, probes []rbac.Probe, approvals execguard.Approvals) (string, error) {
 	argv, err := ParseCommand(platform, command, approvals)
 	if err != nil {
 		return "", err
 	}
-	var probe canI
 	var cmd gdurunner.Cmd
 	switch platform {
 	case validate.PlatformKubernetes:
-		var perr error
-		if probe, perr = canIProbe(action); perr != nil {
-			return "", perr
+		for _, p := range probes {
+			if err := CheckProbe(ctx, r, argv, p); err != nil {
+				return "", fmt.Errorf("preflight failed for %s: %w", platform, err)
+			}
 		}
-		argv = append(argv, "auth", "can-i", probe.verb, probe.resource)
-		if probe.subresource != "" {
-			argv = append(argv, "--subresource", probe.subresource)
-		}
-		if namespace != "" {
-			argv = append(argv, "--namespace", namespace)
-		}
-		cmd = gdurunner.Cmd{Argv: argv}
+		return "", nil
 	case validate.PlatformDocker, validate.PlatformPodman:
 		cmd = containercli.Info(argv)
 	default:
@@ -383,73 +394,79 @@ func Preflight(ctx context.Context, r gdurunner.Runner, platform, command, actio
 	}
 	out, runErr := gdurunner.Combined(ctx, r, cmd)
 	if runErr != nil {
-		// can-i exits 1 both when it cannot reach the cluster and when the
-		// answer is no; only the answer tells them apart, and a refusal is not
-		// fixed by logging in again.
-		if answer, denied := canIDenied(out); platform == validate.PlatformKubernetes && denied {
-			where := "the current namespace"
-			if namespace != "" {
-				where = fmt.Sprintf("namespace %q", namespace)
-			}
-			return "", fmt.Errorf("preflight failed for %s: your account may not %s in %s (kubectl auth can-i answered %q): ask for that permission, or select a context that has it", platform, probe, where, answer)
-		}
-		if platform == validate.PlatformKubernetes {
-			return out, fmt.Errorf("preflight failed for %s: %w\n%s", platform, runErr, kubernetesPreflightHint)
-		}
 		// The engine's own output is in the message, so report prints it once.
 		return "", containercli.InfoError(containercli.Engine(platform), argv, rootless, safeOut(out), runErr)
 	}
 	return out, nil
 }
 
-// canI is one permission `kubectl auth can-i` is asked about.
-type canI struct{ verb, resource, subresource string }
-
-// String spells the permission the way RBAC rules name it: "get pods/log".
-func (c canI) String() string {
-	if c.subresource != "" {
-		return c.verb + " " + c.resource + "/" + c.subresource
-	}
-	return c.verb + " " + c.resource
+// CheckProbe asks one `auth can-i` question through base, the guarded kubectl argv,
+// and reads the answer from stdout alone, so a warning on stderr cannot hide it
+// (runner.Split, rbac.Check). nil is allowed; a refusal is a *rbac.RefusedError, and
+// any other error means the question went unanswered.
+func CheckProbe(ctx context.Context, r gdurunner.Runner, base []string, p rbac.Probe) error {
+	out, errOut, runErr := gdurunner.Split(ctx, r, rbac.CanI(base, p))
+	return rbac.Check(p, out, errOut, runErr)
 }
 
-// canIProbe maps an action to the permission its preflight asks about. The
-// verb is can-i's own -- create/delete, not apply/delete, the manifest verbs
-// kubeVerb returns -- because can-i asks about a permission, not a subcommand.
-// A mutating action asks about the Deployment it changes; a read-only verb asks
-// for the one thing it cannot work without. A subresource goes in
-// --subresource, since "pods/log" would name a pod called log.
-func canIProbe(action string) (canI, error) {
+// kindResources maps the kind of an object the tool writes to the plural resource
+// `auth can-i` is asked about.
+var kindResources = map[string]string{
+	"deployment":            "deployments",
+	"service":               "services",
+	"configmap":             "configmaps",
+	"secret":                "secrets",
+	"persistentvolumeclaim": "persistentvolumeclaims",
+}
+
+// KubernetesProbes is the set of permissions an action asks for before its first
+// write, and only what that write needs:
+//
+//   - deploy: create, and remove: delete, each resource of every object in written
+//     (deploy.Written, so the probes and the owned objects cannot drift), once, plus
+//     persistentvolumes when pv (libs.pvc.create). The Namespace is not among them:
+//     the namespace flow asks for it only when it is absent.
+//   - start, stop, restart: patch deployments in namespace (scale and rollout
+//     restart both patch the Deployment).
+//   - status, logs, cli: nothing. They read what they are allowed to read and report
+//     what they are refused, so no up-front question stands between an operator and
+//     a view.
+//
+// can-i's verbs are its own -- create/delete, not apply/delete, the manifest verbs --
+// because can-i asks about a permission, not a subcommand.
+func KubernetesProbes(action, namespace string, written []nsgate.Object, pv bool) ([]rbac.Probe, error) {
 	switch action {
-	case ActionDeploy:
-		return canI{"create", "deployment", ""}, nil
-	case ActionRemove:
-		return canI{"delete", "deployment", ""}, nil
-	case ActionStart, ActionStop, ActionRestart:
-		// scale and rollout restart both patch the Deployment.
-		return canI{"patch", "deployment", ""}, nil
-	case ActionStatus:
-		// Finding the pods is what status cannot do without; a pod it may not
-		// exec into is reported against that pod.
-		return canI{"get", "pods", ""}, nil
-	case ActionLogs:
-		return canI{"get", "pods", "log"}, nil
-	case ActionCLI:
-		return canI{"create", "pods", "exec"}, nil
-	default:
-		return canI{}, fmt.Errorf("unknown action %q", action)
-	}
-}
-
-// canIDenied reports whether can-i's output is a "no" -- alone, or with the
-// reason some authorizers add -- and returns that line.
-func canIDenied(out string) (string, bool) {
-	for _, line := range strings.Split(out, "\n") {
-		if l := strings.TrimSpace(line); l == "no" || strings.HasPrefix(l, "no - ") {
-			return l, true
+	case ActionDeploy, ActionRemove:
+		verb := "create"
+		if action == ActionRemove {
+			verb = "delete"
 		}
+		var probes []rbac.Probe
+		seen := map[string]bool{}
+		add := func(resource string) {
+			if !seen[resource] {
+				seen[resource] = true
+				probes = append(probes, rbac.Probe{Verb: verb, Resource: resource, Namespace: namespace})
+			}
+		}
+		for _, o := range written {
+			res, ok := kindResources[strings.ToLower(o.Kind)]
+			if !ok {
+				return nil, fmt.Errorf("no permission to ask about for the %s %s: add its resource to kindResources", o.Kind, o.Name)
+			}
+			add(res)
+		}
+		if pv {
+			add("persistentvolumes")
+		}
+		return probes, nil
+	case ActionStart, ActionStop, ActionRestart:
+		return []rbac.Probe{{Verb: "patch", Resource: "deployments", Namespace: namespace}}, nil
+	case ActionStatus, ActionLogs, ActionCLI:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("unknown action %q", action)
 	}
-	return "", false
 }
 
 // PodmanVersion is the podman client's version, as `podman version --format
@@ -818,22 +835,12 @@ func PodmanRemove(ctx context.Context, r gdurunner.Runner, sc QuadletScope, serv
 // container view (state, restart counts, images, limits) for no extra request:
 // discovery and the report read one document.
 func KubernetesPodsJSON(ctx context.Context, r gdurunner.Runner, cmd []string, namespace, selector string, names []string, allNamespaces bool) (string, error) {
-	argv := append(append([]string(nil), cmd...), "get", "pods")
-	argv = append(argv, names...)
-	switch {
-	case allNamespaces:
-		// --all-namespaces outranks a namespace: --all is explicitly a
-		// cluster-wide search, so a namespace resolved from env.yaml must not
-		// narrow it back down.
-		argv = append(argv, "--all-namespaces")
-	case namespace != "":
-		argv = append(argv, "-n", namespace)
-	}
-	if selector != "" {
-		argv = append(argv, "-l", selector)
-	}
-	argv = append(argv, "-o", "json")
-	out, err := runParsed(ctx, r, gdurunner.Cmd{Argv: argv})
+	// --all-namespaces outranks a namespace (kube.GetOptions): --all is explicitly a
+	// cluster-wide search, so a namespace resolved from env.yaml must not narrow it
+	// back down.
+	c := kube.Get(cmd, kube.GetOptions{Namespace: namespace, AllNamespaces: allNamespaces, Selector: selector,
+		Output: "json"}, append([]string{"pods"}, names...)...)
+	out, err := runParsed(ctx, r, c)
 	if err != nil {
 		return out, fmt.Errorf("listing pods: %w\n%s", err, out)
 	}
@@ -849,34 +856,21 @@ func KubernetesPodsJSON(ctx context.Context, r gdurunner.Runner, cmd []string, n
 // which the caller reports as "missing" rather than as a failure -- that is the
 // answer it asked for.
 func KubernetesGetJSON(ctx context.Context, r gdurunner.Runner, cmd []string, namespace, kind, name string) (string, error) {
-	argv := append(append([]string(nil), cmd...), "get", kind, name)
-	if namespace != "" {
-		argv = append(argv, "-n", namespace)
-	}
-	argv = append(argv, "-o", "json")
-	out, err := runParsed(ctx, r, gdurunner.Cmd{Argv: argv})
+	out, err := runParsed(ctx, r, kube.Get(cmd, kube.GetOptions{Namespace: namespace, Output: "json"}, kind, name))
 	if err != nil {
 		return out, fmt.Errorf("reading %s/%s: %w\n%s", kind, name, err, out)
 	}
 	return out, nil
 }
 
-// KubernetesListJSON lists every object of the given types in a namespace:
-// `<cmd> get <types> -n <ns> -o json`.
-//
-// types is a tool-authored constant (a comma-separated kubectl resource list),
-// never operator input. It is separate from KubernetesGetJSON because that one
-// appends a name unconditionally, and an empty name there would put an empty
-// element in the argv rather than listing everything.
-func KubernetesListJSON(ctx context.Context, r gdurunner.Runner, cmd []string, namespace, types string) (string, error) {
-	argv := append(append([]string(nil), cmd...), "get", types)
-	if namespace != "" {
-		argv = append(argv, "-n", namespace)
-	}
-	argv = append(argv, "-o", "json")
-	out, err := runParsed(ctx, r, gdurunner.Cmd{Argv: argv})
+// KubernetesListJSON lists what is in a namespace in one call (nsgate.List: `get
+// all,persistentvolumeclaims,secrets,configmaps -n <ns> -o json`), for the namespace
+// gate. `all` covers the workload and service kinds; the three after it do not appear
+// under `all` and are exactly the ones whose loss would hurt most.
+func KubernetesListJSON(ctx context.Context, r gdurunner.Runner, cmd []string, namespace string) (string, error) {
+	out, err := runParsed(ctx, r, nsgate.List(cmd, namespace))
 	if err != nil {
-		return out, fmt.Errorf("listing %s in namespace %q: %w\n%s", types, namespace, err, out)
+		return out, fmt.Errorf("listing namespace %q: %w\n%s", namespace, err, out)
 	}
 	return out, nil
 }
@@ -1044,8 +1038,8 @@ type ExecOpts struct {
 // begins. docker and podman deliberately stop interspersing on exec, so that a
 // flag typed after the container name belongs to the in-container program --
 // which means their own flags must come first, and a "--" would be handed
-// through to the container as an argument rather than swallowed. The two engines'
-// shape is containercli.Exec's.
+// through to the container as an argument rather than swallowed. kubectl's shape is
+// kube.Exec's and the two engines' is containercli.Exec's.
 //
 // The container is always spec.ConnectorContainerName rather than a name
 // discovered from the pod. This tool renders that name, so naming it outright
@@ -1069,22 +1063,13 @@ func ExecArgv(cmd []string, platform, target, namespace string, o ExecOpts, comm
 	}
 	switch platform {
 	case validate.PlatformKubernetes:
-		if len(command) == 0 {
-			return nil, fmt.Errorf("exec in %s needs a command to run", target)
+		// kube.Exec refuses an empty pod and an empty command.
+		c, err := kube.Exec(cmd, target, kube.ExecOptions{Namespace: namespace,
+			Container: spec.ConnectorContainerName, Stdin: o.Stdin, TTY: o.TTY}, command...)
+		if err != nil {
+			return nil, err
 		}
-		argv := append(append([]string(nil), cmd...), "exec")
-		if o.Stdin {
-			argv = append(argv, "-i")
-		}
-		if o.TTY {
-			argv = append(argv, "-t")
-		}
-		argv = append(argv, target)
-		if namespace != "" {
-			argv = append(argv, "-n", namespace)
-		}
-		argv = append(argv, "-c", spec.ConnectorContainerName, "--")
-		return append(argv, command...), nil
+		return c.Argv, nil
 	case validate.PlatformDocker, validate.PlatformPodman:
 		c, err := containercli.Exec(cmd, target, containercli.ExecOptions{Stdin: o.Stdin, TTY: o.TTY}, command...)
 		if err != nil {
@@ -1134,15 +1119,12 @@ type LogsOpts struct {
 func LogsArgv(cmd []string, platform, target, namespace string, o LogsOpts) ([]string, error) {
 	switch platform {
 	case validate.PlatformKubernetes:
-		argv := append(append([]string(nil), cmd...), "logs", target)
-		if namespace != "" {
-			argv = append(argv, "-n", namespace)
+		lo := kube.LogOptions{Namespace: namespace, Container: spec.ConnectorContainerName, Previous: o.Previous,
+			Follow: o.Follow, Timestamps: o.Timestamps, Since: o.Since}
+		if o.Tail != TailAll {
+			lo.Tail = strconv.Itoa(o.Tail)
 		}
-		argv = append(argv, "-c", spec.ConnectorContainerName)
-		if o.Previous {
-			argv = append(argv, "-p")
-		}
-		return append(argv, logsCommonFlags(o)...), nil
+		return kube.Logs(cmd, target, lo).Argv, nil
 	case validate.PlatformDocker, validate.PlatformPodman:
 		if o.Previous {
 			// Unreachable via the CLI, which refuses the combination with the same
@@ -1158,26 +1140,6 @@ func LogsArgv(cmd []string, platform, target, namespace string, o LogsOpts) ([]s
 	default:
 		return nil, fmt.Errorf("unknown platform %q (want %q, %q, or %q)", platform, validate.PlatformKubernetes, validate.PlatformDocker, validate.PlatformPodman)
 	}
-}
-
-// logsCommonFlags are the options kubectl takes, appended in a fixed order so the
-// argv a test asserts is the argv every run produces. The engines' are
-// containercli.Logs's, in the same order.
-func logsCommonFlags(o LogsOpts) []string {
-	var argv []string
-	if o.Follow {
-		argv = append(argv, "-f")
-	}
-	if o.Timestamps {
-		argv = append(argv, "--timestamps")
-	}
-	if o.Tail != TailAll {
-		argv = append(argv, "--tail", strconv.Itoa(o.Tail))
-	}
-	if o.Since != "" {
-		argv = append(argv, "--since", o.Since)
-	}
-	return argv
 }
 
 // Markers the presence probe echoes, distinctive enough that engine chatter on
@@ -1228,10 +1190,10 @@ func ScriptInstalled(ctx context.Context, r gdurunner.Runner, cmd []string, plat
 }
 
 // InstallScript pipes script onto the target's stdin and writes it to path,
-// creating path's directory first: `sh -c "mkdir -p <dir> && cat > <path>"` with
+// creating path's directory first: `sh -c "mkdir -p '<dir>' && cat > '<path>'"` with
 // Cmd.Stdin = script. The script crosses only on stdin -- never cp, never a
-// download, never the script text in argv. On docker and podman the command is
-// containercli.Upload, which single-quotes the path; kubectl's is built here.
+// download, never the script text in argv. The command is kube.Upload on kubernetes
+// and containercli.Upload on docker and podman, each of which single-quotes the path.
 //
 // path and script are tool-authored constants, never operator input. target and
 // namespace are operator-supplied and must already be validated by the caller.
@@ -1243,13 +1205,14 @@ func InstallScript(ctx context.Context, r gdurunner.Runner, cmd []string, platfo
 		if c, err = containercli.Upload(cmd, target, path, []byte(script), true); err != nil {
 			return "", err
 		}
-	default:
-		argv, err := ExecArgv(cmd, platform, target, namespace, ExecOpts{Stdin: true},
-			ContainerShell, "-c", "mkdir -p "+pathpkg.Dir(path)+" && cat > "+path)
-		if err != nil {
+	case validate.PlatformKubernetes:
+		var err error
+		if c, err = kube.Upload(cmd, target, kube.ExecOptions{Namespace: namespace, Container: spec.ConnectorContainerName},
+			path, []byte(script), true); err != nil {
 			return "", err
 		}
-		c = gdurunner.Cmd{Argv: argv, Stdin: []byte(script)}
+	default:
+		return "", fmt.Errorf("unknown platform %q (want %q, %q, or %q)", platform, validate.PlatformKubernetes, validate.PlatformDocker, validate.PlatformPodman)
 	}
 	return gdurunner.Combined(ctx, r, c)
 }

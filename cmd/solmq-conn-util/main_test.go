@@ -22,6 +22,7 @@ import (
 
 	"github.com/hafio/go-deploy-utility/confirm"
 	"github.com/hafio/go-deploy-utility/containercli"
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
 	"github.com/hafio/go-deploy-utility/notice"
 	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	gduwatch "github.com/hafio/go-deploy-utility/watch"
@@ -299,11 +300,27 @@ type fakeCall struct {
 func (f *fakeRunner) Run(_ context.Context, c gdurunner.Cmd, stdout, _ io.Writer) error {
 	idx := len(f.calls)
 	f.calls = append(f.calls, fakeCall{argv: c.Argv, stdin: string(c.Stdin), env: c.Env})
-	scriptOut(stdout, "out")
+	scriptOut(stdout, defaultAnswer(c.Argv))
 	if f.err != nil && idx >= f.failFrom {
 		return f.err
 	}
 	return nil
+}
+
+// defaultAnswer is what a fake says to a command a test did not script: "yes" to a
+// kubectl auth can-i (rbac.Check refuses anything else), namespace/<ns> to the
+// namespace read (an existing namespace, so a deploy has nothing more to ask), and
+// "out" otherwise.
+func defaultAnswer(argv []string) string {
+	for i := 0; i+1 < len(argv); i++ {
+		switch {
+		case argv[i] == "auth" && argv[i+1] == "can-i":
+			return "yes\n"
+		case argv[i] == "get" && argv[i+1] == "namespace" && i+2 < len(argv):
+			return "namespace/" + argv[i+2] + "\n"
+		}
+	}
+	return "out"
 }
 
 // useFakeRunner returns a fake that captures argv instead of starting a
@@ -324,7 +341,9 @@ type queuedResp struct {
 // queueRunner is a fakeRunner variant status's tests need: each call in a
 // sequence returns its own (out, err) pair (e.g. probe-absent, then
 // install-succeeds, then run-standby) rather than fakeRunner's uniform
-// "fail from index N onward". Calls beyond len(resp) succeed with no output.
+// "fail from index N onward". Calls beyond len(resp) succeed with no output,
+// except that a kubectl auth can-i still answers "yes" and the namespace read
+// still finds the namespace (defaultAnswer).
 type queueRunner struct {
 	noAttach
 	calls []fakeCall
@@ -338,6 +357,7 @@ func (q *queueRunner) Run(_ context.Context, c gdurunner.Cmd, stdout, _ io.Write
 		scriptOut(stdout, q.resp[idx].out)
 		return q.resp[idx].err
 	}
+	scriptOut(stdout, strings.TrimPrefix(defaultAnswer(c.Argv), "out"))
 	return nil
 }
 
@@ -745,29 +765,38 @@ func TestDeployKubernetesSeamHappyPath(t *testing.T) {
 	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
-	// Call 0 is the read-only preflight probe (runner.Preflight), which always
-	// precedes the mutating apply/delete call.
-	if len(f.calls) != 2 {
-		t.Fatalf("want 2 calls to the runner (preflight, apply), got %d: %+v", len(f.calls), f.calls)
+	// The read-only probes come first, one per kind the manifest writes
+	// (deployments, configmaps and the credentials secrets), then the namespace
+	// read (it exists, so nothing is created), the apply, and the rollout wait.
+	if len(f.calls) != kubeProbes+3 {
+		t.Fatalf("want %d calls to the runner (probes, namespace read, apply, rollout status), got %d: %+v", kubeProbes+3, len(f.calls), f.calls)
 	}
-	wantPreflight := []string{"kubectl", "auth", "can-i", "create", "deployment", "--namespace", "solace-connectors"}
-	if !reflect.DeepEqual(f.calls[0].argv, wantPreflight) {
-		t.Errorf("preflight argv = %v, want %v", f.calls[0].argv, wantPreflight)
+	for i, resource := range []string{"deployments", "configmaps", "secrets"} {
+		want := []string{"kubectl", "auth", "can-i", "create", resource, "-n", "solace-connectors"}
+		if !reflect.DeepEqual(f.calls[i].argv, want) {
+			t.Errorf("probe %d argv = %v, want %v", i, f.calls[i].argv, want)
+		}
 	}
-	want := []string{"kubectl", "apply", "-f", "-"}
-	if !reflect.DeepEqual(f.calls[1].argv, want) {
-		t.Errorf("argv = %v, want %v", f.calls[1].argv, want)
+	if want := []string{"kubectl", "get", "namespace", "solace-connectors", "--ignore-not-found", "-o", "name"}; !reflect.DeepEqual(f.calls[kubeProbes].argv, want) {
+		t.Errorf("namespace read argv = %v, want %v", f.calls[kubeProbes].argv, want)
 	}
-	if !strings.Contains(f.calls[1].stdin, "kind: Deployment") {
-		t.Errorf("manifest on stdin missing kind: Deployment:\n%s", f.calls[1].stdin)
+	apply := f.calls[kubeProbes+1]
+	if want := []string{"kubectl", "apply", "-f", "-"}; !reflect.DeepEqual(apply.argv, want) {
+		t.Errorf("argv = %v, want %v", apply.argv, want)
+	}
+	if !strings.Contains(apply.stdin, "kind: Deployment") {
+		t.Errorf("manifest on stdin missing kind: Deployment:\n%s", apply.stdin)
+	}
+	if want := []string{"kubectl", "rollout", "status", "deployment/solmq-connector", "-n", "solace-connectors", "--timeout=300s"}; !reflect.DeepEqual(f.calls[kubeProbes+2].argv, want) {
+		t.Errorf("rollout wait argv = %v, want %v", f.calls[kubeProbes+2].argv, want)
 	}
 }
 
 func TestRemoveKubernetesSeamHappyPath(t *testing.T) {
-	// Three responses: the preflight probe, the manifest delete, and the
-	// occupancy probe that every kubernetes teardown now makes. nsList() is an
-	// empty namespace, so the run reaches the namespace question.
-	f := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
+	// The probes, the manifest delete, the occupancy probe that every kubernetes
+	// teardown makes (nsList() is an empty namespace, so the run reaches the
+	// namespace question), the permission probe for deleting it, and the delete.
+	f := &queueRunner{resp: removeResp(queuedResp{nsList(), nil}, queuedResp{"yes\n", nil}, queuedResp{"", nil})}
 	// remove asks before it tears down; this test is about the argv that
 	// follows, so it answers yes. The prompt itself is covered below.
 	withPrompter(t, true, "y\ny\n")
@@ -778,23 +807,45 @@ func TestRemoveKubernetesSeamHappyPath(t *testing.T) {
 	if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
-	// preflight, delete, the occupancy probe, and the namespace delete the
-	// prompt approved.
-	if len(f.calls) != 4 {
-		t.Fatalf("want 4 calls (preflight, delete, probe, namespace delete), got %d: %+v", len(f.calls), f.calls)
+	if len(f.calls) != kubeProbes+4 {
+		t.Fatalf("want %d calls (probes, delete, listing, delete probe, namespace delete), got %d: %+v", kubeProbes+4, len(f.calls), f.calls)
 	}
-	wantPreflight := []string{"kubectl", "auth", "can-i", "delete", "deployment", "--namespace", "solace-connectors"}
-	if !reflect.DeepEqual(f.calls[0].argv, wantPreflight) {
-		t.Errorf("preflight argv = %v, want %v", f.calls[0].argv, wantPreflight)
+	// The teardown asks delete of every kind it deletes, including the stores
+	// Secret it always names; the Service is not enabled, so it is not asked.
+	for i, resource := range []string{"deployments", "configmaps", "secrets"} {
+		want := []string{"kubectl", "auth", "can-i", "delete", resource, "-n", "solace-connectors"}
+		if !reflect.DeepEqual(f.calls[i].argv, want) {
+			t.Errorf("probe %d argv = %v, want %v", i, f.calls[i].argv, want)
+		}
 	}
 	want := []string{"kubectl", "delete", "-f", "-", "--ignore-not-found"}
-	if !reflect.DeepEqual(f.calls[1].argv, want) {
-		t.Errorf("argv = %v, want %v", f.calls[1].argv, want)
+	if !reflect.DeepEqual(f.calls[kubeProbes].argv, want) {
+		t.Errorf("argv = %v, want %v", f.calls[kubeProbes].argv, want)
 	}
 }
 
+// kubeProbes is how many permission probes a deploy or remove of kubeEnv asks before
+// its first write: deployments, configmaps and secrets (kubeEnv enables no Service
+// and no libs claim, and creates the credentials Secret).
+const kubeProbes = 3
+
+// yesProbes answers n permission probes with a yes.
+func yesProbes(n int) []queuedResp {
+	out := make([]queuedResp, n)
+	for i := range out {
+		out[i] = queuedResp{"yes\n", nil}
+	}
+	return out
+}
+
+// removeResp is the answers a kubernetes remove of kubeEnv reads: its probes, the
+// manifest delete (no output), then rest, the namespace gate's calls.
+func removeResp(rest ...queuedResp) []queuedResp {
+	return append(append(yesProbes(kubeProbes), queuedResp{"", nil}), rest...)
+}
+
 // TestDeployKubernetesProbesOperatorSecrets pins the deploy-time check of a
-// Secret the operator manages and the pod mounts: after the preflight probe,
+// Secret the operator manages and the pod mounts: after the permission probes,
 // one `get secret` per Secret; a missing Secret or key stops the deploy before
 // anything is applied, a Secret the identity may not read only warns, and a
 // complete one lets the apply through. remove never probes.
@@ -813,7 +864,7 @@ func TestDeployKubernetesProbesOperatorSecrets(t *testing.T) {
 		{"complete", queuedResp{`{"kind":"Secret","data":{"ca.p12":"QQ=="}}`, nil}, 0, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			f := &queueRunner{resp: []queuedResp{{"", nil}, c.reply}}
+			f := &queueRunner{resp: append(yesProbes(kubeProbes), c.reply)}
 			dir := t.TempDir()
 			write(t, dir, "env.yaml", env)
 			write(t, dir, "10.yaml", tlsWF)
@@ -824,10 +875,13 @@ func TestDeployKubernetesProbesOperatorSecrets(t *testing.T) {
 			if code != c.wantCode {
 				t.Fatalf("exit = %d, want %d\n%s", code, c.wantCode, stderr)
 			}
-			if want := []string{"kubectl", "get", "secret", "broker-cert", "-n", "solace-connectors", "-o", "json"}; len(f.calls) < 2 || !reflect.DeepEqual(f.calls[1].argv, want) {
-				t.Fatalf("call 1 = %+v, want %v", f.calls, want)
+			if want := []string{"kubectl", "get", "secret", "broker-cert", "-n", "solace-connectors", "-o", "json"}; len(f.calls) <= kubeProbes || !reflect.DeepEqual(f.calls[kubeProbes].argv, want) {
+				t.Fatalf("call %d = %+v, want %v", kubeProbes, f.calls, want)
 			}
-			applied := len(f.calls) == 3 && reflect.DeepEqual(f.calls[2].argv, []string{"kubectl", "apply", "-f", "-"})
+			applied := false
+			for _, call := range f.calls {
+				applied = applied || reflect.DeepEqual(call.argv, []string{"kubectl", "apply", "-f", "-"})
+			}
 			if applied != c.wantApply {
 				t.Errorf("applied = %v, want %v: %+v\n%s", applied, c.wantApply, f.calls, stderr)
 			}
@@ -857,11 +911,11 @@ func TestDeployKubernetesSeamRejectsUnsafeCommand(t *testing.T) {
 
 // TestRemoveKubernetesSeamPromptsBeforeTearingDown is the confirmation half of
 // TestRemoveKubernetesSeamHappyPath above: an accepted answer produces exactly
-// the same two calls, so the prompt gates the teardown without changing it.
+// the same calls, so the prompt gates the teardown without changing it.
 func TestRemoveKubernetesSeamPromptsBeforeTearingDown(t *testing.T) {
 	for _, answer := range []string{"y", "yes", "YES", "Y"} {
 		t.Run(answer, func(t *testing.T) {
-			f := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
+			f := &queueRunner{resp: removeResp(queuedResp{nsList(), nil}, queuedResp{"yes\n", nil}, queuedResp{"", nil})}
 			withPrompter(t, true, answer+"\n"+answer+"\n")
 			dir := t.TempDir()
 			write(t, dir, "env.yaml", sharedEnv+kubeEnv)
@@ -870,10 +924,10 @@ func TestRemoveKubernetesSeamPromptsBeforeTearingDown(t *testing.T) {
 			if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
 				t.Fatalf("exit=%d, want 0", code)
 			}
-			// The same answer approves the namespace question too, so all four
-			// calls happen: preflight, delete, probe, namespace delete.
-			if len(f.calls) != 4 {
-				t.Fatalf("want 4 calls, got %d: %+v", len(f.calls), f.calls)
+			// The same answer approves the namespace question too, so every call
+			// happens: probes, delete, listing, delete probe, namespace delete.
+			if len(f.calls) != kubeProbes+4 {
+				t.Fatalf("want %d calls, got %d: %+v", kubeProbes+4, len(f.calls), f.calls)
 			}
 		})
 	}
@@ -912,7 +966,7 @@ func TestRemoveDeclinedTouchesNothing(t *testing.T) {
 // TestRemoveNoPromptSkipsThePromptEntirely covers the scripted path: --no-prompt must write
 // no question at all, rather than asking it and ignoring the answer.
 func TestRemoveNoPromptSkipsThePromptEntirely(t *testing.T) {
-	f := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
+	f := &queueRunner{resp: removeResp(queuedResp{nsList(), nil}, queuedResp{"yes\n", nil}, queuedResp{"", nil})}
 	out := withPrompter(t, true, "n\nn\n")
 
 	dir := t.TempDir()
@@ -923,9 +977,9 @@ func TestRemoveNoPromptSkipsThePromptEntirely(t *testing.T) {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	// Neither question is asked, and the empty namespace goes with it:
-	// preflight, delete, probe, namespace delete.
-	if len(f.calls) != 4 {
-		t.Fatalf("want 4 calls, got %d: %+v", len(f.calls), f.calls)
+	// probes, delete, listing, delete probe, namespace delete.
+	if len(f.calls) != kubeProbes+4 {
+		t.Fatalf("want %d calls, got %d: %+v", kubeProbes+4, len(f.calls), f.calls)
 	}
 	if out.Len() != 0 {
 		t.Errorf("--no-prompt must not prompt at all, got %q", out.String())
@@ -1047,65 +1101,348 @@ func nsItemJSON(kind, name string) string {
 	return `{"kind":"` + kind + `","metadata":{"name":"` + name + `"}}`
 }
 
+// nsListTypes is what nsgate.List asks for, in one query.
+const nsListTypes = "all,persistentvolumeclaims,secrets,configmaps"
+
+// kubeFixture writes env.yaml (the shared keys plus kube) and the valid workflow
+// into a fresh directory and returns the env file's path.
+func kubeFixture(t *testing.T, kube string) string {
+	t.Helper()
+	dir := t.TempDir()
+	write(t, dir, "env.yaml", sharedEnv+kube)
+	write(t, dir, "10.yaml", validWF)
+	return filepath.Join(dir, "env.yaml")
+}
+
+// runKube dispatches a kubernetes verb against r and returns its exit code and what
+// it wrote to stderr.
+func runKube(t *testing.T, r gdurunner.Runner, envPath string, args ...string) (int, string) {
+	t.Helper()
+	var code int
+	stderr := captureStderr(t, func() {
+		code = dispatch(append(append([]string(nil), args...), "--platform", "kubernetes", "-e", envPath), r)
+	})
+	return code, stderr
+}
+
+// canIAsked lists the permission questions among calls, as "verb resource [flags]".
+func canIAsked(calls []fakeCall) []string {
+	var out []string
+	for _, c := range calls {
+		for i := 0; i+1 < len(c.argv); i++ {
+			if c.argv[i] == "auth" && c.argv[i+1] == "can-i" {
+				out = append(out, strings.Join(c.argv[i+2:], " "))
+				break
+			}
+		}
+	}
+	return out
+}
+
 // TestRemoveTeardownManifestOmitsTheNamespace is the bug this whole file exists
 // for: the manifest piped to `kubectl delete -f -` used to carry a Namespace,
 // which cascades to every object inside it -- including workloads this tool
 // never deployed. The namespace is a separate, checked step now; the manifest
 // must never carry it.
 func TestRemoveTeardownManifestOmitsTheNamespace(t *testing.T) {
-	f := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
+	f := &queueRunner{resp: removeResp(queuedResp{nsList(), nil}, queuedResp{"yes\n", nil}, queuedResp{"", nil})}
 	withPrompter(t, true, "y\ny\n")
-	dir := t.TempDir()
-	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
-	write(t, dir, "10.yaml", validWF)
+	env := kubeFixture(t, kubeEnv)
 
-	if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
-		t.Fatalf("exit=%d, want 0", code)
+	if code, stderr := runKube(t, f, env, "remove"); code != 0 {
+		t.Fatalf("exit=%d, want 0\n%s", code, stderr)
 	}
-	if strings.Contains(f.calls[1].stdin, "kind: Namespace") {
-		t.Fatalf("a teardown manifest must not carry the namespace:\n%s", f.calls[1].stdin)
+	if strings.Contains(f.calls[kubeProbes].stdin, "kind: Namespace") {
+		t.Fatalf("a teardown manifest must not carry the namespace:\n%s", f.calls[kubeProbes].stdin)
 	}
-	// The separate namespace delete is the ONLY place a Namespace document is
-	// piped for a teardown, and only after the occupancy check passed.
-	if !strings.Contains(f.calls[3].stdin, "kind: Namespace") {
-		t.Errorf("the namespace step should pipe the Namespace document, got %q", f.calls[3].stdin)
+	// The namespace goes by its own `delete namespace`, not by a document piped
+	// in, and only after the occupancy check and the permission probe passed.
+	last := f.calls[len(f.calls)-1]
+	if want := []string{"kubectl", "delete", "namespace", "solace-connectors", "--ignore-not-found"}; !reflect.DeepEqual(last.argv, want) || last.stdin != "" {
+		t.Errorf("the namespace step = %v with stdin %q, want %v with none", last.argv, last.stdin, want)
 	}
-	// deploy still needs it, or the objects have nowhere to land.
-	f2 := useFakeRunner(t)
-	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f2); code != 0 {
-		t.Fatalf("deploy exit=%d", code)
+}
+
+// TestDeployManifestOmitsTheNamespace: a deploy creates the namespace on its own,
+// only when it is absent, so the manifest it applies carries no Namespace document
+// whether or not the namespace exists -- and `generate kubernetes`, which is applied
+// by hand, still does.
+func TestDeployManifestOmitsTheNamespace(t *testing.T) {
+	env := kubeFixture(t, kubeEnv)
+	f := useFakeRunner(t)
+	if code, stderr := runKube(t, f, env, "deploy"); code != 0 {
+		t.Fatalf("deploy exit=%d\n%s", code, stderr)
 	}
-	if !strings.Contains(f2.calls[1].stdin, "kind: Namespace") {
-		t.Errorf("deploy must still create the namespace:\n%s", f2.calls[1].stdin)
+	if strings.Contains(f.calls[kubeProbes+1].stdin, "kind: Namespace") {
+		t.Errorf("the deploy manifest must carry no Namespace:\n%s", f.calls[kubeProbes+1].stdin)
+	}
+	var code int
+	out := captureStdout(t, func() { code = run([]string{"generate", "--platform", "kubernetes", "-e", env}) })
+	if code != 0 || !strings.HasPrefix(out, "apiVersion: v1\nkind: Namespace\n") {
+		t.Errorf("generate kubernetes keeps the Namespace first, exit %d:\n%s", code, out)
+	}
+}
+
+// TestDeployNamespaceFlow is every branch of the namespace step, which runs after the
+// probes and before the apply: nothing for a namespace that exists (no cluster
+// permission asked), and otherwise the create probe, then the Namespace applied on
+// its own before the manifest.
+func TestDeployNamespaceFlow(t *testing.T) {
+	notFoundErr := errors.New("exit status 1")
+	const nsDoc = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: solace-connectors\n"
+	exists := queuedResp{"namespace/solace-connectors\n", nil}
+	absent := queuedResp{"", nil}
+	unreadable := queuedResp{`Error from server (Forbidden): namespaces "solace-connectors" is forbidden`, notFoundErr}
+	allowed := queuedResp{"yes\n", nil}
+	refused := queuedResp{"no\n", notFoundErr}
+	unanswered := queuedResp{"error: You must be logged in to the server (Unauthorized)\n", notFoundErr}
+	for _, c := range []struct {
+		name        string
+		read, probe queuedResp // the namespace read, and the create probe when it is asked
+		applyNS     queuedResp // the Namespace's own apply, when it is made
+		wantCode    int
+		wantProbe   bool   // `create namespaces` asked
+		wantNSApply bool   // the Namespace applied on its own
+		wantManif   bool   // the manifest applied
+		wantStderr  string // contained in stderr
+	}{
+		{name: "exists asks nothing more", read: exists, wantManif: true},
+		{name: "absent and allowed creates it first", read: absent, probe: allowed, wantProbe: true, wantNSApply: true, wantManif: true},
+		{name: "absent and refused is MissingNamespace", read: absent, probe: refused, wantCode: 1, wantProbe: true,
+			wantStderr: `namespace "solace-connectors" does not exist, and this identity may not create it`},
+		{name: "absent and unanswered is its own error", read: absent, probe: unanswered, wantCode: 1, wantProbe: true,
+			wantStderr: "cannot check permission to create namespaces"},
+		{name: "unknown and allowed creates it", read: unreadable, probe: allowed, wantProbe: true, wantNSApply: true, wantManif: true},
+		{name: "unknown and refused warns and carries on", read: unreadable, probe: refused, wantProbe: true, wantManif: true,
+			wantStderr: "warning: namespace solace-connectors could not be read (that needs get namespaces) and this identity may not create namespaces"},
+		{name: "unknown and unanswered is an error", read: unreadable, probe: unanswered, wantCode: 1, wantProbe: true,
+			wantStderr: "cannot check permission to create namespaces"},
+		{name: "a failed Namespace apply stops the deploy", read: absent, probe: allowed, applyNS: queuedResp{"denied", notFoundErr},
+			wantCode: 1, wantProbe: true, wantNSApply: true, wantStderr: "create namespace solace-connectors for kubernetes failed"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			resp := append(yesProbes(kubeProbes), c.read)
+			if c.wantProbe {
+				resp = append(resp, c.probe)
+			}
+			if c.wantNSApply {
+				resp = append(resp, c.applyNS)
+			}
+			q := &queueRunner{resp: resp}
+			code, stderr := runKube(t, q, kubeFixture(t, kubeEnv), "deploy")
+			if code != c.wantCode {
+				t.Fatalf("exit = %d, want %d\n%s", code, c.wantCode, stderr)
+			}
+			if c.wantStderr != "" && !strings.Contains(stderr, c.wantStderr) {
+				t.Errorf("stderr lacks %q:\n%s", c.wantStderr, stderr)
+			}
+			var probed, nsApplied, applied int
+			for _, call := range q.calls {
+				switch {
+				case reflect.DeepEqual(call.argv, []string{"kubectl", "auth", "can-i", "create", "namespaces", "--all-namespaces"}):
+					probed++
+				case call.stdin == nsDoc:
+					nsApplied++
+				case reflect.DeepEqual(call.argv, []string{"kubectl", "apply", "-f", "-"}):
+					applied++
+				}
+			}
+			if (probed == 1) != c.wantProbe || probed > 1 {
+				t.Errorf("the create-namespaces probe was asked %d times, want %v", probed, c.wantProbe)
+			}
+			if (nsApplied == 1) != c.wantNSApply || nsApplied > 1 {
+				t.Errorf("the Namespace was applied on its own %d times, want %v: %+v", nsApplied, c.wantNSApply, q.calls)
+			}
+			if (applied == 1) != c.wantManif || applied > 1 {
+				t.Errorf("the manifest was applied %d times, want %v", applied, c.wantManif)
+			}
+			if c.wantNSApply && c.wantManif {
+				// The Namespace is its own apply, before the manifest's.
+				ns := indexOfCall(q.calls, func(fc fakeCall) bool { return fc.stdin == nsDoc })
+				man := indexOfCall(q.calls, func(fc fakeCall) bool { return strings.Contains(fc.stdin, "kind: Deployment") })
+				if ns < 0 || man < 0 || ns > man {
+					t.Errorf("the Namespace apply (call %d) must come before the manifest (call %d)", ns, man)
+				}
+			}
+		})
+	}
+}
+
+// indexOfCall is the index of the first call match accepts, or -1.
+func indexOfCall(calls []fakeCall, match func(fakeCall) bool) int {
+	for i, c := range calls {
+		if match(c) {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestDeployWaitsForTheRollout: after a successful apply the deploy waits for the
+// Deployment (kube.RolloutStatus, 300s), keeping the one ok: line at the end. A
+// refused wait warns and succeeds, since the change is applied; a wait that times
+// out or sees the rollout fail is the deploy's failure, exit 1.
+func TestDeployWaitsForTheRollout(t *testing.T) {
+	forbidden := `Error from server (Forbidden): deployments.apps "solmq-connector" is forbidden: User "u" cannot get resource "deployments/scale"`
+	for _, c := range []struct {
+		name       string
+		wait       queuedResp
+		wantCode   int
+		wantStderr []string
+		notStderr  string
+	}{
+		{"rolled out", queuedResp{`deployment "solmq-connector" successfully rolled out`, nil}, 0,
+			[]string{`deployment "solmq-connector" successfully rolled out`, "ok: deploy kubernetes"}, "warning: the wait"},
+		{"refused", queuedResp{forbidden, errors.New("exit status 1")}, 0,
+			[]string{"warning: the wait for deployment/solmq-connector to roll out was refused", "the change was applied", "ok: deploy kubernetes"}, "error:"},
+		{"timed out", queuedResp{"error: timed out waiting for the condition", errors.New("exit status 1")}, 1,
+			[]string{"error: deploy kubernetes failed", "deployment/solmq-connector did not finish rolling out"}, "ok:"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			q := &queueRunner{resp: append(yesProbes(kubeProbes), queuedResp{"namespace/solace-connectors\n", nil}, queuedResp{"", nil}, c.wait)}
+			code, stderr := runKube(t, q, kubeFixture(t, kubeEnv), "deploy")
+			if code != c.wantCode {
+				t.Fatalf("exit = %d, want %d\n%s", code, c.wantCode, stderr)
+			}
+			for _, want := range c.wantStderr {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr lacks %q:\n%s", want, stderr)
+				}
+			}
+			if strings.Contains(stderr, c.notStderr) {
+				t.Errorf("stderr must not carry %q:\n%s", c.notStderr, stderr)
+			}
+			if len(q.calls) != kubeProbes+3 {
+				t.Errorf("want probes, namespace read, apply and one wait, got %d calls: %+v", len(q.calls), q.calls)
+			}
+		})
+	}
+	// A failed apply is not waited on.
+	q := &queueRunner{resp: append(yesProbes(kubeProbes), queuedResp{"namespace/solace-connectors\n", nil}, queuedResp{"denied", errors.New("exit status 1")})}
+	if code, _ := runKube(t, q, kubeFixture(t, kubeEnv), "deploy"); code != 1 || len(q.calls) != kubeProbes+2 {
+		t.Errorf("a failed apply must not wait: exit %d, calls %+v", code, q.calls)
+	}
+}
+
+// TestKubernetesProbeSets: every probe of a command is asked before its first write.
+// A deploy asks create, and a remove delete, of each kind the manifest writes, once:
+// the credentials Secret only when created, the Service only when enabled, and the
+// libs claim and its cluster-scoped volume (asked cluster-wide) only for
+// libs.pvc.create. The Namespace is never among them.
+func TestKubernetesProbeSets(t *testing.T) {
+	const withLibs = `
+kubernetes:
+  command: kubectl
+  deployment:
+    name: solmq-connector
+    namespace: solace-connectors
+  service:
+    enabled: true
+  secrets:
+    credentials:
+      create: true
+  libs:
+    pvc:
+      create:
+        nfs:
+          server: nfs1
+          path: /libs
+`
+	const theirCreds = `
+kubernetes:
+  command: kubectl
+  deployment:
+    name: solmq-connector
+    namespace: solace-connectors
+  secrets:
+    credentials:
+      existing: their-creds
+`
+	in := func(verb string, resources ...string) []string {
+		var out []string
+		for _, r := range resources {
+			if r == "persistentvolumes" {
+				out = append(out, verb+" "+r+" --all-namespaces")
+				continue
+			}
+			out = append(out, verb+" "+r+" -n solace-connectors")
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name, env    string
+		deploy, drop []string
+	}{
+		{"credentials secret, no service, no libs", kubeEnv,
+			in("create", "deployments", "configmaps", "secrets"), in("delete", "deployments", "configmaps", "secrets")},
+		{"a service and the libs claim with its volume", withLibs,
+			in("create", "deployments", "services", "configmaps", "secrets", "persistentvolumeclaims", "persistentvolumes"),
+			in("delete", "deployments", "services", "configmaps", "secrets", "persistentvolumeclaims", "persistentvolumes")},
+		// The credentials Secret is the operator's, so a deploy writes no Secret at
+		// all; a teardown still deletes the stores Secret by name, whose name the
+		// instance owns whether or not an earlier deploy made it.
+		{"no created secret", theirCreds, in("create", "deployments", "configmaps"), in("delete", "deployments", "configmaps", "secrets")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := useFakeRunner(t)
+			runKube(t, f, kubeFixture(t, c.env), "deploy")
+			if got := canIAsked(f.calls); !reflect.DeepEqual(got, c.deploy) {
+				t.Errorf("deploy asked %v, want %v", got, c.deploy)
+			}
+			f = useFakeRunner(t)
+			withPrompter(t, true, "n\ny\n")
+			runKube(t, f, kubeFixture(t, c.env), "remove", noPromptFlagName)
+			// The remove's last question is the namespace delete, asked after the
+			// occupancy check, so only the first len(c.drop) belong to the teardown.
+			got := canIAsked(f.calls)
+			if len(got) < len(c.drop) || !reflect.DeepEqual(got[:len(c.drop)], c.drop) {
+				t.Errorf("remove asked %v, want %v first", got, c.drop)
+			}
+			for _, q := range got {
+				if strings.Contains(q, " namespaces") && !strings.HasPrefix(q, "delete namespaces") {
+					t.Errorf("a namespaces probe other than the gate's delete: %q", q)
+				}
+			}
+		})
+	}
+}
+
+// Every probe runs before the first write, and the first refusal stops the command:
+// nothing is applied, and the later probes are not asked.
+func TestKubernetesRefusedProbeStopsBeforeAnyWrite(t *testing.T) {
+	resp := append(yesProbes(1), queuedResp{"no\n", errors.New("exit status 1")})
+	q := &queueRunner{resp: resp}
+	code, stderr := runKube(t, q, kubeFixture(t, kubeEnv), "deploy")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, stderr)
+	}
+	if want := `not allowed to create configmaps in namespace "solace-connectors"`; !strings.Contains(stderr, want) {
+		t.Errorf("stderr lacks %q:\n%s", want, stderr)
+	}
+	if len(q.calls) != 2 {
+		t.Errorf("want the first two probes only, got %+v", q.calls)
 	}
 }
 
 // TestRemoveNamespaceOccupiedLeavesItAlone is the case that motivated the flag:
 // another connector, or anything else, living in the same namespace.
 func TestRemoveNamespaceOccupiedLeavesItAlone(t *testing.T) {
-	q := &queueRunner{resp: []queuedResp{
-		{"", nil}, // preflight
-		{"", nil}, // delete
-		{nsList(
+	q := &queueRunner{resp: removeResp(
+		queuedResp{nsList(
 			nsItemJSON("Deployment", "billing-api"),
 			nsItemJSON("StatefulSet", "postgres"),
 			nsItemJSON("PersistentVolumeClaim", "billing-data"),
 		), nil},
-	}}
+	)}
 	withPrompter(t, true, "y\n")
-	dir := t.TempDir()
-	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
-	write(t, dir, "10.yaml", validWF)
+	env := kubeFixture(t, kubeEnv)
 
-	var code int
-	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, q)
-	})
+	code, stderr := runKube(t, q, env, "remove")
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0 -- the teardown succeeded", code)
 	}
-	// preflight, delete, the occupancy probe -- and no fourth call.
-	if len(q.calls) != 3 {
+	// probes, delete, the occupancy listing -- and nothing after it.
+	if len(q.calls) != kubeProbes+2 {
 		t.Fatalf("the namespace must not be deleted, got %d calls: %+v", len(q.calls), q.calls)
 	}
 	for _, want := range []string{"deployment/billing-api", "statefulset/postgres", "persistentvolumeclaim/billing-data", "leaving namespace"} {
@@ -1117,7 +1454,8 @@ func TestRemoveNamespaceOccupiedLeavesItAlone(t *testing.T) {
 
 // TestRemoveNamespaceEmptyPromptsSeparately covers the second question. Saying
 // yes to tearing down a deployment is not saying yes to removing the namespace
-// around it, so it is asked on its own.
+// around it, so it is asked on its own -- after the permission probe, which is
+// never wasted on a question that would be refused.
 func TestRemoveNamespaceEmptyPromptsSeparately(t *testing.T) {
 	for _, c := range []struct {
 		answer  string
@@ -1128,26 +1466,26 @@ func TestRemoveNamespaceEmptyPromptsSeparately(t *testing.T) {
 		{"", false},
 	} {
 		t.Run("answer="+c.answer, func(t *testing.T) {
-			q := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
+			q := &queueRunner{resp: removeResp(queuedResp{nsList(), nil}, queuedResp{"yes\n", nil}, queuedResp{"", nil})}
 			// Two questions: yes to the teardown, then the case's answer to the
 			// namespace. That separation is the point of the feature.
 			withPrompter(t, true, "y\n"+c.answer+"\n")
-			dir := t.TempDir()
-			write(t, dir, "env.yaml", sharedEnv+kubeEnv)
-			write(t, dir, "10.yaml", validWF)
+			env := kubeFixture(t, kubeEnv)
 
-			if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, q); code != 0 {
-				t.Fatalf("exit=%d, want 0", code)
+			if code, stderr := runKube(t, q, env, "remove"); code != 0 {
+				t.Fatalf("exit=%d, want 0\n%s", code, stderr)
 			}
-			want := 3
+			want := kubeProbes + 3
 			if c.deleted {
-				want = 4
+				want = kubeProbes + 4
 			}
 			if len(q.calls) != want {
 				t.Fatalf("want %d calls, got %d: %+v", want, len(q.calls), q.calls)
 			}
-			if c.deleted && !strings.Contains(q.calls[3].stdin, "kind: Namespace") {
-				t.Errorf("the namespace delete should pipe the Namespace document, got %q", q.calls[3].stdin)
+			if c.deleted {
+				if got, want := q.calls[kubeProbes+3].argv, []string{"kubectl", "delete", "namespace", "solace-connectors", "--ignore-not-found"}; !reflect.DeepEqual(got, want) {
+					t.Errorf("the namespace delete = %v, want %v", got, want)
+				}
 			}
 		})
 	}
@@ -1158,23 +1496,18 @@ func TestRemoveNamespaceEmptyPromptsSeparately(t *testing.T) {
 // reader, so one write answering both ("y\ny\n") is not half lost to the first
 // question's read-ahead.
 func TestRemoveSharesOneReaderAcrossBothQuestions(t *testing.T) {
-	q := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
+	q := &queueRunner{resp: removeResp(queuedResp{nsList(), nil}, queuedResp{"yes\n", nil}, queuedResp{"", nil})}
 	out := withPrompter(t, true, "y\ny\n")
-	dir := t.TempDir()
-	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
-	write(t, dir, "10.yaml", validWF)
+	env := kubeFixture(t, kubeEnv)
 
-	if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, q); code != 0 {
-		t.Fatalf("exit=%d, want 0", code)
+	if code, stderr := runKube(t, q, env, "remove"); code != 0 {
+		t.Fatalf("exit=%d, want 0\n%s", code, stderr)
 	}
 	if n := strings.Count(out.String(), "[y/N]"); n != 2 {
 		t.Errorf("want 2 questions asked, got %d: %q", n, out.String())
 	}
-	if len(q.calls) != 4 {
-		t.Fatalf("both answers must be read, want 4 calls (preflight, delete, probe, namespace delete), got %d: %+v", len(q.calls), q.calls)
-	}
-	if !strings.Contains(q.calls[3].stdin, "kind: Namespace") {
-		t.Errorf("the namespace delete should pipe the Namespace document, got %q", q.calls[3].stdin)
+	if len(q.calls) != kubeProbes+4 {
+		t.Fatalf("both answers must be read, want %d calls (probes, delete, listing, delete probe, namespace delete), got %d: %+v", kubeProbes+4, len(q.calls), q.calls)
 	}
 }
 
@@ -1186,29 +1519,19 @@ func TestRemoveSharesOneReaderAcrossBothQuestions(t *testing.T) {
 // cascade -- the occupancy check runs first and an occupant of any kind ends it,
 // silently or not.
 func TestRemoveNoPromptNeverRemovesAnOccupiedNamespace(t *testing.T) {
-	q := &queueRunner{resp: []queuedResp{
-		{"", nil}, // preflight
-		{"", nil}, // delete
-		{nsList(nsItemJSON("Deployment", "billing-api")), nil},
-	}}
+	q := &queueRunner{resp: removeResp(queuedResp{nsList(nsItemJSON("Deployment", "billing-api")), nil})}
 	out := withPrompter(t, true, "n\nn\n")
+	env := kubeFixture(t, kubeEnv)
 
-	dir := t.TempDir()
-	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
-	write(t, dir, "10.yaml", validWF)
-
-	var code int
-	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"remove", "--platform", "kubernetes", noPromptFlagName, "-e", filepath.Join(dir, "env.yaml")}, q)
-	})
+	code, stderr := runKube(t, q, env, "remove", noPromptFlagName)
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0 -- the teardown succeeded", code)
 	}
 	if out.Len() != 0 {
 		t.Errorf("--no-prompt must not prompt at all, got %q", out.String())
 	}
-	// preflight, delete, probe -- and no fourth call, whatever the flags say.
-	if len(q.calls) != 3 {
+	// probes, delete, listing -- and nothing after it, whatever the flags say.
+	if len(q.calls) != kubeProbes+2 {
 		t.Fatalf("an occupied namespace must never be deleted, got %d calls: %+v", len(q.calls), q.calls)
 	}
 	for _, want := range []string{"deployment/billing-api", "leaving namespace"} {
@@ -1223,15 +1546,12 @@ func TestRemoveNoPromptNeverRemovesAnOccupiedNamespace(t *testing.T) {
 // checked and nothing was offered. It is part of what remove does now, not
 // something to opt into.
 func TestRemovePlainRunChecksTheNamespace(t *testing.T) {
-	q := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {nsList(), nil}, {"", nil}}}
+	q := &queueRunner{resp: removeResp(queuedResp{nsList(), nil}, queuedResp{"yes\n", nil}, queuedResp{"", nil})}
 	out := withPrompter(t, true, "y\ny\n")
+	env := kubeFixture(t, kubeEnv)
 
-	dir := t.TempDir()
-	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
-	write(t, dir, "10.yaml", validWF)
-
-	if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, q); code != 0 {
-		t.Fatalf("exit=%d, want 0", code)
+	if code, stderr := runKube(t, q, env, "remove"); code != 0 {
+		t.Fatalf("exit=%d, want 0\n%s", code, stderr)
 	}
 	// Two questions with no flags at all: the teardown, then the namespace.
 	asked := out.String()
@@ -1241,11 +1561,14 @@ func TestRemovePlainRunChecksTheNamespace(t *testing.T) {
 	if !strings.Contains(asked, "remove the namespace too?") {
 		t.Errorf("the second question should be about the namespace, got %q", asked)
 	}
-	if len(q.calls) != 4 {
-		t.Fatalf("want 4 calls (preflight, delete, probe, namespace delete), got %d: %+v", len(q.calls), q.calls)
+	if len(q.calls) != kubeProbes+4 {
+		t.Fatalf("want %d calls (probes, delete, listing, delete probe, namespace delete), got %d: %+v", kubeProbes+4, len(q.calls), q.calls)
 	}
-	if !containsToken(q.calls[2].argv, namespaceProbeTypes) {
-		t.Errorf("call 2 should be the occupancy probe, got %v", q.calls[2].argv)
+	if !containsToken(q.calls[kubeProbes+1].argv, nsListTypes) {
+		t.Errorf("call %d should be the occupancy listing, got %v", kubeProbes+1, q.calls[kubeProbes+1].argv)
+	}
+	if want := []string{"kubectl", "auth", "can-i", "delete", "namespaces", "--all-namespaces"}; !reflect.DeepEqual(q.calls[kubeProbes+2].argv, want) {
+		t.Errorf("call %d should be the delete probe, got %v, want %v", kubeProbes+2, q.calls[kubeProbes+2].argv, want)
 	}
 }
 
@@ -1256,21 +1579,15 @@ func TestRemoveNamespaceRefusesClusterNamespaces(t *testing.T) {
 	for _, ns := range []string{"default", "kube-system", "kube-public", "kube-node-lease"} {
 		t.Run(ns, func(t *testing.T) {
 			env := strings.Replace(kubeEnv, "namespace: solace-connectors", "namespace: "+ns, 1)
-			dir := t.TempDir()
-			write(t, dir, "env.yaml", sharedEnv+env)
-			write(t, dir, "10.yaml", validWF)
 
-			q := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}}}
-			var code int
-			stderr := captureStderr(t, func() {
-				code = dispatch([]string{"remove", "--platform", "kubernetes", noPromptFlagName, "-e", filepath.Join(dir, "env.yaml")}, q)
-			})
+			q := &queueRunner{resp: removeResp()}
+			code, stderr := runKube(t, q, kubeFixture(t, env), "remove", noPromptFlagName)
 			if code != 0 {
 				t.Fatalf("exit=%d, want 0", code)
 			}
-			// Refused before the occupancy probe: preflight and delete only.
-			if len(q.calls) != 2 {
-				t.Fatalf("%s must be refused without even being probed, got %d calls: %+v", ns, len(q.calls), q.calls)
+			// Refused before the occupancy listing: the probes and the delete only.
+			if len(q.calls) != kubeProbes+1 {
+				t.Fatalf("%s must be refused without even being listed, got %d calls: %+v", ns, len(q.calls), q.calls)
 			}
 			if !strings.Contains(stderr, "never removed") {
 				t.Errorf("the refusal should say so, got:\n%s", stderr)
@@ -1282,20 +1599,13 @@ func TestRemoveNamespaceRefusesClusterNamespaces(t *testing.T) {
 // TestRemoveNamespaceProbeFailureLeavesItAlone: a namespace is not worth
 // deleting on a guess.
 func TestRemoveNamespaceProbeFailureLeavesItAlone(t *testing.T) {
-	q := &queueRunner{resp: []queuedResp{{"", nil}, {"", nil}, {"boom", fmt.Errorf("forbidden")}}}
-	dir := t.TempDir()
-	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
-	write(t, dir, "10.yaml", validWF)
-
-	var code int
-	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"remove", "--platform", "kubernetes", noPromptFlagName, "-e", filepath.Join(dir, "env.yaml")}, q)
-	})
+	q := &queueRunner{resp: removeResp(queuedResp{"boom", fmt.Errorf("forbidden")})}
+	code, stderr := runKube(t, q, kubeFixture(t, kubeEnv), "remove", noPromptFlagName)
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0 -- the teardown itself succeeded", code)
 	}
-	if len(q.calls) != 3 {
-		t.Fatalf("the namespace must not be deleted after a failed probe, got %d calls", len(q.calls))
+	if len(q.calls) != kubeProbes+2 {
+		t.Fatalf("the namespace must not be deleted after a failed listing, got %d calls", len(q.calls))
 	}
 	if !strings.Contains(stderr, "left in place") {
 		t.Errorf("stderr should say the namespace was left alone, got:\n%s", stderr)
@@ -1305,102 +1615,74 @@ func TestRemoveNamespaceProbeFailureLeavesItAlone(t *testing.T) {
 // TestRemoveFailedTeardownSkipsTheNamespace: whatever did not come down is still
 // in there, so the namespace is not even considered.
 func TestRemoveFailedTeardownSkipsTheNamespace(t *testing.T) {
-	q := &queueRunner{resp: []queuedResp{{"", nil}, {"boom", fmt.Errorf("denied")}}}
-	dir := t.TempDir()
-	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
-	write(t, dir, "10.yaml", validWF)
-
-	var code int
-	captureStderr(t, func() {
-		code = dispatch([]string{"remove", "--platform", "kubernetes", noPromptFlagName, "-e", filepath.Join(dir, "env.yaml")}, q)
-	})
+	q := &queueRunner{resp: append(yesProbes(kubeProbes), queuedResp{"boom", fmt.Errorf("denied")})}
+	code, _ := runKube(t, q, kubeFixture(t, kubeEnv), "remove", noPromptFlagName)
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
 	}
-	if len(q.calls) != 2 {
-		t.Fatalf("a failed teardown must not probe or delete the namespace, got %d calls: %+v", len(q.calls), q.calls)
+	if len(q.calls) != kubeProbes+1 {
+		t.Fatalf("a failed teardown must not list or delete the namespace, got %d calls: %+v", len(q.calls), q.calls)
 	}
 }
 
-// TestNamespaceOccupantsRules is the exclusion table. Each non-occupant is here
-// because it would otherwise keep a namespace alive forever: our own leftovers,
-// the objects kubernetes puts in every namespace, and -- the likeliest of all --
-// the release that was deleted moments ago and is still terminating.
-func TestNamespaceOccupantsRules(t *testing.T) {
-	owned := map[string]bool{"solmq-connector": true, "solmq-connector-config": true}
-
-	for _, c := range []struct {
-		name string
-		item string
-		want bool // is it an occupant
-	}{
-		{"a foreign deployment", nsItemJSON("Deployment", "billing-api"), true},
-		{"a foreign statefulset", nsItemJSON("StatefulSet", "postgres"), true},
-		{"a foreign pvc", nsItemJSON("PersistentVolumeClaim", "data"), true},
-		{"a foreign service", nsItemJSON("Service", "billing-svc"), true},
-		{"our deployment", nsItemJSON("Deployment", "solmq-connector"), false},
-		{"our configmap", nsItemJSON("ConfigMap", "solmq-connector-config"), false},
-		{
-			name: "a pod we own via ownerReferences",
-			item: `{"kind":"Pod","metadata":{"name":"solmq-connector-7d4-abc","ownerReferences":[{"kind":"ReplicaSet","name":"solmq-connector"}]}}`,
-			want: false,
-		},
-		{
-			name: "anything already terminating",
-			item: `{"kind":"Deployment","metadata":{"name":"whatever","deletionTimestamp":"2026-08-31T10:00:00Z"}}`,
-			want: false,
-		},
-		{"the default root CA configmap", nsItemJSON("ConfigMap", "kube-root-ca.crt"), false},
-		{"the default service account", nsItemJSON("ServiceAccount", "default"), false},
-		{
-			name: "a service-account token secret",
-			item: `{"kind":"Secret","type":"kubernetes.io/service-account-token","metadata":{"name":"default-token-abc"}}`,
-			want: false,
-		},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			got, err := namespaceOccupants(nsList(c.item), owned)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if (len(got) > 0) != c.want {
-				t.Errorf("occupant=%v, want %v (got %v)", len(got) > 0, c.want, got)
-			}
-		})
+// TestRemoveKubernetesSeamRejectsUnsafeCommand: the namespace gate takes the argv the
+// command was guarded into, so a command the guard refuses fails the remove as a usage
+// error before anything reaches the runner -- there is no second path around it.
+func TestRemoveKubernetesSeamRejectsUnsafeCommand(t *testing.T) {
+	f := useFakeRunner(t)
+	code, stderr := runKube(t, f, kubeFixture(t, kubeEnvUnsafeCommand), "remove", noPromptFlagName)
+	if code != 2 {
+		t.Fatalf("exit=%d, want 2\n%s", code, stderr)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("nothing may run, got %d calls", len(f.calls))
 	}
 }
 
-// TestNamespaceOccupantsAreSortedAndLabelled pins the output shape: kind/name,
-// lower-cased and sorted, so the list an operator reads is stable between runs.
-func TestNamespaceOccupantsAreSortedAndLabelled(t *testing.T) {
-	got, err := namespaceOccupants(nsList(
-		nsItemJSON("StatefulSet", "postgres"),
-		nsItemJSON("Deployment", "billing-api"),
-	), nil)
-	if err != nil {
-		t.Fatal(err)
+// gateKube is the section the direct calls to removeNamespace use.
+func gateKube(ns string) *spec.Kubernetes {
+	k := &spec.Kubernetes{Command: spec.DefaultKubeCommand}
+	k.Deployment.Name = "solmq-connector"
+	k.Deployment.Namespace = ns
+	return k
+}
+
+// gateBase is the guarded kubectl argv the caller hands the gate.
+var gateBase = []string{"kubectl"}
+
+// TestRemoveNamespaceDiscountsWhatTheReleaseOwnsByKind is the live half of the
+// occupancy check, now nsgate's: the objects this release created are passed with
+// their kinds, so the Deployment and what it owns do not count, but another kind of
+// object that merely shares a name does.
+func TestRemoveNamespaceDiscountsWhatTheReleaseOwnsByKind(t *testing.T) {
+	list := nsList(
+		nsItemJSON("Deployment", "solmq-connector"),
+		nsItemJSON("ConfigMap", "solmq-connector-config"),
+		`{"kind":"ReplicaSet","metadata":{"name":"solmq-connector-7d4","ownerReferences":[{"kind":"Deployment","name":"solmq-connector"}]}}`,
+		`{"kind":"Pod","metadata":{"name":"solmq-connector-7d4-abc","ownerReferences":[{"kind":"ReplicaSet","name":"solmq-connector-7d4"}]}}`,
+		// Not ours, though the name is: a ConfigMap is not our Deployment.
+		nsItemJSON("ConfigMap", "solmq-connector"),
+	)
+	q := &queueRunner{resp: []queuedResp{{list, nil}}}
+	var code int
+	stderr := captureStderr(t, func() {
+		code = removeNamespace(q, actionOpts{action: "remove", noPrompt: true}, gateKube("prod"), gateBase)
+	})
+	if code != 0 || len(q.calls) != 1 {
+		t.Fatalf("exit=%d, calls %+v, want 0 and the listing only", code, q.calls)
 	}
-	want := []string{"deployment/billing-api", "statefulset/postgres"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("= %v, want %v", got, want)
+	if !strings.Contains(stderr, "still holds 1 resource(s)") || !strings.Contains(stderr, "configmap/solmq-connector") ||
+		strings.Contains(stderr, "pod/") || strings.Contains(stderr, "deployment/") {
+		t.Errorf("only the foreign ConfigMap is an occupant, got:\n%s", stderr)
 	}
 }
 
-// TestNamespaceOccupantsRejectsUnreadableOutput: a parse failure must be an
-// error, never an empty list, or unreadable output would read as "empty" and
-// authorise the delete.
-func TestNamespaceOccupantsRejectsUnreadableOutput(t *testing.T) {
-	if _, err := namespaceOccupants("not json", nil); err == nil {
-		t.Fatal("unreadable output must not be treated as an empty namespace")
-	}
-}
-
-// TestOwnedNamesCoversEverythingThisReleaseCreates is the safety net behind the
+// TestOwnedObjectsCoverEverythingThisReleaseCreates is the safety net behind the
 // occupancy check. The check runs after the teardown, so these objects are
 // normally gone -- but one that has not finished terminating and carries no
 // deletionTimestamp yet must not be mistaken for someone else's workload and
 // keep the namespace alive forever.
-func TestOwnedNamesCoversEverythingThisReleaseCreates(t *testing.T) {
+func TestOwnedObjectsCoverEverythingThisReleaseCreates(t *testing.T) {
 	// The retired name keys are set on purpose: what the teardown created and
 	// deletes is the derived name, so that -- not the key -- is what is ours.
 	k := &spec.Kubernetes{
@@ -1413,22 +1695,26 @@ func TestOwnedNamesCoversEverythingThisReleaseCreates(t *testing.T) {
 	}
 	k.Deployment.Name = "solmq-connector"
 
-	owned := ownedNames(k)
-	for _, want := range []string{
-		"solmq-connector", "solmq-connector-config", "solmq-connector-credentials",
-		"solmq-connector-stores", "solmq-connector-image-pull", "solmq-connector-libs",
+	owned := map[nsgate.Object]bool{}
+	for _, o := range k.CreatedNames() {
+		owned[nsgate.Object{Kind: o.Kind, Name: o.Name}] = true
+	}
+	for _, want := range []nsgate.Object{
+		{Kind: "Deployment", Name: "solmq-connector"}, {Kind: "Service", Name: "solmq-connector"},
+		{Kind: "ConfigMap", Name: "solmq-connector-config"}, {Kind: "Secret", Name: "solmq-connector-credentials"},
+		{Kind: "Secret", Name: "solmq-connector-stores"}, {Kind: "Secret", Name: "solmq-connector-image-pull"},
+		{Kind: "PersistentVolumeClaim", Name: "solmq-connector-libs"},
 	} {
 		if !owned[want] {
-			t.Errorf("ownedNames should carry %q, got %v", want, owned)
+			t.Errorf("CreatedNames should carry %v, got %v", want, owned)
 		}
 	}
 	for _, retired := range []string{"solmq-creds", "solmq-tls", "solmq-pull", "old-libs"} {
-		if owned[retired] {
-			t.Errorf("%q is a retired name key the tool never created, so it is not ours, got %v", retired, owned)
+		for o := range owned {
+			if o.Name == retired {
+				t.Errorf("%q is a retired name key the tool never created, so it is not ours, got %v", retired, owned)
+			}
 		}
-	}
-	if owned[""] {
-		t.Error("an empty name must never be owned, or every unnamed object counts as ours")
 	}
 
 	// Referenced-but-not-created objects are NOT ours: the operator manages
@@ -1443,15 +1729,12 @@ func TestOwnedNamesCoversEverythingThisReleaseCreates(t *testing.T) {
 		Libs: &spec.Libs{PVC: &spec.LibsPVC{Existing: "their-pvc"}},
 	}
 	k2.Deployment.Name = "solmq-connector"
-	owned2 := ownedNames(k2)
-	for _, no := range []string{"their-creds", "their-tls", "their-pull", "their-pvc"} {
-		if owned2[no] {
-			t.Errorf("%q is referenced, not created, so it is not ours to discount", no)
+	for _, o := range k2.CreatedNames() {
+		for _, no := range []string{"their-creds", "their-tls", "their-pull", "their-pvc"} {
+			if o.Name == no {
+				t.Errorf("%q is referenced, not created, so it is not ours to discount", no)
+			}
 		}
-	}
-
-	if got := ownedNames(nil); len(got) != 0 {
-		t.Errorf("a nil section owns nothing, got %v", got)
 	}
 }
 
@@ -1460,12 +1743,10 @@ func TestOwnedNamesCoversEverythingThisReleaseCreates(t *testing.T) {
 // saying rather than deleting something named "".
 func TestRemoveNamespaceWithoutANamespaceSaysSo(t *testing.T) {
 	f := useFakeRunner(t)
-	k := &spec.Kubernetes{Command: spec.DefaultKubeCommand}
-	k.Deployment.Name = "solmq-connector"
 
 	var code int
 	stderr := captureStderr(t, func() {
-		code = removeNamespace(f, actionOpts{action: "remove"}, k)
+		code = removeNamespace(f, actionOpts{action: "remove"}, gateKube(""), gateBase)
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -1478,93 +1759,136 @@ func TestRemoveNamespaceWithoutANamespaceSaysSo(t *testing.T) {
 	}
 }
 
-// TestRemoveNamespaceRejectsAnUnsafeCommand pins that the namespace delete goes
-// through the same binary allowlist as everything else, rather than being a
-// second path around it.
-func TestRemoveNamespaceRejectsAnUnsafeCommand(t *testing.T) {
-	f := useFakeRunner(t)
-	k := &spec.Kubernetes{Command: "curl"}
-	k.Deployment.Name = "solmq-connector"
-	k.Deployment.Namespace = "prod"
-
-	var code int
-	stderr := captureStderr(t, func() {
-		code = removeNamespace(f, actionOpts{action: "remove"}, k)
-	})
-	if code != 2 { // a command the guard refuses is about what the tool was given
-		t.Fatalf("exit=%d, want 2", code)
-	}
-	if !strings.Contains(stderr, "curl") {
-		t.Errorf("the error should name the refused binary, got:\n%s", stderr)
-	}
-	if len(f.calls) != 0 {
-		t.Errorf("nothing may run, got %d calls", len(f.calls))
-	}
-}
-
-// TestRemoveNamespaceUnreadableProbeLeavesItAlone: output that cannot be parsed
-// must not read as "empty" and authorise the delete.
+// TestRemoveNamespaceUnreadableProbeLeavesItAlone: output that cannot be parsed,
+// or a listing with nothing in it to read, must not read as "empty" and authorise
+// the delete -- nsgate.Occupants errors on both, and the namespace is kept with a
+// warning naming why.
 func TestRemoveNamespaceUnreadableProbeLeavesItAlone(t *testing.T) {
-	q := &queueRunner{resp: []queuedResp{{"not json at all", nil}}}
-	k := &spec.Kubernetes{Command: spec.DefaultKubeCommand}
-	k.Deployment.Name = "solmq-connector"
-	k.Deployment.Namespace = "prod"
-
-	var code int
-	stderr := captureStderr(t, func() {
-		code = removeNamespace(q, actionOpts{action: "remove", noPrompt: true}, k)
-	})
-	if code != 0 {
-		t.Fatalf("exit=%d, want 0", code)
-	}
-	if len(q.calls) != 1 {
-		t.Fatalf("the namespace must not be deleted, got %d calls: %+v", len(q.calls), q.calls)
-	}
-	if !strings.Contains(stderr, "left in place") {
-		t.Errorf("stderr should say the namespace was left alone, got:\n%s", stderr)
+	for _, c := range []struct{ name, out, want string }{
+		{"not JSON", "not json at all", "not JSON"},
+		{"no items", "{}", "no items"},
+		{"empty", "  ", "came back empty"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			q := &queueRunner{resp: []queuedResp{{c.out, nil}}}
+			var code int
+			stderr := captureStderr(t, func() {
+				code = removeNamespace(q, actionOpts{action: "remove", noPrompt: true}, gateKube("prod"), gateBase)
+			})
+			if code != 0 {
+				t.Fatalf("exit=%d, want 0", code)
+			}
+			if len(q.calls) != 1 {
+				t.Fatalf("the namespace must not be deleted, got %d calls: %+v", len(q.calls), q.calls)
+			}
+			if !strings.Contains(stderr, "left in place") || !strings.Contains(stderr, c.want) {
+				t.Errorf("stderr should say the namespace was left alone and why (%q), got:\n%s", c.want, stderr)
+			}
+		})
 	}
 }
 
-// TestRemoveNamespaceNonTTYFailsFastNamingTheFlag: the namespace question
-// refuses a non-TTY the same way every other prompt does, naming the flag that
-// skips it rather than blocking on a read that will never return.
-func TestRemoveNamespaceNonTTYFailsFastNamingTheFlag(t *testing.T) {
-	q := &queueRunner{resp: []queuedResp{{nsList(), nil}}}
+// TestRemoveNamespaceNonTTYKeepsItNamingTheFlag: the namespace question has no
+// terminal to ask on, which used to fail the remove. The gate never fails the
+// remove: the namespace is kept with a warning that names the flag that answers
+// without a terminal, and the exit code stays 0.
+func TestRemoveNamespaceNonTTYKeepsItNamingTheFlag(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{{nsList(), nil}, {"yes\n", nil}}}
 	withPrompter(t, false, "y\n")
 
-	k := &spec.Kubernetes{Command: spec.DefaultKubeCommand}
-	k.Deployment.Name = "solmq-connector"
-	k.Deployment.Namespace = "prod"
+	var code int
+	stderr := captureStderr(t, func() { code = removeNamespace(q, actionOpts{action: "remove"}, gateKube("prod"), gateBase) })
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0 -- the teardown succeeded", code)
+	}
+	if !strings.Contains(stderr, "warning:") || !strings.Contains(stderr, noPromptFlagName) {
+		t.Errorf("the warning must name %s, got:\n%s", noPromptFlagName, stderr)
+	}
+	if len(q.calls) != 2 {
+		t.Errorf("the namespace must not be deleted, got %d calls: %+v", len(q.calls), q.calls)
+	}
+}
 
+// TestRemoveNamespaceAsksThePermissionBeforeTheQuestion: the delete probe runs after
+// the occupancy check and before the prompt, so nobody is asked a question that would
+// be refused. A refusal, and a probe that could not be answered, keep the namespace
+// with a warning and exit 0, without asking.
+func TestRemoveNamespaceAsksThePermissionBeforeTheQuestion(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		probe queuedResp
+		want  string
+	}{
+		{"refused", queuedResp{"no\n", errors.New("exit status 1")}, `not allowed to delete namespaces in the cluster (auth can-i answered "no")`},
+		{"unanswered", queuedResp{"error: no context\n", errors.New("exit status 1")}, "cannot check permission to delete namespaces"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			q := &queueRunner{resp: []queuedResp{{nsList(), nil}, c.probe}}
+			out := withPrompter(t, true, "y\n")
+			var code int
+			stderr := captureStderr(t, func() { code = removeNamespace(q, actionOpts{action: "remove"}, gateKube("prod"), gateBase) })
+			if code != 0 {
+				t.Fatalf("exit=%d, want 0", code)
+			}
+			if out.Len() != 0 {
+				t.Errorf("nobody is asked a question that would be refused, got %q", out.String())
+			}
+			if len(q.calls) != 2 {
+				t.Fatalf("want the listing and the probe only, got %+v", q.calls)
+			}
+			if want := []string{"kubectl", "auth", "can-i", "delete", "namespaces", "--all-namespaces"}; !reflect.DeepEqual(q.calls[1].argv, want) {
+				t.Errorf("probe argv = %v, want %v", q.calls[1].argv, want)
+			}
+			for _, want := range []string{"warning:", "left in place", c.want} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr lacks %q:\n%s", want, stderr)
+				}
+			}
+		})
+	}
+}
+
+// TestRemoveNamespaceDeleteOutcome: a confirmed delete reports ok:, and one that
+// fails is a warning that keeps the namespace -- the remove already succeeded, so the
+// exit stays 0.
+func TestRemoveNamespaceDeleteOutcome(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{{nsList(), nil}, {"yes\n", nil}, {"namespace \"prod\" deleted", nil}}}
 	var code int
 	stderr := captureStderr(t, func() {
-		code = removeNamespace(q, actionOpts{action: "remove"}, k)
+		code = removeNamespace(q, actionOpts{action: "remove", noPrompt: true}, gateKube("prod"), gateBase)
 	})
-	if code != 1 {
-		t.Fatalf("exit=%d, want 1", code)
+	if code != 0 || !strings.Contains(stderr, "ok: remove namespace kubernetes") {
+		t.Errorf("a deleted namespace reports ok, exit %d:\n%s", code, stderr)
 	}
-	if !strings.Contains(stderr, noPromptFlagName) {
-		t.Errorf("the refusal must name %s, got:\n%s", noPromptFlagName, stderr)
+
+	q = &queueRunner{resp: []queuedResp{{nsList(), nil}, {"yes\n", nil}, {"Error from server (Forbidden): namespaces \"prod\" is forbidden", errors.New("exit status 1")}}}
+	stderr = captureStderr(t, func() {
+		code = removeNamespace(q, actionOpts{action: "remove", noPrompt: true}, gateKube("prod"), gateBase)
+	})
+	if code != 0 {
+		t.Fatalf("a failed namespace delete must not fail the remove: exit %d\n%s", code, stderr)
 	}
-	if len(q.calls) != 1 {
-		t.Errorf("the namespace must not be deleted, got %d calls", len(q.calls))
+	for _, want := range []string{"warning: namespace prod was left in place, since deleting it failed", "is forbidden"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "ok:") || strings.Contains(stderr, "error:") {
+		t.Errorf("a kept namespace is neither ok nor an error:\n%s", stderr)
 	}
 }
 
 // TestRemoveNamespaceProbeArgvIsOneQuery pins the shape of the occupancy query:
 // one call listing every kind whose loss would matter, in the namespace being
-// considered.
+// considered (nsgate.List).
 func TestRemoveNamespaceProbeArgvIsOneQuery(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{{nsList(nsItemJSON("Deployment", "other")), nil}}}
-	k := &spec.Kubernetes{Command: spec.DefaultKubeCommand}
-	k.Deployment.Name = "solmq-connector"
-	k.Deployment.Namespace = "prod"
 
-	captureStderr(t, func() { removeNamespace(q, actionOpts{action: "remove", noPrompt: true}, k) })
+	captureStderr(t, func() { removeNamespace(q, actionOpts{action: "remove", noPrompt: true}, gateKube("prod"), gateBase) })
 	if len(q.calls) != 1 {
 		t.Fatalf("want 1 probe call, got %d", len(q.calls))
 	}
-	want := []string{"kubectl", "get", namespaceProbeTypes, "-n", "prod", "-o", "json"}
+	want := []string{"kubectl", "get", nsListTypes, "-n", "prod", "-o", "json"}
 	if !reflect.DeepEqual(q.calls[0].argv, want) {
 		t.Errorf("probe argv = %v, want %v", q.calls[0].argv, want)
 	}
@@ -3300,7 +3624,7 @@ func TestDeployKubernetesPreflightFailureStopsBeforeApply(t *testing.T) {
 	if len(f.calls) != 1 {
 		t.Fatalf("want exactly 1 runner call (the preflight probe), got %d: %+v", len(f.calls), f.calls)
 	}
-	want := []string{"kubectl", "auth", "can-i", "create", "deployment", "--namespace", "solace-connectors"}
+	want := []string{"kubectl", "auth", "can-i", "create", "deployments", "-n", "solace-connectors"}
 	if !reflect.DeepEqual(f.calls[0].argv, want) {
 		t.Errorf("preflight argv = %v, want %v", f.calls[0].argv, want)
 	}
@@ -3581,8 +3905,8 @@ func TestPlatformSingleSectionInferred(t *testing.T) {
 	if !strings.Contains(stderr, "platform: kubernetes") {
 		t.Errorf("stderr should echo the inferred platform, got:\n%s", stderr)
 	}
-	if len(f.calls) != 2 {
-		t.Errorf("want 2 runner calls (preflight, apply), got %d: %+v", len(f.calls), f.calls)
+	if len(f.calls) != kubeProbes+3 {
+		t.Errorf("want %d runner calls (probes, namespace read, apply, rollout wait), got %d: %+v", kubeProbes+3, len(f.calls), f.calls)
 	}
 }
 
@@ -3824,7 +4148,7 @@ func TestStatusTargetAliasesResolve(t *testing.T) {
 	}
 	// And an alias really drives the view: cnt runs the container half, which
 	// never execs into anything.
-	q := &queueRunner{resp: []queuedResp{{"", nil}, {podsJSON, nil}}}
+	q := &queueRunner{resp: []queuedResp{{podsJSON, nil}}}
 	var code int
 	captureStdout(t, func() {
 		code = dispatch([]string{"sts", "cnt", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
@@ -3832,8 +4156,8 @@ func TestStatusTargetAliasesResolve(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
-	if len(q.calls) != 2 {
-		t.Errorf("the container view should cost preflight + one get, got %d calls: %+v", len(q.calls), q.calls)
+	if len(q.calls) != 1 {
+		t.Errorf("the container view should cost one get, got %d calls: %+v", len(q.calls), q.calls)
 	}
 }
 
@@ -4088,8 +4412,7 @@ func TestWatchTitleNamesTheViewAndItsFlags(t *testing.T) {
 // is ever exec'd into -- the in-container script is not involved at all.
 func TestStatusContainerViewReadsEngineFactsWithoutExecing(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
-		{"", nil},       // preflight: kubectl auth can-i get pods
-		{podsJSON, nil}, // get pods -o json: discovery and facts together
+		{podsJSON, nil}, // get pods -o json: discovery and facts together; no permission probe first
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
@@ -4114,8 +4437,8 @@ func TestStatusContainerViewReadsEngineFactsWithoutExecing(t *testing.T) {
 	if strings.Contains(stdout, "NAMESPACE") {
 		t.Errorf("one namespace belongs in the banner, not in a column, got:\n%s", stdout)
 	}
-	if len(q.calls) != 2 {
-		t.Fatalf("want 2 calls (preflight, get pods), got %d: %+v", len(q.calls), q.calls)
+	if len(q.calls) != 1 {
+		t.Fatalf("want 1 call (get pods), got %d: %+v", len(q.calls), q.calls)
 	}
 	// Nothing was exec'd: no probe, no install, no script run.
 	for _, c := range q.calls {
@@ -4125,7 +4448,7 @@ func TestStatusContainerViewReadsEngineFactsWithoutExecing(t *testing.T) {
 			}
 		}
 	}
-	if got := q.calls[1].argv; got[len(got)-1] != "json" {
+	if got := q.calls[0].argv; got[len(got)-1] != "json" {
 		t.Errorf("discovery should ask for json, got %v", got)
 	}
 }
@@ -4136,7 +4459,6 @@ func TestStatusContainerViewReadsEngineFactsWithoutExecing(t *testing.T) {
 // deployment references the same ones.
 func TestStatusContainerDetailsSamplesAndChecksComponents(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
-		{"", nil},       // preflight
 		{podsJSON, nil}, // get pods
 		{"pod-a   connector   120m   512Mi\n", nil},                                // top pod --containers
 		{`{"kind":"ConfigMap","metadata":{"name":"solmq-connector-config"}}`, nil}, // get configmap (pod-a's only reference)
@@ -4159,11 +4481,11 @@ func TestStatusContainerDetailsSamplesAndChecksComponents(t *testing.T) {
 			t.Errorf("details view is missing %q, got:\n%s", want, stdout)
 		}
 	}
-	if len(q.calls) != 4 {
-		t.Fatalf("want 4 calls (preflight, get pods, top, one component check), got %d: %+v", len(q.calls), q.calls)
+	if len(q.calls) != 3 {
+		t.Fatalf("want 3 calls (get pods, top, one component check), got %d: %+v", len(q.calls), q.calls)
 	}
-	if !containsToken(q.calls[2].argv, "--containers") {
-		t.Errorf("the sample must be per container, got %v", q.calls[2].argv)
+	if !containsToken(q.calls[1].argv, "--containers") {
+		t.Errorf("the sample must be per container, got %v", q.calls[1].argv)
 	}
 }
 
@@ -4173,7 +4495,6 @@ func TestStatusContainerDetailsSamplesAndChecksComponents(t *testing.T) {
 // is still about the instances, not about the collection.
 func TestStatusContainerDetailsWithoutMetricsServerDegradesToANote(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
-		{"", nil},
 		{onePodJSON, nil},
 		{"error: Metrics API not available\n", fmt.Errorf("exit status 1")}, // top fails
 	}}
@@ -4302,7 +4623,7 @@ func TestStatusAllSearchesByImage(t *testing.T) {
 		  {"metadata":{"name":"theirs","namespace":"other"},
 		   "spec":{"containers":[{"name":"app","image":"nginx:1.27"}]},
 		   "status":{"phase":"Running"}}]}`
-		q := &queueRunner{resp: []queuedResp{{"", nil}, {pods, nil}}}
+		q := &queueRunner{resp: []queuedResp{{pods, nil}}}
 		var code int
 		stdout := captureStdout(t, func() {
 			code = dispatch([]string{"status", "container", "--platform", "kubernetes", "--all"}, q)
@@ -4310,8 +4631,8 @@ func TestStatusAllSearchesByImage(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("exit=%d, want 0", code)
 		}
-		if !containsToken(q.calls[1].argv, "--all-namespaces") {
-			t.Errorf("--all must search the whole cluster, got %v", q.calls[1].argv)
+		if !containsToken(q.calls[0].argv, "--all-namespaces") {
+			t.Errorf("--all must search the whole cluster, got %v", q.calls[0].argv)
 		}
 		for _, want := range []string{"ours", "another-teams"} {
 			if !strings.Contains(stdout, want) {
@@ -4361,7 +4682,7 @@ func TestStatusAllSearchesByImage(t *testing.T) {
 // TestStatusAllWithNoMatchIsActionable covers the empty search: it names what
 // it looked for, since there is no env.yaml in play to point at.
 func TestStatusAllWithNoMatchIsActionable(t *testing.T) {
-	q := &queueRunner{resp: []queuedResp{{"", nil}, {`{"items":[]}`, nil}}}
+	q := &queueRunner{resp: []queuedResp{{`{"items":[]}`, nil}}}
 	var code int
 	stderr := captureStderr(t, func() {
 		code = dispatch([]string{"status", "container", "--platform", "kubernetes", "--all"}, q)
@@ -4381,9 +4702,8 @@ func TestStatusAllWithNoMatchIsActionable(t *testing.T) {
 // verbatim: the values line up, and the banner is unchanged.
 func TestStatusApplicationViewRunsTheScriptAndRendersItsFacts(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
-		{"", nil},                                // preflight
-		{onePodJSON, nil},                        // get pods
-		{runner.ScriptPresentMarker + "\n", nil}, // probe: present
+		{onePodJSON, nil},                                               // get pods
+		{runner.ScriptPresentMarker + "\n", nil},                        // probe: present
 		{appReport + "workflows:\n   0: running\n  10: stopped\n", nil}, // run
 	}}
 	var code int
@@ -4422,7 +4742,7 @@ func TestStatusApplicationDetailsAddsTheEnrichmentLines(t *testing.T) {
 
 	report := func(args ...string) string {
 		q := &queueRunner{resp: []queuedResp{
-			{"", nil}, {onePodJSON, nil},
+			{onePodJSON, nil},
 			{runner.ScriptPresentMarker + "\n", nil}, {full, nil},
 		}}
 		return captureStdout(t, func() {
@@ -4463,7 +4783,6 @@ func TestStatusApplicationDetailsAddsTheEnrichmentLines(t *testing.T) {
 // change that instance produced one stderr line and no block at all.
 func TestStatusFailedScriptRunStillGetsItsOwnBlock(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
-		{"", nil},                                // preflight
 		{podsJSON, nil},                          // get pods: pod-a fine, pod-b crash looping
 		{runner.ScriptPresentMarker + "\n", nil}, // pod-a probe
 		{runner.ScriptPresentMarker + "\n", nil}, // pod-b probe
@@ -4496,7 +4815,6 @@ func TestStatusFailedScriptRunStillGetsItsOwnBlock(t *testing.T) {
 func TestStatusInstallPaths(t *testing.T) {
 	base := func(extra ...queuedResp) *queueRunner {
 		return &queueRunner{resp: append([]queuedResp{
-			{"", nil},                               // preflight
 			{onePodJSON, nil},                       // get pods
 			{runner.ScriptAbsentMarker + "\n", nil}, // probe: absent
 		}, extra...)}
@@ -4509,8 +4827,8 @@ func TestStatusInstallPaths(t *testing.T) {
 				t.Fatalf("exit=%d, want 0", code)
 			}
 		})
-		if len(q.calls) != 5 {
-			t.Fatalf("want 5 calls (preflight, get, probe, install, run), got %d: %+v", len(q.calls), q.calls)
+		if len(q.calls) != 4 {
+			t.Fatalf("want 4 calls (get, probe, install, run), got %d: %+v", len(q.calls), q.calls)
 		}
 	})
 
@@ -4522,8 +4840,8 @@ func TestStatusInstallPaths(t *testing.T) {
 				t.Fatalf("exit=%d, want 0", code)
 			}
 		})
-		if len(q.calls) != 5 {
-			t.Fatalf("want 5 calls, got %d: %+v", len(q.calls), q.calls)
+		if len(q.calls) != 4 {
+			t.Fatalf("want 4 calls, got %d: %+v", len(q.calls), q.calls)
 		}
 	})
 
@@ -4542,7 +4860,7 @@ func TestStatusInstallPaths(t *testing.T) {
 		if !strings.Contains(stdout, "status: the status script is not installed") {
 			t.Errorf("the skip should be reported in the block, got:\n%s", stdout)
 		}
-		if len(q.calls) != 3 {
+		if len(q.calls) != 2 {
 			t.Fatalf("nothing should be installed or run, got %d calls: %+v", len(q.calls), q.calls)
 		}
 	})
@@ -4556,7 +4874,6 @@ func TestStatusInstallPromptNonTTYRefusesWithInstallHint(t *testing.T) {
 	withPrompter(t, false, "")
 
 	q := &queueRunner{resp: []queuedResp{
-		{"", nil},
 		{onePodJSON, nil},
 		{runner.ScriptAbsentMarker + "\n", nil},
 	}}
@@ -4570,7 +4887,7 @@ func TestStatusInstallPromptNonTTYRefusesWithInstallHint(t *testing.T) {
 	if !strings.Contains(stdout, "--install") {
 		t.Errorf("the refusal should point at --install, got:\n%s", stdout)
 	}
-	if len(q.calls) != 3 {
+	if len(q.calls) != 2 {
 		t.Fatalf("nothing installed or run, got %d calls: %+v", len(q.calls), q.calls)
 	}
 }
@@ -4580,7 +4897,6 @@ func TestStatusInstallPromptNonTTYRefusesWithInstallHint(t *testing.T) {
 // standby instance prints like any other and the run still exits 0.
 func TestStatusStandbyIsAnAnswerNotAFailure(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
-		{"", nil},
 		{podsJSON, nil},
 		{runner.ScriptPresentMarker + "\n", nil},
 		{runner.ScriptPresentMarker + "\n", nil},
@@ -4607,7 +4923,6 @@ func TestStatusStandbyIsAnAnswerNotAFailure(t *testing.T) {
 // tables render, as one parseable document on stdout.
 func TestStatusJSONOutputIsOneDocument(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
-		{"", nil},
 		{onePodJSON, nil},
 		{runner.ScriptPresentMarker + "\n", nil},
 		{appReport, nil},
@@ -4656,7 +4971,7 @@ func TestStatusImageMismatchIsReportedAtBothLevels(t *testing.T) {
 	deployment := `{"kind":"Deployment","metadata":{"name":"solmq-connector"},"spec":{"replicas":1},"status":{"readyReplicas":1,"updatedReplicas":1,"availableReplicas":1}}`
 
 	t.Run("basic reports it as a note", func(t *testing.T) {
-		q := &queueRunner{resp: []queuedResp{{"", nil}, {onePodJSON, nil}, {deployment, nil}}}
+		q := &queueRunner{resp: []queuedResp{{onePodJSON, nil}, {deployment, nil}}}
 		var code int
 		stdout := captureStdout(t, func() {
 			code = dispatch([]string{"status", "container", "-e", envPath, "--platform", "kubernetes", "--pod", "pod-a"}, q)
@@ -4673,7 +4988,7 @@ func TestStatusImageMismatchIsReportedAtBothLevels(t *testing.T) {
 
 	t.Run("details reports it per instance", func(t *testing.T) {
 		q := &queueRunner{resp: []queuedResp{
-			{"", nil}, {onePodJSON, nil}, {deployment, nil},
+			{onePodJSON, nil}, {deployment, nil},
 			{"pod-a   connector   120m   512Mi\n", nil}, // top
 		}}
 		var code int
@@ -4698,7 +5013,7 @@ func TestStatusImageMismatchIsReportedAtBothLevels(t *testing.T) {
 		if err := os.WriteFile(matchPath, []byte(matching), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		q := &queueRunner{resp: []queuedResp{{"", nil}, {onePodJSON, nil}, {deployment, nil}}}
+		q := &queueRunner{resp: []queuedResp{{onePodJSON, nil}, {deployment, nil}}}
 		var code int
 		stdout := captureStdout(t, func() {
 			code = dispatch([]string{"status", "container", "-e", matchPath, "--platform", "kubernetes", "--pod", "pod-a"}, q)
@@ -4889,7 +5204,7 @@ func TestStatusNoPodsFoundNamesTheSelector(t *testing.T) {
 	if err := os.WriteFile(envPath, []byte("kubernetes:\n  deployment:\n    name: solmq-connector\n    namespace: prod\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	q := &queueRunner{resp: []queuedResp{{"", nil}, {`{"items":[]}`, nil}}}
+	q := &queueRunner{resp: []queuedResp{{`{"items":[]}`, nil}}}
 	var code int
 	stderr := captureStderr(t, func() {
 		code = dispatch([]string{"status", "container", "--platform", "kubernetes", "-e", envPath}, q)
@@ -5332,7 +5647,6 @@ func TestStatusVerboseNamesEverySlowCall(t *testing.T) {
 	withProgressClock(t, 600*time.Millisecond)
 	withStderrTerminal(t, false) // --verbose prints whether or not there is a screen
 	q := &queueRunner{resp: []queuedResp{
-		{"", nil},                                // preflight
 		{podsJSON, nil},                          // get pods
 		{runner.ScriptPresentMarker + "\n", nil}, // pod-a probe
 		{runner.ScriptPresentMarker + "\n", nil}, // pod-b probe
@@ -5355,11 +5669,11 @@ func TestStatusVerboseNamesEverySlowCall(t *testing.T) {
 			steps = append(steps, ln)
 		}
 	}
-	// No "resolve instance names" line: both --pod values here are names, and
-	// resolveIndexes only enumerates when an index was typed, so there is no call
-	// for a step to name.
+	// No "preflight" line: kubernetes asks no permission up front, so there is no
+	// call for the step to name. No "resolve instance names" line either: both
+	// --pod values here are names, and resolveIndexes only enumerates when an
+	// index was typed.
 	want := []string{
-		"step: preflight 0.6s",
 		"step: list pods 0.6s",
 		"step: install probe pod-a 1/2 0.6s",
 		"step: install probe pod-b 2/2 0.6s",
@@ -5383,11 +5697,12 @@ func TestStatusVerboseUnderWatchSaysWhichWins(t *testing.T) {
 			// The note is the last thing checkStatusFlags does, so reaching it
 			// means every refusal passed -- which would otherwise drop this case
 			// into the redraw loop. A failing preflight is what ends the run
-			// instead: it is the first call actStatus makes, before the loop.
-			f := &fakeRunner{err: fmt.Errorf("no cluster")}
+			// instead: it is the first call actStatus makes, before the loop. docker
+			// has one where kubernetes, which asks nothing up front, does not.
+			f := &fakeRunner{err: fmt.Errorf("no engine")}
 			var code int
 			stderr := captureStderr(t, func() {
-				code = dispatch([]string{"status", "container", "-w", spelling, "--platform", "kubernetes", "--pod", "pod-a"}, f)
+				code = dispatch([]string{"status", "container", "-w", spelling, "--platform", "docker", "--container", "solmq-connector"}, f)
 			})
 			if code != 1 {
 				t.Fatalf("exit=%d, want 1", code)
@@ -5411,7 +5726,6 @@ func TestStatusStdoutIsIdenticalWithAndWithoutTheSpinner(t *testing.T) {
 	run := func(t *testing.T, tty bool) (string, string) {
 		withStderrTerminal(t, tty)
 		q := &queueRunner{resp: []queuedResp{
-			{"", nil},
 			{onePodJSON, nil},
 			{runner.ScriptPresentMarker + "\n", nil},
 			{appReport, nil},
@@ -5636,12 +5950,12 @@ func TestLogsPreviousIsKubernetesOnly(t *testing.T) {
 // TestLogsPreviousReachesTheKubernetesArgv is the other half of the rule: where
 // the concept exists, the flag arrives as kubectl's own -p.
 func TestLogsPreviousReachesTheKubernetesArgv(t *testing.T) {
-	q := &streamRunner{resp: []queuedResp{{"", nil}, {onePodJSON, nil}}}
+	q := &streamRunner{}
 	if code := dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "pod-a", "--previous"}, q); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
-	if !containsToken(q.calls[1].argv, "-p") {
-		t.Errorf("--previous should reach the argv as -p, got %v", q.calls[1].argv)
+	if !containsToken(q.calls[0].argv, "-p") {
+		t.Errorf("--previous should reach the argv as -p, got %v", q.calls[0].argv)
 	}
 }
 
@@ -5817,7 +6131,7 @@ func TestLogsPlatformMenuWhenSeveralSectionsArePresent(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv)
 	withPrompter(t, true, "1\n") // kubernetes, the first section present
 
-	q := &streamRunner{resp: []queuedResp{{"", nil}, {onePodJSON, nil}}}
+	q := &streamRunner{resp: []queuedResp{{onePodJSON, nil}}}
 	var code int
 	captureStdout(t, func() {
 		captureStderr(t, func() {
@@ -5831,11 +6145,11 @@ func TestLogsPlatformMenuWhenSeveralSectionsArePresent(t *testing.T) {
 		t.Errorf("the menu answer should select kubernetes, got %q", got)
 	}
 	// Discovery came from the deployment in env.yaml, not from a guess.
-	if !containsToken(q.calls[1].argv, "app=solmq-connector") {
-		t.Errorf("discovery should use the deployment selector, got %v", q.calls[1].argv)
+	if !containsToken(q.calls[0].argv, "app=solmq-connector") {
+		t.Errorf("discovery should use the deployment selector, got %v", q.calls[0].argv)
 	}
-	if !containsToken(q.calls[1].argv, "solace-connectors") {
-		t.Errorf("discovery should use the deployment namespace, got %v", q.calls[1].argv)
+	if !containsToken(q.calls[0].argv, "solace-connectors") {
+		t.Errorf("discovery should use the deployment namespace, got %v", q.calls[0].argv)
 	}
 }
 
@@ -5905,7 +6219,7 @@ func TestLogsNoInstancesFoundNamesTheFix(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 
-	q := &streamRunner{resp: []queuedResp{{"", nil}, {`{"items":[]}`, nil}}}
+	q := &streamRunner{resp: []queuedResp{{`{"items":[]}`, nil}}}
 	var code int
 	stderr := captureStderr(t, func() {
 		code = dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml")}, q)
@@ -5945,40 +6259,42 @@ func TestLogsPlatformWithNoSectionAtAllIsLoud(t *testing.T) {
 	}
 }
 
-// TestReadVerbsReportTheirOwnRefusal is CR-0006 at the seam: a view-only
-// operator refused by the cluster is told which verb failed and which
-// permission it lacked -- not "deploy kubernetes failed" with a login hint --
-// and nothing past the probe runs.
-func TestReadVerbsReportTheirOwnRefusal(t *testing.T) {
+// TestReadVerbsAskKubernetesNoPermissionFirst is CR-0006 taken to its end: status,
+// logs and cli change nothing, so on kubernetes they ask for no permission up front.
+// The first call is the read itself, and a view-only operator is never turned away by
+// a question -- what the cluster refuses, the read reports in the platform's own
+// words.
+func TestReadVerbsAskKubernetesNoPermissionFirst(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	t.Chdir(dir)
-	refused := []queuedResp{{"no\n", fmt.Errorf("exit status 1")}}
-	status := &queueRunner{resp: refused}
-	logs := &streamRunner{resp: refused}
-	cli := &attachRunner{resp: refused}
+	forbidden := `Error from server (Forbidden): pods is forbidden: User "u" cannot list resource "pods" in namespace "prod"`
+	refused := fmt.Errorf("exit status 1")
+	status := &queueRunner{resp: []queuedResp{{forbidden, refused}}}
+	logs := &streamRunner{streams: []streamed{{stderr: forbidden, err: refused}}}
+	cli := &attachRunner{attaches: []attached{{code: 1, err: refused}}}
+	withPrompter(t, true, "")
 	for _, c := range []struct {
 		args  []string
 		r     gdurunner.Runner
-		calls func() int
-		want  []string
+		calls func() []fakeCall
+		want  []string // the first call's leading arguments after the command
 	}{
-		{[]string{"status", "container", "--platform", "kubernetes", "--namespace", "prod"}, status, func() int { return len(status.calls) }, []string{"error: status kubernetes failed", `may not get pods in namespace "prod"`}},
-		{[]string{"logs", "--platform", "kubernetes", "--pod", "p", "--namespace", "prod"}, logs, func() int { return len(logs.calls) }, []string{"error: logs kubernetes failed", `may not get pods/log in namespace "prod"`}},
-		{[]string{"cli", "--platform", "kubernetes", "--pod", "p", "--namespace", "prod"}, cli, func() int { return len(cli.calls) }, []string{"error: cli kubernetes failed", `may not create pods/exec in namespace "prod"`}},
+		{[]string{"status", "container", "--platform", "kubernetes", "--namespace", "prod"}, status, func() []fakeCall { return status.calls }, []string{"get", "pods"}},
+		{[]string{"logs", "--platform", "kubernetes", "--pod", "p", "--namespace", "prod"}, logs, func() []fakeCall { return logs.calls }, []string{"logs", "p"}},
+		{[]string{"cli", "--platform", "kubernetes", "--pod", "p", "--namespace", "prod"}, cli, func() []fakeCall { return cli.calls }, []string{"exec"}},
 	} {
 		var code int
-		stderr := captureStderr(t, func() { code = dispatch(c.args, c.r) })
-		if code != 1 {
-			t.Errorf("%s: exit=%d, want 1", c.args[0], code)
+		captureStderr(t, func() { code = dispatch(c.args, c.r) })
+		if code == 0 {
+			t.Errorf("%s: a refused read must not exit 0", c.args[0])
 		}
-		for _, w := range c.want {
-			if !strings.Contains(stderr, w) {
-				t.Errorf("%s: stderr missing %q:\n%s", c.args[0], w, stderr)
-			}
+		calls := c.calls()
+		if len(calls) == 0 || !containsToken(calls[0].argv, c.want[0]) || (len(c.want) > 1 && !containsToken(calls[0].argv, c.want[1])) {
+			t.Errorf("%s: the first call should be the read itself (%v), got %+v", c.args[0], c.want, calls)
 		}
-		if n := c.calls(); n != 1 {
-			t.Errorf("%s: want only the preflight to run, got %d calls", c.args[0], n)
+		if asked := canIAsked(calls); len(asked) != 0 {
+			t.Errorf("%s: kubernetes asks no permission up front, got %v", c.args[0], asked)
 		}
 	}
 }
@@ -5991,7 +6307,6 @@ func TestReadVerbsReportTheirOwnRefusal(t *testing.T) {
 // this tool paid for on every run that named one.
 func TestLogsNamedPodIsNotPreChecked(t *testing.T) {
 	q := &streamRunner{
-		resp:    []queuedResp{{"", nil}},
 		streams: []streamed{{stderr: "Error from server (NotFound): pods \"ghost\" not found\n", err: fmt.Errorf("exit status 1")}},
 	}
 	var code int
@@ -6001,15 +6316,11 @@ func TestLogsNamedPodIsNotPreChecked(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
 	}
-	if len(q.calls) != 2 {
-		t.Fatalf("want 2 calls (preflight, the read), got %d: %+v", len(q.calls), q.calls)
+	// No permission question either: the read is the whole run.
+	if len(q.calls) != 1 {
+		t.Fatalf("want 1 call (the read), got %d: %+v", len(q.calls), q.calls)
 	}
-	// The preflight asks can-i about the log subresource, which spells "get"
-	// too; it is a permission question, not a lookup of the pod.
-	if want := []string{"kubectl", "auth", "can-i", "get", "pods", "--subresource", "log", "--namespace", "prod"}; !reflect.DeepEqual(q.calls[0].argv, want) {
-		t.Errorf("preflight argv = %v, want %v", q.calls[0].argv, want)
-	}
-	for _, c := range q.calls[1:] {
+	for _, c := range q.calls {
 		if containsToken(c.argv, "get") {
 			t.Errorf("a named pod must not cost a discovery query, got %v", c.argv)
 		}
@@ -6026,7 +6337,7 @@ func TestLogsUsesTheSectionCommandOverride(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+"\nkubernetes:\n  command: oc\n  deployment:\n    name: solmq-connector\n    namespace: prod\n")
 
-	q := &streamRunner{resp: []queuedResp{{"", nil}, {onePodJSON, nil}}}
+	q := &streamRunner{resp: []queuedResp{{onePodJSON, nil}}}
 	var code int
 	captureStdout(t, func() {
 		captureStderr(t, func() {
@@ -6046,7 +6357,7 @@ func TestLogsUsesTheSectionCommandOverride(t *testing.T) {
 // TestLogsCommandFlagOverridesTheSection is the other half: --command wins over
 // env.yaml, and still goes through the binary allowlist.
 func TestLogsCommandFlagOverridesTheSection(t *testing.T) {
-	q := &streamRunner{resp: []queuedResp{{"", nil}, {onePodJSON, nil}}}
+	q := &streamRunner{}
 	if code := dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "pod-a", "--command", "oc"}, q); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
@@ -6080,7 +6391,6 @@ func TestLogsCommandFlagOverridesTheSection(t *testing.T) {
 // wrong half of it read.
 func TestLogsKubernetesArgvShape(t *testing.T) {
 	q := &streamRunner{
-		resp:    []queuedResp{{"", nil}},
 		streams: []streamed{{stdout: "line-a\n"}},
 	}
 	var code int
@@ -6090,11 +6400,11 @@ func TestLogsKubernetesArgvShape(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
-	if len(q.calls) != 2 {
-		t.Fatalf("want 2 calls (preflight, the log read), got %d: %+v", len(q.calls), q.calls)
+	if len(q.calls) != 1 {
+		t.Fatalf("want 1 call (the log read), got %d: %+v", len(q.calls), q.calls)
 	}
-	if want := []string{"kubectl", "logs", "pod-a", "-n", "prod", "-c", spec.ConnectorContainerName}; !reflect.DeepEqual(q.calls[1].argv, want) {
-		t.Errorf("log argv = %v, want %v", q.calls[1].argv, want)
+	if want := []string{"kubectl", "logs", "pod-a", "-n", "prod", "-c", spec.ConnectorContainerName}; !reflect.DeepEqual(q.calls[0].argv, want) {
+		t.Errorf("log argv = %v, want %v", q.calls[0].argv, want)
 	}
 	// One instance prints its log and nothing else, so the output pipes cleanly.
 	if stdout != "line-a\n" {
@@ -6231,7 +6541,7 @@ func TestLogsPickerListsPasteableCommands(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
 	envPath := filepath.Join(dir, "env.yaml")
 
-	q := &streamRunner{resp: []queuedResp{{"", nil}, {unsortedPodsJSON, nil}}}
+	q := &streamRunner{resp: []queuedResp{{unsortedPodsJSON, nil}}}
 	var code int
 	stdout := captureStdout(t, func() {
 		code = dispatch([]string{"logs", "-e", envPath, "--tail", "50", "--follow"}, q)
@@ -6270,7 +6580,7 @@ func TestLogsOneDiscoveredInstanceIsJustRead(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
 
 	q := &streamRunner{
-		resp:    []queuedResp{{"", nil}, {onePodJSON, nil}},
+		resp:    []queuedResp{{onePodJSON, nil}},
 		streams: []streamed{{stdout: "only-line\n"}},
 	}
 	var code int
@@ -6299,7 +6609,7 @@ func TestLogsIndexSelectsFromTheSortedList(t *testing.T) {
 	} {
 		t.Run(c.index, func(t *testing.T) {
 			q := &streamRunner{
-				resp:    []queuedResp{{"", nil}, {unsortedPodsJSON, nil}},
+				resp:    []queuedResp{{unsortedPodsJSON, nil}},
 				streams: []streamed{{stdout: "x\n"}},
 			}
 			if code := dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml"), "--pod", c.index}, q); code != 0 {
@@ -6326,7 +6636,7 @@ func TestLogsNameWinsOverIndex(t *testing.T) {
  {"metadata":{"name":"0","namespace":"prod"},"spec":{"containers":[{"name":"connector","image":"img:1"}]},"status":{"phase":"Running","containerStatuses":[{"name":"connector","image":"img:1","restartCount":0,"state":{"running":{"startedAt":"2026-01-01T00:00:00Z"}}}]}}
 ]}`
 	q := &streamRunner{
-		resp:    []queuedResp{{"", nil}, {podsNamedZero, nil}},
+		resp:    []queuedResp{{podsNamedZero, nil}},
 		streams: []streamed{{stdout: "x\n"}},
 	}
 	if code := dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml"), "--pod", "0"}, q); code != 0 {
@@ -6346,7 +6656,7 @@ func TestLogsIndexOutOfRangeNamesTheRange(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
 
-	q := &streamRunner{resp: []queuedResp{{"", nil}, {unsortedPodsJSON, nil}}}
+	q := &streamRunner{resp: []queuedResp{{unsortedPodsJSON, nil}}}
 	var code int
 	stderr := captureStderr(t, func() {
 		code = dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml"), "--pod", "3"}, q)
@@ -6370,7 +6680,7 @@ func TestLogsIndexOutOfRangeNamesTheRange(t *testing.T) {
 // discover from, which is about what the tool was given, so the exit is 2.
 func TestLogsIndexWithNothingToIndexInto(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such-env.yaml")
-	q := &streamRunner{resp: []queuedResp{{"", nil}}}
+	q := &streamRunner{}
 	var code int
 	stderr := captureStderr(t, func() {
 		code = dispatch([]string{"logs", "--platform", "kubernetes", "-e", missing, "--pod", "0"}, q)
@@ -6394,16 +6704,15 @@ func TestStatusAcceptsAnIndexToo(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
 
 	q := &queueRunner{resp: []queuedResp{
-		{"", nil},               // preflight
 		{unsortedPodsJSON, nil}, // enumeration for the index
 		{unsortedPodsJSON, nil}, // the report query itself
 	}}
 	if code := dispatch([]string{"status", "container", "-e", filepath.Join(dir, "env.yaml"), "--pod", "1"}, q); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
-	// calls: 0 preflight, 1 the enumeration for the index, 2 the report query.
-	// Later calls are the workload summary, which is not what this pins.
-	report := q.calls[2].argv
+	// calls: 0 the enumeration for the index, 1 the report query. Later calls
+	// are the workload summary, which is not what this pins.
+	report := q.calls[1].argv
 	if !containsToken(report, "pod-b") {
 		t.Errorf("--pod 1 should resolve to pod-b, got %v", report)
 	}
@@ -6415,11 +6724,11 @@ func TestStatusAcceptsAnIndexToo(t *testing.T) {
 // TestStatusKeepsPodRepeatable is the other half of the arity split: status
 // reports many instances by design, so the one-entry limit is a logs rule only.
 func TestStatusKeepsPodRepeatable(t *testing.T) {
-	q := &queueRunner{resp: []queuedResp{{"", nil}, {podsJSON, nil}}}
+	q := &queueRunner{resp: []queuedResp{{podsJSON, nil}}}
 	if code := dispatch([]string{"status", "container", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
-	argv := q.calls[1].argv
+	argv := q.calls[0].argv
 	for _, want := range []string{"pod-a", "pod-b"} {
 		if !containsToken(argv, want) {
 			t.Errorf("both pods should be queried, got %v", argv)
@@ -6557,7 +6866,7 @@ func TestLogsPickerCarriesEveryFlagBack(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
 	envPath := filepath.Join(dir, "env.yaml")
 
-	q := &streamRunner{resp: []queuedResp{{"", nil}, {unsortedPodsJSON, nil}}}
+	q := &streamRunner{resp: []queuedResp{{unsortedPodsJSON, nil}}}
 	var code int
 	stdout := captureStdout(t, func() {
 		code = dispatch([]string{
@@ -6843,19 +7152,20 @@ func TestCliRefusesAShellWithoutATerminal(t *testing.T) {
 // TestCliKubernetesArgvShape pins the session argv: -i and -t both asked for,
 // the namespace and the connector container both named, and the "--" that tells
 // kubectl where the in-container command starts. Naming a pod costs no
-// discovery call, so the whole run is the preflight probe and the attach.
+// discovery call, and kubernetes asks no permission first, so the whole run is
+// the attach.
 func TestCliKubernetesArgvShape(t *testing.T) {
 	withPrompter(t, true, "")
 	q := &attachRunner{}
 	if code := dispatch([]string{"cli", "--platform", "kubernetes", "--pod", "pod-a", "--namespace", "prod"}, q); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
-	if len(q.calls) != 2 {
-		t.Fatalf("want 2 calls (preflight, the attach), got %d: %+v", len(q.calls), q.calls)
+	if len(q.calls) != 1 {
+		t.Fatalf("want 1 call (the attach), got %d: %+v", len(q.calls), q.calls)
 	}
 	want := []string{"kubectl", "exec", "-i", "-t", "pod-a", "-n", "prod", "-c", spec.ConnectorContainerName, "--", runner.ContainerShell}
-	if !reflect.DeepEqual(q.calls[1].argv, want) {
-		t.Errorf("session argv = %v, want %v", q.calls[1].argv, want)
+	if !reflect.DeepEqual(q.calls[0].argv, want) {
+		t.Errorf("session argv = %v, want %v", q.calls[0].argv, want)
 	}
 }
 
@@ -7023,7 +7333,7 @@ func TestCliPickerCarriesTheCommandBehindTheSeparator(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
 	envPath := filepath.Join(dir, "env.yaml")
 
-	q := &attachRunner{resp: []queuedResp{{"", nil}, {unsortedPodsJSON, nil}}}
+	q := &attachRunner{resp: []queuedResp{{unsortedPodsJSON, nil}}}
 	var code int
 	stdout := captureStdout(t, func() {
 		code = dispatch([]string{"cli", "-e", envPath, "--", "ls", "-la"}, q)
@@ -7056,16 +7366,16 @@ func TestCliIndexSelectsFromTheSortedList(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
 
-	q := &attachRunner{resp: []queuedResp{{"", nil}, {unsortedPodsJSON, nil}}}
+	q := &attachRunner{resp: []queuedResp{{unsortedPodsJSON, nil}}}
 	if code := dispatch([]string{"cli", "-e", filepath.Join(dir, "env.yaml"), "--pod", "1"}, q); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
-	if len(q.calls) != 3 {
-		t.Fatalf("want 3 calls (preflight, get pods, the attach), got %d: %+v", len(q.calls), q.calls)
+	if len(q.calls) != 2 {
+		t.Fatalf("want 2 calls (get pods, the attach), got %d: %+v", len(q.calls), q.calls)
 	}
 	// pod-b: the middle of the sorted list, not the middle of the JSON.
-	if !containsToken(q.calls[2].argv, "pod-b") {
-		t.Errorf("index 1 should select pod-b from the sorted list, got %v", q.calls[2].argv)
+	if !containsToken(q.calls[1].argv, "pod-b") {
+		t.Errorf("index 1 should select pod-b from the sorted list, got %v", q.calls[1].argv)
 	}
 }
 

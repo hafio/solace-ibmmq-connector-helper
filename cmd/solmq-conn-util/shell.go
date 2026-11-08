@@ -184,8 +184,8 @@ func actShell(o shellOpts, r gdurunner.Runner) int {
 
 	// The same read-only preflight probe status and logs run, for the same
 	// reason: fail on an unreachable engine once, up front, rather than at the
-	// point of attach. On kubernetes it asks for exec, what cli actually does.
-	if code, ok := preflight(r, runner.ActionCLI, sess.platform, sess.command, sess.ns, sess.rootless(), o.approved); !ok {
+	// point of attach. Kubernetes asks nothing: the exec itself reports a refusal.
+	if code, ok := preflightRead(r, runner.ActionCLI, sess.platform, sess.command, sess.rootless(), o.approved); !ok {
 		return code
 	}
 
