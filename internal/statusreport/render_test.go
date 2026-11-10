@@ -39,7 +39,7 @@ func sample() Report {
 					Java: "openjdk 17.0.9", Config: "/app/external/spring/config/application.yml",
 					Heap:             &Resource{Used: "412Mi", Limit: "1Gi", Percent: "40%"},
 					HealthComponents: []NameStatus{{"solace", "UP"}, {"ibmmq", "UP"}},
-					Workflows:        []Workflow{{"0", "running"}, {"10", "stopped"}},
+					Workflows:        []Workflow{{ID: "0", State: "running"}, {ID: "10", State: "stopped"}},
 				},
 			},
 			{
@@ -229,6 +229,113 @@ func TestRenderApplicationViewBasicAndDetails(t *testing.T) {
 		if !strings.Contains(details, must) {
 			t.Errorf("details application block is missing %q, got:\n%s", must, details)
 		}
+	}
+}
+
+// connectionsReport is one active instance whose MQ binder is reconnecting:
+// workflow 0 rides on it, workflow 1 does not.
+func connectionsReport(conns []Connection, wfs []Workflow) Report {
+	return Report{Platform: "kubernetes", Namespace: "prod", Group: "solmq-connector", Instances: []Instance{{
+		Name: "pod-a", Namespace: "prod",
+		Application: &Application{
+			LeaderElectionMode: "active_standby", LeaderElectionState: "active",
+			Health: "RECONNECTING", HealthDetail: `{"status":"RECONNECTING"}`,
+			Connections: conns,
+			Workflows:   wfs,
+		},
+	}}}
+}
+
+// TestRenderConnectionsAndDegradedWorkflows covers how a running workflow that
+// is not connected reads: its row names what holds it down, the basic level
+// gets a connections block only when a binder is not UP and lists only those,
+// and the details level lists every binder.
+func TestRenderConnectionsAndDegradedWorkflows(t *testing.T) {
+	conns := []Connection{
+		{Name: "mq-conn-1", Status: "RECONNECTING", Error: "JMSWMQ0018: Failed to connect to queue manager 'QM1'"},
+		{Name: "prod-solace", Status: "UP"},
+	}
+	wfs := []Workflow{
+		{ID: "0", State: "running", Health: "UP", Degraded: []NameStatus{{Name: "mq-conn-1", Status: "RECONNECTING"}}},
+		{ID: "1", State: "running", Health: "UP"},
+	}
+
+	basic := render(t, connectionsReport(conns, wfs), ViewApplication, LevelBasic)
+	for _, must := range []string{
+		"  connections:\n    mq-conn-1: RECONNECTING  JMSWMQ0018: Failed to connect to queue manager 'QM1'\n",
+		"    0: running (mq-conn-1: RECONNECTING)\n",
+		"    1: running\n",
+	} {
+		if !strings.Contains(basic, must) {
+			t.Errorf("basic block is missing %q, got:\n%s", must, basic)
+		}
+	}
+	// The block names the failing binder; the raw document is detail now.
+	for _, mustNot := range []string{"prod-solace", "health-detail:"} {
+		if strings.Contains(basic, mustNot) {
+			t.Errorf("basic level must not carry %q, got:\n%s", mustNot, basic)
+		}
+	}
+
+	details := render(t, connectionsReport(conns, wfs), ViewApplication, LevelDetails)
+	for _, must := range []string{
+		"    mq-conn-1:   RECONNECTING  JMSWMQ0018",
+		"    prod-solace: UP\n",
+		"health-detail:",
+	} {
+		if !strings.Contains(details, must) {
+			t.Errorf("details block is missing %q, got:\n%s", must, details)
+		}
+	}
+
+	// Every binder UP: the basic report carries no connections block at all.
+	healthy := render(t, connectionsReport([]Connection{{Name: "mq-conn-1", Status: "UP"}}, wfs[1:]), ViewApplication, LevelBasic)
+	if strings.Contains(healthy, "connections:") {
+		t.Errorf("a healthy basic report must not carry the block, got:\n%s", healthy)
+	}
+
+	// An older script sends no health document, so the raw detail is the only
+	// explanation and stays at the basic level.
+	old := render(t, connectionsReport(nil, []Workflow{{ID: "0", State: "running"}}), ViewApplication, LevelBasic)
+	if !strings.Contains(old, `health-detail:         {"status":"RECONNECTING"}`) || strings.Contains(old, "connections:") {
+		t.Errorf("without connections the raw detail stays at the basic level, got:\n%s", old)
+	}
+
+	doc, err := JSON(connectionsReport(conns, wfs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, must := range []string{`"connections"`, `"degraded"`, `"health": "UP"`} {
+		if !strings.Contains(doc, must) {
+			t.Errorf("the json document is missing %s:\n%s", must, doc)
+		}
+	}
+}
+
+// TestRenderHealthDocumentInFull covers what status --raw prints: the document
+// indented as JSON under its own header, after the workflows, in place of the
+// one-line health-detail copy.
+func TestRenderHealthDocumentInFull(t *testing.T) {
+	r := connectionsReport(nil, []Workflow{{ID: "0", State: "running"}})
+	r.Instances[0].Application.HealthDocument = []byte(`{"status":"DOWN","components":{"binders":{"status":"DOWN"}}}`)
+	got := render(t, r, ViewApplication, LevelBasic)
+	want := "  health document:\n" +
+		"    {\n" +
+		"      \"status\": \"DOWN\",\n" +
+		"      \"components\": {\n" +
+		"        \"binders\": {\n" +
+		"          \"status\": \"DOWN\"\n" +
+		"        }\n" +
+		"      }\n" +
+		"    }\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("want the document in full:\n%s\ngot:\n%s", want, got)
+	}
+	if strings.Contains(got, "health-detail:") {
+		t.Errorf("the full document replaces the one-line copy, got:\n%s", got)
+	}
+	if strings.Index(got, "health document:") < strings.Index(got, "workflows:") {
+		t.Errorf("the document belongs after the workflows, got:\n%s", got)
 	}
 }
 

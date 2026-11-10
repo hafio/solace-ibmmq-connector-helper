@@ -330,6 +330,11 @@ func renderLeaderElection(w *yw, le *consolidate.LeaderElectionModel) {
 // guarantees both are always set), and so is endpoint.health.show-details in
 // practice -- consolidate.Build sets the operator's value or
 // spec.DefaultHealthShowDetails -- so only a hand-built model can leave it out.
+//
+// The status script's health group (spec.StatusHealthGroup) is unconditional
+// too. It includes every contributor, shows details exactly as /actuator/health
+// does, and maps DOWN and OUT_OF_SERVICE to 200, so the script can read the
+// document of an instance that is down; /actuator/health keeps its 503.
 func renderManagement(w *yw, mg consolidate.Management) {
 	w.Line(0, "management:")
 	w.Line(2, "server:")
@@ -338,11 +343,21 @@ func renderManagement(w *yw, mg consolidate.Management) {
 	w.Line(4, "web:")
 	w.Line(6, "exposure:")
 	w.Line(8, "include: "+mg.Exposure)
+	w.Line(2, "endpoint:")
+	w.Line(4, "health:")
 	if mg.HealthShowDetails != "" {
-		w.Line(2, "endpoint:")
-		w.Line(4, "health:")
 		w.Line(6, "show-details: "+q(mg.HealthShowDetails))
 	}
+	w.Line(6, "group:")
+	w.Line(8, spec.StatusHealthGroup+":")
+	w.Line(10, "include: "+q("*"))
+	if mg.HealthShowDetails != "" {
+		w.Line(10, "show-details: "+q(mg.HealthShowDetails))
+	}
+	w.Line(10, "status:")
+	w.Line(12, "http-mapping:")
+	w.Line(14, "down: 200")
+	w.Line(14, "out-of-service: 200")
 }
 
 func renderLogging(w *yw, level *yaml.Node) {

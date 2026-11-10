@@ -1,6 +1,7 @@
 package statusreport
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -742,8 +743,14 @@ func TestParseApplication(t *testing.T) {
 	if app.Heap == nil || app.Heap.Used != "412Mi" || app.Heap.Limit != "1Gi" || app.Heap.Percent != "40%" {
 		t.Errorf("heap = %+v", app.Heap)
 	}
-	if len(app.Workflows) != 2 || app.Workflows[0] != (Workflow{"0", "running"}) || app.Workflows[1] != (Workflow{"10", "stopped"}) {
+	if len(app.Workflows) != 2 || app.Workflows[0].ID != "0" || app.Workflows[0].State != "running" ||
+		app.Workflows[1].ID != "10" || app.Workflows[1].State != "stopped" {
 		t.Errorf("workflows = %+v", app.Workflows)
+	}
+	// An older script sends no health document, so nothing is judged: no
+	// connections, no verdict, and no failure on the instance's account.
+	if app.Connections != nil || app.Workflows[0].Degraded != nil || app.Workflows[0].Health != "" || app.NotConnected() {
+		t.Errorf("without a health document nothing may be judged: %+v", app)
 	}
 	if len(app.Notes) != 1 || !strings.Contains(app.Notes[0], "exposure list") {
 		t.Errorf("notes = %+v", app.Notes)
@@ -795,5 +802,159 @@ func TestParseApplicationIndentedLineWithNoBlockIsANote(t *testing.T) {
 	}
 	if len(app.Workflows) != 0 {
 		t.Errorf("nothing should be read as a workflow: %+v", app.Workflows)
+	}
+}
+
+// connectorHealthReconnecting is a health document in the shape the
+// connector's documentation and a published capture give it: a binders
+// composite with one component per configured binder, the Solace binder
+// nesting its consumer bindings and their flows, and the per-workflow
+// indicator. The MQ binder is reconnecting; everything else is UP.
+const connectorHealthReconnecting = `{"status":"RECONNECTING","components":{` +
+	`"binders":{"status":"RECONNECTING","components":{` +
+	`"mq-conn-1":{"status":"RECONNECTING","details":{"error":"JMSWMQ0018: Failed to connect to queue manager 'QM1'\nnested exception is com.ibm.mq.MQException"}},` +
+	`"prod-solace":{"status":"UP","details":{"bindings":{"input-1":{"status":"UP","details":{"flows":{"flow-0":{"status":"UP"}}}}}}},` +
+	`"mq-archive":{"status":"UP"},"sol-conn-1":{"status":"UP"}}},` +
+	`"diskSpace":{"status":"UP"},"ping":{"status":"UP"},` +
+	`"workflows":{"status":"UP","components":{"0":{"status":"UP"},"1":{"status":"UP"},"2":{"status":"UP"},"3":{"status":"UP"}}}}}`
+
+// goldenBindingLines is what the script prints for testdata/golden's config,
+// plus the line it prints for a binder: key found outside any binding.
+const goldenBindingLines = "binding: input-0 mq-conn-1\nbinding: output-0 prod-solace\n" +
+	"binding: input-1 prod-solace\nbinding: output-1 mq-conn-1\n" +
+	"binding: input-2 mq-archive\nbinding: output-2 prod-solace\n" +
+	"binding: input-3 mq-conn-1\nbinding: output-3 sol-conn-1\n" +
+	"binding:  stray-binder\n"
+
+// rawScriptOutput is the script's report under --raw for one health document,
+// with the given binding lines and every workflow in one state.
+func rawScriptOutput(health, bindings, state string) string {
+	return "leader-election mode: active_standby\nleader-election state: active\nhealth: UP\n" +
+		"health-json: " + health + "\n" + bindings +
+		"workflows:\n  0: " + state + "\n  1: " + state + "\n  2: " + state + "\n  3: " + state + "\n"
+}
+
+// degradedOf lists each workflow's verdict as "id=name:status,...", so a case
+// states the whole outcome in one line.
+func degradedOf(app *Application) []string {
+	var out []string
+	for _, w := range app.Workflows {
+		parts := make([]string, 0, len(w.Degraded))
+		for _, d := range w.Degraded {
+			parts = append(parts, d.Name+":"+d.Status)
+		}
+		out = append(out, w.ID+"="+strings.Join(parts, ","))
+	}
+	return out
+}
+
+// TestParseApplicationJudgesEachRunningWorkflowByItsConnections covers the
+// case the connection verdict exists for: a workflow reads running while the
+// MQ binder it rides on is reconnecting. Only the workflows mapped to that
+// binder are marked, the binders are listed in name order with the first line
+// of their error, and the raw lines never surface as notes.
+func TestParseApplicationJudgesEachRunningWorkflowByItsConnections(t *testing.T) {
+	app := ParseApplication(rawScriptOutput(connectorHealthReconnecting, goldenBindingLines, "running"))
+
+	want := []Connection{
+		{Name: "mq-archive", Status: "UP"},
+		{Name: "mq-conn-1", Status: "RECONNECTING", Error: "JMSWMQ0018: Failed to connect to queue manager 'QM1'"},
+		{Name: "prod-solace", Status: "UP"},
+		{Name: "sol-conn-1", Status: "UP"},
+	}
+	if !reflect.DeepEqual(app.Connections, want) {
+		t.Errorf("connections = %+v\nwant %+v", app.Connections, want)
+	}
+	if got, want := degradedOf(app), []string{"0=mq-conn-1:RECONNECTING", "1=mq-conn-1:RECONNECTING", "2=", "3=mq-conn-1:RECONNECTING"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("verdicts = %q, want %q", got, want)
+	}
+	for _, w := range app.Workflows {
+		if w.Health != "UP" {
+			t.Errorf("workflow %s health = %q, want the connector's own UP", w.ID, w.Health)
+		}
+	}
+	if !app.NotConnected() {
+		t.Error("a running workflow on a reconnecting binder must count as not connected")
+	}
+	if len(app.Notes) != 0 {
+		t.Errorf("the raw lines are input, not notes: %q", app.Notes)
+	}
+}
+
+// TestParseApplicationConnectionVerdicts covers every source of the verdict and
+// the cases that must not raise one.
+func TestParseApplicationConnectionVerdicts(t *testing.T) {
+	allUp := strings.Replace(connectorHealthReconnecting, `"mq-conn-1":{"status":"RECONNECTING"`, `"mq-conn-1":{"status":"UP"`, 1)
+	cases := []struct {
+		name     string
+		health   string
+		bindings string
+		state    string
+		want     []string
+		failed   bool
+	}{
+		{"every connection up", allUp, goldenBindingLines, "running",
+			[]string{"0=", "1=", "2=", "3="}, false},
+		{"the connector's own workflow health down",
+			strings.Replace(allUp, `"0":{"status":"UP"}`, `"0":{"status":"DOWN","details":{"error":"binding failed"}}`, 1),
+			goldenBindingLines, "running",
+			[]string{"0=health:DOWN", "1=", "2=", "3="}, true},
+		{"a binding down under a binder that is up",
+			strings.Replace(allUp, `"input-1":{"status":"UP"`, `"input-1":{"status":"DOWN"`, 1),
+			goldenBindingLines, "running",
+			[]string{"0=", "1=input-1:DOWN", "2=", "3="}, true},
+		{"a stopped workflow is never judged", connectorHealthReconnecting, goldenBindingLines, "stopped",
+			[]string{"0=", "1=", "2=", "3="}, false},
+		// No config pairs at all: input-1 is placed on prod-solace by the
+		// health tree, and every other binding is judged against every binder,
+		// so the down binder cannot leave a workflow looking connected.
+		{"an unmapped binding is judged against every binder", connectorHealthReconnecting, "", "running",
+			[]string{"0=mq-conn-1:RECONNECTING", "1=mq-conn-1:RECONNECTING", "2=mq-conn-1:RECONNECTING", "3=mq-conn-1:RECONNECTING"}, true},
+		{"a binder the document does not mention is unknown, not down", allUp,
+			"binding: input-0 mq-gone\nbinding: output-0 mq-gone\n", "running",
+			[]string{"0=", "1=", "2=", "3="}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			app := ParseApplication(rawScriptOutput(c.health, c.bindings, c.state))
+			if got := degradedOf(app); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("verdicts = %q, want %q", got, c.want)
+			}
+			if app.NotConnected() != c.failed {
+				t.Errorf("NotConnected = %v, want %v", app.NotConnected(), c.failed)
+			}
+		})
+	}
+}
+
+// TestParseApplicationKeepsTheHealthDocument covers the document status --raw
+// prints: the script's health-json line when it sent one, an older script's
+// health-detail line otherwise, and never anything that is not JSON.
+func TestParseApplicationKeepsTheHealthDocument(t *testing.T) {
+	raw := ParseApplication(rawScriptOutput(connectorHealthReconnecting, goldenBindingLines, "running"))
+	if string(raw.HealthDocument) != connectorHealthReconnecting {
+		t.Errorf("document = %s, want the health-json line verbatim", raw.HealthDocument)
+	}
+	old := ParseApplication("health: DOWN\nhealth-detail: {\"status\":\"DOWN\"}\n")
+	if string(old.HealthDocument) != `{"status":"DOWN"}` {
+		t.Errorf("document = %s, want an older script's health-detail", old.HealthDocument)
+	}
+	if bad := ParseApplication("health: DOWN\nhealth-detail: not json\n"); bad.HealthDocument != nil {
+		t.Errorf("a detail that is not JSON must not become the document: %s", bad.HealthDocument)
+	}
+	if up := ParseApplication(scriptOutput); up.HealthDocument != nil {
+		t.Errorf("an older script's healthy report carries no document: %s", up.HealthDocument)
+	}
+}
+
+// TestParseApplicationUnreadableHealthDocumentIsANote covers a document the
+// parse cannot read: said once as a note, and nothing judged on its account.
+func TestParseApplicationUnreadableHealthDocumentIsANote(t *testing.T) {
+	app := ParseApplication(rawScriptOutput(`{"status":"UP","components":`, goldenBindingLines, "running"))
+	if len(app.Notes) != 1 || !strings.Contains(app.Notes[0], "could not be read for connection status") {
+		t.Errorf("notes = %q, want one note saying the document was unreadable", app.Notes)
+	}
+	if app.Connections != nil || app.NotConnected() || app.HealthDocument != nil {
+		t.Errorf("an unreadable document must judge nothing and is not kept: %+v", app)
 	}
 }

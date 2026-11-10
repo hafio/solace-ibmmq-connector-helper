@@ -572,7 +572,7 @@ mq-defaults:
 | `logging.level` | verbatim, order preserved |
 | `logging.syslog` | `host`, `port`, `protocol` (`udp` default, or `tcp`). Emits `logback-spring.xml` and `LOGGING_SYSLOG_*` env vars on every platform; appname is the instance name. `tcp` needs the `logstash-logback-encoder` jar on the classpath: fetch it with `download jar syslog` and ship it via `libs` |
 | `management.port` | always emitted, default `8090`; the published port and the kubernetes `service.port` default to it. Keep it above 1023 |
-| `management.health-show-details` | default `always`, so `/actuator/health` names each component; `when-authorized` or `never` restricts it |
+| `management.health-show-details` | default `always`, so `/actuator/health` names each component; `when-authorized` or `never` restricts it. The status health group below uses the same value |
 | `security.users` | extra accounts: `{name, password or password-env, roles}`. Omit `roles` for a read-only account; add `admin` for read/write. Roles are passed through verbatim, not checked against a list |
 | `leader-election.mode` | `standalone` (default; requires `replicas: 1`), `active_active`, `active_standby` |
 | `leader-election.queue` | management queue; required for `active_*` |
@@ -584,6 +584,12 @@ mq-defaults:
 Not configurable: management security is always on, and the actuator exposure
 list is always `health,info,metrics,leaderelection,workflows`. An `env.yaml`
 carrying `security.enabled` or `management.exposure` is rejected.
+
+Every generated config also declares a health group named `solmq`, served at
+`/actuator/health/solmq`. It includes every health component and answers HTTP
+200 even when the status is `DOWN` or `OUT_OF_SERVICE`. The status script reads
+the health document from it. `/actuator/health` keeps the standard 503 for a
+`DOWN` instance, so a monitor polling it sees no change.
 
 The management session reuses a binder's credential secrets when it points at a
 broker the workflows already bind. Changing `solace-defaults` changes the

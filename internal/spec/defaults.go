@@ -219,6 +219,15 @@ const (
 	StatusUserPasswordEnvVar = "SECURITY_USER_SOLMQ_STATUS_PASSWORD"
 )
 
+// StatusHealthGroup is the actuator health group every generated config
+// declares for the status script, served at /actuator/health/<group>. It
+// includes every health contributor and answers HTTP 200 whatever the status,
+// because the actuator answers a DOWN /actuator/health with 503 and busybox
+// wget, the only HTTP client in the connector image, prints no body for an
+// error status. /actuator/health itself keeps the standard status codes for
+// anything else that polls it.
+const StatusHealthGroup = "solmq"
+
 // GeneratedNamePrefix marks every mount name the tool derives for itself, as
 // opposed to the ones operators supply through the `-env` fields. A credential
 // written as `-env` is mounted under the host variable it names, so the two

@@ -3,6 +3,7 @@ package statusreport
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -741,6 +742,8 @@ const (
 	prefixLEState      = "leader-election state:"
 	prefixHealth       = "health:"
 	prefixHealthDetail = "health-detail:"
+	prefixHealthJSON   = "health-json:"
+	prefixBinding      = "binding:"
 	prefixUptime       = "uptime:"
 	prefixVersion      = "version:"
 	prefixJava         = "java:"
@@ -763,6 +766,8 @@ func ParseApplication(out string) *Application {
 	app := &Application{}
 	lines := strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n")
 	block := ""
+	healthJSON := ""
+	binders := map[string]string{}
 	for _, raw := range lines {
 		line := strings.TrimRight(raw, " \t")
 		if strings.TrimSpace(line) == "" {
@@ -799,6 +804,16 @@ func ParseApplication(out string) *Application {
 			app.LeaderElectionState = value(line, prefixLEState)
 		case strings.HasPrefix(line, prefixHealthDetail):
 			app.HealthDetail = value(line, prefixHealthDetail)
+		case strings.HasPrefix(line, prefixHealthJSON):
+			healthJSON = value(line, prefixHealthJSON)
+		case strings.HasPrefix(line, prefixBinding):
+			// The first config to name a binding's binder wins, the same
+			// first-hit rule the script reads every other value by.
+			if binding, binder, ok := bindingLine(value(line, prefixBinding)); ok {
+				if _, seen := binders[binding]; !seen {
+					binders[binding] = binder
+				}
+			}
 		case strings.HasPrefix(line, prefixHealth):
 			app.Health = value(line, prefixHealth)
 		case strings.HasPrefix(line, prefixUptime):
@@ -817,7 +832,181 @@ func ParseApplication(out string) *Application {
 			app.Notes = append(app.Notes, line)
 		}
 	}
+	switch {
+	case healthJSON != "":
+		if json.Valid([]byte(healthJSON)) {
+			app.HealthDocument = json.RawMessage(healthJSON)
+		}
+		applyConnections(app, healthJSON, binders)
+	case app.HealthDetail != "" && json.Valid([]byte(app.HealthDetail)):
+		// An older script sends the document only as the detail of a health
+		// that is not UP; it is still the whole document.
+		app.HealthDocument = json.RawMessage(app.HealthDetail)
+	}
 	return app
+}
+
+// bindingRe is the shape of a workflow's binding name: the connector binds
+// workflow N through input-N and output-N.
+var bindingRe = regexp.MustCompile(`^(input|output)-[0-9]+$`)
+
+// bindingLine reads one "binding: <name> <binder>" pair. A line that does not
+// start with a binding name is the script pairing a binder: key it found
+// outside any binding, and is skipped.
+func bindingLine(s string) (string, string, bool) {
+	f := strings.Fields(s)
+	if len(f) < 2 || !bindingRe.MatchString(f[0]) {
+		return "", "", false
+	}
+	binder := strings.Trim(f[1], `"'`)
+	if binder == "" {
+		return "", "", false
+	}
+	return f[0], binder, true
+}
+
+// healthNode is one entry of the actuator health document. Only the fields
+// the connection verdict reads are named; everything else stays raw for the
+// binding walk.
+type healthNode struct {
+	Status     string                     `json:"status"`
+	Components map[string]json.RawMessage `json:"components"`
+	Details    map[string]json.RawMessage `json:"details"`
+}
+
+// applyConnections reads the binders and the per-workflow health out of the
+// health document and judges each running workflow against them.
+//
+// A workflow reads running once its bindings start, whatever its connections
+// are doing, so the verdict comes from health: the workflow's own indicator,
+// the status of its input-N and output-N bindings wherever a binder reports
+// them, and the binders those bindings use. A binding the script found no
+// binder for is judged against every binder, failing closed: a down binder
+// that cannot be placed must not leave a workflow looking connected. Only a
+// status that is present and not UP counts.
+func applyConnections(app *Application, doc string, binders map[string]string) {
+	var root healthNode
+	if err := json.Unmarshal([]byte(doc), &root); err != nil {
+		app.Notes = append(app.Notes, fmt.Sprintf("status: the health document could not be read for connection status: %v", err))
+		return
+	}
+
+	conns := map[string]Connection{}
+	bindingStatus := map[string]string{}
+	if raw, ok := root.Components["binders"]; ok {
+		var group healthNode
+		if json.Unmarshal(raw, &group) == nil {
+			if len(group.Components) == 0 && group.Status != "" {
+				// One binder reported without the composite around it.
+				conns["binders"] = Connection{Name: "binders", Status: group.Status, Error: detailError(group.Details)}
+			}
+			for name, braw := range group.Components {
+				var b healthNode
+				if json.Unmarshal(braw, &b) != nil {
+					continue
+				}
+				conns[name] = Connection{Name: name, Status: b.Status, Error: detailError(b.Details)}
+				var tree any
+				if json.Unmarshal(braw, &tree) == nil {
+					walkBindings(tree, name, bindingStatus, binders)
+				}
+			}
+		}
+	}
+
+	wfHealth := map[string]string{}
+	if raw, ok := root.Components["workflows"]; ok {
+		var group healthNode
+		if json.Unmarshal(raw, &group) == nil {
+			for id, wraw := range group.Components {
+				var w healthNode
+				if json.Unmarshal(wraw, &w) == nil && w.Status != "" {
+					wfHealth[id] = w.Status
+				}
+			}
+		}
+	}
+
+	names := make([]string, 0, len(conns))
+	for name := range conns {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		app.Connections = append(app.Connections, conns[name])
+	}
+
+	for i := range app.Workflows {
+		w := &app.Workflows[i]
+		w.Health = wfHealth[w.ID]
+		if !strings.EqualFold(w.State, "running") {
+			continue
+		}
+		var deg []NameStatus
+		seen := map[string]bool{}
+		add := func(name, status string) {
+			if status == "" || IsUp(status) || seen[name] {
+				return
+			}
+			seen[name] = true
+			deg = append(deg, NameStatus{Name: name, Status: status})
+		}
+		add("health", w.Health)
+		for _, binding := range []string{"input-" + w.ID, "output-" + w.ID} {
+			add(binding, bindingStatus[binding])
+			if binder, ok := binders[binding]; ok {
+				add(binder, conns[binder].Status)
+				continue
+			}
+			for _, name := range names {
+				add(name, conns[name].Status)
+			}
+		}
+		w.Degraded = deg
+	}
+}
+
+// walkBindings records the status of every input-N or output-N entry found
+// anywhere under one binder's health, however the binder nests them (the
+// Solace binder reports each consumer binding with its flows). A binding seen
+// here also tells which binder it rides on, which fills in a binding the
+// config named no binder for. When a binding is reported more than once, a
+// status that is not UP wins.
+func walkBindings(node any, binder string, status, binders map[string]string) {
+	m, ok := node.(map[string]any)
+	if !ok {
+		return
+	}
+	for key, child := range m {
+		if bindingRe.MatchString(key) {
+			if cm, ok := child.(map[string]any); ok {
+				if st, ok := cm["status"].(string); ok && st != "" {
+					if prev, seen := status[key]; !seen || IsUp(prev) {
+						status[key] = st
+					}
+				}
+			}
+			if _, mapped := binders[key]; !mapped {
+				binders[key] = binder
+			}
+		}
+		walkBindings(child, binder, status, binders)
+	}
+}
+
+// detailError is the first line of a health entry's details.error, which is
+// where the connector's binders put the exception that holds them down.
+func detailError(details map[string]json.RawMessage) string {
+	raw, ok := details["error"]
+	if !ok {
+		return ""
+	}
+	var msg string
+	if json.Unmarshal(raw, &msg) != nil {
+		return ""
+	}
+	first, _, _ := strings.Cut(strings.TrimSpace(msg), "\n")
+	return strings.TrimSpace(first)
 }
 
 // value returns what follows a known prefix, trimmed. The prefix is checked by

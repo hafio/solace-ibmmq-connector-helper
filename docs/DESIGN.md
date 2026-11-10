@@ -593,11 +593,41 @@ the instance's own status first; Spring Boot 4 (connector 3.x) sorts every key,
 so the status comes last. The script finds the instance's own status either way,
 never a component's.
 
-**Degraded queries are notes, not exit codes.** `status` exits 1 only when an
-instance could not be reached or run, or the run could not start. A standby, a
-crash loop or a missing metrics API are answers, printed in the report. A
+**Degraded queries are notes, not exit codes.** `status` exits 1 when an
+instance could not be reached or run, when the run could not start, or when a
+running workflow is not connected. A standby, a crash loop or a missing metrics
+API are answers, printed in the report. The connection case is the one answer
+that fails the run: a monitor needs it from the exit code alone, and it fails
+only on a status that is present and not `UP`, never on a missing one. A
 component that cannot be checked becomes a `status:` line in the same idiom the
 in-container script uses.
+
+**Running is not connected.** The connector reports a workflow `running` once
+its bindings start, while its MQ or Solace connection may still be retrying.
+The connection truth is in the health document: one entry per binder, binding
+entries under some binders, and a per-workflow indicator. The script hands the
+CLI that document on one line and the binder each binding names, read from the
+config with sed. The CLI parses the JSON, because nested JSON in busybox sed is
+fragile and Go can be tested against the documented shape. Hand runs leave
+`--raw` off and keep the readable report. A binding with no `binder:` key is
+judged against every binder, so a down binder that cannot be placed never
+leaves a workflow looking connected.
+
+**The status script reads its own health group.** The actuator answers a `DOWN`
+`/actuator/health` with HTTP 503, and busybox `wget`, the only HTTP client in the
+connector image, exits on any error status without printing the body. A
+connection that went from `RECONNECTING` to `DOWN` therefore vanished from the
+report. Remapping `/actuator/health` to 200 would mislead every other monitor
+polling it, so the generated config declares a separate `solmq` group instead.
+It includes every contributor, shows details as the operator set them, and maps
+`DOWN` and `OUT_OF_SERVICE` to 200. The script reads it first and falls back to
+`/actuator/health` for configs without it. The `--health` check keeps its one
+call to `/actuator/health`, because an empty answer already fails it.
+
+**`--raw` keeps the document, not a second fetch.** The script already sends
+the health document for the connection verdict, so `status --raw` prints that
+same document. Without the flag the CLI drops it, so the report and its JSON
+stay the size they were.
 
 **An instance that cannot answer still gets a block**, with the failure under
 the container facts that explain it. The crash-looping instance is the one you

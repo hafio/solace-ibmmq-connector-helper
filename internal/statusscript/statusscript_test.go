@@ -3,9 +3,13 @@ package statusscript
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
 // TestRenderSubstitution covers port and user substitution, including
@@ -736,8 +740,9 @@ func TestRenderGatesDetailsCallsBehindTheArg(t *testing.T) {
 	before, block, after := splitDetailsBlock(t, afterHealth)
 
 	// The argument is read after the --health branch, which owns $1 when the
-	// engine's healthcheck runs, and compared with the exported constant.
-	if !strings.Contains(before, `if [ "${1:-}" = "`+DetailsArg+`" ]; then`+"\n  DETAILS=1\n") {
+	// engine's healthcheck runs, in a loop over every argument, so it is found
+	// whatever order the CLI passes it and RawArg in.
+	if !strings.Contains(before, `for arg in "$@"; do`) || !strings.Contains(before, "    "+DetailsArg+") DETAILS=1 ;;\n") {
 		t.Errorf("DETAILS is not set from the %s argument after the %s branch:\n%s", DetailsArg, HealthArg, before)
 	}
 	if !strings.Contains(before, `DETAILS=""`) {
@@ -774,8 +779,10 @@ func TestRenderGatesDetailsCallsBehindTheArg(t *testing.T) {
 			t.Errorf("%q must run without %s:\n%s", want, DetailsArg, outside)
 		}
 	}
-	if n := strings.Count(outside, `get "$BASE/`); n != 3 {
-		t.Errorf("the basic report makes %d actuator calls, want 3 (leaderelection, health, workflows)", n)
+	// Four call sites, three calls: /actuator/health is read only when the
+	// health group answers nothing (see TestRenderReadsHealthFromTheStatusGroupFirst).
+	if n := strings.Count(outside, `get "$BASE/`); n != 4 {
+		t.Errorf("the basic report has %d actuator call sites, want 4 (leaderelection, the health group, its fallback, workflows)", n)
 	}
 }
 
@@ -911,5 +918,142 @@ func TestHealthParseIsKeyOrderIndependent(t *testing.T) {
 				t.Errorf("health_components =\n%s\nwant\n%s", got, c.rows)
 			}
 		})
+	}
+}
+
+// TestRenderRawOutputOnlyUnderTheArg pins the documents the CLI reads each
+// workflow's connections from: printed only under --raw, so a hand run stays
+// the readable report, after the health document is fetched, and at no cost of
+// an actuator call of their own.
+func TestRenderRawOutputOnlyUnderTheArg(t *testing.T) {
+	out := Render(8090, "solmq-status")
+	_, _, afterHealth := splitHealthBlock(t, out)
+
+	if !strings.Contains(afterHealth, `RAW=""`) || !strings.Contains(afterHealth, "    "+RawArg+") RAW=1 ;;\n") {
+		t.Errorf("RAW is not set from the %s argument:\n%s", RawArg, afterHealth)
+	}
+	i := strings.Index(afterHealth, `if [ -n "$RAW" ]; then`+"\n")
+	if i < 0 {
+		t.Fatalf("no %s block in:\n%s", RawArg, afterHealth)
+	}
+	rel := strings.Index(afterHealth[i:], "\nfi\n")
+	if rel < 0 {
+		t.Fatalf("the %s block is never closed", RawArg)
+	}
+	block := afterHealth[i : i+rel+len("\nfi\n")]
+	for _, want := range []string{
+		`printf 'health-json: %s\n' "$(printf %s "$HEALTH" | tr '\n' ' ')"`,
+		"binding_binders | while IFS= read -r pair; do",
+		`printf 'binding: %s\n' "$pair"`,
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("the %s block is missing %q:\n%s", RawArg, want, block)
+		}
+	}
+	if strings.Count(out, "health-json:") != 1 || strings.Count(out, "printf 'binding:") != 1 {
+		t.Errorf("the raw lines must be printed from the %s block alone", RawArg)
+	}
+	if fetch := strings.Index(afterHealth, `HEALTH=$(get "$BASE/health")`); fetch < 0 || fetch > i {
+		t.Errorf("the %s block must follow the health fetch it reuses", RawArg)
+	}
+	if strings.Contains(block, `get "$BASE/`) {
+		t.Errorf("the %s block must not make an actuator call of its own:\n%s", RawArg, block)
+	}
+}
+
+// runBindingBinders runs the rendered script's binding_binders under sh with
+// CONFIGS naming the given files, as the script sets it, and returns the lines
+// it printed.
+func runBindingBinders(t *testing.T, sh string, configs ...string) []string {
+	t.Helper()
+	paths := make([]string, len(configs))
+	for i, c := range configs {
+		paths[i] = filepath.ToSlash(c)
+	}
+	script := Render(8090, "solmq-status")
+	cmd := exec.Command(sh)
+	cmd.Stdin = strings.NewReader(scriptFunction(t, script, "binding_binders") +
+		"CONFIGS='" + strings.Join(paths, " ") + "'\nbinding_binders\n")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("binding_binders: %v\n%s", err, stderr.String())
+	}
+	var lines []string
+	for _, l := range strings.Split(strings.ReplaceAll(string(out), "\r\n", "\n"), "\n") {
+		if l != "" {
+			lines = append(lines, l)
+		}
+	}
+	return lines
+}
+
+// TestBindingBindersPairsEachBindingWithItsBinder runs the config read the CLI
+// maps each workflow to its binders by, against the config this tool
+// generates and a hand-written one.
+func TestBindingBindersPairsEachBindingWithItsBinder(t *testing.T) {
+	sh := testShell(t)
+
+	t.Run("generated config", func(t *testing.T) {
+		got := runBindingBinders(t, sh, filepath.Join("..", "..", "testdata", "golden", "application.yml"))
+		want := []string{
+			"input-0 mq-conn-1", "output-0 prod-solace",
+			"input-1 prod-solace", "output-1 mq-conn-1",
+			"input-2 mq-archive", "output-2 prod-solace",
+			"input-3 mq-conn-1", "output-3 sol-conn-1",
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("pairs:\n%q\nwant:\n%q", got, want)
+		}
+	})
+
+	t.Run("hand-written config", func(t *testing.T) {
+		// input-0 names no binder, so it rides on the default binder and
+		// prints nothing; default-binder is not a binding's binder key; the
+		// extended jms block under the second bindings key carries no binder.
+		cfg := filepath.Join(t.TempDir(), "application.yml")
+		doc := "spring:\n  cloud:\n    stream:\n      default-binder: mq\n      bindings:\n" +
+			"        input-0:\n          destination: Q1\n" +
+			"        output-0:\n          destination: t/1\n          binder: \"sol\"\n" +
+			"      jms:\n        bindings:\n          input-0:\n            consumer:\n              destination-type: queue\n"
+		if err := os.WriteFile(cfg, []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := runBindingBinders(t, sh, cfg)
+		if want := []string{`output-0 "sol"`}; !reflect.DeepEqual(got, want) {
+			t.Errorf("pairs = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestRenderReadsHealthFromTheStatusGroupFirst pins how a down instance's
+// health document is read at all: the actuator answers a DOWN /actuator/health
+// with 503 and wget prints no body for it, so the report asks the health group
+// the generated config maps to 200 first, falls back to /actuator/health only
+// when the group answers nothing, and says so on stderr when neither does
+// rather than dropping the health line silently.
+func TestRenderReadsHealthFromTheStatusGroupFirst(t *testing.T) {
+	out := Render(8090, "solmq-status")
+	_, _, afterHealth := splitHealthBlock(t, out)
+
+	group := `HEALTH=$(get "$BASE/health/` + HealthGroup + `") || HEALTH=""`
+	fallback := "if [ -z \"$HEALTH\" ]; then\n  HEALTH=$(get \"$BASE/health\") || HEALTH=\"\"\nfi\n"
+	gi, fi := strings.Index(afterHealth, group), strings.Index(afterHealth, fallback)
+	if gi < 0 || fi < 0 || gi > fi {
+		t.Fatalf("the health group must be read first and /actuator/health only as its fallback:\n%s", afterHealth)
+	}
+	note := strings.Index(afterHealth[fi:], `echo "status: no answer from $BASE/health`)
+	if note < 0 || !strings.Contains(afterHealth[fi+note:], `/health/`+HealthGroup+`" >&2`) {
+		t.Errorf("a health endpoint that answers nothing must be said on stderr, naming the group:\n%s", afterHealth)
+	}
+	if HealthGroup != spec.StatusHealthGroup {
+		t.Errorf("HealthGroup %q must be the group the generated config declares (%q)", HealthGroup, spec.StatusHealthGroup)
+	}
+	// The healthcheck keeps its single call to /actuator/health: its verdict is
+	// the exit status, which an empty answer already makes non-zero.
+	_, block, _ := splitHealthBlock(t, out)
+	if strings.Contains(block, "/health/"+HealthGroup) {
+		t.Errorf("the %s branch must stay one call to /actuator/health:\n%s", HealthArg, block)
 	}
 }

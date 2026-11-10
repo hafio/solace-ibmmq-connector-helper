@@ -247,6 +247,14 @@ management:
   endpoint:
     health:
       show-details: always
+      group:
+        solmq:
+          include: "*"
+          show-details: always
+          status:
+            http-mapping:
+              down: 200
+              out-of-service: 200
 logging:
   level:
     root: INFO
@@ -1143,5 +1151,50 @@ target:
 		if !strings.Contains(out, yes) {
 			t.Errorf("want %q in the output\n---\n%s", yes, out)
 		}
+	}
+}
+
+// TestRenderManagementDeclaresTheStatusHealthGroup pins the health group the
+// status script reads a down instance's document from: every contributor,
+// details shown exactly as the operator set them for /actuator/health, and DOWN
+// and OUT_OF_SERVICE answered with 200 so busybox wget prints the body.
+// /actuator/health itself gets no http-mapping and keeps its 503.
+func TestRenderManagementDeclaresTheStatusHealthGroup(t *testing.T) {
+	src := `
+source:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: v
+    client-username: u
+    client-password: x
+    queue: IN
+target:
+  solace:
+    host: tcp://b:55555
+    msg-vpn: v
+    client-username: u
+    client-password: x
+    queue: OUT
+`
+	d := &spec.Defaults{}
+	d.Management.HealthShowDetails = "when-authorized"
+	m, _ := consolidate.Build([]spec.Workflow{wf(t, "10.yaml", src)}, d, consolidate.Opts{StatusPassword: "status-literal-pw"})
+	out := Application(m)
+	want := "  endpoint:\n" +
+		"    health:\n" +
+		"      show-details: when-authorized\n" +
+		"      group:\n" +
+		"        " + spec.StatusHealthGroup + ":\n" +
+		"          include: \"*\"\n" +
+		"          show-details: when-authorized\n" +
+		"          status:\n" +
+		"            http-mapping:\n" +
+		"              down: 200\n" +
+		"              out-of-service: 200\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("the management block should declare the status health group:\n%s\n---\n%s", want, out)
+	}
+	if strings.Count(out, "http-mapping:") != 1 {
+		t.Errorf("only the group may remap status codes, /actuator/health keeps its own:\n%s", out)
 	}
 }

@@ -1,6 +1,7 @@
 package statusreport
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -275,7 +276,13 @@ func renderApplication(inst Instance, level Level) []string {
 		b.add("leader-election mode", app.LeaderElectionMode)
 		b.add("leader-election state", app.LeaderElectionState)
 		b.add("health", app.Health)
-		b.add("health-detail", app.HealthDetail)
+		// The raw document is the only explanation an older script gives. Once
+		// its binders are read into the connections block, which names the
+		// failing one and its error, the document is detail.
+		// A document printed in full below makes the one-line copy redundant.
+		if app.HealthDocument == nil && (level == LevelDetails || len(app.Connections) == 0) {
+			b.add("health-detail", app.HealthDetail)
+		}
 		if level == LevelDetails {
 			b.add("uptime", app.Uptime)
 			b.add("version", app.Version)
@@ -284,6 +291,7 @@ func renderApplication(inst Instance, level Level) []string {
 			b.add("heap", resourceLine(app.Heap))
 		}
 		lines = append(lines, KV(2, b.pairs)...)
+		lines = append(lines, renderConnections(app.Connections, level)...)
 		if level == LevelDetails && len(app.HealthComponents) > 0 {
 			lines = append(lines, "  health components:")
 			pairs := make([][2]string, 0, len(app.HealthComponents))
@@ -293,6 +301,7 @@ func renderApplication(inst Instance, level Level) []string {
 			lines = append(lines, KV(4, pairs)...)
 		}
 		lines = append(lines, renderWorkflows(app.Workflows)...)
+		lines = append(lines, renderHealthDocument(app.HealthDocument)...)
 		for _, n := range app.Notes {
 			lines = append(lines, "  "+noteLine(n))
 		}
@@ -321,9 +330,58 @@ func renderWorkflows(wfs []Workflow) []string {
 	}
 	out := []string{"  workflows:"}
 	for _, w := range wfs {
-		out = append(out, "    "+strings.Repeat(" ", width-len(w.ID))+w.ID+": "+w.State)
+		row := "    " + strings.Repeat(" ", width-len(w.ID)) + w.ID + ": " + w.State
+		if len(w.Degraded) > 0 {
+			parts := make([]string, 0, len(w.Degraded))
+			for _, d := range w.Degraded {
+				parts = append(parts, d.Name+": "+d.Status)
+			}
+			row += " (" + strings.Join(parts, ", ") + ")"
+		}
+		out = append(out, row)
 	}
 	return out
+}
+
+// renderHealthDocument prints the health document in full, indented as JSON
+// under its own header, so status --raw shows exactly what the instance
+// answered. A document that cannot be indented is printed as it came.
+func renderHealthDocument(doc json.RawMessage) []string {
+	if len(doc) == 0 {
+		return nil
+	}
+	var buf bytes.Buffer
+	text := string(doc)
+	if json.Indent(&buf, doc, "", "  ") == nil {
+		text = buf.String()
+	}
+	out := []string{"  health document:"}
+	for _, l := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		out = append(out, "    "+l)
+	}
+	return out
+}
+
+// renderConnections prints one row per binder: its status and the first line
+// of its error. At the basic level the block appears only when a binder is not
+// UP and lists only those, so its presence is the finding and a healthy report
+// is unchanged; the details level lists every binder.
+func renderConnections(conns []Connection, level Level) []string {
+	pairs := make([][2]string, 0, len(conns))
+	for _, c := range conns {
+		if c.Status == "" || (level != LevelDetails && IsUp(c.Status)) {
+			continue
+		}
+		val := c.Status
+		if c.Error != "" {
+			val += "  " + c.Error
+		}
+		pairs = append(pairs, [2]string{c.Name, val})
+	}
+	if len(pairs) == 0 {
+		return nil
+	}
+	return append([]string{"  connections:"}, KV(4, pairs)...)
 }
 
 // ---- json --------------------------------------------------------------------

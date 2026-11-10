@@ -16,6 +16,7 @@
 package statusreport
 
 import (
+	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
@@ -211,6 +212,19 @@ type Application struct {
 	// is the app-level answer closest to "is it actually moving messages".
 	HealthComponents []NameStatus `json:"healthComponents,omitempty"`
 
+	// Connections is every binder in the health document: whether the
+	// connector holds its connection to the broker that binder reaches. Sorted
+	// by name. Empty when the script sent no health document (an older script,
+	// or an instance whose health endpoint answered nothing).
+	Connections []Connection `json:"connections,omitempty"`
+
+	// HealthDocument is the health document exactly as the instance answered
+	// it, kept only when the operator asked for it (status --raw). It is the
+	// script's health-json line, or for an older script its health-detail
+	// line, and only ever a valid JSON document, so it embeds in the JSON
+	// output as an object rather than a string.
+	HealthDocument json.RawMessage `json:"healthDocument,omitempty"`
+
 	Workflows []Workflow `json:"workflows,omitempty"`
 
 	Uptime  string    `json:"uptime,omitempty"`
@@ -226,9 +240,51 @@ type Application struct {
 }
 
 // Workflow is one workflow slot's reported state.
+//
+// State is the connector's own lifecycle answer, which reads running once the
+// workflow's bindings have started, whatever its broker connections are doing.
+// Degraded is what says whether a running workflow is actually connected: every
+// dependency of its that is not UP, so its presence is the finding.
 type Workflow struct {
 	ID    string `json:"id"`
 	State string `json:"state"`
+
+	// Health is the connector's own per-workflow health indicator, UP or DOWN,
+	// when the health document carries one.
+	Health string `json:"health,omitempty"`
+
+	// Degraded names, for a running workflow, its own health when not UP, its
+	// bindings that are not UP, and the binders it uses that are not UP.
+	Degraded []NameStatus `json:"degraded,omitempty"`
+}
+
+// Connection is one binder's health, from the health document's binders
+// component. Error is the first line of the binder's own error detail.
+type Connection struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+// NotConnected reports whether any running workflow depends on something that
+// is not UP. Only positive evidence counts: a binder the health document does
+// not mention is unknown, never a failure.
+func (a *Application) NotConnected() bool {
+	if a == nil {
+		return false
+	}
+	for _, w := range a.Workflows {
+		if len(w.Degraded) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// IsUp reports whether a health status is UP. An empty status is unknown, so it
+// is not reported as down either: callers test !IsUp only on a status they have.
+func IsUp(status string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), "UP")
 }
 
 // NameStatus is a named component and its status (health components).

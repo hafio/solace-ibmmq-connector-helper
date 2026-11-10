@@ -592,6 +592,14 @@ management:
   endpoint:
     health:
       show-details: always
+      group:
+        solmq:
+          include: "*"
+          show-details: always
+          status:
+            http-mapping:
+              down: 200
+              out-of-service: 200
 logging:
   level:
     root: INFO
@@ -3606,13 +3614,21 @@ function renderLeaderElection(line, le){
 // renderManagement always emits the management block: server.port and the
 // fixed actuator exposure list are unconditional (applyStatusAccess guarantees
 // both are always set), and so is endpoint.health.show-details, which
-// consolidateBuild defaults to DEFAULT_HEALTH_SHOW_DETAILS. Mirrors render.go's
+// consolidateBuild defaults to DEFAULT_HEALTH_SHOW_DETAILS. The status script's
+// health group (STATUS_HEALTH_GROUP) is unconditional too: every contributor,
+// details as /actuator/health shows them, and DOWN and OUT_OF_SERVICE mapped to
+// 200 so the script can read a down instance's document. Mirrors render.go's
 // renderManagement.
+const STATUS_HEALTH_GROUP = 'solmq';
 function renderManagement(line, mg){
   line(0, 'management:');
   line(2, 'server:'); line(4, 'port: ' + mg.port);
   line(2, 'endpoints:'); line(4, 'web:'); line(6, 'exposure:'); line(8, 'include: ' + mg.exposure);
-  if(mg.healthShowDetails){ line(2, 'endpoint:'); line(4, 'health:'); line(6, 'show-details: ' + yq(mg.healthShowDetails)); }
+  line(2, 'endpoint:'); line(4, 'health:');
+  if(mg.healthShowDetails){ line(6, 'show-details: ' + yq(mg.healthShowDetails)); }
+  line(6, 'group:'); line(8, STATUS_HEALTH_GROUP + ':'); line(10, 'include: ' + yq('*'));
+  if(mg.healthShowDetails){ line(10, 'show-details: ' + yq(mg.healthShowDetails)); }
+  line(10, 'status:'); line(12, 'http-mapping:'); line(14, 'down: 200'); line(14, 'out-of-service: 200');
 }
 function renderLoggingLevel(line, level){
   if(!level || !level.length) return;

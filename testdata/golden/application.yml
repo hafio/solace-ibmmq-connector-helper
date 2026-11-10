@@ -179,6 +179,14 @@ management:
   endpoint:
     health:
       show-details: always
+      group:
+        solmq:
+          include: "*"
+          show-details: always
+          status:
+            http-mapping:
+              down: 200
+              out-of-service: 200
 logging:
   level:
     root: INFO

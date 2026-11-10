@@ -222,7 +222,19 @@ in [configuration.md](configuration.md), the verbs in
 ## Status, logs and cli
 
 - **`status` exit 0 does not mean healthy.** It means every instance was
-  reported. Read the report, or `--output json`, for the state.
+  reported and every running workflow is connected. A crash loop or a `DOWN`
+  health status still exits 0. Read the report, or `--output json`, for the
+  state.
+- **The health line disappeared when a connection went `DOWN`.** The actuator
+  answers a `DOWN` `/actuator/health` with HTTP 503, and busybox `wget` prints
+  no body for it. Configs from this release declare the `solmq` health group,
+  which answers 200, and the script reads it first. Redeploy and restart an
+  older instance to get it. `status app --raw` then prints the whole document.
+- **A workflow reads `running` but nothing moves.** `running` means only that
+  its bindings started. Its row names any connection that is not `UP`, and the
+  `connections` block gives the binder's error. A row with nothing in
+  parentheses on an instance deployed by an older release may still be
+  reconnecting: redeploy so the instance carries the current status script.
 - **A standby shows no workflow lines.** That is the normal shape.
 - **Podman restart counts come from systemd.** A quadlet restart recreates the
   container, so podman's own counter reads 0. When systemd cannot answer (the

@@ -358,8 +358,34 @@ compose project / container; or the container alone).
 |---|---|
 | `leader-election mode` | `env.yaml` |
 | `leader-election state` | `/actuator/leaderelection`: `active` or `standby` |
-| `health` | `/actuator/health`: `UP`, or the status plus a `health-detail` line naming the failing component |
-| `workflows` | `/actuator/workflows`: one `<id>: <state>` row per configured workflow, ordered numerically |
+| `health` | `/actuator/health`: `UP`, or the status plus a `health-detail` line with the raw document. Once a `connections` block names the failing binder, that line is shown under `-d` only |
+| `connections` | `/actuator/health`: one row per binder with its status and the first line of its error. Shown only when a binder is not `UP`, and then only those binders. `-d` lists every binder |
+| `workflows` | `/actuator/workflows`: one `<id>: <state>` row per configured workflow, ordered numerically. A `running` row whose own health, bindings or binders are not `UP` names them in parentheses |
+
+`running` means only that the workflow's bindings have started. A workflow can
+read `running` while its MQ or Solace connection is still retrying. The row's
+parentheses and the `connections` block show that case:
+
+```text
+  health:                RECONNECTING
+  connections:
+    mq-conn-1: RECONNECTING  JMSWMQ0018: Failed to connect to queue manager 'QM1'
+  workflows:
+    0: running (mq-conn-1: RECONNECTING)
+    1: running
+```
+
+A `DOWN` instance answers `/actuator/health` with HTTP 503, which the script
+cannot read. The script therefore reads the `solmq` health group first, which
+answers 200 at any status. A config deployed by an older release has no such
+group. There, a `DOWN` instance shows no health line, and a `status:` line says
+the health endpoint answered nothing. Redeploy and restart to add the group.
+
+Each workflow is matched to its binders through the `binder:` keys of its
+`input-N` and `output-N` bindings in the instance's config. A binding with no
+`binder:` key is checked against every binder. A binder the health document
+does not list is unknown and never marks a row. An instance running a script
+from an older release reports no connections until it is redeployed.
 
 - A standby carries no workflow lines. That is the normal shape.
 - Unconfigured slots (`N/A`) are filtered out. An active instance with every
@@ -386,6 +412,7 @@ the `application` and `all` views only; with `container` they are a usage error.
 
 | Flag | Meaning |
 |---|---|
+| `--raw` | print each instance's health document in full under its block, as JSON. With `--output json` it is the `healthDocument` object. An instance whose script predates it gets a `status:` line instead. Not with the `container` view |
 | `-d`, `--details` | add the enrichment lines below. Costs one sampling call (`kubectl top`, `docker stats`), and four more actuator calls and a `java -version` inside each instance; kubernetes needs a metrics API |
 | `--all` | report every container whose image name contains `solace-pubsub-connector-ibmmq`: every namespace on kubernetes (a `NAMESPACE` column appears when they span several), every container on docker/podman, stopped ones included. Needs no `env.yaml` but still a `--platform`. Not with `--pod`/`--container` |
 | `-w`, `--watch` | re-render every 5s until Ctrl-C (exit 0); the 5s is the pause after each refresh, so a slow collection never shortens it. The previous report stays on screen while the next one is collected. On a terminal the screen is redrawn under an `Every 5s: ...` header; when stdout is not a terminal each refresh is appended under a `=== <time> ===` section line, with no escape bytes. A refresh that fails is reported on stderr as a warning naming the retry, and the next one still runs. The install prompt is asked at most once |
@@ -403,7 +430,7 @@ the `application` and `all` views only; with `container` they are a usage error.
   (ConfigMap, Secrets, PVCs) with their presence. `image-expected` is printed
   only when the running image differs from `env.yaml`.
 - Application side: uptime, version, java, the config path the script read,
-  heap against `-Xmx`, and per-component health. A line whose source answers
+  heap against `-Xmx`, every binder in `connections`, and per-component health. A line whose source answers
   nothing is dropped. Without `-d` the script does not collect uptime,
   version, java or heap, so `--output json` omits them too.
 
@@ -436,9 +463,10 @@ a terminal. Progress never changes stdout or the exit code, so
 
 - **0**: every instance was reported. A standby, an unhealthy container, a
   crash loop or a missing metrics API are answers, not failures.
-- **1**: an instance's script was missing and not installed, or could not be
-  installed or run, or the
-  run could not start (no instances, unreadable `env.yaml`, failed preflight).
+- **1**: a running workflow is not connected: its own health, a binding or a
+  binder it uses is not `UP`. Also when an instance's script was missing and
+  not installed, or could not be installed or run, or the run could not start
+  (no instances, unreadable `env.yaml`, failed preflight).
 - **2**: usage error.
 
 | View | kubernetes | docker | podman |

@@ -40,6 +40,11 @@ const HealthArg = "--health"
 // and the JVM start those lines cost.
 const DetailsArg = "--details"
 
+// RawArg adds what the CLI reads each workflow's connections from: the health
+// document on one line and the binder each binding names in the config. A hand
+// run leaves it off and gets the report alone.
+const RawArg = "--raw"
+
 // HealthShell is what every platform invokes the script through. The mounted
 // copy is never executable -- a kubernetes ConfigMap subPath, a compose
 // configs entry and a podman secret mount all land it read-only without the
@@ -62,6 +67,10 @@ const (
 	HealthRetries            = 3
 	HealthStartPeriodSeconds = 60
 )
+
+// HealthGroup is the actuator health group the report reads the health
+// document from; see spec.StatusHealthGroup for why it exists.
+const HealthGroup = spec.StatusHealthGroup
 
 // SecretsDir is where credentials are mounted, one file per name. The script
 // reads a ${...} password back out of it, so it has to be the same directory
@@ -96,7 +105,9 @@ const header = `#!/bin/sh
 #   docker exec <container> sh ` + ContainerPath + `
 #   podman exec <container> sh ` + ContainerPath + `
 #
-# Add ` + DetailsArg + ` after the path for the enrichment lines.
+# Add ` + DetailsArg + ` after the path for the enrichment lines. solmq-conn-util
+# also passes ` + RawArg + `, which adds the health document and the binder each
+# binding uses, so it can tell whether each running workflow is connected.
 #
 # The report always exits 0. It goes to stdout, anything that went wrong goes
 # to stderr, and neither is encoded in the exit status: an exec wrapper should
@@ -185,6 +196,23 @@ from_configs() {
       printf %s "$value"
       return 0
     fi
+  done
+  return 0
+}
+
+# Prints "<binding> <binder>" for every input-N and output-N binding the config
+# names a binder for, so the CLI can tell which connection each workflow rides
+# on. The hold space keeps the last binding key seen and each binder: line is
+# paired with it, which reads the block style this tool writes and most hand
+# written configs. A binding that names no binder uses the default binder and
+# prints nothing here; the CLI then judges it against every binder.
+binding_binders() {
+  for cfg in $CONFIGS; do
+    sed -n \
+      -e '/^[[:space:]]*input-[0-9][0-9]*:[[:space:]]*$/{s/^[[:space:]]*//;s/:.*//;h;}' \
+      -e '/^[[:space:]]*output-[0-9][0-9]*:[[:space:]]*$/{s/^[[:space:]]*//;s/:.*//;h;}' \
+      -e '/^[[:space:]]*binder:[[:space:]]*[^[:space:]]/{s/^[[:space:]]*binder:[[:space:]]*//;G;s/^\(.*\)\n\(.*\)$/\2 \1/p;}' \
+      "$cfg"
   done
   return 0
 }
@@ -307,14 +335,19 @@ if [ "${1:-}" = "` + HealthArg + `" ]; then
   exit 1
 fi
 
-# ` + DetailsArg + ` asks for the enrichment lines below. They cost four more
-# actuator calls and a JVM start, and the CLI shows them only at its details
-# level, so without the argument they are skipped rather than collected and
-# thrown away.
+# The arguments after the path, in any order. ` + DetailsArg + ` asks for the
+# enrichment lines below. They cost four more actuator calls and a JVM start,
+# and the CLI shows them only at its details level, so without the argument
+# they are skipped rather than collected and thrown away. ` + RawArg + ` adds the
+# documents the CLI reads each workflow's connections from (see binding_binders).
 DETAILS=""
-if [ "${1:-}" = "` + DetailsArg + `" ]; then
-  DETAILS=1
-fi
+RAW=""
+for arg in "$@"; do
+  case "$arg" in
+    ` + DetailsArg + `) DETAILS=1 ;;
+    ` + RawArg + `) RAW=1 ;;
+  esac
+done
 
 # An endpoint that is not exposed answers 404, which by the time it reaches
 # wget below is indistinguishable from a wrong port or a rejected credential.
@@ -351,11 +384,23 @@ STATE=$(printf %s "$LE" | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([^"]*\)
 echo "leader-election mode: ${MODE:-unknown}"
 echo "leader-election state: ${STATE:-unknown}"
 
-# health, uptime and version are enrichment. Each line is dropped when its
-# endpoint answers nothing rather than reported as missing: none of them says
-# whether this instance is doing its job, which is what the leader-election
-# lines above and the workflow lines below are for.
-HEALTH=$(get "$BASE/health") || HEALTH=""
+# Health is read before the enrichment below, and unlike it, a health
+# endpoint that answers nothing is said on stderr: a missing health line is
+# how a down instance looked before the health group existed.
+#
+# The document is read from this tool's health group first: the actuator
+# answers a DOWN /actuator/health with HTTP 503, and wget prints no body for an
+# error status, so a down instance would report no health at all. The group
+# answers 200 whatever the status. A config without the group (deployed by an
+# older release, or not by this tool) answers it 404, and /actuator/health is
+# read instead.
+HEALTH=$(get "$BASE/health/` + HealthGroup + `") || HEALTH=""
+if [ -z "$HEALTH" ]; then
+  HEALTH=$(get "$BASE/health") || HEALTH=""
+fi
+if [ -z "$HEALTH" ]; then
+  echo "status: no answer from $BASE/health -- an instance whose health is DOWN answers HTTP 503, which wget cannot read; redeploy and restart with solmq-conn-util, whose config also serves the document at $BASE/health/` + HealthGroup + `" >&2
+fi
 if [ -n "$HEALTH" ]; then
   H=$(printf %s "$HEALTH" | health_status)
   if [ "$H" = "UP" ]; then
@@ -373,6 +418,20 @@ if [ -n "$HEALTH" ]; then
     echo "health components:"
     printf '%s\n' "$HC_ROWS"
   fi
+fi
+
+# A workflow reports running once its bindings start, whatever its broker
+# connections are doing, so the CLI judges each one against its binders'
+# health. It parses the document itself rather than this script doing it in
+# sed, and needs the binder each binding names to know which binders are a
+# workflow's own.
+if [ -n "$RAW" ]; then
+  if [ -n "$HEALTH" ]; then
+    printf 'health-json: %s\n' "$(printf %s "$HEALTH" | tr '\n' ' ')"
+  fi
+  binding_binders | while IFS= read -r pair; do
+    printf 'binding: %s\n' "$pair"
+  done
 fi
 
 # Which configuration this report was built from: the same search order the

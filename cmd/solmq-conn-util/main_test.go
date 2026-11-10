@@ -4180,6 +4180,7 @@ func TestStatusRejectsImpossibleFlagCombinations(t *testing.T) {
 		{"install on the container view", []string{"status", "container", "--install"}, "--install applies to the application"},
 		{"user on the container view", []string{"status", "cnt", "--user", "ops"}, "--user applies to the application"},
 		{"management port on the container view", []string{"status", "container", "--management-port", "9090"}, "--management-port applies to the application"},
+		{"raw on the container view", []string{"status", "container", "--raw"}, "--raw applies to the application"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -4821,9 +4822,10 @@ func TestStatusApplicationDetailsAddsTheEnrichmentLines(t *testing.T) {
 
 	details, argv := report("status", "app", "-d", "--platform", "kubernetes", "--pod", "pod-a")
 	// The details level asks the script for what it renders, so the script
-	// spends its extra actuator calls and the JVM start only here.
-	if argv[len(argv)-1] != statusscript.DetailsArg {
-		t.Errorf("-d should run the script with %s, got argv %v", statusscript.DetailsArg, argv)
+	// spends its extra actuator calls and the JVM start only here. Both levels
+	// ask for the raw documents the connection verdict is read from.
+	if !slices.Contains(argv, statusscript.DetailsArg) || !slices.Contains(argv, statusscript.RawArg) {
+		t.Errorf("-d should run the script with %s and %s, got argv %v", statusscript.DetailsArg, statusscript.RawArg, argv)
 	}
 	for _, want := range []string{
 		"uptime:", "3d 4h 31m",
@@ -4842,8 +4844,8 @@ func TestStatusApplicationDetailsAddsTheEnrichmentLines(t *testing.T) {
 	// The basic level prints none of it, even from a script that still reports
 	// it: an instance deployed by an older release ignores the argument.
 	basic, argv := report("status", "app", "--platform", "kubernetes", "--pod", "pod-a")
-	if slices.Contains(argv, statusscript.DetailsArg) {
-		t.Errorf("the basic level must not ask for the details calls, got argv %v", argv)
+	if slices.Contains(argv, statusscript.DetailsArg) || !slices.Contains(argv, statusscript.RawArg) {
+		t.Errorf("the basic level must ask for %s and not for the details calls, got argv %v", statusscript.RawArg, argv)
 	}
 	for _, mustNot := range []string{"uptime:", "version:", "java:", "config:", "heap:", "health components:"} {
 		if strings.Contains(basic, mustNot) {
@@ -5014,6 +5016,131 @@ func TestStatusStandbyIsAnAnswerNotAFailure(t *testing.T) {
 			t.Errorf("stdout missing %q, got:\n%s", want, stdout)
 		}
 	}
+}
+
+// reconnectingReport is the script's --raw report from an instance whose MQ
+// binder is reconnecting, with workflow 0 riding on it in the given state.
+func reconnectingReport(leState, wfState string) string {
+	doc := `{"status":"RECONNECTING","components":{"binders":{"status":"RECONNECTING","components":{` +
+		`"mq-conn-1":{"status":"RECONNECTING","details":{"error":"JMSWMQ0018: Failed to connect to queue manager 'QM1'"}},` +
+		`"prod-solace":{"status":"UP"}}}}}`
+	return "leader-election mode: active_standby\nleader-election state: " + leState + "\n" +
+		"health: RECONNECTING\nhealth-detail: " + doc + "\nhealth-json: " + doc + "\n" +
+		"binding: input-0 mq-conn-1\nbinding: output-0 prod-solace\n" +
+		"workflows:\n  0: " + wfState + "\n"
+}
+
+// TestStatusRunningWorkflowNotConnectedFailsTheRun covers the one answer the
+// report treats as a failure: a workflow that reads running while a connection
+// it rides on is not UP. The row says which connection, the basic level shows
+// the failing binder with its error, and the run exits 1. A standby beside the
+// same binder is an answer, since its workflows are stopped.
+func TestStatusRunningWorkflowNotConnectedFailsTheRun(t *testing.T) {
+	run := func(t *testing.T, leState, wfState string) (string, int) {
+		t.Helper()
+		q := &queueRunner{resp: []queuedResp{{onePodJSON, nil}, {reconnectingReport(leState, wfState), nil}}}
+		var code int
+		stdout := captureStdout(t, func() {
+			code = dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+		})
+		return stdout, code
+	}
+
+	t.Run("active", func(t *testing.T) {
+		stdout, code := run(t, "active", "running")
+		if code != 1 {
+			t.Errorf("exit=%d, want 1 for a running workflow that is not connected", code)
+		}
+		for _, want := range []string{
+			"  connections:\n    mq-conn-1: RECONNECTING  JMSWMQ0018: Failed to connect to queue manager 'QM1'\n",
+			"    0: running (mq-conn-1: RECONNECTING)\n",
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("stdout missing %q, got:\n%s", want, stdout)
+			}
+		}
+	})
+
+	t.Run("stopped workflow on a standby", func(t *testing.T) {
+		stdout, code := run(t, "standby", "stopped")
+		if code != 0 {
+			t.Errorf("exit=%d, want 0: a stopped workflow holds no connection to judge", code)
+		}
+		if !strings.Contains(stdout, "    0: stopped\n") || strings.Contains(stdout, "(mq-conn-1") {
+			t.Errorf("a stopped workflow must not be marked, got:\n%s", stdout)
+		}
+	})
+}
+
+// TestStatusRawPrintsTheHealthDocumentInFull covers status --raw: the health
+// document the instance answered is printed whole under its block, and is the
+// healthDocument object of the JSON output. Without --raw neither appears, and
+// an instance whose script sent no document says so instead of printing
+// nothing.
+func TestStatusRawPrintsTheHealthDocumentInFull(t *testing.T) {
+	run := func(t *testing.T, report string, args ...string) (string, int) {
+		t.Helper()
+		q := &queueRunner{resp: []queuedResp{{onePodJSON, nil}, {report, nil}}}
+		var code int
+		stdout := captureStdout(t, func() {
+			code = dispatch(append([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, args...), q)
+		})
+		return stdout, code
+	}
+
+	t.Run("table", func(t *testing.T) {
+		stdout, _ := run(t, reconnectingReport("active", "running"), "--raw")
+		for _, want := range []string{
+			"  health document:\n    {\n      \"status\": \"RECONNECTING\",\n",
+			"\"error\": \"JMSWMQ0018: Failed to connect to queue manager 'QM1'\"",
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("stdout missing %q, got:\n%s", want, stdout)
+			}
+		}
+		// The document in full makes the one-line copy redundant.
+		if strings.Contains(stdout, "health-detail:") {
+			t.Errorf("health-detail must give way to the full document, got:\n%s", stdout)
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		stdout, _ := run(t, reconnectingReport("active", "running"), "--raw", "--output", "json")
+		var doc struct {
+			Instances []struct {
+				Application struct {
+					HealthDocument map[string]any `json:"healthDocument"`
+				} `json:"application"`
+			} `json:"instances"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+			t.Fatalf("stdout must be one json document: %v\n%s", err, stdout)
+		}
+		if len(doc.Instances) != 1 || doc.Instances[0].Application.HealthDocument["status"] != "RECONNECTING" {
+			t.Errorf("healthDocument should be the instance's document as an object, got:\n%s", stdout)
+		}
+	})
+
+	t.Run("without raw", func(t *testing.T) {
+		stdout, _ := run(t, reconnectingReport("active", "running"), "--output", "json")
+		if strings.Contains(stdout, "healthDocument") {
+			t.Errorf("the document is only kept under --raw, got:\n%s", stdout)
+		}
+		table, _ := run(t, reconnectingReport("active", "running"))
+		if strings.Contains(table, "health document:") {
+			t.Errorf("the document is only printed under --raw, got:\n%s", table)
+		}
+	})
+
+	t.Run("an older script sends no document", func(t *testing.T) {
+		stdout, code := run(t, appReport, "--raw")
+		if code != 0 {
+			t.Errorf("exit=%d, want 0: a missing document is a note, not a failure", code)
+		}
+		if !strings.Contains(stdout, "status: no health document from this instance") {
+			t.Errorf("the missing document should be said in the block, got:\n%s", stdout)
+		}
+	})
 }
 
 // podListJSON is onePodJSON's running pod under each of names, for a test that

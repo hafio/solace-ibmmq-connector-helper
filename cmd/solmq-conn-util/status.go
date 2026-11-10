@@ -148,6 +148,7 @@ type statusOpts struct {
 	command  string
 	approved execguard.Approvals
 	all      bool
+	raw      bool
 
 	// now is the clock ages are measured against, injected here rather than
 	// read inside the collectors so a test can pin it.
@@ -159,6 +160,7 @@ func runStatus(args []string, r gdurunner.Runner) int {
 	fs := verbFlagSet("status")
 	env := envFlag(fs)
 	install := fs.Bool("install", false, "install the status script on every target without prompting")
+	raw := fs.Bool("raw", false, "print the health document of each instance in full")
 	platform := platformFlag(fs)
 	var pods, containers []string
 	fs.Var(repeatableName{&pods}, "pod", "limit checks to this kubernetes pod name (repeatable)")
@@ -201,7 +203,7 @@ func runStatus(args []string, r gdurunner.Runner) int {
 		view: view, json: *output == outputJSON, watch: watch, verbose: *verbose,
 		envPath: *env, install: *install, platform: *platform,
 		pods: pods, conts: containers, ns: *namespace, port: *port,
-		user: *user, command: *command, approved: approvals, all: *all,
+		user: *user, command: *command, approved: approvals, all: *all, raw: *raw,
 		now: time.Now(),
 	}
 	if *details {
@@ -269,6 +271,7 @@ func checkStatusFlags(o statusOpts, output string) int {
 			name string
 		}{
 			{o.install, "--install"},
+			{o.raw, rawFlagName},
 			{o.user != "", "--user"},
 			{o.port != 0, "--management-port"},
 		} {
@@ -418,9 +421,10 @@ func (c *statusCollector) session() instanceSession {
 }
 
 // collect gathers the whole report. It returns the report plus whether any
-// instance could not be reached and run, which is what the exit code is about
-// -- never which instance is active, and never whether an engine query
-// degraded (that is a note in the report).
+// instance could not be reached and run, or has a running workflow that is not
+// connected, which is what the exit code is about -- never which instance is
+// active, and never whether an engine query degraded (that is a note in the
+// report).
 func (c *statusCollector) collect() (statusreport.Report, bool, error) {
 	// The last step ends here rather than in renderOnce, so the live line is
 	// erased before the report's first byte reaches the terminal -- on every path
@@ -447,8 +451,31 @@ func (c *statusCollector) collect() (statusreport.Report, bool, error) {
 	failed := false
 	if c.opts.view != statusreport.ViewContainer {
 		failed = c.collectApplication(&rep)
+		c.keepHealthDocuments(&rep)
 	}
 	return rep, failed, nil
+}
+
+// keepHealthDocuments keeps each instance's raw health document only under
+// --raw, where it is the point of the run, and says so against an instance
+// that sent none: its script predates the document, or its health endpoint
+// answered nothing. Without --raw the document is dropped, so the report and
+// its JSON stay the size they always were.
+func (c *statusCollector) keepHealthDocuments(rep *statusreport.Report) {
+	for i := range rep.Instances {
+		app := rep.Instances[i].Application
+		if app == nil {
+			continue
+		}
+		if !c.opts.raw {
+			app.HealthDocument = nil
+			continue
+		}
+		if app.HealthDocument == nil {
+			app.Notes = append(app.Notes, fmt.Sprintf(
+				"status: no health document from this instance: its status script predates %s, or its health endpoint answered nothing; redeploy and restart it with this release", rawFlagName))
+		}
+	}
 }
 
 // collectKubernetes reads every pod's facts, and the workload above them, in
@@ -788,7 +815,7 @@ type scriptResult struct {
 
 // collectApplication runs the status script on each instance, filling in each
 // instance's application block. It reports whether any instance could not be
-// reached and run.
+// reached and run, or has a running workflow that is not connected.
 //
 // One exec per instance both checks for the script and runs it. Only the
 // instances found without it cost more: the install confirmation is asked once
@@ -813,19 +840,21 @@ func (c *statusCollector) collectApplication(rep *statusreport.Report) bool {
 	return failed || installFailed || runFailed || len(stillMissing) > 0
 }
 
-// scriptArgs is what the script is run with: DetailsArg only at the details
-// level, the one level that renders the lines it adds.
+// scriptArgs is what the script is run with: RawArg always, since every level
+// judges each workflow's connections, and DetailsArg only at the details level,
+// the one level that renders the lines it adds.
 func (c *statusCollector) scriptArgs() []string {
 	if c.opts.level == statusreport.LevelDetails {
-		return []string{statusscript.DetailsArg}
+		return []string{statusscript.DetailsArg, statusscript.RawArg}
 	}
-	return nil
+	return []string{statusscript.RawArg}
 }
 
 // applyScripts runs the script on the instances at idx and records each answer
 // against its instance: the parsed report, or why the script could not run. It
 // returns the instances the script was not found on, in report order, and
-// whether any instance could not be run.
+// whether any instance could not be run or has a running workflow that is not
+// connected.
 //
 // The script always exits 0 and puts its findings in the output, so an error
 // here is the exec failing rather than a standby instance -- reported against
@@ -844,6 +873,12 @@ func (c *statusCollector) applyScripts(rep *statusreport.Report, idx []int, args
 			missing = append(missing, i)
 		default:
 			inst.Application = statusreport.ParseApplication(res.out)
+			// A workflow reads running once its bindings start, whatever its
+			// connections are doing, so one whose own health, bindings or
+			// binders are not UP fails the run like an unreachable instance.
+			if inst.Application.NotConnected() {
+				failed = true
+			}
 		}
 	}
 	return missing, failed
