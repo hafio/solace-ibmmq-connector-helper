@@ -1,12 +1,14 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/execguard"
+	"github.com/hafio/go-deploy-utility/exitcode"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
@@ -34,6 +36,7 @@ type shellOpts struct {
 	ns       string
 	command  string
 	allow    []string
+	approved execguard.Approvals
 
 	// remote is what to run inside the instance: everything after the "--"
 	// separator. Empty is the interactive form, an attached shell.
@@ -65,7 +68,7 @@ func splitAtSeparator(args []string) (before, after []string, sawSep bool) {
 }
 
 // runShell parses cli's flags and hands them to actShell.
-func runShell(args []string, r runner.Runner) int {
+func runShell(args []string, r gdurunner.Runner) int {
 	flagArgs, remote, sawSep := splitAtSeparator(args)
 
 	fs := verbFlagSet(verbShell)
@@ -82,17 +85,21 @@ func runShell(args []string, r runner.Runner) int {
 	if err != nil {
 		return flagExit(verbShell, err)
 	}
+	approvals, aerr := approvalsFrom(*allow)
+	if aerr != nil {
+		return usageExit(aerr)
+	}
 	if len(pos) > 0 {
 		// cli has no target word: an instance is named with --pod/--container,
 		// and a command to run in it goes after "--", so a bare word here is a
 		// mistake worth naming rather than a name to guess at.
 		fmt.Fprintf(os.Stderr, "cli: unexpected argument %q (name an instance with %s or %s; a command to run goes after %s)\n",
 			pos[0], podFlagName, containerFlagName, argSeparator)
-		return 2
+		return exitcode.Usage
 	}
 	if sawSep && len(remote) == 0 {
 		fmt.Fprintf(os.Stderr, "cli: %s was given with no command after it (leave it off to open a shell)\n", argSeparator)
-		return 2
+		return exitcode.Usage
 	}
 
 	o := shellOpts{
@@ -103,6 +110,7 @@ func runShell(args []string, r runner.Runner) int {
 		ns:       *namespace,
 		command:  *command,
 		allow:    *allow,
+		approved: approvals,
 		remote:   remote,
 	}
 	if code := checkShellFlags(o); code != 0 {
@@ -127,23 +135,18 @@ func checkShellFlags(o shellOpts) int {
 	} {
 		if len(f.vals) > 1 {
 			fmt.Fprintf(os.Stderr, "cli: %s may be given once -- cli reaches one instance; run cli with no %s to list what matches\n", f.name, f.name)
-			return 2
+			return exitcode.Usage
 		}
 	}
-	return 0
+	return exitcode.OK
 }
 
 // actShell resolves the platform, settles on exactly one instance, and hands
-// the terminal to it. Everything that can fail the whole run -- a runner that
-// cannot attach, an unsafe command token, a non-interactive stdin, an
-// unreadable env.yaml, a platform that cannot be resolved, a failed preflight
-// -- fails here, before any process starts.
-func actShell(o shellOpts, r runner.Runner) int {
-	a, ok := r.(runner.Attacher)
-	if !ok {
-		return errExit(errors.New("cli needs a runner that can hand a command the terminal, and this one cannot"))
-	}
-
+// the terminal to it. Everything that can fail the whole run -- an unsafe
+// command token, a non-interactive stdin, an unreadable env.yaml, a platform
+// that cannot be resolved, a failed preflight -- fails here, before any process
+// starts.
+func actShell(o shellOpts, r gdurunner.Runner) int {
 	// Every token of the in-container command is held to the same charset every
 	// other operator-supplied argv token is. No shell is involved -- the tokens
 	// reach the engine as separate argv entries, never through sh -c -- so a
@@ -152,7 +155,7 @@ func actShell(o shellOpts, r runner.Runner) int {
 	// else so a typo costs no process at all.
 	for _, t := range o.remote {
 		if !validate.SafeToken(t) {
-			return errExit(fmt.Errorf("the command token %q contains an unsafe character (%s); cli runs an argv, not a shell line, so a pipe or a glob has to be written inside the session instead", t, validate.UnsafeTokenReason))
+			return usageExit(fmt.Errorf("the command token %q contains an unsafe character (%s); cli runs an argv, not a shell line, so a pipe or a glob has to be written inside the session instead", t, validate.UnsafeTokenReason))
 		}
 	}
 
@@ -161,7 +164,7 @@ func actShell(o shellOpts, r runner.Runner) int {
 	// possibly work should say so with a next step rather than hang or open a
 	// session nobody can type into. Only the shell form needs a terminal; the
 	// one-shot form is exactly what a script should be using instead.
-	if o.interactive() && !stdinIsTerminal() {
+	if o.interactive() && !prompter.Terminal() {
 		return errExit(fmt.Errorf("cli opens an interactive shell and stdin is not a terminal; run `cli %s <command>` to run one command instead", argSeparator))
 	}
 
@@ -173,16 +176,16 @@ func actShell(o shellOpts, r runner.Runner) int {
 		command:  o.command,
 		pods:     o.pods,
 		conts:    o.conts,
-		allow:    o.allow,
+		approved: o.approved,
 	})
 	if serr != nil {
-		return errExit(serr)
+		return usageExit(serr)
 	}
 
 	// The same read-only preflight probe status and logs run, for the same
 	// reason: fail on an unreachable engine once, up front, rather than at the
-	// point of attach. On kubernetes it asks for exec, what cli actually does.
-	if code, ok := preflight(r, runner.ActionCLI, sess.platform, sess.command, sess.ns, o.allow); !ok {
+	// point of attach. Kubernetes asks nothing: the exec itself reports a refusal.
+	if code, ok := preflightRead(r, runner.ActionCLI, sess.platform, sess.command, sess.rootless(), o.approved); !ok {
 		return code
 	}
 
@@ -193,9 +196,9 @@ func actShell(o shellOpts, r runner.Runner) int {
 	if !found {
 		// The picker was printed: the run answered an ambiguous request with
 		// exactly what to type next, which is not a failure.
-		return 0
+		return exitcode.OK
 	}
-	return attachShell(a, sess, o, target)
+	return attachShell(r, sess, o, target)
 }
 
 // shellInvocation rebuilds the command that was run, minus the instance, so the
@@ -236,7 +239,7 @@ func shellInvocation(sess instanceSession, o shellOpts) pickerLine {
 // outright -- kubectl exec reports "the pod could not be reached" and "the
 // command exited 1" with the same status, so a non-zero cli exit means one of
 // the two and the engine's own message on stderr is what distinguishes them.
-func attachShell(a runner.Attacher, sess instanceSession, o shellOpts, t instanceRef) int {
+func attachShell(r gdurunner.Runner, sess instanceSession, o shellOpts, t instanceRef) int {
 	opts := runner.ExecOpts{Stdin: true, TTY: true}
 	payload := []string{runner.ContainerShell}
 	if !o.interactive() {
@@ -245,15 +248,14 @@ func attachShell(a runner.Attacher, sess instanceSession, o shellOpts, t instanc
 		// piped in, which is what a stdin that is not a terminal means here.
 		// Asking for it unconditionally would leave a command that reads stdin
 		// waiting on a terminal that never sends EOF.
-		opts = runner.ExecOpts{Stdin: !stdinIsTerminal()}
+		opts = runner.ExecOpts{Stdin: !prompter.Terminal()}
 		payload = o.remote
 	}
 
-	argv, err := runner.ExecArgv(sess.cmdArgv, sess.platform, t.name, t.namespace, opts)
+	argv, err := runner.ExecArgv(sess.cmdArgv, sess.platform, t.name, t.namespace, opts, payload...)
 	if err != nil {
 		return errExit(err)
 	}
-	argv = append(argv, payload...)
 
 	if o.interactive() {
 		// A busybox prompt's escape sequences print as literal bytes in a plain
@@ -265,7 +267,7 @@ func attachShell(a runner.Attacher, sess instanceSession, o shellOpts, t instanc
 	restore := ignoreInterruptWhileAttached()
 	defer restore()
 
-	code, aerr := a.Attach(runner.Cmd{Argv: argv}, os.Stdin, os.Stdout, os.Stderr)
+	code, aerr := r.Attach(gdurunner.Cmd{Argv: argv}, os.Stdin, os.Stdout, os.Stderr)
 	if aerr != nil {
 		return errExit(fmt.Errorf("opening a session on %s: %w", t.name, aerr))
 	}

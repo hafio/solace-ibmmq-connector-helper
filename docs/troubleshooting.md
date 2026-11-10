@@ -81,15 +81,20 @@ in [configuration.md](configuration.md), the verbs in
   `/app/external/classpath/truststores/<name>` on every platform, whatever its
   file is called. Two stores may share a file, or be one file.
 - **The connector reads stores at start only.** After rotating one, podman
-  `deploy` restarts the unit and docker `deploy` recreates the container, but
-  kubernetes needs `solmq-conn-util restart`.
+  `deploy` restarts the unit and docker `deploy` recreates the container (each
+  after asking, if it is running), but kubernetes needs `solmq-conn-util
+  restart`.
 
 ## Secrets and credentials
 
 - **The `solmq-status` password is a literal in `application.yml`.** Anyone
   who can read the ConfigMap, the compose file or the podman secret can read
-  it. Never reuse a password you use elsewhere, and pin
-  `SECURITY_USER_SOLMQ_STATUS_PASSWORD` if it must survive a redeploy.
+  it. Never reuse a password you use elsewhere. Unless
+  `SECURITY_USER_SOLMQ_STATUS_PASSWORD` sets it, docker and podman derive it from
+  the credentials and the deployment name, so it survives a redeploy unchanged and
+  changes only when a credential does. Kubernetes keeps it random, since its
+  ConfigMap may be readable where the credentials are not, and so does a docker
+  or podman deployment with no secret at all.
 - **`generate --platform kubernetes` embeds every Secret.** The manifest is
   written `0600` with `-o`; treat it as sensitive. Docker and podman write no
   credential to disk.
@@ -114,13 +119,34 @@ in [configuration.md](configuration.md), the verbs in
   every capability dropped. `deploy` warns on Linux about each unreadable
   mounted path.
 - **Rootless podman needs the run-as ids inside your subuid/subgid ranges.**
-  The default 1000 fits a standard 65536 range; a bigger id does not. Widen
-  the range, pick a smaller id, deploy as root, or set `run-as: image`.
+  The default 1000 fits a standard 65536 range; a bigger id does not. `deploy`
+  and `validate` ask `podman info` and refuse an id outside it, printing the
+  `usermod --add-subuids --add-subgids` line for a free range and `podman system
+  migrate`. Or pick an id inside the range, or set `run-as: image`.
+- **`podman.rootful=true requires root`, or `running as root ... rootful podman
+  is deployed only when asked for`.** Rootless is the default and runs as the
+  user itself, without `sudo`. Only root may deploy rootful, and only with
+  `podman.rootful: true`; root without it is refused, because deploying for a
+  rootless user is not built yet. Exit 2, nothing runs.
+- **`linger is not enabled`, or the user runtime directory does not exist.**
+  A rootless unit stops at logout and does not start at boot without linger.
+  `deploy` enables it for your own account; if that is refused, an
+  administrator runs `sudo loginctl enable-linger <user>`. A missing
+  `/run/user/<uid>` means no login session: run as the user in its own session
+  (not `sudo` or `su`), or enable linger first.
 - **OpenShift assigns its own ids.** Set `kubernetes.run-as: image`.
 - **The safe-charset gate covers more than `command:`.** `image`, `restart`,
   `timezone`, bind-mounted store files, `libs.dir`, referenced Secret names and
   `libs.pvc.create.nfs.*` are rejected when they carry whitespace, quotes,
-  control characters or shell metacharacters.
+  control or invisible characters, invalid UTF-8 or shell metacharacters. One
+  charset serves them all. Names (namespace, pod, role and the like) refuse a
+  `~`, host paths admit it and a backslash, and `command:` tokens refuse only a
+  leading `~`.
+- **`command: sudo podman` is refused, and so is `--allow-command sudo`.** A
+  privilege-escalation wrapper would elevate every command for the life of the
+  env file. Run `sudo solmq-conn-util ...` instead, with `podman.rootful: true`.
+- **A set but empty `-env` variable fails deploy**, like an unset one; `validate`
+  warns about both.
 - **`java-options` has its own gate.** Spaces separate options and shell
   metacharacters are fine, since no value reaches a shell. Quotes, backslash,
   backtick, a leftover `$`, control characters and a `#` comment inside a `>-`
@@ -159,9 +185,39 @@ in [configuration.md](configuration.md), the verbs in
   `libs.pvc.existing` claim is never deleted.
 - **Kubernetes: a namespace with anything else in it is never removed.** The
   occupants are listed and the namespace kept, with or without `--no-prompt`.
+- **Kubernetes: `remove` says the namespace "was left in place".** The gate
+  never fails a remove that succeeded. The warning names why: the listing could
+  not be read, you may not `delete namespaces` (asked before the question), the
+  question has no terminal (pass `--no-prompt`), or the delete itself failed. The
+  exit code is 0 either way; delete the namespace by hand if you want it gone.
+- **Kubernetes: `deploy` says the namespace does not exist and you may not create
+  it.** The namespace is created only when absent, and only if you may. Have a
+  cluster admin run the `create namespace` command in the message, or ask for
+  `create namespaces`, then re-run.
+- **Kubernetes: `deploy` warns the rollout wait was refused.** The apply
+  succeeded; your identity just may not watch the Deployment. A wait that times
+  out, or a rollout that fails, exits 1: read `kubectl rollout status` and the
+  pod's logs.
 - **A piped run hangs? It does not; it fails.** Every prompt refuses a
   non-TTY and names the flag to pass: `--platform`, `--install`, `--no-prompt`,
-  or the one-shot `cli` form.
+  or the one-shot `cli` form. (The namespace question after a `remove` is the
+  exception: with no terminal it keeps the namespace with a warning instead of
+  failing.)
+- **`deploy` asks "continue?" on a service that is running.** Docker or podman
+  would recreate or restart it: the compose file or a credential changed
+  (docker), or the unit or a secret changed (podman). Answering `n` exits 0 and
+  changes nothing; `--no-prompt` approves, and a CI job needs it, since with no
+  terminal the deploy exits 1 naming the flag. A container an earlier build
+  created has no deploy digest label, so the first deploy after upgrading asks
+  once. On podman older than 4.7 every secret counts as changed (the stored value
+  cannot be read back), so a running unit always asks. It asks every time? Something in the artifact differs each run; a
+  deployment with no credentials at all gets a random status password.
+- **podman `deploy` says the unit is "unchanged and left running".** Nothing
+  differed, so nothing was written or restarted. `solmq-conn-util restart`
+  restarts it anyway.
+- **docker `deploy` fails with "checking whether ... is running".** The container
+  listing could not be read, so the deploy cannot say whether it would restart a
+  running service. Fix the engine error it carries and re-run.
 
 ## Status, logs and cli
 
@@ -169,7 +225,9 @@ in [configuration.md](configuration.md), the verbs in
   reported. Read the report, or `--output json`, for the state.
 - **A standby shows no workflow lines.** That is the normal shape.
 - **Podman restart counts come from systemd.** A quadlet restart recreates the
-  container, so podman's own counter reads 0.
+  container, so podman's own counter reads 0. When systemd cannot answer (the
+  podman scope is refused, or `systemctl show` returns nothing or a negative
+  number), `status` keeps podman's own count rather than failing.
 - **`HEALTH` reads `n/a`.** The container declares no healthcheck: created
   before this tool emitted one, deployed without the script, or run by hand.
 - **A line you expect under `-d` is missing.** The installed script may be out

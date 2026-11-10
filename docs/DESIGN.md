@@ -42,8 +42,14 @@ Packages: `scan`, `spec`, `consolidate`, `tls`, `render`, `deploy`, `dockergen`,
 **Byte-for-byte output.** `application.yml` and every artifact come from a
 deterministic ordered emitter, not generic YAML marshaling, which would re-sort
 keys. Regenerated files diff cleanly and match the golden fixture exactly.
-Scalars are quoted only when YAML would misread them. `${VAR}` expansion is the
-one exception: output then depends on the environment the tool runs in.
+Compose scalars follow one always-quote policy: a name or an operator value
+(project, service, container, config and secret names, `TZ`, syslog settings,
+the java options, ports, `user:` and bind-mount entries) goes through
+`compose.Quote`, so a name such as `yes` or `0123` stays a string; the image
+reference, numbers and the tool's own constants stay bare. A quadlet
+`Environment=` is quoted whole (`quadlet.Environment`). Both come from the shared
+`containerart` packages. `${VAR}` expansion is the one exception: output then
+depends on the environment the tool runs in.
 
 **One folder is one connector instance.** The connector binds workflow ids 0 to
 19 and silently ignores anything higher. A 21st workflow would generate, deploy
@@ -91,14 +97,19 @@ them.
 confirmation, the `remove` confirmation and an interactive `cli` session all fail
 immediately when stdin is not a terminal, naming the flag that replaces them.
 A CI job that hangs on a hidden prompt is worse than one that fails with a
-message.
+message. One prompter from the shared `confirm` package serves every question in
+a run, so it holds the run's single stdin reader and the `cli` terminal check
+agrees with the prompts.
 
 **`validate` reports everything; `generate` fails fast.** `validate` is the
 linter and must surface every error `generate` or `deploy` would hit, TLS store
 files included. `generate` stops at the first error and writes nothing. Its
 output is buffered, so a failed run never leaves a half-written `-o` file.
 
-**Exit codes are 0, 1 or 2**, except for `cli`. Once a session or command runs
+**Exit codes are 0, 1 or 2**, except for `cli`. 2 means the tool refused before
+acting because of what it was given: the command line, `env.yaml`, the files and
+variables it names, or the platform it selects. 1 means something ran and
+failed, or the live system said no. Once a session or command runs
 inside the instance, its own status is passed back. The engines overload that
 status: `kubectl exec` reports an unreachable pod and a failing command with the
 same code, and docker adds 125, 126 and 127. `cli` does not guess between them;
@@ -126,24 +137,35 @@ interleave would be worse than a list.
 
 **Never a shell.** `internal/runner` runs the CLI named by each section's
 `command:` through an argv slice. Every config-derived token is checked against a
-safe charset first. `validate.CheckDeployCommand` pins argv[0] to a bare,
-per-platform allowlisted binary and requires later tokens to be flag-shaped,
-since the tool appends its own subcommand and a stray positional would land in
-the wrong place. argv[0] is resolved with `exec.LookPath`, rejecting an
-`exec.ErrDot` same-directory match.
+safe charset first. The shared `execguard.Check` (rules from
+`validate.CommandRules`) pins argv[0] to a bare, per-platform allowlisted binary
+and requires later tokens to be flag-shaped, since the tool appends its own
+subcommand and a stray positional would land in the wrong place. The same
+function runs in the validator and in `runner.ParseCommand`, and a refusal is a
+usage error (exit 2) in both. argv[0] is resolved by the shared `runner.Resolve`,
+which refuses an `exec.ErrDot` same-directory match and any other relative result.
+A binary that is not on `PATH` reads `x: not found on PATH`.
 
 **Authority lives with whoever runs the command.** `--allow-command` approves an
 extra binary for one invocation. It is a flag, not an `env.yaml` key, so a config
-someone hands you cannot approve `sudo` for itself. `env.yaml` is still
+someone hands you cannot approve a binary for itself. A privilege-escalation
+wrapper such as `sudo` cannot be approved at all, by the flag or the file:
+elevate the tool (`sudo solmq-conn-util ...`), not the commands it issues.
+`env.yaml` is still
 executable configuration: its `command:` runs with your privileges, so review it
 like a Makefile. `generate` is the dry run.
 
 **Preflight is read-only and asks for the least it needs.** Docker and podman run
-`info`. Kubernetes asks `auth can-i` for the one permission the verb needs
-(`create deployment` for deploy, `get pods --subresource log` for logs, and so
-on), so a read-only account can still run `status` and `logs`. A failing probe
-stops the run before anything is written. There is no skip flag: the real
-command would fail anyway.
+`info`. Kubernetes asks `auth can-i` only for what the command is about to write:
+`create` (deploy) or `delete` (remove) of each kind the manifest holds
+(deployments, configmaps and, when written, services, secrets,
+persistentvolumeclaims, and cluster-wide persistentvolumes), `patch deployments`
+for start, stop and restart. `status`, `logs` and `cli` are not probed at all on
+kubernetes: they read what they may and report what they are refused, so a
+read-only account is never turned away by a question. Every probe of a command
+runs before its first write, and the first refusal stops it. The namespace is not
+among them: the namespace flow asks `create namespaces` only when it is absent.
+There is no skip flag: the real command would fail anyway.
 
 **Secret material crosses on stdin, never argv**, and is never logged. Podman
 secrets, kubernetes manifests and the compose file all travel that way.
@@ -151,15 +173,31 @@ secrets, kubernetes manifests and the compose file all travel that way.
 **`remove` asks before it probes.** It names what it will tear down, with the
 namespace or container name, because a run against the wrong `env.yaml` looks
 identical until you read that line. Declining exits 0 having read nothing.
-`deploy` has no prompt and rejects `--no-prompt`: it is additive and
-re-runnable.
 
-**The namespace is never in the manifest `remove` deletes.** Deleting a
-Namespace cascades. A namespace holding anything the release does not own is
-never removed, on any path, with or without `--no-prompt`. An empty one is
-offered as a separate question, because consenting to a deployment's removal is
-not consenting to the namespace's. Cluster namespaces are never removed, and a
-check that cannot run leaves the namespace alone.
+**`deploy` asks before it restarts something that is running.** On docker and
+podman, a deploy that would recreate or restart a running service whose artifact
+or secrets changed asks first, through the same prompter `remove` uses
+(`confirmRedeploy`). A "no" exits 0 having written nothing, so the next deploy
+asks again. `--no-prompt` approves without asking, and with no terminal and no
+flag the deploy fails with exit 1 naming it. An unchanged deploy asks nothing.
+Kubernetes asks nothing: `kubectl apply` and the rollout decide, so `--no-prompt`
+is refused there (exit 2) as a flag that would do nothing, as `solace-util` does.
+
+**The namespace is never in the manifest `remove` deletes, and the deploy creates
+it only when it is absent.** Deleting a Namespace cascades. A namespace holding
+anything the release does not own is never removed, on any path, with or without
+`--no-prompt`. The gate (`kube/nsgate`) runs after a successful remove in a fixed
+order: cluster namespaces are protected; the listing and the occupants (this
+release's objects are passed by kind and name, with what they own); then the
+permission to delete namespaces, probed before anyone is asked; then the question,
+because consenting to a deployment's removal is not consenting to the
+namespace's; then the delete. Nothing in the gate fails the remove, which has
+already succeeded: a refusal, a listing that cannot be read, an occupant, a
+declined question, no terminal to ask on (`--no-prompt` answers it) and a failed
+delete each keep the namespace with a warning and exit 0. The deploy manifest
+carries no Namespace document either (`generate` still does, for a manual apply):
+the namespace is read, and only an absent one is created, on its own, when this
+identity may.
 
 **Teardown reverses the manifest order.** kubectl deletes documents in file
 order and waits on each. In creation order a `libs.pvc.create` claim precedes the
@@ -173,7 +211,9 @@ resolves no credential and opens no store.
 **`deploy` does not restart pods.** `application.yml` and the status script are
 mounted from the ConfigMap with `subPath`, and kubernetes never refreshes a
 `subPath` mount when its ConfigMap changes. The `restart` verb exists for this:
-it runs `kubectl rollout restart`.
+it runs `kubectl rollout restart`. After a deploy, start and restart the tool
+waits for the rollout (300s). The wait is a convenience: a refusal warns and the
+command succeeds, a timeout or failed rollout is exit 1.
 
 **Everything is named after `deployment.name`.** `<name>-config`,
 `<name>-credentials`, `<name>-stores`, `<name>-image-pull`, `<name>-libs`. A
@@ -182,6 +222,10 @@ let each object take its own name, and two instances given the same one shared
 it: each deploy overwrote the other's credentials, either `remove` deleted them
 for both, and a shared libs claim made `remove` hang on `pvc-protection`. A
 PersistentVolume is cluster-scoped, so its name also carries the namespace.
+`spec.CreatedNames` lists them by kind and name (Deployment, Service, ConfigMap,
+each Secret, the claim), the one list that `validate` holds to 63 characters and
+that `remove` passes to the namespace gate as its own, so another kind of object
+that merely shares a name still keeps the namespace.
 
 **Liveness and readiness are different checks.** Liveness is a `tcpSocket` probe
 on the management port, because it decides whether kubelet restarts the
@@ -236,6 +280,24 @@ compares that with the image the engine reports and refuses an image that starts
 any other way. A store too large for one environment variable (131072 bytes on
 Linux, 32767 characters on Windows) fails the deploy by name.
 
+**The `deploy-sha256` label makes compose recreate on any change, and tells
+`deploy` whether it will.** Compose compares a service's configuration, which
+covers the file but not the content of a secret, so a rotated credential would
+leave the old container running. `deploy` computes one digest of the file and
+every value the compose child receives (`containercli.ComposeDigest`), hands it
+to compose in `_GEN_DEPLOY_SHA256`, and the file writes it as the
+`solace-connector/deploy-sha256` label. Compose therefore recreates exactly when
+something changed and leaves an unchanged container alone, and `deploy` always
+runs a plain `up -d` and lets compose decide. Before `up` it lists the running
+containers (`ps --filter status=running`, matched by exact name in Go) and, for a
+running one, reads that label off `container inspect`: a different label, a
+missing one (a container an earlier build created) or a failed inspect counts as
+changed, and `deploy` asks first. A listing that cannot be read is an error, exit
+1, since the deploy could not say whether it would restart a running service. The
+digest holds the status account's password, which is derived from the credentials
+and the container name (see the `solmq-status` password below), so it is the same
+on every render until a credential changes and an unchanged redeploy is a no-op.
+
 **The `stores-sha256` label makes compose recreate on store change.** The stores
 are not in the compose file, so compose's own change detection cannot see them.
 The label carries a digest of every selected store's bytes, so `compose up`
@@ -280,10 +342,33 @@ mounting and `remove` can delete them all.
 under `/run/secrets`, and the connector reads credentials only from
 `/app/external/var/secrets/`. Requires podman 4.5 or newer.
 
+**Rootless is the default, and rootful is asked for.** `podman.rootful: true`
+deploys the rootful engine and needs root; `rootless.Decide` (the shared
+`rootless` package) refuses a non-root user who asks for it and root who does not,
+since deploying on behalf of a rootless user needs a key naming the user and a way
+to run podman as them, which is not built. The mode and the directory come from
+one decision, so they cannot disagree. Both are refused as usage errors (exit 2)
+before the preflight.
+
 **The unit directory is not configurable.** systemd scans only
-`/etc/containers/systemd` (root) and `~/.config/containers/systemd` (everyone
-else), so the deploy derives the directory from the invoking uid. A key could
-only name a directory systemd ignores or the account cannot write.
+`/etc/containers/systemd` (rootful) and the user's config directory under
+`containers/systemd`, so the deploy derives the directory from the mode:
+`podman.QuadletDir` takes `$XDG_CONFIG_HOME` or `$HOME/.config`, as podman's own
+generator does, and refuses a relative `XDG_CONFIG_HOME` and an unresolvable home.
+A key could only name a directory systemd ignores or the account cannot write.
+
+**Rootless needs a session, and linger.** `sudo`, `su` and cron strip
+`XDG_RUNTIME_DIR` and the bus address, which `systemctl --user` and `loginctl`
+need. `runner.ResolveQuadletScope` has `rootless.UserSession` derive what is
+missing (and refuse a runtime directory that does not exist, exit 1), and the scope
+carries the result as `Cmd.Env` for those calls alone: nothing is set
+process-wide, and podman's own calls never carry it. Without linger the user's
+manager stops at logout and starts nothing at boot, so a rootless deploy asks
+logind (`systemd.ShowLinger`) after the preflight and before any write, and turns
+it on for the user's own account (`systemd.EnableLinger`, which needs no
+privilege). A refusal ends the deploy with the `sudo loginctl enable-linger <user>`
+an administrator runs. `validate` changes nothing, so a user that does not linger
+is a host error there.
 
 **`restart` takes systemd's words.** The value lands in the unit as `Restart=`.
 systemd never restarts a unit you stopped, so its `always` is what compose's
@@ -293,13 +378,40 @@ systemd would ignore it and never restart the connector.
 **Restart counts come from systemd.** Under quadlet a restart recreates the
 container, so podman's own `RestartCount` reads 0 forever. `status` asks
 `systemctl show -p NRestarts` and falls back to the container's counter where
-systemd cannot answer.
+systemd cannot answer (`systemd.ParseNRestarts` refuses an empty or negative
+answer, and `status` also keeps the container's counter when the scope is
+refused).
 
-**`deploy` restarts a running unit.** Podman copies a mount secret into the
-container when it creates it, so only a new container sees the configuration
-this deploy loaded. A stopped or failed unit is started. On podman 4.7 and newer
-secrets are loaded with `--replace`, so a failed load leaves the previous secret
-intact.
+**`deploy` compares, asks, writes, then restarts only what changed.** Podman
+copies a mount secret into the container when it creates it, so only a new
+container sees the configuration this deploy loaded, and `daemon-reload` never
+restarts a unit. Nothing is written before the answer:
+
+1. The podman version is read first. The rendered unit is compared with the
+   file on disk (a missing one is a change), and on podman 4.7 and newer each
+   secret's stored value is read back (`podman.SecretData`, `secret inspect
+   --showsecret`, the release that also brings `secret create --replace`) and
+   compared exactly (`podman.SecretMatches`); a missing secret or a failed probe
+   is a change. Below 4.7, or with a version that cannot be read, every secret
+   counts as changed and none is probed. No digest of a value is written as a
+   label, since a label goes on `secret create`'s argv, which any local user can
+   read; the value is read on stdout only and never printed.
+2. A unit `systemctl is-active` reports as `active` or `reloading` is running;
+   any other answer, or none (the exit status is ignored, since every state but
+   active exits non-zero), is not.
+3. If something changed and the unit is running, the deploy asks. A "no" exits 0
+   having written nothing.
+4. Only the changed secrets are written, and the
+   unit only if it changed; `daemon-reload` runs only if something was written.
+   On podman 4.7 and newer secrets are loaded with
+   `podman.CreateSecret(..., replace)`, so a failed load leaves the previous
+   secret intact; below that it is `RemoveSecrets` then create.
+5. A unit that is not running is started. A running one is restarted when
+   something changed, and left alone when nothing did: the deploy says so and
+   names `solmq-conn-util restart` for a restart anyway.
+
+The `systemctl`, `loginctl` and `podman` argv come from the shared `systemd` and
+`podman` packages, and the docker commands from `containercli`.
 
 **`HealthOnFailure=` is left unset.** The check reports a verdict and never
 restarts, kills or stops anything.
@@ -313,9 +425,13 @@ fixed set of restrictions: kubernetes `allowPrivilegeEscalation: false`,
 `privileged: false`, `capabilities.drop: [ALL]` and `seccompProfile:
 RuntimeDefault`; compose `privileged: false`, `cap_drop: [ALL]`,
 `security_opt: [no-new-privileges=true]`; quadlet `NoNewPrivileges=true` and
-`DropCapability=all`. `TestArtifactsStateTheirPosture` pins what each platform
-writes and `TestArtifactsCarryNoWideningTokens` forbids the spellings that would
-widen it.
+`DropCapability=all`. The compose and quadlet blocks are the shared
+`compose.Posture` and `quadlet.Posture`, and the checks come from
+`containerart/artifacttest`. `TestArtifactsStateTheirPosture` pins what each
+platform writes and `TestArtifactsCarryNoWideningTokens` forbids the spellings
+that would widen it. `TestQuadletKeysAreWithinTheFloor` holds every quadlet key
+to podman 4.5, and `TestSecretTargetsAreAbsolutePaths` holds every secret to an
+absolute target.
 
 **`run-as: image` keeps the restrictions.** It drops only the identity. Root
 without `CAP_DAC_OVERRIDE` reads only what the file modes allow, so deploy's
@@ -323,8 +439,17 @@ mount check (`cmd/solmq-conn-util/runas.go`) judges root by the mode bits like
 any uid. Group 0 is the default gid because the image's own files belong to it.
 
 **Rootless podman** maps uid 0 to the invoking user and higher ids into the
-subordinate ranges, which `useradd` sizes at 65536. `deploy` reads `/etc/subuid`
-and `/etc/subgid` and warns when the run-as ids need more than is granted.
+subordinate ranges, which `useradd` sizes at 65536. `deploy` and `validate` ask
+`podman info` what is actually mapped (`podman.IDMap`), which covers a range an NSS
+source such as SSSD grants and which the files cannot show, and `rootless.CheckIDMap`
+refuses a numeric run-as id outside it. A refusal appends `rootless.SubIDFix`, the
+`usermod` line for a range `rootless.NextFreeRange` computes from `/etc/subuid` and
+`/etc/subgid` (marked as not computed when they cannot be read), then this tool's
+own alternatives. Id 0 and `run-as: image` need no range. Deploy exits 1 before it
+stores or writes anything; validate reports a host error. The static
+`checkRootlessRange` lint in validate stays, for a host that is not this one. No
+core-limit check: the unit sets no core ulimit, so there is nothing to compare the
+session against.
 
 ## 8. TLS
 
@@ -402,8 +527,25 @@ fallback for a session on a broker no workflow uses.
 **The `solmq-status` password is a literal.** The status script reads it back
 out of the mounted `application.yml` at run time, so there is nothing for the
 secrets model to mount separately. Anyone who can read the artifact can read it:
-the ConfigMap, the compose file, or the podman secret entry. A generated password
-rotates on every regenerate unless `SECURITY_USER_SOLMQ_STATUS_PASSWORD` pins it.
+the ConfigMap, the compose file, or the podman secret entry. Unless
+`SECURITY_USER_SOLMQ_STATUS_PASSWORD` sets it, docker and podman derive the
+password rather than draw it: the first 16 bytes of an HMAC-SHA-256, hex-encoded
+(32 lowercase hex characters), keyed by every resolved credential (key and value,
+each length-prefixed, sorted by key) over a versioned label and the container
+name. The same spec therefore renders the same password on every generate and
+deploy, so an unchanged redeploy changes nothing. Rotating a credential rotates it,
+which changes the artifact anyway. Whoever can read a docker or podman artifact
+(the docker group, or the podman secret's owner) can read the credentials too, so
+the derivation exposes nothing new there. Kubernetes and `generate config` stay
+random (`Resolver.Rand`): on kubernetes the literal sits in a ConfigMap, which RBAC
+may let someone read who cannot read the credentials' Secrets, and a value derived
+from the credentials would let them check guesses at one offline. The credentials
+do not depend on the status password (it is a literal user, never a secret
+reference), so `gen.statusPasswordFor` builds the model once with a placeholder to
+collect them, derives, then builds for real. Docker and podman are random too when
+there is nothing to key on: no credentials, or an `-env` credential that cannot be
+resolved at that moment (generate and validate tolerate an unset variable; deploy
+refuses one separately). Empty material never keys the HMAC.
 The account is GET-only, and the tool never adds a role to it.
 
 **Management security is always on and the exposure list is fixed**
@@ -423,8 +565,28 @@ rather than guessed from a directory.
 stderr, so a non-zero exec exit means exactly one thing: the exec did not reach
 the instance. `--health` is the one exception and has to be asked for by name:
 it makes one health call and exits 0 only on `UP`. It does none of the rest of
-the report, because the full report makes seven actuator calls and starts a
-JVM, far too much for a timer in a CPU-limited container.
+the report, because even the basic report makes three actuator calls, and the
+details report seven plus a JVM start. That is far too much for a timer in a
+CPU-limited container.
+
+**The basic report skips the details calls.** Uptime, version, java and heap
+cost four actuator calls and a JVM start per instance, and only the details
+level renders them. The CLI passes `--details` to the script only at that
+level, so a basic run makes three calls. The trade is that basic-level JSON
+carries none of those four fields. A script deployed by an older release
+ignores the argument and prints everything, so either pairing still works.
+
+**One exec per instance.** The run checks for the script and runs it in one
+exec, with the path and arguments as positional parameters rather than shell
+text. It echoes a marker line instead when the script is missing. A separate
+probe doubled the per-instance cost to learn something only a missing script
+needs.
+
+**Script runs go four at a time.** The in-container script is the run's
+dominant cost, so the instances run side by side and the wall time is the
+slowest one's, not the sum. Four bounds the exec streams an `--all` opens
+against one API server. Only the coordinating goroutine touches the report and
+the progress line.
 
 **Health is read under either key order.** Spring Boot 3 (connector 2.x) writes
 the instance's own status first; Spring Boot 4 (connector 3.x) sorts every key,
@@ -449,7 +611,16 @@ a sampling call (`top`, `stats`) and on kubernetes needs a metrics API.
 `--output json > report.json` produces the same bytes with a spinner, with `-v`
 or with neither. The spinner draws with carriage return and spaces, no ANSI,
 capped at 79 columns so a wrapped line never leaves residue above the cursor.
-`--watch` prints no progress: the redraw owns the screen.
+`--watch` prints no progress: the redraw owns the screen, and the same holds when
+stdout is a pipe, where each refresh is a section line instead of a redraw.
+
+**A watch refresh collects before it clears.** Status runs on the shared
+`watch.LoopFrames`, which hands each refresh a frame to render into and writes
+the clear-screen, the header and the frame in one write once the collection is
+complete, so the previous report stays readable for the whole collection. A
+refresh cut short by Ctrl-C draws nothing, which leaves the last complete report
+in place. A collection that fails goes back to the loop, which draws the header
+and then warns on stderr, naming the retry.
 
 **JSON is the same model the tables render from**, so they cannot disagree.
 Fields are a compatibility contract: additions keep `schemaVersion`, renames
@@ -474,7 +645,7 @@ unauthenticated, which is right for a foreign instance with security disabled.
 ask for, so there is no `--shell` flag. A one-shot command reaches the engine as
 argv, never `sh -c`, so shell metacharacters are refused rather than misread.
 
-**`cli` attaches the real terminal.** See `runner.Attacher` in
+**`cli` attaches the real terminal.** See `Attach` in
 [section 12](#12-runner-seams).
 
 ## 11. download jar
@@ -521,34 +692,64 @@ with no opt-out.
 
 ## 12. Runner seams
 
-`runner.Runner` is one method, `Run`, fully buffered: it returns once the process
-has exited with stdout and stderr merged. Most Runners in tests are fakes that
-record argv, so the other capabilities are separate interfaces asked for by type
-assertion, and `var _ Streamer = OS{}` makes the production assertion a
-compile-time fact.
+Every external command crosses the shared `runner.Runner`
+(`github.com/hafio/go-deploy-utility/runner`, imported as `gdurunner` because this
+module's own package is also `runner`). It has two methods: `Run(ctx, cmd, stdout,
+stderr)` executes a `gdurunner.Cmd` (argv, stdin bytes, extra environment) and writes
+the two streams to the writers it is given, and `Attach(cmd, stdin, stdout, stderr)`
+hands the terminal to a session. `Combined`, `Split` and `Output` are capture helpers
+over `Run`, so a test fake implements two methods and every mode works.
 
-- **`Streamer`** is for `logs --follow`, where output must arrive while the
-  process runs. Its two writers are separate, so `logs > app.log` captures the
-  log and leaves the platform CLI's diagnostics on the terminal. A cancelled
-  context is reported as success: a follow the operator ended with Ctrl-C did
-  not fail. `cmd.Cancel` interrupts, falling back to `Kill` on Windows, with
-  `WaitDelay` as the backstop.
-- **`Splitter`** returns stdout and stderr apart, both buffered. `runParsed`
-  uses it for every helper that parses output (the five JSON readers,
-  `KubernetesTop`, `EngineList`, `EngineStats`, `SystemctlNRestarts`), because a
-  platform CLI writes warnings to stderr whenever it likes (OpenShift greets
-  `oc get` with a deprecation notice), and merged into stdout that line lands in
-  front of the JSON. `ScriptInstalled` and `RunStatusScript` still call `Run`:
-  they tolerate an extra line and want the script's stderr advisories.
-- **`Attacher`** is for `cli`, where the child must have the operator's real
-  terminal. Its parameters are `*os.File`, because `os/exec` interposes a pipe
-  for any other writer, a pipe is not a terminal, and the engine would refuse
-  the pty. It returns the child's own exit status and reserves the error for a
-  child that never started. No context: a session is ended from inside by
-  typing `exit`. Ctrl-C is handled by not handling it: `signal.Notify` onto a
-  channel nobody reads keeps the parent alive while the terminal delivers the
-  interrupt to the child. Not `signal.Ignore`, whose `SIG_IGN` would be
-  inherited across exec and leave the container's shell uninterruptible.
+The docker and podman commands are built by the shared `containercli` package (the
+preflight `info` and its one failure message, compose with its file on stdin, the
+lifecycle verbs, the container listing, exec, upload and logs) and read back with
+`containercli/inspect`, which decodes `container inspect` and strips control
+characters (`inspect.Printable`) from anything the engine supplied before it is
+printed. This module keeps the `command:` allowlist and the `runner.Runner` calls;
+the package only builds `Cmd` values. Names read back from the engine are held to
+`containercli.ValidName` before they can reach an argv.
+
+- **Combined** is what each helper that reports output uses: stdout and stderr merged
+  in arrival order, returned even when the command fails.
+- **Split** is what `runParsed` uses for every helper that parses output (the JSON
+  readers, `KubernetesTop`, `EngineList`, `EngineStats`, `SystemctlNRestarts`, the
+  podman version, id-map and image-command reads, and `systemctl is-active`'s state), because a platform CLI writes warnings to
+  stderr whenever it likes (OpenShift greets `oc get` with a deprecation notice), and
+  merged into stdout that line lands in front of the JSON. A failure carries both
+  streams, trimmed, so the message is no less useful. `RunStatusScript` still
+  captures combined: it reads its absent marker line by line, so an extra line does
+  no harm, and it wants the script's stderr advisories.
+- **`logs`** calls `Run` with the process's own stdout and stderr, so output arrives
+  while the command runs and `logs > app.log` captures the log and leaves the platform
+  CLI's diagnostics on the terminal. Under `--follow` the operator's Ctrl-C cancels the
+  context; `Exec` interrupts the command, then kills it when its grace period ends, and
+  reports the cancel as an error wrapping `context.Canceled`. That is policy here, not
+  in the runner: `readLog` reads an error with `ctx.Err() != nil` that wraps
+  `context.Canceled` as the clean end of a follow and exits 0, and anything else is a
+  failure (exit 1).
+- **`cli`** calls `Attach`, where the child must have the operator's real terminal. Its
+  parameters are `*os.File`, because `os/exec` interposes a pipe for any other writer,
+  a pipe is not a terminal, and the engine would refuse the pty. It returns the child's
+  own exit status and reserves the error for a child that never started. No context: a
+  session is ended from inside by typing `exit`, and the runner never interrupts it.
+  Ctrl-C is handled by not handling it: `signal.Notify` onto a channel nobody reads
+  keeps the parent alive while the terminal delivers the interrupt to the child. Not
+  `signal.Ignore`, whose `SIG_IGN` would be inherited across exec and leave the
+  container's shell uninterruptible.
+- **Process facts are inputs.** `runner.ResolveQuadletScope` takes a `ScopeEnv`
+  (euid, `getenv`, home, `isDir`, whether the host is Linux) and the `rootful`
+  setting instead of reading the process; `LiveScopeEnv` is the production value.
+  `cmd/solmq-conn-util` reaches it, the subid files and the user's name through the
+  `host` seam (`hostFacts`), so a test supplies its own euid and files and passes
+  the same as root or off Linux. `QuadletScope.WithEnv` attaches the session to
+  each `systemctl --user` and `loginctl` command as `Cmd.Env`; the runner allows an
+  environment on any command.
+- **Contexts.** Every helper in `internal/runner` takes a `context.Context` first.
+  `cmd/solmq-conn-util` passes `bg()` (`context.Background()`) at every helper call,
+  so Ctrl-C keeps its default effect everywhere except `logs --follow`. A context that
+  is already done starts nothing.
+- **Errors** read `<program>: <cause>` (`kubectl: exit status 1`) and never carry an
+  argument, the stdin bytes or an environment value.
 
 Every runner prints nothing of its own. The child's output is returned to the
 caller, which reports it followed by `ok: <action> <platform>` or `error: ...`.

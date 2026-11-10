@@ -62,8 +62,9 @@ the build on drift. After changing a command:
 ```
 
 **Hand-written docs.** `TestSupportNoticeInHandWrittenDocs` requires the
-support notice from `cmd/solmq-conn-util/support.go` verbatim under the H1 of
-every hand-written doc, and `TestSupportNoticeInGeneratorPage` holds the
+support notice built in `cmd/solmq-conn-util/support.go` (`supportNotice`, from
+the shared module's `notice` package) verbatim under the H1 of every
+hand-written doc, and `TestSupportNoticeInGeneratorPage` holds the
 generator page to the same text.
 
 **Test catalogue.** [`test.md`](test.md) lists every test and case by package.

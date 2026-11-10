@@ -16,19 +16,29 @@ package main
 // for a whole selector, `inspect a b c`), so the cost of a status run barely
 // grows with the number of instances. Only the sampling calls under --details
 // (kubectl top, docker stats) and the in-container script exec are per-run or
-// per-instance costs beyond that.
+// per-instance costs beyond that. The exec is one per instance, checking for
+// the script and running it together, and several run at once (see
+// statusScriptWorkers), so its wall time is the slowest instance's rather than
+// the sum of all of them.
 //
 // Every fact collected here lands in an internal/statusreport model and is
 // rendered from it, so the table view and --output json can never disagree.
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/confirm"
+	"github.com/hafio/go-deploy-utility/execguard"
+	"github.com/hafio/go-deploy-utility/exitcode"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
+	gduwatch "github.com/hafio/go-deploy-utility/watch"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
@@ -53,12 +63,14 @@ const (
 	outputJSON  = "json"
 )
 
-// Watch interval bounds. The default is the only documented value; see
-// watchFlag for why an override exists but is not advertised.
+// Watch interval bounds, in whole seconds, taken from the shared watch package so
+// the flag and the loop agree on what is allowed. The default is the only
+// documented value; see watchFlag for why an override exists but is not
+// advertised.
 const (
-	watchDefaultSeconds = 5
-	watchMinSeconds     = 1
-	watchMaxSeconds     = 3600
+	watchDefaultSeconds = int(gduwatch.DefaultInterval / time.Second)
+	watchMinSeconds     = int(gduwatch.MinInterval / time.Second)
+	watchMaxSeconds     = int(gduwatch.MaxInterval / time.Second)
 )
 
 // repeatableName implements flag.Value for a repeatable, free-form name flag
@@ -98,7 +110,7 @@ func (w *watchFlag) String() string { return "" }
 func (w *watchFlag) Set(s string) error {
 	switch s {
 	case "true":
-		w.on, w.interval = true, watchDefaultSeconds*time.Second
+		w.on, w.interval = true, gduwatch.DefaultInterval
 		return nil
 	case "false":
 		w.on = false
@@ -134,7 +146,7 @@ type statusOpts struct {
 	port     int
 	user     string
 	command  string
-	allow    []string
+	approved execguard.Approvals
 	all      bool
 
 	// now is the clock ages are measured against, injected here rather than
@@ -143,7 +155,7 @@ type statusOpts struct {
 }
 
 // runStatus parses status's target word and flags and hands them to actStatus.
-func runStatus(args []string, r runner.Runner) int {
+func runStatus(args []string, r gdurunner.Runner) int {
 	fs := verbFlagSet("status")
 	env := envFlag(fs)
 	install := fs.Bool("install", false, "install the status script on every target without prompting")
@@ -175,6 +187,10 @@ func runStatus(args []string, r runner.Runner) int {
 	if err != nil {
 		return flagExit("status", err)
 	}
+	approvals, aerr := approvalsFrom(*allow)
+	if aerr != nil {
+		return usageExit(aerr)
+	}
 
 	view, code := statusView(pos)
 	if code != 0 {
@@ -185,7 +201,7 @@ func runStatus(args []string, r runner.Runner) int {
 		view: view, json: *output == outputJSON, watch: watch, verbose: *verbose,
 		envPath: *env, install: *install, platform: *platform,
 		pods: pods, conts: containers, ns: *namespace, port: *port,
-		user: *user, command: *command, allow: *allow, all: *all,
+		user: *user, command: *command, approved: approvals, all: *all,
 		now: time.Now(),
 	}
 	if *details {
@@ -205,22 +221,22 @@ func statusView(pos []string) (statusreport.View, int) {
 	if len(pos) == 0 {
 		fmt.Fprintf(os.Stderr, "status: missing target (%s)\n\n", pipeList(targetNames("status")))
 		fmt.Fprint(os.Stderr, verbUsage("status"))
-		return 0, 2
+		return 0, exitcode.Usage
 	}
 	if len(pos) > 1 {
 		fmt.Fprintf(os.Stderr, "status: unexpected argument %q\n", pos[1])
-		return 0, 2
+		return 0, exitcode.Usage
 	}
 	switch resolveTarget("status", pos[0]) {
 	case statusTargetContainer:
-		return statusreport.ViewContainer, 0
+		return statusreport.ViewContainer, exitcode.OK
 	case statusTargetApplication:
-		return statusreport.ViewApplication, 0
+		return statusreport.ViewApplication, exitcode.OK
 	case statusTargetAll:
-		return statusreport.ViewAll, 0
+		return statusreport.ViewAll, exitcode.OK
 	}
 	fmt.Fprintf(os.Stderr, "status: unknown target %q (want %s)\n", pos[0], wantList(targetNames("status")))
-	return 0, 2
+	return 0, exitcode.Usage
 }
 
 // checkStatusFlags rejects the combinations that cannot mean anything, loudly
@@ -232,18 +248,18 @@ func checkStatusFlags(o statusOpts, output string) int {
 	case outputTable, outputJSON:
 	default:
 		fmt.Fprintf(os.Stderr, "status: unknown --output %q (want %s)\n", output, wantList([]string{outputTable, outputJSON}))
-		return 2
+		return exitcode.Usage
 	}
 	if o.json && o.watch.on {
 		// A redraw loop emitting a document per tick is neither a stream a parser
 		// can read nor a screen a human can, so the two are refused together
 		// rather than one silently winning.
 		fmt.Fprintln(os.Stderr, "status: --output json cannot be combined with --watch")
-		return 2
+		return exitcode.Usage
 	}
 	if o.all && (len(o.pods) > 0 || len(o.conts) > 0) {
 		fmt.Fprintln(os.Stderr, "status: --all searches for every instance by image name, so it cannot be combined with --pod/--container")
-		return 2
+		return exitcode.Usage
 	}
 	if o.view == statusreport.ViewContainer {
 		// These three only steer the in-container script, which the container
@@ -259,7 +275,7 @@ func checkStatusFlags(o statusOpts, output string) int {
 			if f.set {
 				fmt.Fprintf(os.Stderr, "status: %s applies to the %s and %s views, which run the in-container script; %s does not\n",
 					f.name, statusTargetApplication, statusTargetAll, statusTargetContainer)
-				return 2
+				return exitcode.Usage
 			}
 		}
 	}
@@ -274,14 +290,14 @@ func checkStatusFlags(o statusOpts, output string) int {
 		// saying that run is not happening.
 		fmt.Fprintf(os.Stderr, "note: %s prints no steps under %s -- the redraw owns the screen\n", verboseFlagName, watchFlagName)
 	}
-	return 0
+	return exitcode.OK
 }
 
 // actStatus resolves the platform and its targets and renders the report, once
 // or on a watch loop. Everything that can fail the whole run -- an unreadable
 // env.yaml, an unsafe name, a platform that cannot be resolved, a failed
 // preflight -- fails here, before any instance is queried.
-func actStatus(o statusOpts, r runner.Runner) int {
+func actStatus(o statusOpts, r gdurunner.Runner) int {
 	sess, serr := resolveInstanceSession(instanceRequest{
 		verb:     verbStatus,
 		envPath:  o.envPath,
@@ -290,11 +306,11 @@ func actStatus(o statusOpts, r runner.Runner) int {
 		command:  o.command,
 		pods:     o.pods,
 		conts:    o.conts,
-		allow:    o.allow,
+		approved: o.approved,
 		all:      o.all,
 	})
 	if serr != nil {
-		return errExit(serr)
+		return usageExit(serr)
 	}
 	o.ns = sess.ns
 
@@ -305,14 +321,14 @@ func actStatus(o statusOpts, r runner.Runner) int {
 	// sed address inside the generated script, where a '/' or a regex
 	// metacharacter would break the password lookup rather than fail loudly.
 	if !validate.SafeActuatorUser(o.user) {
-		return errExit(fmt.Errorf("--user %q is not a usable account name (%s)", o.user, validate.SafeActuatorUserReason))
+		return usageExit(fmt.Errorf("--user %q is not a usable account name (%s)", o.user, validate.SafeActuatorUserReason))
 	}
 
 	if o.port == 0 {
 		o.port = sess.env.Defaults.EffectiveManagementPort()
 	}
 	if o.port < 1 || o.port > 65535 {
-		return errExit(fmt.Errorf("--management-port %d must be 1-65535", o.port))
+		return usageExit(fmt.Errorf("--management-port %d must be 1-65535", o.port))
 	}
 
 	// Progress starts here rather than in the collector, because the first thing
@@ -322,12 +338,15 @@ func actStatus(o statusOpts, r runner.Runner) int {
 	prog := newProgress(o, os.Stderr)
 	defer prog.stop()
 
-	// Reuse the read-only preflight probe before touching anything, same as
-	// deploy/remove. The action only steers kubernetes' can-i question
-	// (docker/podman ignore it): status asks to get pods, the one permission it
-	// cannot work without, so a view-only operator is not refused a write.
-	prog.step("preflight")
-	if code, ok := preflight(r, runner.ActionStatus, sess.platform, sess.command, sess.ns, o.allow); !ok {
+	// Reuse the read-only engine probe before touching anything, same as
+	// deploy/remove. Kubernetes asks nothing up front: status reads what it is
+	// allowed to read and reports what it is refused, so a view-only operator is
+	// never turned away by a question, and the step is announced only where a call
+	// stands behind it.
+	if sess.platform != validate.PlatformKubernetes {
+		prog.step("preflight")
+	}
+	if code, ok := preflightRead(r, runner.ActionStatus, sess.platform, sess.command, sess.rootless(), o.approved); !ok {
 		return code
 	}
 
@@ -352,7 +371,10 @@ func actStatus(o statusOpts, r runner.Runner) int {
 
 	c := &statusCollector{opts: o, platform: sess.platform, cmdArgv: sess.cmdArgv, env: sess.env, r: r, prog: prog}
 	if o.watch.on {
-		return watchStatus(o, c)
+		// Ctrl-C ends the watch with success; the context is how the loop hears it.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		return watchStatus(ctx, o, c, watchIO{redraw: gduwatch.CanRedraw(os.Stdout), out: os.Stdout})
 	}
 	return c.renderOnce(os.Stdout)
 }
@@ -367,7 +389,7 @@ type statusCollector struct {
 	platform string
 	cmdArgv  []string
 	env      *spec.Env
-	r        runner.Runner
+	r        gdurunner.Runner
 
 	// prog names the step each slow call is on while the operator waits. Built
 	// once in actStatus, since the first step is the preflight probe that runs
@@ -441,7 +463,7 @@ func (c *statusCollector) collectKubernetes(rep *statusreport.Report) error {
 	rep.Group = group
 
 	c.prog.step("list pods")
-	doc, err := runner.KubernetesPodsJSON(c.r, c.cmdArgv, o.ns, selector, o.pods, o.all)
+	doc, err := runner.KubernetesPodsJSON(bg(), c.r, c.cmdArgv, o.ns, selector, o.pods, o.all)
 	if err != nil {
 		return err
 	}
@@ -465,14 +487,14 @@ func (c *statusCollector) collectKubernetes(rep *statusreport.Report) error {
 	if c.wantsContainerFacts() && !o.all && c.env != nil && c.env.Kubernetes != nil {
 		name := c.env.Kubernetes.Deployment.Name
 		c.prog.step("read deployment %s", name)
-		if doc, derr := runner.KubernetesGetJSON(c.r, c.cmdArgv, o.ns, "deployment", name); derr != nil {
+		if doc, derr := runner.KubernetesGetJSON(bg(), c.r, c.cmdArgv, o.ns, "deployment", name); derr != nil {
 			rep.Notes = append(rep.Notes, fmt.Sprintf("could not read deployment %s: %v", name, derr))
 		} else if w, werr := statusreport.ParseDeployment(doc); werr == nil {
 			rep.Workload = w
 		}
 		if c.env.Kubernetes.Service.Enabled {
 			c.prog.step("read service %s", name)
-			if doc, serr := runner.KubernetesGetJSON(c.r, c.cmdArgv, o.ns, "service", name); serr == nil {
+			if doc, serr := runner.KubernetesGetJSON(bg(), c.r, c.cmdArgv, o.ns, "service", name); serr == nil {
 				rep.Workload, _ = statusreport.MergeService(rep.Workload, doc)
 			}
 		}
@@ -482,7 +504,7 @@ func (c *statusCollector) collectKubernetes(rep *statusreport.Report) error {
 		return nil
 	}
 	c.prog.step("sample resource use")
-	if out, terr := runner.KubernetesTop(c.r, c.cmdArgv, o.ns, selector, o.pods, o.all); terr != nil {
+	if out, terr := runner.KubernetesTop(bg(), c.r, c.cmdArgv, o.ns, selector, o.pods, o.all); terr != nil {
 		// The metrics API is an optional cluster add-on, so its absence is a
 		// note against the resource lines rather than a failed run.
 		rep.Notes = append(rep.Notes, fmt.Sprintf("no resource usage: %v; install metrics-server, or drop --details", terr))
@@ -521,7 +543,7 @@ func (c *statusCollector) checkComponents(rep *statusreport.Report) {
 				continue
 			}
 			c.prog.step("check %s %s", comp.Kind, comp.Name)
-			doc, err := runner.KubernetesGetJSON(c.r, c.cmdArgv, inst.Namespace, comp.Kind, comp.Name)
+			doc, err := runner.KubernetesGetJSON(bg(), c.r, c.cmdArgv, inst.Namespace, comp.Kind, comp.Name)
 			if err != nil {
 				comp.Status = "MISSING"
 			} else if ok, status := statusreport.ObjectExists(doc); ok {
@@ -555,7 +577,7 @@ func (c *statusCollector) collectEngine(rep *statusreport.Report) error {
 	}
 
 	c.prog.step("inspect containers")
-	doc, err := runner.EngineInspectJSON(c.r, c.cmdArgv, names)
+	doc, err := runner.EngineInspectJSON(bg(), c.r, c.cmdArgv, names)
 	if err != nil {
 		return err
 	}
@@ -585,7 +607,7 @@ func (c *statusCollector) collectEngine(rep *statusreport.Report) error {
 	// enrichment. On kubernetes it arrives free in the pod document either way.
 	c.applyDigests(rep)
 	c.prog.step("sample resource use")
-	if out, serr := runner.EngineStats(c.r, c.cmdArgv, names); serr != nil {
+	if out, serr := runner.EngineStats(bg(), c.r, c.cmdArgv, names); serr != nil {
 		rep.Notes = append(rep.Notes, fmt.Sprintf("no resource usage: %v", serr))
 	} else {
 		statusreport.ApplyStats(rep.Instances, out)
@@ -604,11 +626,10 @@ func (c *statusCollector) applyPodmanRestarts(rep *statusreport.Report) {
 	if c.platform != validate.PlatformPodman {
 		return
 	}
-	// Nothing is read from env.yaml here: the scope follows the invoking user, so
-	// it lands on the same directory and the same systemd instance a deploy by
-	// that user would have used. status can run with no env.yaml at all (see
-	// loadStatusEnv), and this now needs none.
-	sc, err := runner.ResolveQuadletScope()
+	// podman.rootful is the one setting read from env.yaml, and status can run
+	// with none (see loadStatusEnv), so an absent section is the rootless default.
+	// Any refusal or session failure leaves the container's own count in place.
+	sc, err := runner.ResolveQuadletScope(host().scope, c.podmanRootful())
 	if err != nil {
 		return
 	}
@@ -618,13 +639,19 @@ func (c *statusCollector) applyPodmanRestarts(rep *statusreport.Report) {
 			continue
 		}
 		c.prog.step("read restart count %s %d/%d", inst.Name, i+1, len(rep.Instances))
-		n, nerr := runner.SystemctlNRestarts(c.r, sc, gen.PodmanServiceName(inst.Name))
+		n, nerr := runner.SystemctlNRestarts(bg(), c.r, sc, gen.PodmanServiceName(inst.Name))
 		if nerr != nil {
 			continue
 		}
 		inst.Container.Restarts = n
 		inst.Container.RestartSource = "systemd"
 	}
+}
+
+// podmanRootful is env.yaml's podman.rootful, false (the rootless default) when
+// there is no env.yaml or no podman section.
+func (c *statusCollector) podmanRootful() bool {
+	return c.env != nil && c.env.Podman != nil && c.env.Podman.Rootful
 }
 
 // applyDigests fills in the registry digest each instance is actually running,
@@ -647,7 +674,7 @@ func (c *statusCollector) applyDigests(rep *statusreport.Report) {
 				continue
 			}
 			c.prog.step("read image digest %s", ref)
-			if doc, err := runner.EngineImageInspectJSON(c.r, c.cmdArgv, ref); err == nil {
+			if doc, err := runner.EngineImageInspectJSON(bg(), c.r, c.cmdArgv, ref); err == nil {
 				d = statusreport.ParseImageDigest(doc)
 			}
 			digests[ref] = d
@@ -743,107 +770,180 @@ func quoteAll(vals []string) []string {
 
 // ---- the application half ----------------------------------------------------
 
-// collectApplication ensures the status script is present on each instance and
-// runs it, filling in each instance's application block. It reports whether any
-// instance could not be reached and run.
+// statusScriptWorkers is how many instances the status script runs on at once.
+// The script is the run's dominant cost, so running it side by side makes the
+// wall time the slowest instance's rather than the sum of all of them. Four keeps
+// an --all over many pods from opening dozens of exec streams against one API
+// server at once. A var rather than a const for the reason progressFrameRate is
+// one: a test sets it to 1 to pin the order the calls are made in.
+var statusScriptWorkers = 4
+
+// scriptResult is one instance's answer from runner.RunStatusScript: its
+// report, or that the script is not there, or why the exec failed.
+type scriptResult struct {
+	out     string
+	present bool
+	err     error
+}
+
+// collectApplication runs the status script on each instance, filling in each
+// instance's application block. It reports whether any instance could not be
+// reached and run.
 //
-// The probe/install phase is separate from the run phase on purpose: the
-// install confirmation is asked once for every instance that needs it, rather
-// than once per instance.
+// One exec per instance both checks for the script and runs it. Only the
+// instances found without it cost more: the install confirmation is asked once
+// for all of them, rather than once per instance, and each one installed is
+// then run.
 func (c *statusCollector) collectApplication(rep *statusreport.Report) bool {
-	script := statusscript.Render(c.opts.port, c.opts.user)
+	args := c.scriptArgs()
+	every := make([]int, len(rep.Instances))
+	for i := range every {
+		every[i] = i
+	}
+	missing, failed := c.applyScripts(rep, every, args)
+	if len(missing) == 0 {
+		return failed
+	}
+	installed, installFailed := c.installScripts(rep, missing)
+	stillMissing, runFailed := c.applyScripts(rep, installed, args)
+	// The install reported success but the run found nothing at the path: the
+	// write landed somewhere else, or was undone. Said against the instance
+	// rather than offered another install, which would only repeat itself.
+	markMissing(rep, stillMissing, "the status script is still missing after the install")
+	return failed || installFailed || runFailed || len(stillMissing) > 0
+}
+
+// scriptArgs is what the script is run with: DetailsArg only at the details
+// level, the one level that renders the lines it adds.
+func (c *statusCollector) scriptArgs() []string {
+	if c.opts.level == statusreport.LevelDetails {
+		return []string{statusscript.DetailsArg}
+	}
+	return nil
+}
+
+// applyScripts runs the script on the instances at idx and records each answer
+// against its instance: the parsed report, or why the script could not run. It
+// returns the instances the script was not found on, in report order, and
+// whether any instance could not be run.
+//
+// The script always exits 0 and puts its findings in the output, so an error
+// here is the exec failing rather than a standby instance -- reported against
+// that instance, so one unreachable instance does not hide the rest.
+func (c *statusCollector) applyScripts(rep *statusreport.Report, idx []int, args []string) ([]int, bool) {
 	failed := false
-
-	// Indexed by namespace and name, not by name alone: under --all two pods in
-	// different namespaces can share a name, and a bare-name key would report
-	// one of them with the other's answer.
 	var missing []int
-	present := map[int]bool{}
-	for i := range rep.Instances {
+	for n, res := range c.runScripts(rep, idx, args) {
+		i := idx[n]
 		inst := &rep.Instances[i]
-		c.prog.step("install probe %s %d/%d", inst.Name, i+1, len(rep.Instances))
-		ok, err := runner.ScriptInstalled(c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerPath)
-		if err != nil {
-			inst.Error = fmt.Sprintf("could not check for the status script: %v", err)
+		switch {
+		case res.err != nil:
+			inst.Error = fmt.Sprintf("could not run the status script: %v", res.err)
 			failed = true
-			continue
-		}
-		if ok {
-			present[i] = true
-		} else {
+		case !res.present:
 			missing = append(missing, i)
+		default:
+			inst.Application = statusreport.ParseApplication(res.out)
 		}
 	}
+	return missing, failed
+}
 
-	if len(missing) > 0 {
-		doInstall := c.opts.install
-		if !doInstall && !c.promptedInstall {
-			c.promptedInstall = true
-			// Paused around the prompt: the question goes to stderr too (see
-			// readStdinLine), so a spinner frame drawn under it would overwrite it.
-			var answer bool
-			var cerr error
-			c.prog.pause(func() {
-				answer, cerr = confirmInstall(instanceNames(rep, missing))
-			})
-			if cerr != nil {
-				// The prompt could not be asked at all (stdin is not a TTY). That
-				// cannot be resolved for these instances, but the ones that already
-				// carry the script are still worth reporting, so they are marked and
-				// the run carries on rather than being abandoned.
-				rep.Notes = append(rep.Notes, cerr.Error())
-				markMissing(rep, missing, "the status script is not installed")
-				missing = nil
-				failed = true
-			} else {
-				doInstall = answer
-			}
-		}
-		for n, i := range missing {
-			inst := &rep.Instances[i]
-			if !doInstall {
-				inst.Error = "the status script is not installed, and the install prompt was declined"
-				failed = true
-				continue
-			}
-			c.prog.step("install script %s %d/%d", inst.Name, n+1, len(missing))
-			if _, err := runner.InstallScript(c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerDir, statusscript.ContainerPath, script); err != nil {
-				inst.Error = fmt.Sprintf("could not install the status script: %v", err)
-				failed = true
-				continue
-			}
-			present[i] = true
-		}
+// runScripts runs the status script on the instances at idx, up to
+// statusScriptWorkers at a time, and returns each answer at its position in
+// idx. Positions rather than names: under --all two pods in different
+// namespaces can share a name.
+//
+// Only this goroutine touches rep and the progress line. The workers are handed
+// each name and namespace by value, take jobs in report order, and send back
+// what they found with how long it took, which is also why one worker makes the
+// calls in exactly report order.
+func (c *statusCollector) runScripts(rep *statusreport.Report, idx []int, args []string) []scriptResult {
+	results := make([]scriptResult, len(idx))
+	if len(idx) == 0 {
+		return results
 	}
+	type job struct {
+		n        int
+		name, ns string
+	}
+	type answer struct {
+		n    int
+		res  scriptResult
+		took time.Duration
+	}
+	jobs := make(chan job, len(idx))
+	for n, i := range idx {
+		jobs <- job{n: n, name: rep.Instances[i].Name, ns: rep.Instances[i].Namespace}
+	}
+	close(jobs)
+	answers := make(chan answer, len(idx))
 
-	// i/N counts the instances the script is actually run on, not every instance
-	// in the report: one whose probe failed, or whose install was declined, never
-	// gets a call, and counting it would leave a gap in the sequence the operator
-	// is watching for movement.
-	ran, total := 0, len(present)
-	for i := range rep.Instances {
+	c.prog.step("status script on %d instance(s)", len(idx))
+	for w := 0; w < max(1, min(statusScriptWorkers, len(idx))); w++ {
+		go func() {
+			for j := range jobs {
+				start := progressNow()
+				out, present, err := runner.RunStatusScript(bg(), c.r, c.cmdArgv, c.platform, j.name, j.ns, statusscript.ContainerPath, args...)
+				answers <- answer{n: j.n, res: scriptResult{out: out, present: present, err: err}, took: progressNow().Sub(start)}
+			}
+		}()
+	}
+	// i/N counts answers as they arrive, which is what tells an operator under
+	// --verbose that the batch is advancing rather than stuck on one exec.
+	for done := 1; done <= len(idx); done++ {
+		a := <-answers
+		results[a.n] = a.res
+		c.prog.done(a.took, "status script %s %d/%d", rep.Instances[idx[a.n]].Name, done, len(idx))
+	}
+	return results
+}
+
+// installScripts installs the status script on the missing instances, asking
+// first unless --install was given, and returns the ones it installed. The
+// question is asked at most once a run, so a watch loop does not block its
+// redraw on the same question every tick.
+func (c *statusCollector) installScripts(rep *statusreport.Report, missing []int) ([]int, bool) {
+	failed := false
+	doInstall := c.opts.install
+	if !doInstall && !c.promptedInstall {
+		c.promptedInstall = true
+		// Paused around the prompt: the question goes to stderr too (see
+		// confirmInstall), so a spinner frame drawn under it would overwrite it.
+		var answer bool
+		var cerr error
+		c.prog.pause(func() {
+			answer, cerr = confirmInstall(instanceNames(rep, missing))
+		})
+		if cerr != nil {
+			// The prompt could not be asked at all (stdin is not a TTY). That
+			// cannot be resolved for these instances, but the ones that already
+			// carry the script are still worth reporting, so they are marked and
+			// the run carries on rather than being abandoned.
+			rep.Notes = append(rep.Notes, cerr.Error())
+			markMissing(rep, missing, "the status script is not installed")
+			return nil, true
+		}
+		doInstall = answer
+	}
+	script := statusscript.Render(c.opts.port, c.opts.user)
+	var installed []int
+	for n, i := range missing {
 		inst := &rep.Instances[i]
-		if !present[i] {
-			continue
-		}
-		ran++
-		// The script always exits 0 and puts its findings in the output, so an
-		// error here is the exec failing rather than a standby instance -- report
-		// it against this instance and keep going, so one unreachable instance
-		// does not hide the rest.
-		//
-		// This is the run's dominant cost: one exec per instance, and seven
-		// sequential actuator calls inside each one.
-		c.prog.step("status script %s %d/%d", inst.Name, ran, total)
-		out, err := runner.RunStatusScript(c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerPath)
-		if err != nil {
-			inst.Error = fmt.Sprintf("could not run the status script: %v", err)
+		if !doInstall {
+			inst.Error = "the status script is not installed, and the install prompt was declined"
 			failed = true
 			continue
 		}
-		inst.Application = statusreport.ParseApplication(out)
+		c.prog.step("install script %s %d/%d", inst.Name, n+1, len(missing))
+		if _, err := runner.InstallScript(bg(), c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerPath, script); err != nil {
+			inst.Error = fmt.Sprintf("could not install the status script: %v", err)
+			failed = true
+			continue
+		}
+		installed = append(installed, i)
 	}
-	return failed
+	return installed, failed
 }
 
 // markMissing records why each of the given instances has no application
@@ -865,20 +965,19 @@ func instanceNames(rep *statusreport.Report, idx []int) []string {
 }
 
 // confirmInstall asks once whether to install the status script on the listed
-// missing instances, via the same promptLine seam and non-TTY refusal
+// missing instances, via the same prompter and non-TTY refusal
 // promptPlatformMenu uses. "y"/"yes" (case-insensitive) installs; anything
 // else, including a blank line, declines.
 func confirmInstall(missing []string) (bool, error) {
-	line, err := promptLine(fmt.Sprintf("status script missing on %s -- install it now? [y/N] ", strings.Join(missing, ", ")))
+	yes, answered, err := prompter.Ask(
+		fmt.Sprintf("status script missing on %s -- install it now? [y/N] ", strings.Join(missing, ", ")), confirm.Lenient)
+	if err == nil && !answered {
+		err = confirm.Unanswered()
+	}
 	if err != nil {
 		return false, fmt.Errorf("confirming the status script install interactively: %w; pass --install instead", err)
 	}
-	switch strings.ToLower(line) {
-	case "y", "yes":
-		return true, nil
-	default:
-		return false, nil
-	}
+	return yes, nil
 }
 
 // ---- rendering ---------------------------------------------------------------
@@ -887,11 +986,17 @@ func confirmInstall(missing []string) (bool, error) {
 // the run (nothing to report on at all) goes to stderr with the exit code, the
 // way every other verb reports a failure; anything the report itself can carry
 // is already in it.
-func (c *statusCollector) renderOnce(w *os.File) int {
+func (c *statusCollector) renderOnce(w io.Writer) int {
 	rep, failed, err := c.collect()
 	if err != nil {
 		return errExit(err)
 	}
+	return c.emit(w, rep, failed)
+}
+
+// emit prints a collected report, as the tables or as the JSON document, and
+// returns the exit code it stands for.
+func (c *statusCollector) emit(w io.Writer, rep statusreport.Report, failed bool) int {
 	if c.opts.json {
 		doc, jerr := statusreport.JSON(rep)
 		if jerr != nil {
@@ -904,45 +1009,79 @@ func (c *statusCollector) renderOnce(w *os.File) int {
 		}
 	}
 	if failed {
-		return 1
+		return exitcode.Failure
 	}
-	return 0
+	return exitcode.OK
 }
 
-// watchStatus re-renders the report until the operator interrupts it. Each tick
-// clears the screen and prints a header naming the interval and the time, so a
-// glance tells whether what is on screen is current.
+// watchIO is where a watch loop writes and how it pauses, so a test can drive
+// it without a terminal or a real clock.
+type watchIO struct {
+	// redraw clears the screen before each refresh; otherwise each refresh is
+	// appended under a section line (a pipe or a file never sees an escape byte).
+	redraw bool
+	out    io.Writer
+
+	// sleep pauses for d or until ctx is done; the shared watch.Sleep when nil.
+	sleep func(ctx context.Context, d time.Duration) error
+}
+
+// watchTitle is what follows "Every <interval>: " in the redraw header: the verb,
+// the view as the operator spelled it, and the flags that change what is shown.
+func watchTitle(o statusOpts) string {
+	title := "solmq-conn-util status"
+	switch o.view {
+	case statusreport.ViewContainer:
+		title += " " + statusTargetContainer
+	case statusreport.ViewApplication:
+		title += " " + statusTargetApplication
+	case statusreport.ViewAll:
+		title += " " + statusTargetAll
+	}
+	if o.level == statusreport.LevelDetails {
+		title += " " + detailsFlagName
+	}
+	if o.all {
+		title += " " + allFlagName
+	}
+	return title
+}
+
+// watchStatus re-renders the report until ctx is done, on the shared refresh
+// loop: a terminal is redrawn in place under a header naming the interval and
+// the time, anything else gets a timestamped section line per refresh. The pause
+// is taken after each refresh, so a slow collection never shortens it.
 //
-// Ctrl-C exits 0: a watch that was ended on purpose did not fail. The exit code
-// of an individual tick is deliberately not carried out here -- there is no
-// single answer for a loop that ran for an hour.
-func watchStatus(o statusOpts, c *statusCollector) int {
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt)
-	defer signal.Stop(stop)
-
-	tick := time.NewTicker(o.watch.interval)
-	defer tick.Stop()
-	for {
-		c.opts.now = time.Now()
-		clearScreen(os.Stdout)
-		fmt.Fprintf(os.Stdout, "Every %s: solmq-conn-util status  --  %s   (Ctrl-C to stop)\n\n",
-			o.watch.interval, c.opts.now.Format("15:04:05"))
-		c.renderOnce(os.Stdout)
-		select {
-		case <-stop:
-			fmt.Fprintln(os.Stdout)
-			return 0
-		case <-tick.C:
+// Each refresh collects before it draws: gduwatch.LoopFrames hands the refresh
+// a frame to render into and writes the clear-screen, the header and the frame
+// in one go once the collection is complete, so the previous report stays on
+// screen for the whole collection. A refresh that Ctrl-C cuts short draws
+// nothing at all, leaving the last complete report in place.
+//
+// Ctrl-C (ctx done) exits 0: a watch that was ended on purpose did not fail. The
+// exit code of an individual refresh is deliberately not carried out here --
+// there is no single answer for a loop that ran for an hour. A collection that
+// fails is returned to the loop, which draws the header and then warns on
+// stderr, naming the retry, so the clear cannot wipe the message.
+func watchStatus(ctx context.Context, o statusOpts, c *statusCollector, wio watchIO) int {
+	err := gduwatch.LoopFrames(ctx, gduwatch.Options{
+		Every:  o.watch.interval,
+		Title:  watchTitle(o),
+		Redraw: wio.redraw,
+		Out:    wio.out,
+		Warn:   func(msg string) { fmt.Fprintln(os.Stderr, "warning: "+msg) },
+		Sleep:  wio.sleep,
+	}, func(t time.Time, frame io.Writer) error {
+		c.opts.now = t
+		rep, failed, cerr := c.collect()
+		if cerr != nil {
+			return cerr
 		}
+		c.emit(frame, rep, failed)
+		return nil
+	})
+	if err != nil {
+		return errExit(err)
 	}
-}
-
-// clearScreen moves the cursor home and clears what is below it, so a redraw
-// replaces the previous report instead of scrolling it away. ANSI, which every
-// terminal this tool targets understands once VT processing is on -- see
-// enableVirtualTerminal, which turns it on where it is not on by default.
-func clearScreen(w *os.File) {
-	enableVirtualTerminal(w)
-	fmt.Fprint(w, "\x1b[H\x1b[2J")
+	return exitcode.OK
 }

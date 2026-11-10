@@ -28,7 +28,7 @@ command model in
 ## Command tree
 
 - `generate` (`gen`) `[config]` `[--platform kubernetes|docker|podman]`
-- `deploy` (`dp`) `[--platform kubernetes|docker|podman]`
+- `deploy` (`dp`) `[--platform kubernetes|docker|podman]` `[--no-prompt]`
 - `remove` (`rm`) `[--platform kubernetes|docker|podman]` `[--no-prompt]`
 - `start` `[--platform kubernetes|docker|podman]`
 - `stop` `[--platform kubernetes|docker|podman]`
@@ -49,7 +49,7 @@ command model in
 |---------|---------|
 | `solmq-conn-util generate config [--platform kubernetes\|docker\|podman] [-e env.yaml] [-o out]` | Emit application.yml |
 | `solmq-conn-util generate [--platform kubernetes\|docker\|podman] [-e env.yaml] [-o out]` | Render the artifacts for the resolved platform to stdout or a file |
-| `solmq-conn-util deploy [--platform kubernetes\|docker\|podman] [-e env.yaml] [--allow-command name]` | Generate for a platform, then apply it |
+| `solmq-conn-util deploy [--platform kubernetes\|docker\|podman] [--no-prompt] [-e env.yaml] [--allow-command name]` | Generate for a platform, then apply it |
 | `solmq-conn-util remove [--platform kubernetes\|docker\|podman] [--no-prompt] [-e env.yaml] [--allow-command name]` | Tear down what deploy created for a platform |
 | `solmq-conn-util start [--platform kubernetes\|docker\|podman] [-e env.yaml] [--allow-command name]` | Start the instance deploy created, as it stands |
 | `solmq-conn-util stop [--platform kubernetes\|docker\|podman] [-e env.yaml] [--allow-command name]` | Stop the instance deploy created, keeping it to start again |
@@ -84,7 +84,7 @@ command model in
 | `--omit-lib-file` | `download` | a jar list that replaces (never merges with) the built-in list the omission rule compares against; an empty file omits nothing |
 | `--include-provided` | `download` | download the whole closure even where the connector image already provides a jar, instead of omitting it |
 | `--install` | `status` | install the status script on every instance without prompting |
-| `--no-prompt` | `remove` | tear down without asking anything -- what a script or CI job passes, since the prompts refuse to read a non-TTY rather than hang. It covers both questions: the teardown confirmation, and whether to remove a namespace that turned out to be empty. It cannot authorise more than that: a namespace holding anything this release does not own is never removed, with or without it |
+| `--no-prompt` | `deploy`/`remove` | approve without asking anything -- what a script or CI job passes, since the prompts refuse to read a non-TTY rather than hang. On `remove` it covers both questions: the teardown confirmation, and whether to remove a namespace that turned out to be empty (with no terminal to ask it on, the namespace is kept with a warning and the remove still succeeds). On `deploy` it approves restarting or recreating a docker or podman service that is running and whose artifact or secrets changed; kubernetes deploy asks nothing, so the flag is refused there (exit 2). It cannot authorise more than that: a namespace holding anything this release does not own is never removed, with or without it |
 | `-d`, `--details` | `status` | add the enrichment lines each view can report: worker node, CPU/memory use against allocation, image digest and referenced components; app version, java version, config path and heap |
 | `-w`, `--watch` | `status` | re-render the report every 5s until interrupted (Ctrl-C) |
 | `-v`, `--verbose` | `status` | print one line per collection step, naming the call and how long it took, instead of the spinner a terminal gets by default. Both go to stderr, never to stdout, so the report stays byte-identical either way; the step lines are printed whether or not stderr is a terminal, which is what makes `2>steps.log` useful for finding which call is slow. Nothing is printed under `--watch` |
@@ -117,8 +117,8 @@ The menu -- and `status`'s install confirmation, and `remove`'s teardown confirm
 | Code | Meaning |
 |------|---------|
 | `0` | success |
-| `1` | processing error (bad input, unreadable file, missing env var, a deploy command that failed) |
-| `2` | usage error (missing/unknown verb or target, unknown flag) |
+| `1` | processing error: something ran and failed, or the live system refused it (a preflight, a host check, a deploy command that failed) |
+| `2` | usage error: refused before acting because of what it was given -- the command line, `env.yaml`, the files and variables it names, or the platform selected (including every `validate` error in `env.yaml` or its workflows) |
 | _other_ | `cli` only: once a session or command is running inside the instance, its own exit status is passed straight back. Anything that fails before that still uses the three codes above |
 
 ## Command details
@@ -151,9 +151,13 @@ Alias: `dp`.
 
 Generates for the platform, then applies it by shelling out to the section's `command:` (`kubectl`/`oc`, `docker`, or `podman` + `systemctl`) through an argv slice -- never a shell. The env file must contain the matching section.
 
-`command:`'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); `--allow-command` approves an extra binary for this invocation (e.g. a `sudo` prefix). Before anything is written or applied, a read-only preflight probe (on kubernetes, `auth can-i create deployment`) must succeed, or the run stops: naming the missing permission when the cluster answers no, with a login hint when it cannot be reached. For how the platform is picked, see [Platform resolution](#platform-resolution).
+`command:`'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); `--allow-command` approves an extra binary for this invocation (e.g. a chained runner such as `lima nerdctl`). A privilege-escalation wrapper such as `sudo` is never approved: run `sudo solmq-conn-util` instead. Before anything is written or applied, a read-only preflight must succeed, or the run stops: on docker and podman the engine's own info, and on kubernetes an `auth can-i create` of each kind the manifest writes (deployments, configmaps and, when it writes them, services, secrets, persistentvolumeclaims and, cluster-wide, persistentvolumes), all asked before the first write. A refusal names the missing permission, and a login hint is given when the cluster cannot be reached. For how the platform is picked, see [Platform resolution](#platform-resolution).
 
-Flags: `--platform`; `-e`, `--env`; `--allow-command`.
+A redeploy leaves the decision to the platform and asks before anything is written. On docker, compose recreates the container when the file or any credential changed (a digest label records both) and leaves an unchanged one alone; on podman the unit and each secret are compared first, and only a change restarts the service. When a docker or podman service is running and would be recreated or restarted, `deploy` asks first, and answering anything but `y`/`yes` cancels and exits 0 having changed nothing, so the next deploy asks again. `--no-prompt` approves without asking, which is what a script or CI job passes -- without it a non-TTY run fails fast with that hint rather than hanging. Kubernetes asks nothing -- `kubectl apply` and the rollout decide -- so `--no-prompt` is refused there as a flag that would do nothing (exit 2).
+
+On kubernetes the manifest carries no Namespace document: the namespace is read first, and only one that does not exist is created, on its own and only when this identity may create namespaces (an existing one asks for no cluster-wide permission, and an absent one that cannot be created stops the deploy, naming who can create it). After the apply, `deploy` waits for the Deployment to roll out, up to 300 seconds: a wait the cluster refuses is a warning, since the change is applied, and a rollout that times out or fails exits 1.
+
+Flags: `--no-prompt`; `--platform`; `-e`, `--env`; `--allow-command`.
 
 ```sh
 solmq-conn-util deploy --platform kubernetes -e env.yaml
@@ -163,13 +167,13 @@ solmq-conn-util deploy --platform kubernetes -e env.yaml
 
 Alias: `rm`.
 
-Tears down what `deploy` created for the platform, the same way (via the section's `command:`, the same binary allowlist, `--allow-command`, and the same read-only preflight probe before anything is torn down). For how the platform is picked, see [Platform resolution](#platform-resolution).
+Tears down what `deploy` created for the platform, the same way (via the section's `command:`, the same binary allowlist, `--allow-command`, and the same read-only preflight before anything is torn down, which on kubernetes asks `auth can-i delete` of each kind the manifest deletes). For how the platform is picked, see [Platform resolution](#platform-resolution).
 
 Because it is the one verb that destroys rather than creates, it asks for confirmation first, naming what it is about to tear down -- the deployment and its namespace on kubernetes, the container on docker/podman -- so a run pointed at the wrong `env.yaml` is caught before anything is deleted. Answering anything but `y`/`yes` cancels and exits 0, having touched nothing at all: the question comes before even the preflight probe. `--no-prompt` skips the prompt, which is what a script or CI job passes -- without it a non-TTY run fails fast with that hint rather than hanging on a read that will never return.
 
-On kubernetes the namespace is handled separately, and never as part of the manifest delete: deleting a Namespace cascades to every object inside it, including workloads this tool never deployed. So once the teardown succeeds, `remove` looks at what is left in the namespace. Anything this release does not own -- another deployment, a stateful set, a volume claim, a secret -- is listed and the namespace is kept. Only a namespace with nothing else in it is offered for removal, as its own separate question.
+On kubernetes the namespace is handled separately, and never as part of the manifest delete: deleting a Namespace cascades to every object inside it, including workloads this tool never deployed. So once the teardown succeeds, `remove` looks at what is left in the namespace. Anything this release does not own -- another deployment, a stateful set, a volume claim, a secret -- is listed and the namespace is kept. Only a namespace with nothing else in it is offered for removal, as its own separate question, and the permission to delete namespaces is checked before that question is asked, so nobody is asked one that would be refused.
 
-That is an invariant rather than a default: no flag removes a namespace that still holds someone else's work. The cluster namespaces (`default`, `kube-system`, `kube-public`, `kube-node-lease`) are never removed either, and a check that cannot run leaves the namespace alone rather than assuming it is empty.
+That is an invariant rather than a default: no flag removes a namespace that still holds someone else's work. The cluster namespaces (`default`, `kube-system`, `kube-public`, `kube-node-lease`) are never removed either, and a check that cannot run leaves the namespace alone rather than assuming it is empty. Nothing in this step fails the remove, which has already succeeded: a refused permission, a declined question, a question with no terminal to ask it on (`--no-prompt` answers it) and a failed namespace delete each keep the namespace with a warning and exit 0.
 
 Flags: `--no-prompt`; `--platform`; `-e`, `--env`; `--allow-command`.
 
@@ -181,7 +185,7 @@ solmq-conn-util remove --platform kubernetes -e env.yaml
 
 Starts the instance `deploy` created for the platform, in place: on kubernetes the Deployment is scaled back to `deployment.replicas`; on docker the container is started (`docker start`), decoding any created store again; on podman the unit is started (`systemctl [--user] start`), which creates the container from it. For how the platform is picked, see [Platform resolution](#platform-resolution).
 
-It reads `env.yaml` for the platform section's names and `command:` only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no `-env` variable exported. It shells out through the same binary allowlist and `--allow-command`, after the same read-only preflight probe, as `deploy`; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another.
+It reads `env.yaml` for the platform section's names and `command:` only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no `-env` variable exported. It shells out through the same binary allowlist and `--allow-command`, after the same read-only preflight probe, as `deploy`; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another. On kubernetes, start and restart then wait for the Deployment to roll out (up to 300 seconds): a wait the cluster refuses is a warning, since the change is made, and one that times out or sees the rollout fail exits 1; stop makes no wait.
 
 Flags: `--platform`; `-e`, `--env`; `--allow-command`.
 
@@ -193,7 +197,7 @@ solmq-conn-util start --platform docker -e env.yaml
 
 Stops the instance `deploy` created for the platform, keeping everything it needs to start again: on kubernetes the Deployment is scaled to 0 replicas (its ConfigMap and Secrets stay; a later `deploy` or `start` scales it back); on docker the container is stopped, and its restart policy leaves it stopped; on podman the unit is stopped, which removes its container. For how the platform is picked, see [Platform resolution](#platform-resolution).
 
-It reads `env.yaml` for the platform section's names and `command:` only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no `-env` variable exported. It shells out through the same binary allowlist and `--allow-command`, after the same read-only preflight probe, as `deploy`; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another.
+It reads `env.yaml` for the platform section's names and `command:` only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no `-env` variable exported. It shells out through the same binary allowlist and `--allow-command`, after the same read-only preflight probe, as `deploy`; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another. On kubernetes, start and restart then wait for the Deployment to roll out (up to 300 seconds): a wait the cluster refuses is a warning, since the change is made, and one that times out or sees the rollout fail exits 1; stop makes no wait.
 
 Flags: `--platform`; `-e`, `--env`; `--allow-command`.
 
@@ -205,7 +209,7 @@ solmq-conn-util stop --platform kubernetes -e env.yaml
 
 Restarts the instance `deploy` created for the platform -- what makes the connector load a rotated TLS store or a changed `application.yml` where `deploy` does not restart it: on kubernetes it is `kubectl rollout restart`, which replaces the pods one at a time; on docker the container is restarted, decoding any created store again (a store a docker `deploy` changed has already recreated it); on podman the unit is restarted, which creates its container again from the unit. For how the platform is picked, see [Platform resolution](#platform-resolution).
 
-It reads `env.yaml` for the platform section's names and `command:` only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no `-env` variable exported. It shells out through the same binary allowlist and `--allow-command`, after the same read-only preflight probe, as `deploy`; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another.
+It reads `env.yaml` for the platform section's names and `command:` only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no `-env` variable exported. It shells out through the same binary allowlist and `--allow-command`, after the same read-only preflight probe, as `deploy`; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another. On kubernetes, start and restart then wait for the Deployment to roll out (up to 300 seconds): a wait the cluster refuses is a warning, since the change is made, and one that times out or sees the rollout fail exits 1; stop makes no wait.
 
 Flags: `--platform`; `-e`, `--env`; `--allow-command`.
 
@@ -219,9 +223,9 @@ Alias: `sts`.
 
 Reports the state of every connector instance of the resolved platform. The target word picks which half is reported, because they answer different questions and come from different places: `container` is what the container engine knows, read from outside through read-only `kubectl`/`docker`/`podman` queries -- state, restarts, age and the image actually running, in one table per platform; `application` is what the connector knows about itself, read from inside by running the generated status script in each instance -- leader-election mode and state, health, and per-workflow state; `all` reports both, container first, since a container that is not running is the reason the application half is missing. Each word has a short spelling (`cnt`, `app`); the word itself is required, and `status` on its own prints this list.
 
-`-d`/`--details` adds the enrichment lines to whichever view is being printed: worker node, CPU and memory use against allocation, the image digest, and the objects the workload references (secrets, config maps, volume claims, mounts) on the container side; app version, java version, the configuration file the report was read from, and JVM heap use on the application side. The one sampling query it needs (`kubectl top`, `docker stats`) is why those lines are opt-in: on kubernetes it also needs a metrics API in the cluster, and reports a note instead of the lines when there is none.
+`-d`/`--details` adds the enrichment lines to whichever view is being printed: worker node, CPU and memory use against allocation, the image digest, and the objects the workload references (secrets, config maps, volume claims, mounts) on the container side; app version, java version, the configuration file the report was read from, and JVM heap use on the application side. The one sampling query it needs (`kubectl top`, `docker stats`), and the four extra actuator calls and the JVM start the script makes for its half, are why those lines are opt-in: on kubernetes it also needs a metrics API in the cluster, and reports a note instead of the lines when there is none.
 
-`-w`/`--watch` re-renders the report every 5s until interrupted. `--output` `json` emits one machine-readable document per run instead of the tables, carrying every fact either view collected. Collection can take a while -- the application views make two container calls per instance, and the script inside each one makes seven -- so a spinner on stderr names the step being waited on whenever stderr is a terminal, and `-v`/`--verbose` replaces it with one durable line per step carrying how long that step took, which is how a slow environment is diagnosed. Neither ever reaches stdout, and neither appears under `-w`/`--watch`. `--all` ignores the instance names in `env.yaml` and reports every connector instance it can find by image name (`solace-pubsub-connector-ibmmq`) -- across every namespace on kubernetes, and every container, running or not, on docker/podman.
+`-w`/`--watch` re-renders the report every 5s until interrupted, and keeps the previous report on screen while the next one is collected. `--output` `json` emits one machine-readable document per run instead of the tables, carrying every fact either view collected. Collection can take a while -- the application views run the status script in every instance, up to four at a time, and the script makes three actuator calls, or seven under `-d`/`--details` -- so a spinner on stderr names the step being waited on whenever stderr is a terminal, and `-v`/`--verbose` replaces it with one durable line per step carrying how long that step took, which is how a slow environment is diagnosed. Neither ever reaches stdout, and neither appears under `-w`/`--watch`. `--all` ignores the instance names in `env.yaml` and reports every connector instance it can find by image name (`solace-pubsub-connector-ibmmq`) -- across every namespace on kubernetes, and every container, running or not, on docker/podman.
 
 For the application views, `--install` installs the status script without asking where it is missing; without it, a declined install prompt just skips the instances that lack it. `--pod` and `--container` (both repeatable) narrow which instances are reported; `--namespace` overrides the kubernetes namespace and `--management-port` the actuator port; `--user` names the read-only actuator account the script authenticates as, for an instance whose config does not carry the reserved `solmq-status` account. `--command` overrides the platform CLI binary used to reach each instance, and `--allow-command` approves an extra one, the same as deploy/remove. For how the platform is picked, see [Platform resolution](#platform-resolution).
 
@@ -255,7 +259,7 @@ solmq-conn-util status all -d
 
 Alias: `lg`.
 
-Prints what one connector instance of the resolved platform has written, read through the same read-only `kubectl`/`docker`/`podman` path `status` uses -- the same `command:`, the same binary allowlist, `--allow-command`, and the same preflight probe, which on kubernetes asks only to read pod logs (`auth can-i get pods --subresource log`) -- and discovering the same instances from `env.yaml`, so the two verbs can never disagree about which ones they mean. It is the answer to the question `status` leaves open: that view reports a restart count and an exit code, and this one reports the lines that preceded them.
+Prints what one connector instance of the resolved platform has written, read through the same read-only `kubectl`/`docker`/`podman` path `status` uses -- the same `command:`, the same binary allowlist, `--allow-command`, and the same preflight, which on kubernetes asks for no permission up front (the read itself reports a refusal) -- and discovering the same instances from `env.yaml`, so the two verbs can never disagree about which ones they mean. It is the answer to the question `status` leaves open: that view reports a restart count and an exit code, and this one reports the lines that preceded them.
 
 One instance is read per run. When discovery finds several and none was named, nothing is read: the matching instances are listed on stdout as commands that can be pasted back verbatim, carrying the flags already typed, and the run exits 0. `--pod` and `--container` name the instance, and each may be given once -- a second is refused rather than silently losing the first. Either accepts an **index** as well as a name: `--pod 0` is the first instance in the listed order, which is alphabetical by name and the same order `status` prints. A name always wins, so an instance genuinely called `0` is still reachable by name.
 
@@ -271,7 +275,7 @@ solmq-conn-util logs --tail 100 -e env.yaml
 
 ### cli
 
-Opens an interactive shell inside one connector instance of the resolved platform, reached through the same read-only `kubectl`/`docker`/`podman` path `status` and `logs` use -- the same `command:`, the same binary allowlist, `--allow-command`, the same preflight probe (on kubernetes it asks to exec into pods, `auth can-i create pods --subresource exec`), and the same instance discovery from `env.yaml`, so the three verbs can never disagree about which instance they mean. It is where the questions `status` and `logs` cannot answer get settled: whether the truststore really mounted, what is actually in `/app/external/libs`, which `application.yml` the process is running. For how the platform is picked, see [Platform resolution](#platform-resolution).
+Opens an interactive shell inside one connector instance of the resolved platform, reached through the same read-only `kubectl`/`docker`/`podman` path `status` and `logs` use -- the same `command:`, the same binary allowlist, `--allow-command`, the same preflight (on kubernetes it asks for no permission up front: the exec itself reports a refusal), and the same instance discovery from `env.yaml`, so the three verbs can never disagree about which instance they mean. It is where the questions `status` and `logs` cannot answer get settled: whether the truststore really mounted, what is actually in `/app/external/libs`, which `application.yml` the process is running. For how the platform is picked, see [Platform resolution](#platform-resolution).
 
 Everything after `--` is run in the instance instead of a shell, non-interactively, which is the form for a script -- an interactive run with no terminal on stdin is refused with that as the next step rather than opening a session nobody can type into. The shell is `sh`: the connector image is Alpine, so its userland is busybox and there is no `bash` to ask for.
 
@@ -299,7 +303,7 @@ solmq-conn-util version
 
 Alias: `vld`.
 
-Runs every check across the whole `env.yaml` (including any `kubernetes:`/`docker:`/`podman:` sections) and its workflows, printing all findings. Non-zero exit if any errors. Use it as a linter.
+Runs every check across the whole `env.yaml` (including any `kubernetes:`/`docker:`/`podman:` sections) and its workflows, printing all findings. Exits 2 if `env.yaml` or its workflows have any error, and 1 if only a docker or podman host check fails. Use it as a linter.
 
 It reports every error `generate` and `deploy` would stop at before they reach a platform: once the spec itself validates, it reads each TLS store a present platform loads and opens each existing PKCS12 with its password, builds each created one in memory and discards it, holds them and the kubernetes ConfigMap to each platform's size limit, and checks docker's bind-mount sources on this host. An unset `-env` variable is a warning. Logins, the image, and the cluster or engine itself are left to `deploy`.
 

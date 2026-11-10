@@ -125,8 +125,8 @@ type Instance struct {
 	Container   *Container   `json:"container,omitempty"`
 	Application *Application `json:"application,omitempty"`
 
-	// Error is why this instance has no Application block: the script could not
-	// be probed, installed, or run. It is a body line in the report rather than
+	// Error is why this instance has no Application block: the script was not
+	// there, or could not be installed or run. It is a body line in the report rather than
 	// a bare stderr message, so the container facts that explain it sit right
 	// above it.
 	Error string `json:"error,omitempty"`

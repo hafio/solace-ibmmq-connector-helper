@@ -10,6 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/containercli"
+	"github.com/hafio/go-deploy-utility/execguard"
+	"github.com/hafio/go-deploy-utility/exitcode"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
@@ -78,6 +82,7 @@ type logsOpts struct {
 	ns       string
 	command  string
 	allow    []string
+	approved execguard.Approvals
 
 	follow     bool
 	previous   bool
@@ -99,7 +104,7 @@ func (o logsOpts) forRunner() runner.LogsOpts {
 }
 
 // runLogs parses logs's flags and hands them to actLogs.
-func runLogs(args []string, r runner.Runner) int {
+func runLogs(args []string, r gdurunner.Runner) int {
 	fs := verbFlagSet("logs")
 	env := envFlag(fs)
 	platform := platformFlag(fs)
@@ -121,12 +126,16 @@ func runLogs(args []string, r runner.Runner) int {
 	if err != nil {
 		return flagExit("logs", err)
 	}
+	approvals, aerr := approvalsFrom(*allow)
+	if aerr != nil {
+		return usageExit(aerr)
+	}
 	if len(pos) > 0 {
 		// logs has no target word: an instance is named with --pod/--container,
 		// not positionally, so a bare word here is a mistake worth naming rather
 		// than a name to guess at.
 		fmt.Fprintf(os.Stderr, "logs: unexpected argument %q (name an instance with %s or %s)\n", pos[0], podFlagName, containerFlagName)
-		return 2
+		return exitcode.Usage
 	}
 
 	o := logsOpts{
@@ -137,6 +146,7 @@ func runLogs(args []string, r runner.Runner) int {
 		ns:         *namespace,
 		command:    *command,
 		allow:      *allow,
+		approved:   approvals,
 		follow:     *follow,
 		previous:   *previous,
 		timestamps: *timestamps,
@@ -156,7 +166,7 @@ func runLogs(args []string, r runner.Runner) int {
 func checkLogsFlags(o logsOpts) int {
 	if o.follow && o.previous {
 		fmt.Fprintf(os.Stderr, "logs: %s reads a log that has already ended, so it cannot be combined with %s\n", previousFlagName, followFlagName)
-		return 2
+		return exitcode.Usage
 	}
 	// logs reads one instance, so naming two is a question it cannot answer.
 	// Refused loudly rather than by quietly using the first: a repeated flag is
@@ -171,26 +181,17 @@ func checkLogsFlags(o logsOpts) int {
 	} {
 		if len(f.vals) > 1 {
 			fmt.Fprintf(os.Stderr, "logs: %s may be given once -- logs reads one instance; run logs with no %s to list what matches\n", f.name, f.name)
-			return 2
+			return exitcode.Usage
 		}
 	}
-	return 0
+	return exitcode.OK
 }
 
 // actLogs resolves the platform, settles on exactly one instance, and reads its
 // log. Everything that can fail the whole run -- an unreadable env.yaml, an
 // unsafe name, a platform that cannot be resolved, a failed preflight -- fails
 // here, before anything is read.
-func actLogs(o logsOpts, r runner.Runner) int {
-	// Both paths stream: a one-shot read wants the platform diagnostics on
-	// stderr just as much as a followed one does, because `logs > app.log` is
-	// the whole point of the verb and a redirect that swallowed them would be
-	// the first thing to confuse an operator.
-	s, ok := r.(runner.Streamer)
-	if !ok {
-		return errExit(errors.New("logs needs a runner that can stream command output, and this one cannot"))
-	}
-
+func actLogs(o logsOpts, r gdurunner.Runner) int {
 	sess, serr := resolveInstanceSession(instanceRequest{
 		verb:     verbLogs,
 		envPath:  o.envPath,
@@ -199,21 +200,21 @@ func actLogs(o logsOpts, r runner.Runner) int {
 		command:  o.command,
 		pods:     o.pods,
 		conts:    o.conts,
-		allow:    o.allow,
+		approved: o.approved,
 	})
 	if serr != nil {
-		return errExit(serr)
+		return usageExit(serr)
 	}
 
 	if o.previous && sess.platform != validate.PlatformKubernetes {
-		fmt.Fprintf(os.Stderr, "logs: %s is a kubernetes concept; %s keeps no prior-run log to read\n", previousFlagName, sess.platform)
-		return 2
+		fmt.Fprintln(os.Stderr, "logs:", containercli.NoPrevious(containercli.Engine(sess.platform)))
+		return exitcode.Usage
 	}
 
 	// The same read-only preflight probe status runs, for the same reason: fail
 	// on an unreachable engine once, up front, rather than at the point of read.
-	// On kubernetes it asks for the log subresource, what logs actually reads.
-	if code, ok := preflight(r, runner.ActionLogs, sess.platform, sess.command, sess.ns, o.allow); !ok {
+	// Kubernetes asks nothing: the read itself reports a refusal.
+	if code, ok := preflightRead(r, runner.ActionLogs, sess.platform, sess.command, sess.rootless(), o.approved); !ok {
 		return code
 	}
 
@@ -224,9 +225,9 @@ func actLogs(o logsOpts, r runner.Runner) int {
 	if !found {
 		// The picker was printed: the run answered an ambiguous request with
 		// exactly what to type next, which is not a failure.
-		return 0
+		return exitcode.OK
 	}
-	return readLog(s, sess, o, target)
+	return readLog(r, sess, o, target)
 }
 
 // logsInvocation rebuilds the command that was run, minus the instance, so the
@@ -272,9 +273,14 @@ func logsInvocation(sess instanceSession, o logsOpts) pickerLine {
 //
 // Follow mode is the same read with a cancellable context and a signal handler:
 // Ctrl-C is how a follow is meant to end, so it exits 0 -- the same reasoning
-// watchStatus records for --watch. Stream reports a cancelled context as
-// success, so there is nothing here to unpick.
-func readLog(s runner.Streamer, sess instanceSession, o logsOpts, t instanceRef) int {
+// watchStatus records for --watch. Both paths stream, a one-shot read as much
+// as a followed one: a read wants the platform diagnostics on stderr just as
+// much, because `logs > app.log` is the whole point of the verb and a redirect
+// that swallowed them would be the first thing to confuse an operator. The
+// shared runner reports a cancelled context as an error wrapping
+// context.Canceled rather than as success, so a follow whose own context was
+// cancelled is the clean end and is unpicked here; any other failure is one.
+func readLog(r gdurunner.Runner, sess instanceSession, o logsOpts, t instanceRef) int {
 	argv, err := runner.LogsArgv(sess.cmdArgv, sess.platform, t.name, t.namespace, o.forRunner())
 	if err != nil {
 		return errExit(err)
@@ -294,8 +300,11 @@ func readLog(s runner.Streamer, sess instanceSession, o logsOpts, t instanceRef)
 		}()
 	}
 
-	if err := s.Stream(ctx, runner.Cmd{Argv: argv}, os.Stdout, os.Stderr); err != nil {
+	if err := r.Run(ctx, gdurunner.Cmd{Argv: argv}, os.Stdout, os.Stderr); err != nil {
+		if o.follow && ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			return exitcode.OK
+		}
 		return errExit(fmt.Errorf("reading %s: %w", t.name, err))
 	}
-	return 0
+	return exitcode.OK
 }

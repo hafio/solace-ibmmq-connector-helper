@@ -597,9 +597,13 @@ Every generated `application.yml` carries a read-only actuator account named
 - The name is reserved: a `security.users` entry called `solmq-status` is an
   error.
 - The password comes from `SECURITY_USER_SOLMQ_STATUS_PASSWORD` when that
-  variable is set and non-empty. Otherwise the tool generates one (32 lowercase hex characters from a
-  CSPRNG), and a generated password changes on every regenerate. Pin the variable if the value
-  must survive a redeploy.
+  variable is set and non-empty. Otherwise, on docker and podman, the tool derives one (32
+  lowercase hex characters, an HMAC keyed by the deployment's resolved credentials over its
+  name), so it is the same on every regenerate until a credential or the name changes. On
+  kubernetes, for `generate config`, and with no credential to key on, it generates a random
+  one from a CSPRNG instead: on kubernetes the password sits in a ConfigMap, which may be
+  readable where the credentials are not, and a derived value would let that reader check
+  guesses at a credential offline.
 - It is rendered as a literal inside `application.yml`, so anyone who can read
   the ConfigMap, the compose file or the podman secret can read it. Never reuse
   a password you use elsewhere.
@@ -642,7 +646,9 @@ java-options:
 - Each value is one string of space-separated options; a `>-` block is the same
   thing. A list is a parse error.
 - Quotes, backslash, backtick, a `$` left after expansion and control characters
-  are errors. A ` #` inside a `>-` block is an error (it would be part of the
+  (C0 and C1) are errors, as are invisible formatting characters (a zero-width
+  space, a bidirectional override) and invalid UTF-8; re-save the env file as
+  UTF-8. A ` #` inside a `>-` block is an error (it would be part of the
   value).
 - When an MQ binder uses TLS the tool sets
   `-Dcom.ibm.mq.cfg.useIBMCipherMappings=false` first and appends `tool` after
@@ -684,8 +690,14 @@ absent is an error.
 
 `command` rules: the first token must be a bare binary on the platform's
 allowlist (`kubectl`/`oc`, `docker`, `podman`), later tokens must be
-flag-shaped, and every token is checked against a safe charset. Another binary
-(`sudo`, a wrapper) needs `--allow-command` on the command line.
+flag-shaped, and every token is checked against a safe charset: valid UTF-8,
+no whitespace, control or invisible characters, no shell metacharacters. An
+embedded `~` (`--kubeconfig=C:/RUNNER~1/config`) and `.exe` in any case are
+accepted; a leading `~` is not. Another binary (a chained runner such as
+`lima nerdctl`) needs `--allow-command` on the command line. A
+privilege-escalation wrapper (`sudo`, `doas`, `su` and the like) is never
+accepted, not even with `--allow-command`: run `sudo solmq-conn-util ...`
+instead, so the privilege belongs to one invocation you chose.
 
 No section takes a `secrets:` block for application credentials (kubernetes
 takes one for how they are delivered), and none configures in-container paths.
@@ -735,7 +747,7 @@ kubernetes:
 
 | Key | Meaning |
 |---|---|
-| `deployment.name`, `namespace` | required DNS-1123 labels. A `kind: Namespace` document is always emitted first. `<name>-credentials` and `<namespace>-<name>-libs-pv` must stay within 63 characters |
+| `deployment.name`, `namespace` | required DNS-1123 labels. `generate kubernetes` emits a `kind: Namespace` document first, so a manual apply works; `deploy` applies none and creates the namespace on its own only when it is absent. `<name>-credentials` and `<namespace>-<name>-libs-pv` must stay within 63 characters |
 | `deployment.replicas` | default `1`; `standalone` requires `1` |
 | `deployment.resources` | `cpu` and `memory`, Kubernetes quantities, written as identical requests and limits |
 | `deployment.node-selector` | node labels the node must carry; keys written sorted |
@@ -852,6 +864,7 @@ podman:
   name: solmq-connector
   restart: always                # systemd's words; this is the default
   run-as: "1000:0"
+  rootful: false                 # the default: rootless, as the user running deploy
   ports:
     - 8090
     - "8081:8090"
@@ -861,6 +874,7 @@ podman:
 
 | Key | Meaning |
 |---|---|
+| `rootful` | `false` by default: podman is deployed rootless, as the user running `deploy`, with no `sudo`. `true` deploys the rootful engine and needs root. A non-root user setting it is refused, and so is root without it (exit 2, nothing runs): deploying on behalf of a rootless user is not built yet, so run as that user itself |
 | `restart` | systemd's `Restart=` values: `no`, `always` (default), `on-success`, `on-failure`, `on-abnormal`, `on-abort`, `on-watchdog`. `unless-stopped` is an error |
 | `ports`, `libs.dir` | as docker |
 
@@ -877,10 +891,18 @@ every selected store are loaded into podman's secret store and mounted back by
 | `<name>-status-script` | `/app/external/.status-script` |
 | `<name>-logback-spring.xml` (syslog only) | `/app/external/classpath/logback-spring.xml` |
 
-- The unit goes to `/etc/containers/systemd/` when run as root, otherwise to
-  `~/.config/containers/systemd/`, and `systemctl` or `systemctl --user`
-  manages it. This is not configurable; `podman.quadlet`, `podman.mode` and
-  `podman.base-dir` are rejected or ignored.
+- The unit goes to `$XDG_CONFIG_HOME/containers/systemd/` (`$HOME/.config/...`
+  when it is unset) rootless, and to `/etc/containers/systemd/` with
+  `rootful: true`; `systemctl --user` or `systemctl` manages it. A relative
+  `XDG_CONFIG_HOME`, or a home directory that cannot be resolved, is refused
+  (exit 2). The directory is not configurable; `podman.quadlet`, `podman.mode`
+  and `podman.base-dir` are rejected or ignored.
+- Rootless on Linux, `deploy` repairs the session `sudo`, `su` and cron strip
+  (`XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`, for its own `systemctl
+  --user` and `loginctl` calls only; nothing is exported), and enables linger
+  for your own account when it is off, so the unit survives logout and starts at
+  boot. A refused enable ends the deploy with `sudo loginctl enable-linger
+  <user>` for an administrator to run.
 - `deploy` resolves everything first, loads the secrets, deletes the ones the
   spec no longer mounts, writes the unit, reloads systemd, then starts a stopped
   unit or restarts a running one. `remove` stops the unit, removes it, then
@@ -924,14 +946,19 @@ What the identity has to read:
   than opened to everyone.
 - **podman**: only `libs.dir` is a bind mount. Rootless, a non-zero uid maps to
   a subordinate id that owns no host file, so jars must be readable by others
-  or by your group.
+  or by your group. With `rootful: true` the ids are the host's own.
 
 `download jar` writes jars `0644`, so a directory it filled needs nothing.
 
-**Rootless podman** needs the run-as ids inside your `/etc/subuid` and
-`/etc/subgid` ranges (65536 by default). `deploy` warns when they are not.
-Widen the range (`usermod --add-subuids`, then `podman system migrate`), pick a
-smaller id, deploy as root, or set `run-as: image`.
+**Rootless podman** (the default) needs a numeric run-as id other than 0 inside
+your subordinate uid and gid ranges (65536 by default). `deploy` and `validate`
+ask `podman info` what is mapped, which covers ranges an NSS source such as SSSD
+grants, and refuse an id outside it. The refusal prints the `usermod
+--add-subuids --add-subgids` line naming a range no other user holds (computed
+from `/etc/subuid` and `/etc/subgid`, and marked as not computed when they cannot
+be read) and `podman system migrate`. Or pick an id inside the range, or set
+`run-as: image`. Id 0 is you and needs no range; so does `image`. `deploy` exits
+1 before it stores or writes anything; `validate` reports a host error.
 
 **OpenShift**: set `run-as: image`. The restrictions match the `restricted-v2`
 SCC.

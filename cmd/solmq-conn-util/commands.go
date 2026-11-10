@@ -5,6 +5,7 @@ package main
 import (
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/abbrev"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/libs"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusreport"
@@ -47,16 +48,17 @@ const platformSpan = bt + platformFlagName + bt
 // installFlagName is status's --install flag (no short alias).
 const installFlagName = "--install"
 
-// noPromptFlagName is remove's confirmation skip (no short alias). It names
-// what it does -- ask nothing -- which covers both questions a teardown asks:
-// the confirmation, and whether to remove a namespace that turned out empty.
+// noPromptFlagName is the prompt skip of remove and deploy (no short alias). It
+// names what it does -- ask nothing -- which covers both questions a teardown
+// asks (the confirmation, and whether to remove a namespace that turned out
+// empty) and the one a redeploy asks before it restarts a running service.
 //
 // Deliberately not -f/--force: cliFlags is keyed by Short across every verb, and
 // -f already means "overwrite existing files" for examples/download. One key
 // carrying two unrelated meanings would make that entry's own prose untrue.
 const noPromptFlagName = "--no-prompt"
 
-// noPromptSpan is the markdown code span for --no-prompt, for the remove Detail.
+// noPromptSpan is the markdown code span for --no-prompt, for the remove and deploy Detail.
 const noPromptSpan = bt + noPromptFlagName + bt
 
 // urlFlagName is download's repeatable explicit-URL override (no short
@@ -250,8 +252,10 @@ type cliVerb struct {
 	// canonical name is (dispatch, shell completion of a verb's own
 	// flags/targets), but deliberately never offered as a position-1
 	// completion candidate -- the TAB menu keeps showing only canonical verbs.
-	// Entries must be [a-z0-9-] only: names are spliced unquoted into shell
-	// case patterns and fish conditions, and assertShellSafeName enforces it.
+	// The rule is the shared module's (abbrev.New enforces it when the set is
+	// built): lower-case letters and digits only, shorter than the word, unique,
+	// and never a canonical name. Names are spliced unquoted into shell case
+	// patterns and fish conditions, and assertShellSafeName gates them too.
 	Aliases []string
 }
 
@@ -260,7 +264,7 @@ var cliFlags = []cliFlag{
 	{Short: "-o", Long: "--out", AppliesTo: bt + "generate" + bt, Meaning: "write output to a file (default: stdout)", Arg: argFile, Usage: "write output to a file (default: stdout)"},
 	{Short: "-f", Long: "--force", AppliesTo: bt + "examples" + bt + "/" + bt + "download" + bt, Meaning: "overwrite existing files", Arg: argNone, Usage: "overwrite existing files"},
 	// argName, not argFile: the value must be a bare, PATH-resolved binary name
-	// (allowCommandValue rejects a path), so offering filenames would suggest
+	// (approvalsFrom rejects a path), so offering filenames would suggest
 	// exactly what the flag refuses.
 	{Short: allowCommandFlagName, Long: allowCommandFlagName, AppliesTo: bt + "deploy" + bt + "/" + bt + "remove" + bt + "/" + bt + "start" + bt + "/" + bt + "stop" + bt + "/" + bt + "restart" + bt + "/" + bt + "status" + bt + "/" + bt + "logs" + bt + "/" + bt + "cli" + bt, Meaning: "approve an extra command binary beyond the " + cmdFieldSpan + " allowlist; repeatable", Arg: argName, Usage: "approve an extra command binary beyond the platform allowlist (repeatable)"},
 	// argName: the model has no enumerated-value kind (only argNone/argFile/
@@ -274,7 +278,7 @@ var cliFlags = []cliFlag{
 	{Short: omitLibFileFlagName, Long: omitLibFileFlagName, AppliesTo: bt + "download" + bt, Meaning: "a jar list that replaces (never merges with) the built-in list the omission rule compares against; an empty file omits nothing", Arg: argFile, Usage: "replace the built-in jar list the omission rule compares against"},
 	{Short: includeProvidedFlagName, Long: includeProvidedFlagName, AppliesTo: bt + "download" + bt, Meaning: "download the whole closure even where the connector image already provides a jar, instead of omitting it", Arg: argNone, Usage: "download the whole closure even where the image already ships a jar"},
 	{Short: installFlagName, Long: installFlagName, AppliesTo: bt + "status" + bt, Meaning: "install the status script on every instance without prompting", Arg: argNone, Usage: "install the status script on every instance without prompting"},
-	{Short: noPromptFlagName, Long: noPromptFlagName, AppliesTo: bt + "remove" + bt, Meaning: "tear down without asking anything -- what a script or CI job passes, since the prompts refuse to read a non-TTY rather than hang. It covers both questions: the teardown confirmation, and whether to remove a namespace that turned out to be empty. It cannot authorise more than that: a namespace holding anything this release does not own is never removed, with or without it", Arg: argNone, Usage: "tear down without asking for confirmation"},
+	{Short: noPromptFlagName, Long: noPromptFlagName, AppliesTo: bt + "deploy" + bt + "/" + bt + "remove" + bt, Meaning: "approve without asking anything -- what a script or CI job passes, since the prompts refuse to read a non-TTY rather than hang. On " + bt + "remove" + bt + " it covers both questions: the teardown confirmation, and whether to remove a namespace that turned out to be empty (with no terminal to ask it on, the namespace is kept with a warning and the remove still succeeds). On " + bt + "deploy" + bt + " it approves restarting or recreating a docker or podman service that is running and whose artifact or secrets changed; kubernetes deploy asks nothing, so the flag is refused there (exit 2). It cannot authorise more than that: a namespace holding anything this release does not own is never removed, with or without it", Arg: argNone, Usage: "approve without asking (remove: the teardown; deploy: restarting a changed service)"},
 	{Short: detailsFlagShort, Long: detailsFlagName, AppliesTo: bt + "status" + bt, Meaning: "add the enrichment lines each view can report: worker node, CPU/memory use against allocation, image digest and referenced components; app version, java version, config path and heap", Arg: argNone, Usage: "add node, cpu/memory, digest, components; application version, java, config, heap"},
 	{Short: watchFlagShort, Long: watchFlagName, AppliesTo: bt + "status" + bt, Meaning: "re-render the report every 5s until interrupted (Ctrl-C)", Arg: argNone, Usage: "re-render the report every 5s until interrupted"},
 	{Short: verboseFlagShort, Long: verboseFlagName, AppliesTo: bt + "status" + bt, Meaning: "print one line per collection step, naming the call and how long it took, instead of the spinner a terminal gets by default. Both go to stderr, never to stdout, so the report stays byte-identical either way; the step lines are printed whether or not stderr is a terminal, which is what makes " + bt + "2>steps.log" + bt + " useful for finding which call is slow. Nothing is printed under " + bt + watchFlagName + bt, Arg: argNone, Usage: "print one line per collection step with its elapsed time, instead of the spinner"},
@@ -309,14 +313,17 @@ var cliVerbs = []cliVerb{
 		},
 	},
 	{
-		Name: "deploy", Args: platformArgBracket + " [-e env.yaml] [" + allowCommandFlagName + " name]",
-		Flags: []string{platformFlagName, "-e", allowCommandFlagName}, PosArg: posNone, Aliases: []string{"dp"},
+		Name: "deploy", Args: platformArgBracket + " [" + noPromptFlagName + "] [-e env.yaml] [" + allowCommandFlagName + " name]",
+		Flags: []string{noPromptFlagName, platformFlagName, "-e", allowCommandFlagName}, PosArg: posNone, Aliases: []string{"dp"},
 		Synopsis:   "deploy [flags]",
 		Summary:    "Generate for a platform, then apply it",
 		Example:    "solmq-conn-util deploy --platform kubernetes -e env.yaml",
-		TreeSuffix: bt + platformArgBracket + bt,
+		TreeSuffix: bt + platformArgBracket + bt + " " + bt + "[" + noPromptFlagName + "]" + bt,
 		Detail: "Generates for the platform, then applies it by shelling out to the section's " + cmdFieldSpan + " (" + bt + "kubectl" + bt + "/" + bt + "oc" + bt + ", " + bt + "docker" + bt + ", or " + bt + "podman" + bt + " + " + bt + "systemctl" + bt + ") through an argv slice -- never a shell. The env file must contain the matching section.\n\n" +
-			cmdFieldSpan + "'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); " + allowCommandSpan + " approves an extra binary for this invocation (e.g. a " + bt + "sudo" + bt + " prefix). Before anything is written or applied, a read-only preflight probe (on kubernetes, " + bt + "auth can-i create deployment" + bt + ") must succeed, or the run stops: naming the missing permission when the cluster answers no, with a login hint when it cannot be reached. " + platformResolutionPointer,
+			cmdFieldSpan + "'s argv[0] must be a bare, allowlisted binary name (path-free, PATH-resolved); " + allowCommandSpan + " approves an extra binary for this invocation (e.g. a chained runner such as " + bt + "lima nerdctl" + bt + "). A privilege-escalation wrapper such as " + bt + "sudo" + bt + " is never approved: run " + bt + "sudo solmq-conn-util" + bt + " instead. Before anything is written or applied, a read-only preflight must succeed, or the run stops: on docker and podman the engine's own info, and on kubernetes an " + bt + "auth can-i create" + bt + " of each kind the manifest writes (deployments, configmaps and, when it writes them, services, secrets, persistentvolumeclaims and, cluster-wide, persistentvolumes), all asked before the first write. A refusal names the missing permission, and a login hint is given when the cluster cannot be reached. " + platformResolutionPointer + "\n\n" +
+			"A redeploy leaves the decision to the platform and asks before anything is written. On docker, compose recreates the container when the file or any credential changed (a digest label records both) and leaves an unchanged one alone; on podman the unit and each secret are compared first, and only a change restarts the service. When a docker or podman service is running and would be recreated or restarted, " + bt + "deploy" + bt + " asks first, and answering anything but " + bt + "y" + bt + "/" + bt + "yes" + bt + " cancels and exits 0 having changed nothing, so the next deploy asks again. " +
+			noPromptSpan + " approves without asking, which is what a script or CI job passes -- without it a non-TTY run fails fast with that hint rather than hanging. Kubernetes asks nothing -- " + bt + "kubectl apply" + bt + " and the rollout decide -- so " + noPromptSpan + " is refused there as a flag that would do nothing (exit 2).\n\n" +
+			"On kubernetes the manifest carries no Namespace document: the namespace is read first, and only one that does not exist is created, on its own and only when this identity may create namespaces (an existing one asks for no cluster-wide permission, and an absent one that cannot be created stops the deploy, naming who can create it). After the apply, " + bt + "deploy" + bt + " waits for the Deployment to roll out, up to 300 seconds: a wait the cluster refuses is a warning, since the change is applied, and a rollout that times out or fails exits 1.",
 	},
 	{
 		Name: "remove", Args: platformArgBracket + " [" + noPromptFlagName + "] [-e env.yaml] [" + allowCommandFlagName + " name]",
@@ -325,13 +332,13 @@ var cliVerbs = []cliVerb{
 		Summary:    "Tear down what deploy created for a platform",
 		Example:    "solmq-conn-util remove --platform kubernetes -e env.yaml",
 		TreeSuffix: bt + platformArgBracket + bt + " " + bt + "[" + noPromptFlagName + "]" + bt,
-		Detail: "Tears down what " + bt + "deploy" + bt + " created for the platform, the same way (via the section's " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", and the same read-only preflight probe before anything is torn down). " + platformResolutionPointer + "\n\n" +
+		Detail: "Tears down what " + bt + "deploy" + bt + " created for the platform, the same way (via the section's " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", and the same read-only preflight before anything is torn down, which on kubernetes asks " + bt + "auth can-i delete" + bt + " of each kind the manifest deletes). " + platformResolutionPointer + "\n\n" +
 			"Because it is the one verb that destroys rather than creates, it asks for confirmation first, naming what it is about to tear down -- the deployment and its namespace on kubernetes, the container on docker/podman -- so a run pointed at the wrong " + bt + "env.yaml" + bt + " is caught before anything is deleted. " +
 			"Answering anything but " + bt + "y" + bt + "/" + bt + "yes" + bt + " cancels and exits 0, having touched nothing at all: the question comes before even the preflight probe. " +
 			noPromptSpan + " skips the prompt, which is what a script or CI job passes -- without it a non-TTY run fails fast with that hint rather than hanging on a read that will never return.\n\n" +
 			"On kubernetes the namespace is handled separately, and never as part of the manifest delete: deleting a Namespace cascades to every object inside it, including workloads this tool never deployed. " +
-			"So once the teardown succeeds, " + bt + "remove" + bt + " looks at what is left in the namespace. Anything this release does not own -- another deployment, a stateful set, a volume claim, a secret -- is listed and the namespace is kept. Only a namespace with nothing else in it is offered for removal, as its own separate question.\n\n" +
-			"That is an invariant rather than a default: no flag removes a namespace that still holds someone else's work. The cluster namespaces (" + bt + "default" + bt + ", " + bt + "kube-system" + bt + ", " + bt + "kube-public" + bt + ", " + bt + "kube-node-lease" + bt + ") are never removed either, and a check that cannot run leaves the namespace alone rather than assuming it is empty.",
+			"So once the teardown succeeds, " + bt + "remove" + bt + " looks at what is left in the namespace. Anything this release does not own -- another deployment, a stateful set, a volume claim, a secret -- is listed and the namespace is kept. Only a namespace with nothing else in it is offered for removal, as its own separate question, and the permission to delete namespaces is checked before that question is asked, so nobody is asked one that would be refused.\n\n" +
+			"That is an invariant rather than a default: no flag removes a namespace that still holds someone else's work. The cluster namespaces (" + bt + "default" + bt + ", " + bt + "kube-system" + bt + ", " + bt + "kube-public" + bt + ", " + bt + "kube-node-lease" + bt + ") are never removed either, and a check that cannot run leaves the namespace alone rather than assuming it is empty. Nothing in this step fails the remove, which has already succeeded: a refused permission, a declined question, a question with no terminal to ask it on (" + noPromptSpan + " answers it) and a failed namespace delete each keep the namespace with a warning and exit 0.",
 	},
 	{
 		Name: "start", Args: platformArgBracket + " [-e env.yaml] [" + allowCommandFlagName + " name]",
@@ -341,7 +348,7 @@ var cliVerbs = []cliVerb{
 		Example:    "solmq-conn-util start --platform docker -e env.yaml",
 		TreeSuffix: bt + platformArgBracket + bt,
 		Detail: "Starts the instance " + bt + "deploy" + bt + " created for the platform, in place: on kubernetes the Deployment is scaled back to " + bt + "deployment.replicas" + bt + "; on docker the container is started (" + bt + "docker start" + bt + "), decoding any created store again; on podman the unit is started (" + bt + "systemctl [--user] start" + bt + "), which creates the container from it. " + platformResolutionPointer + "\n\n" +
-			"It reads " + bt + "env.yaml" + bt + " for the platform section's names and " + cmdFieldSpan + " only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no " + bt + "-env" + bt + " variable exported. It shells out through the same binary allowlist and " + allowCommandSpan + ", after the same read-only preflight probe, as " + bt + "deploy" + bt + "; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another.",
+			"It reads " + bt + "env.yaml" + bt + " for the platform section's names and " + cmdFieldSpan + " only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no " + bt + "-env" + bt + " variable exported. It shells out through the same binary allowlist and " + allowCommandSpan + ", after the same read-only preflight probe, as " + bt + "deploy" + bt + "; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another. On kubernetes, start and restart then wait for the Deployment to roll out (up to 300 seconds): a wait the cluster refuses is a warning, since the change is made, and one that times out or sees the rollout fail exits 1; stop makes no wait.",
 	},
 	{
 		Name: "stop", Args: platformArgBracket + " [-e env.yaml] [" + allowCommandFlagName + " name]",
@@ -351,7 +358,7 @@ var cliVerbs = []cliVerb{
 		Example:    "solmq-conn-util stop --platform kubernetes -e env.yaml",
 		TreeSuffix: bt + platformArgBracket + bt,
 		Detail: "Stops the instance " + bt + "deploy" + bt + " created for the platform, keeping everything it needs to start again: on kubernetes the Deployment is scaled to 0 replicas (its ConfigMap and Secrets stay; a later " + bt + "deploy" + bt + " or " + bt + "start" + bt + " scales it back); on docker the container is stopped, and its restart policy leaves it stopped; on podman the unit is stopped, which removes its container. " + platformResolutionPointer + "\n\n" +
-			"It reads " + bt + "env.yaml" + bt + " for the platform section's names and " + cmdFieldSpan + " only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no " + bt + "-env" + bt + " variable exported. It shells out through the same binary allowlist and " + allowCommandSpan + ", after the same read-only preflight probe, as " + bt + "deploy" + bt + "; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another.",
+			"It reads " + bt + "env.yaml" + bt + " for the platform section's names and " + cmdFieldSpan + " only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no " + bt + "-env" + bt + " variable exported. It shells out through the same binary allowlist and " + allowCommandSpan + ", after the same read-only preflight probe, as " + bt + "deploy" + bt + "; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another. On kubernetes, start and restart then wait for the Deployment to roll out (up to 300 seconds): a wait the cluster refuses is a warning, since the change is made, and one that times out or sees the rollout fail exits 1; stop makes no wait.",
 	},
 	{
 		Name: "restart", Args: platformArgBracket + " [-e env.yaml] [" + allowCommandFlagName + " name]",
@@ -361,7 +368,7 @@ var cliVerbs = []cliVerb{
 		Example:    "solmq-conn-util restart --platform kubernetes -e env.yaml",
 		TreeSuffix: bt + platformArgBracket + bt,
 		Detail: "Restarts the instance " + bt + "deploy" + bt + " created for the platform -- what makes the connector load a rotated TLS store or a changed " + bt + "application.yml" + bt + " where " + bt + "deploy" + bt + " does not restart it: on kubernetes it is " + bt + "kubectl rollout restart" + bt + ", which replaces the pods one at a time; on docker the container is restarted, decoding any created store again (a store a docker " + bt + "deploy" + bt + " changed has already recreated it); on podman the unit is restarted, which creates its container again from the unit. " + platformResolutionPointer + "\n\n" +
-			"It reads " + bt + "env.yaml" + bt + " for the platform section's names and " + cmdFieldSpan + " only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no " + bt + "-env" + bt + " variable exported. It shells out through the same binary allowlist and " + allowCommandSpan + ", after the same read-only preflight probe, as " + bt + "deploy" + bt + "; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another.",
+			"It reads " + bt + "env.yaml" + bt + " for the platform section's names and " + cmdFieldSpan + " only: nothing is rendered or applied, no credential is resolved and no TLS store opened, so it runs with no " + bt + "-env" + bt + " variable exported. It shells out through the same binary allowlist and " + allowCommandSpan + ", after the same read-only preflight probe, as " + bt + "deploy" + bt + "; on kubernetes the probe asks to patch the Deployment. It asks nothing first: every one of the three is undone by another. On kubernetes, start and restart then wait for the Deployment to roll out (up to 300 seconds): a wait the cluster refuses is a warning, since the change is made, and one that times out or sees the rollout fail exits 1; stop makes no wait.",
 	},
 	{
 		Name: "status", Args: statusTargetArgBracket + " " + statusFlagArgs, TargetArgs: statusFlagArgs,
@@ -375,9 +382,9 @@ var cliVerbs = []cliVerb{
 			bt + "application" + bt + " is what the connector knows about itself, read from inside by running the generated status script in each instance -- leader-election mode and state, health, and per-workflow state; " +
 			bt + "all" + bt + " reports both, container first, since a container that is not running is the reason the application half is missing. " +
 			"Each word has a short spelling (" + bt + "cnt" + bt + ", " + bt + "app" + bt + "); the word itself is required, and " + bt + "status" + bt + " on its own prints this list.\n\n" +
-			detailsSpan + " adds the enrichment lines to whichever view is being printed: worker node, CPU and memory use against allocation, the image digest, and the objects the workload references (secrets, config maps, volume claims, mounts) on the container side; app version, java version, the configuration file the report was read from, and JVM heap use on the application side. The one sampling query it needs (" + bt + "kubectl top" + bt + ", " + bt + "docker stats" + bt + ") is why those lines are opt-in: on kubernetes it also needs a metrics API in the cluster, and reports a note instead of the lines when there is none.\n\n" +
-			watchSpan + " re-renders the report every 5s until interrupted. " + outputSpan + " " + bt + "json" + bt + " emits one machine-readable document per run instead of the tables, carrying every fact either view collected. " +
-			"Collection can take a while -- the application views make two container calls per instance, and the script inside each one makes seven -- so a spinner on stderr names the step being waited on whenever stderr is a terminal, and " + verboseSpan + " replaces it with one durable line per step carrying how long that step took, which is how a slow environment is diagnosed. Neither ever reaches stdout, and neither appears under " + watchSpan + ". " +
+			detailsSpan + " adds the enrichment lines to whichever view is being printed: worker node, CPU and memory use against allocation, the image digest, and the objects the workload references (secrets, config maps, volume claims, mounts) on the container side; app version, java version, the configuration file the report was read from, and JVM heap use on the application side. The one sampling query it needs (" + bt + "kubectl top" + bt + ", " + bt + "docker stats" + bt + "), and the four extra actuator calls and the JVM start the script makes for its half, are why those lines are opt-in: on kubernetes it also needs a metrics API in the cluster, and reports a note instead of the lines when there is none.\n\n" +
+			watchSpan + " re-renders the report every 5s until interrupted, and keeps the previous report on screen while the next one is collected. " + outputSpan + " " + bt + "json" + bt + " emits one machine-readable document per run instead of the tables, carrying every fact either view collected. " +
+			"Collection can take a while -- the application views run the status script in every instance, up to four at a time, and the script makes three actuator calls, or seven under " + detailsSpan + " -- so a spinner on stderr names the step being waited on whenever stderr is a terminal, and " + verboseSpan + " replaces it with one durable line per step carrying how long that step took, which is how a slow environment is diagnosed. Neither ever reaches stdout, and neither appears under " + watchSpan + ". " +
 			allSpan + " ignores the instance names in " + bt + "env.yaml" + bt + " and reports every connector instance it can find by image name (" + bt + statusreport.ImageMatch + bt + ") -- across every namespace on kubernetes, and every container, running or not, on docker/podman.\n\n" +
 			"For the application views, " + bt + installFlagName + bt + " installs the status script without asking where it is missing; without it, a declined install prompt just skips the instances that lack it. " +
 			bt + podFlagName + bt + " and " + bt + containerFlagName + bt + " (both repeatable) narrow which instances are reported; " + bt + namespaceFlagName + bt + " overrides the kubernetes namespace and " + bt + managementPortFlagName + bt + " the actuator port; " + bt + userFlagName + bt + " names the read-only actuator account the script authenticates as, for an instance whose config does not carry the reserved " + bt + spec.StatusUserName + bt + " account. " + bt + commandFlagName + bt + " overrides the platform CLI binary used to reach each instance, and " + allowCommandSpan + " approves an extra one, the same as deploy/remove. " + platformResolutionPointer,
@@ -407,7 +414,7 @@ var cliVerbs = []cliVerb{
 		Summary:    "Print one instance log, where status says what but not why",
 		Example:    "solmq-conn-util logs " + tailFlagName + " 100 -e env.yaml",
 		TreeSuffix: bt + "[" + followFlagName + "]" + bt + " " + bt + "[" + previousFlagName + "]" + bt + " " + bt + platformArgBracket + bt,
-		Detail: "Prints what one connector instance of the resolved platform has written, read through the same read-only " + bt + "kubectl" + bt + "/" + bt + "docker" + bt + "/" + bt + "podman" + bt + " path " + bt + "status" + bt + " uses -- the same " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", and the same preflight probe, which on kubernetes asks only to read pod logs (" + bt + "auth can-i get pods --subresource log" + bt + ") -- and discovering the same instances from " + bt + "env.yaml" + bt + ", so the two verbs can never disagree about which ones they mean. " +
+		Detail: "Prints what one connector instance of the resolved platform has written, read through the same read-only " + bt + "kubectl" + bt + "/" + bt + "docker" + bt + "/" + bt + "podman" + bt + " path " + bt + "status" + bt + " uses -- the same " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", and the same preflight, which on kubernetes asks for no permission up front (the read itself reports a refusal) -- and discovering the same instances from " + bt + "env.yaml" + bt + ", so the two verbs can never disagree about which ones they mean. " +
 			"It is the answer to the question " + bt + "status" + bt + " leaves open: that view reports a restart count and an exit code, and this one reports the lines that preceded them.\n\n" +
 			"One instance is read per run. When discovery finds several and none was named, nothing is read: the matching instances are listed on stdout as commands that can be pasted back verbatim, carrying the flags already typed, and the run exits 0. " +
 			bt + podFlagName + bt + " and " + bt + containerFlagName + bt + " name the instance, and each may be given once -- a second is refused rather than silently losing the first. " +
@@ -426,7 +433,7 @@ var cliVerbs = []cliVerb{
 		Summary:    "Open a shell inside one instance, or run one command in it",
 		Example:    "solmq-conn-util cli -e env.yaml",
 		TreeSuffix: bt + "[-- command ...]" + bt + " " + bt + platformArgBracket + bt,
-		Detail: "Opens an interactive shell inside one connector instance of the resolved platform, reached through the same read-only " + bt + "kubectl" + bt + "/" + bt + "docker" + bt + "/" + bt + "podman" + bt + " path " + bt + "status" + bt + " and " + bt + "logs" + bt + " use -- the same " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", the same preflight probe (on kubernetes it asks to exec into pods, " + bt + "auth can-i create pods --subresource exec" + bt + "), and the same instance discovery from " + bt + "env.yaml" + bt + ", so the three verbs can never disagree about which instance they mean. " +
+		Detail: "Opens an interactive shell inside one connector instance of the resolved platform, reached through the same read-only " + bt + "kubectl" + bt + "/" + bt + "docker" + bt + "/" + bt + "podman" + bt + " path " + bt + "status" + bt + " and " + bt + "logs" + bt + " use -- the same " + cmdFieldSpan + ", the same binary allowlist, " + allowCommandSpan + ", the same preflight (on kubernetes it asks for no permission up front: the exec itself reports a refusal), and the same instance discovery from " + bt + "env.yaml" + bt + ", so the three verbs can never disagree about which instance they mean. " +
 			"It is where the questions " + bt + "status" + bt + " and " + bt + "logs" + bt + " cannot answer get settled: whether the truststore really mounted, what is actually in " + bt + "/app/external/libs" + bt + ", which " + bt + "application.yml" + bt + " the process is running. " + platformResolutionPointer + "\n\n" +
 			"Everything after " + bt + "--" + bt + " is run in the instance instead of a shell, non-interactively, which is the form for a script -- an interactive run with no terminal on stdin is refused with that as the next step rather than opening a session nobody can type into. " +
 			"The shell is " + bt + "sh" + bt + ": the connector image is Alpine, so its userland is busybox and there is no " + bt + "bash" + bt + " to ask for.\n\n" +
@@ -447,7 +454,7 @@ var cliVerbs = []cliVerb{
 		Name: "validate", Args: "[-e env.yaml]", Flags: []string{"-e"}, PosArg: posNone, Aliases: []string{"vld"},
 		Synopsis: "validate [flags]",
 		Summary:  "Lint the whole env.yaml + workflows", Example: "solmq-conn-util validate -e env.yaml",
-		Detail: "Runs every check across the whole " + bt + "env.yaml" + bt + " (including any " + bt + "kubernetes:" + bt + "/" + bt + "docker:" + bt + "/" + bt + "podman:" + bt + " sections) and its workflows, printing all findings. Non-zero exit if any errors. Use it as a linter.\n\n" +
+		Detail: "Runs every check across the whole " + bt + "env.yaml" + bt + " (including any " + bt + "kubernetes:" + bt + "/" + bt + "docker:" + bt + "/" + bt + "podman:" + bt + " sections) and its workflows, printing all findings. Exits 2 if " + bt + "env.yaml" + bt + " or its workflows have any error, and 1 if only a docker or podman host check fails. Use it as a linter.\n\n" +
 			"It reports every error " + bt + "generate" + bt + " and " + bt + "deploy" + bt + " would stop at before they reach a platform: once the spec itself validates, it reads each TLS store a present platform loads and opens each existing PKCS12 with its password, builds each created one in memory and discards it, holds them and the kubernetes ConfigMap to each platform's size limit, and checks docker's bind-mount sources on this host. An unset " + bt + "-env" + bt + " variable is a warning. Logins, the image, and the cluster or engine itself are left to " + bt + "deploy" + bt + ".",
 	},
 	{
@@ -603,7 +610,7 @@ func renderCommandsDoc() string {
 	add("Regenerate: go test ./cmd/solmq-conn-util -run TestCommandsDocInSync -update")
 	add("TestCommandsDocInSync fails the build if this file drifts from the model. -->")
 	add("")
-	for _, ln := range supportNoticeMarkdown {
+	for _, ln := range supportNotice.Lines() {
 		add(ln)
 	}
 	add("")
@@ -686,8 +693,8 @@ func renderCommandsDoc() string {
 	add("| Code | Meaning |")
 	add("|------|---------|")
 	add("| " + bt + "0" + bt + " | success |")
-	add("| " + bt + "1" + bt + " | processing error (bad input, unreadable file, missing env var, a deploy command that failed) |")
-	add("| " + bt + "2" + bt + " | usage error (missing/unknown verb or target, unknown flag) |")
+	add("| " + bt + "1" + bt + " | processing error: something ran and failed, or the live system refused it (a preflight, a host check, a deploy command that failed) |")
+	add("| " + bt + "2" + bt + " | usage error: refused before acting because of what it was given -- the command line, " + bt + "env.yaml" + bt + ", the files and variables it names, or the platform selected (including every " + bt + "validate" + bt + " error in " + bt + "env.yaml" + bt + " or its workflows) |")
 	add("| _other_ | " + bt + "cli" + bt + " only: once a session or command is running inside the instance, its own exit status is passed straight back. Anything that fails before that still uses the three codes above |")
 	add("")
 	add("## Command details")
@@ -890,22 +897,31 @@ func verbExample(v cliVerb) string {
 // reason resolveVerb is: an alias added to cliVerbs is accepted everywhere
 // without a second table to keep in step.
 func resolveTarget(verb, name string) string {
-	for _, v := range cliVerbs {
-		if v.Name != verb {
-			continue
-		}
-		for _, tg := range v.Targets {
-			if tg.Name == name {
-				return name
-			}
-			for _, a := range tg.Aliases {
-				if a == name {
-					return tg.Name
-				}
-			}
+	if set, ok := targetAbbrev[verb]; ok {
+		if canon, ok := set.Expand(name); ok {
+			return canon
 		}
 	}
 	return name
+}
+
+// targetAbbrev holds one abbreviation set per verb that models targets, keyed by
+// the verb's name and built from each cliTarget's Name and Aliases.
+var targetAbbrev = newTargetAbbrev()
+
+func newTargetAbbrev() map[string]*abbrev.Set {
+	m := make(map[string]*abbrev.Set)
+	for _, v := range cliVerbs {
+		if len(v.Targets) == 0 {
+			continue
+		}
+		entries := make([]abbrev.Entry, 0, len(v.Targets))
+		for _, tg := range v.Targets {
+			entries = append(entries, abbrev.Entry{Canonical: tg.Name, Short: tg.Aliases})
+		}
+		m[v.Name] = abbrev.New(v.Name+" target", entries)
+	}
+	return m
 }
 
 // usageText is the in-binary help summary: one line per command, description

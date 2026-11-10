@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,13 +10,33 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
+	"github.com/hafio/go-deploy-utility/execguard"
+	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+	"github.com/hafio/go-deploy-utility/podman"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
+	"github.com/hafio/go-deploy-utility/runner/runnertest"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
+
+// noApprovals is the zero Approvals: a run without --allow-command.
+var noApprovals execguard.Approvals
+
+// approve builds the approvals a run with --allow-command <names> would carry,
+// failing the test on a value Approve refuses.
+func approve(t *testing.T, names ...string) execguard.Approvals {
+	t.Helper()
+	a, err := execguard.Approve("solmq-conn-util", names)
+	if err != nil {
+		t.Fatalf("Approve(%v) = %v", names, err)
+	}
+	return a
+}
 
 // fakeRunner records every invocation so tests can assert the exact argv/stdin
 // crossing the exec boundary without starting a process.
@@ -23,7 +44,7 @@ type fakeRunner struct {
 	calls     []call
 	err       error         // returned by every Run when errByCall has no entry (nil = success)
 	errByCall map[int]error // per-call-index override, so a later call can fail while earlier ones succeed
-	out       string        // returned by every Run when outByCall has no entry ("" falls back to "out")
+	out       string        // returned by every Run when outByCall has no entry ("" falls back to "out", or "yes" for auth can-i)
 	outByCall map[int]string
 }
 
@@ -33,181 +54,54 @@ type call struct {
 	env   []string
 }
 
-func (f *fakeRunner) Run(c Cmd) (string, error) {
+func (f *fakeRunner) Run(_ context.Context, c gdurunner.Cmd, stdout, _ io.Writer) error {
 	idx := len(f.calls)
-	f.calls = append(f.calls, call{argv: c.Argv, stdin: c.Stdin, env: c.Env})
+	f.calls = append(f.calls, call{argv: c.Argv, stdin: string(c.Stdin), env: c.Env})
 	out, ok := f.outByCall[idx]
 	if !ok {
 		out = f.out
-		if out == "" {
+		switch {
+		case out != "":
+		case isCanI(c.Argv):
+			// rbac.Check refuses anything but a "yes", so a probe answers it by
+			// default and a test scripts the refusal it wants.
+			out = "yes\n"
+		default:
 			out = "out"
 		}
 	}
+	emit(stdout, out)
 	if e, ok := f.errByCall[idx]; ok {
-		return out, e
+		return e
 	}
-	return out, f.err
+	return f.err
 }
 
-// ---- OS.Run (the real exec.Command boundary) --------------------------------
-
-// helperProcessArgv builds an OS.Run argv slice that re-execs this test binary
-// under go test's own harness with -test.run=TestHelperProcess, so
-// TestHelperProcess below runs as the child process instead of the actual test
-// suite. program is the value used for argv[0] -- tests pass either os.Args[0]
-// or an absolute path from os.Executable so both forms are exercised.
-func helperProcessArgv(program, mode string) []string {
-	return []string{program, "-test.run=TestHelperProcess", "--", mode}
+// Attach is never reached: nothing in this package attaches a terminal.
+func (f *fakeRunner) Attach(c gdurunner.Cmd, _, _, _ *os.File) (int, error) {
+	return 0, fmt.Errorf("%s: this fake does not attach", c.Argv[0])
 }
 
-// TestHelperProcess is not a real test: it returns immediately unless
-// GO_WANT_HELPER_PROCESS is set. OS.Run leaves cmd.Env nil, so the child
-// inherits the parent's environment and sees the variable the tests below set
-// with t.Setenv, letting them drive a re-exec of this binary as the child
-// process without depending on any external command.
-func TestHelperProcess(t *testing.T) {
-	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
-		return
+// emit writes a fake's scripted output to the stream a caller handed it. A nil
+// writer discards the stream, as the shared runner's does.
+func emit(w io.Writer, s string) {
+	if w != nil && s != "" {
+		fmt.Fprint(w, s)
 	}
-	args := os.Args
-	for len(args) > 0 {
-		if args[0] == "--" {
-			args = args[1:]
-			break
-		}
-		args = args[1:]
-	}
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "TestHelperProcess: no mode given")
-		os.Exit(2)
-	}
-	switch args[0] {
-	case "stdin":
-		b, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		os.Stdout.Write(b)
-	case "both":
-		fmt.Fprintln(os.Stdout, "stdout-line")
-		fmt.Fprintln(os.Stderr, "stderr-line")
-	case "fail":
-		fmt.Fprintln(os.Stdout, "before-exit")
-		os.Exit(3)
-	case "drip":
-		// Print immediately, then outlive any reasonable test: a reader that
-		// sees the line has seen it while the process was still running, which
-		// is what separates Stream from Run.
-		fmt.Fprintln(os.Stdout, "drip-line")
-		time.Sleep(10 * time.Minute)
-	case "env":
-		fmt.Fprintf(os.Stdout, "AMBIENT_ONLY=%s OVERRIDE=%s EXTRA_ONLY=%s\n",
-			os.Getenv("RUNNER_TEST_AMBIENT_ONLY"),
-			os.Getenv("RUNNER_TEST_OVERRIDE"),
-			os.Getenv("RUNNER_TEST_EXTRA_ONLY"))
-	case "stdiokind":
-		// Reports whether each standard file the parent handed over is a plain
-		// regular file. If os/exec had interposed a pipe -- which it does for
-		// any io.Writer that is not an *os.File -- these would read as pipes
-		// instead, and that substitution is exactly what Attach must never
-		// allow: a pipe is not a terminal, so the engine would refuse the tty.
-		fmt.Fprintf(os.Stdout, "in=%v out=%v err=%v\n",
-			regularFile(os.Stdin), regularFile(os.Stdout), regularFile(os.Stderr))
-	default:
-		fmt.Fprintf(os.Stderr, "TestHelperProcess: unknown mode %q\n", args[0])
-		os.Exit(2)
-	}
-	os.Exit(0)
 }
 
-// TestOSRunWiresStdinToChild covers text, and binary content of the kind a
-// TLS store loaded into podman's secret store is: NUL, CR and bytes that are
-// not UTF-8 must reach the child byte for byte.
-func TestOSRunWiresStdinToChild(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	for _, in := range []string{"hello-stdin\n", "\xfe\xed\xfe\xed\x00\x00\x00\x02\r\n\xff"} {
-		out, err := (OS{}).Run(Cmd{Argv: helperProcessArgv(os.Args[0], "stdin"), Stdin: in})
-		if err != nil {
-			t.Fatalf("Run returned error: %v (output %q)", err, out)
-		}
-		if out != in {
-			t.Errorf("stdin content not visible to child unchanged: output = %q, want %q", out, in)
+// isCanI reports whether argv is a `kubectl auth can-i` probe.
+func isCanI(argv []string) bool {
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "auth" && argv[i+1] == "can-i" {
+			return true
 		}
 	}
+	return false
 }
 
-func TestOSRunCombinesStdoutAndStderr(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	out, err := (OS{}).Run(Cmd{Argv: helperProcessArgv(os.Args[0], "both")})
-	if err != nil {
-		t.Fatalf("Run returned error: %v (output %q)", err, out)
-	}
-	if !strings.Contains(out, "stdout-line") {
-		t.Errorf("combined output missing stdout write: %q", out)
-	}
-	if !strings.Contains(out, "stderr-line") {
-		t.Errorf("combined output missing stderr write: %q", out)
-	}
-}
-
-func TestOSRunNonZeroExitReturnsErrorWithOutput(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	out, err := (OS{}).Run(Cmd{Argv: helperProcessArgv(os.Args[0], "fail")})
-	if err == nil {
-		t.Fatalf("non-zero child exit must return a non-nil error, output = %q", out)
-	}
-	if !strings.Contains(out, "before-exit") {
-		t.Errorf("output written before the failing exit must still be captured: %q", out)
-	}
-}
-
-// TestOSRunEnvReachesChildAndAmbientInherited pins the two guarantees in the Cmd.Env
-// doc comment: a supplied entry reaches the child, an ambient variable the child
-// process would otherwise see (via os.Environ()) is still inherited when Env carries
-// unrelated entries, and a supplied entry wins over an ambient one of the same name.
-func TestOSRunEnvReachesChildAndAmbientInherited(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	t.Setenv("RUNNER_TEST_AMBIENT_ONLY", "ambient-only-value")
-	t.Setenv("RUNNER_TEST_OVERRIDE", "ambient-should-lose")
-	out, err := (OS{}).Run(Cmd{
-		Argv: helperProcessArgv(os.Args[0], "env"),
-		Env: []string{
-			"RUNNER_TEST_OVERRIDE=override-wins",
-			"RUNNER_TEST_EXTRA_ONLY=extra-only-value",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Run returned error: %v (output %q)", err, out)
-	}
-	want := "AMBIENT_ONLY=ambient-only-value OVERRIDE=override-wins EXTRA_ONLY=extra-only-value\n"
-	if out != want {
-		t.Errorf("output = %q, want %q", out, want)
-	}
-}
-
-// TestOSRunAcceptsAbsolutePathArgv0 pins the trust decision at the nolint on
-// OS.Run's exec.Command call -- argv[0] can come from an env.yaml command
-// token, which validate.SafeToken allows to name any binary (letters, digits,
-// and / . : - _ among the allowed chars), so an absolute path must resolve via
-// exec.LookPath and run exactly like a bare command name does.
-func TestOSRunAcceptsAbsolutePathArgv0(t *testing.T) {
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
-	}
-	if !filepath.IsAbs(exe) {
-		t.Fatalf("os.Executable() returned a non-absolute path %q", exe)
-	}
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	out, err := (OS{}).Run(Cmd{Argv: helperProcessArgv(exe, "stdin"), Stdin: "abs-argv0-ok\n"})
-	if err != nil {
-		t.Fatalf("Run with absolute argv[0] returned error: %v (output %q)", err, out)
-	}
-	if out != "abs-argv0-ok\n" {
-		t.Errorf("output = %q", out)
-	}
-}
+// bg is the context the helper tests run under.
+func bg() context.Context { return context.Background() }
 
 func TestParseCommand(t *testing.T) {
 	cases := []struct {
@@ -218,6 +112,8 @@ func TestParseCommand(t *testing.T) {
 		{"kubectl", []string{"kubectl"}, true},
 		{"kubectl --context prod -n solace", []string{"kubectl", "--context", "prod", "-n", "solace"}, true},
 		{"  oc   ", []string{"oc"}, true},
+		{"kubectl.Exe", []string{"kubectl.Exe"}, true},
+		{"kubectl --kubeconfig=C:/RUNNER~1/config", []string{"kubectl", "--kubeconfig=C:/RUNNER~1/config"}, true},
 		{"", nil, false},
 		{"   ", nil, false},
 		{"kubectl; rm -rf /", nil, false},          // ';' is unsafe
@@ -228,7 +124,7 @@ func TestParseCommand(t *testing.T) {
 		{"/tmp/evil", nil, false},                  // path, not a bare name
 	}
 	for _, c := range cases {
-		got, err := ParseCommand(validate.PlatformKubernetes, c.in, nil)
+		got, err := ParseCommand(validate.PlatformKubernetes, c.in, noApprovals)
 		if c.ok {
 			if err != nil {
 				t.Errorf("ParseCommand(%q) unexpected error: %v", c.in, err)
@@ -241,32 +137,47 @@ func TestParseCommand(t *testing.T) {
 		}
 		if err == nil {
 			t.Errorf("ParseCommand(%q) should have failed, got %v", c.in, got)
+		} else if !exitcode.IsUsage(err) {
+			t.Errorf("ParseCommand(%q) refusal must be a usage error (exit 2), got %v", c.in, err)
 		}
 	}
 }
 
 // TestParseCommandExtraAllowed pins the escape hatch: a chained binary (e.g.
-// `sudo podman`) is rejected on the platform allowlist alone but accepted once
-// its argv[0] is named in extraAllowed, and the platform's own binary still
-// follows in argv unmodified.
+// `lima podman`) is rejected on the platform allowlist alone but accepted once
+// its argv[0] is approved, and the platform's own binary still follows in argv
+// unmodified. A privilege-escalation wrapper is the one chained binary that no
+// approval reaches: `sudo podman` is refused as a usage error whatever the
+// approvals say, and --allow-command sudo is refused by Approve itself.
 func TestParseCommandExtraAllowed(t *testing.T) {
-	if _, err := ParseCommand(validate.PlatformPodman, "sudo podman", nil); err == nil {
-		t.Fatal("sudo podman must be rejected without --allow-command sudo")
+	if _, err := ParseCommand(validate.PlatformPodman, "lima podman", noApprovals); err == nil {
+		t.Fatal("lima podman must be rejected without --allow-command lima")
 	}
-	got, err := ParseCommand(validate.PlatformPodman, "sudo podman", []string{"sudo"})
+	got, err := ParseCommand(validate.PlatformPodman, "lima podman", approve(t, "lima"))
 	if err != nil {
-		t.Fatalf("ParseCommand with extraAllowed=[sudo] unexpected error: %v", err)
+		t.Fatalf("ParseCommand with lima approved unexpected error: %v", err)
 	}
-	want := []string{"sudo", "podman"}
+	want := []string{"lima", "podman"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("ParseCommand(%q) = %v, want %v", "sudo podman", got, want)
+		t.Errorf("ParseCommand(%q) = %v, want %v", "lima podman", got, want)
+	}
+
+	_, err = ParseCommand(validate.PlatformPodman, "sudo podman", approve(t, "lima"))
+	if err == nil || !strings.Contains(err.Error(), `podman.command[0] = "sudo" is a privilege-escalation wrapper (sudo), which is never permitted`) {
+		t.Fatalf("sudo podman must be refused as an escalation wrapper, got %v", err)
+	}
+	if !exitcode.IsUsage(err) {
+		t.Errorf("an escalation refusal must be a usage error (exit 2), got %v", err)
+	}
+	if _, err := execguard.Approve("solmq-conn-util", []string{"sudo"}); err == nil || !strings.Contains(err.Error(), "sudo solmq-conn-util") {
+		t.Errorf("--allow-command sudo must be refused with the run-it-under-sudo advice, got %v", err)
 	}
 }
 
 func TestKubernetesDeployApplyOnStdin(t *testing.T) {
 	f := &fakeRunner{}
 	manifest := "apiVersion: v1\nkind: Namespace\n"
-	if _, err := Kubernetes(f, "kubectl --context prod", ActionDeploy, manifest, nil); err != nil {
+	if _, err := Kubernetes(bg(), f, "kubectl --context prod", ActionDeploy, manifest, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.calls) != 1 {
@@ -283,7 +194,7 @@ func TestKubernetesDeployApplyOnStdin(t *testing.T) {
 
 func TestKubernetesRemoveUsesDeleteVerb(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Kubernetes(f, "oc", ActionRemove, "x", nil); err != nil {
+	if _, err := Kubernetes(bg(), f, "oc", ActionRemove, "x", noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	wantArgv := []string{"oc", "delete", "-f", "-", "--ignore-not-found"}
@@ -294,7 +205,19 @@ func TestKubernetesRemoveUsesDeleteVerb(t *testing.T) {
 
 func TestKubernetesRejectsUnsafeCommand(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Kubernetes(f, "kubectl; rm -rf /", ActionDeploy, "x", nil); err == nil {
+	if _, err := Kubernetes(bg(), f, "kubectl; rm -rf /", ActionDeploy, "x", noApprovals); err == nil {
+		t.Fatal("unsafe command must be rejected")
+	}
+	if len(f.calls) != 0 {
+		t.Fatal("nothing must be executed when the command is rejected")
+	}
+}
+
+// TestKubernetesRolloutStatusRejectsUnsafeCommand: the rollout wait goes through the
+// same guard as the apply it follows, so a refused command waits on nothing.
+func TestKubernetesRolloutStatusRejectsUnsafeCommand(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := KubernetesRolloutStatus(bg(), f, "kubectl; rm -rf /", "ns", "c", noApprovals); err == nil {
 		t.Fatal("unsafe command must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -304,7 +227,7 @@ func TestKubernetesRejectsUnsafeCommand(t *testing.T) {
 
 func TestKubernetesUnknownAction(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Kubernetes(f, "kubectl", "restart", "x", nil); err == nil {
+	if _, err := Kubernetes(bg(), f, "kubectl", "restart", "x", noApprovals); err == nil {
 		t.Fatal("unknown action must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -316,7 +239,7 @@ func TestDockerUpAndDown(t *testing.T) {
 	f := &fakeRunner{}
 	env := []string{"MQ_CONN_1_USER=admin", "MQ_CONN_1_PASSWORD=s3cr3t"}
 	const compose = "name: proj\nservices: {}\n"
-	if _, err := Docker(f, "docker", ActionDeploy, compose, "/srv/spec", env, nil); err != nil {
+	if _, err := Docker(bg(), f, "docker", ActionDeploy, compose, "/srv/spec", env, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	wantUp := []string{"docker", "compose", "-f", "-", "--project-directory", "/srv/spec", "up", "-d"}
@@ -329,7 +252,7 @@ func TestDockerUpAndDown(t *testing.T) {
 	if !reflect.DeepEqual(f.calls[0].env, env) {
 		t.Errorf("up env = %v, want %v (credential values must cross via Cmd.Env, never argv)", f.calls[0].env, env)
 	}
-	if _, err := Docker(f, "docker", ActionRemove, compose, "/srv/spec", env, nil); err != nil {
+	if _, err := Docker(bg(), f, "docker", ActionRemove, compose, "/srv/spec", env, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	wantDown := []string{"docker", "compose", "-f", "-", "--project-directory", "/srv/spec", "down"}
@@ -346,7 +269,7 @@ func TestDockerUpAndDown(t *testing.T) {
 
 func TestDockerRejectsUnsafeCommand(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Docker(f, "docker `id`", ActionDeploy, "x", "/srv/spec", nil, nil); err == nil {
+	if _, err := Docker(bg(), f, "docker `id`", ActionDeploy, "x", "/srv/spec", nil, noApprovals); err == nil {
 		t.Fatal("unsafe command must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -354,76 +277,324 @@ func TestDockerRejectsUnsafeCommand(t *testing.T) {
 	}
 }
 
-// TestResolveQuadletScope pins the scope to the invoking user's effective uid,
-// which is the whole point of there no longer being a scope key: the mode and
-// the directory are derived from one fact, so they cannot disagree.
-//
-// It asserts the euid-consistent pairing rather than one fixed answer, because
-// the answer legitimately differs between a normal developer run and a run as
-// root (a CI container, say). What must always hold is that user mode goes with
-// the home directory and system mode with /etc.
+// scopeEnv is a ScopeEnv for a test: a fixed euid, the given environment, home
+// /home/alice, and a runtime directory that exists only where dirs says so. It
+// reads nothing from the real process.
+func scopeEnv(euid int, vars map[string]string, dirs ...string) ScopeEnv {
+	return ScopeEnv{
+		Euid:   euid,
+		Getenv: func(k string) string { return vars[k] },
+		Home:   func() (string, error) { return "/home/alice", nil },
+		IsDir: func(p string) (bool, error) {
+			for _, d := range dirs {
+				if d == p {
+					return true, nil
+				}
+			}
+			return false, nil
+		},
+		Linux: true,
+	}
+}
+
+// TestResolveQuadletScope pins the scope to the rootless rule, the quadlet
+// directory and the user session, each read from the inputs it is given rather
+// than from the process: so it needs no skip as root and redirects no HOME.
 func TestResolveQuadletScope(t *testing.T) {
-	sc, err := ResolveQuadletScope()
-	if err != nil {
+	const runtimeDir = "/run/user/1000"
+	user := "/home/alice/.config/containers/systemd"
+	sess := []string{"XDG_RUNTIME_DIR=" + runtimeDir, "DBUS_SESSION_BUS_ADDRESS=unix:path=" + runtimeDir + "/bus"}
+	t.Run("the six rootless decisions", func(t *testing.T) {
+		windows := scopeEnv(-1, nil)
+		windows.Linux = false
+		for _, c := range []struct {
+			name    string
+			env     ScopeEnv
+			rootful bool
+			want    QuadletScope
+			wantErr string
+		}{
+			{"non-root, rootful unset: rootless", scopeEnv(1000, nil, runtimeDir), false,
+				QuadletScope{Dir: user, UserMode: true, Euid: 1000, Env: sess}, ""},
+			{"non-root asking for rootful: refused", scopeEnv(1000, nil, runtimeDir), true,
+				QuadletScope{}, "podman.rootful=true requires root, but running as euid 1000"},
+			{"root asking for rootful: rootful", scopeEnv(0, nil), true,
+				QuadletScope{Dir: "/etc/containers/systemd", Euid: 0}, ""},
+			{"root, rootful unset: refused", scopeEnv(0, nil), false,
+				QuadletScope{}, "set podman.rootful=true to deploy the rootful engine"},
+			{"no euid, rootful unset: rootless, no session", windows, false,
+				QuadletScope{Dir: "/home/alice/.config/containers/systemd", UserMode: true, Euid: -1}, ""},
+			{"no euid, rootful: rootful", windows, true,
+				QuadletScope{Dir: "/etc/containers/systemd", Euid: -1}, ""},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				got, err := ResolveQuadletScope(c.env, c.rootful)
+				if c.wantErr != "" {
+					if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+						t.Fatalf("err = %v, want it to contain %q", err, c.wantErr)
+					}
+					if !exitcode.IsUsage(err) {
+						t.Errorf("a refused rootless rule is a usage error (exit 2), got %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(got, c.want) {
+					t.Errorf("scope = %+v, want %+v", got, c.want)
+				}
+			})
+		}
+	})
+
+	t.Run("XDG_CONFIG_HOME", func(t *testing.T) {
+		got, err := ResolveQuadletScope(scopeEnv(1000, map[string]string{"XDG_CONFIG_HOME": "/srv/xdg"}, runtimeDir), false)
+		if err != nil || got.Dir != "/srv/xdg/containers/systemd" {
+			t.Errorf("an absolute XDG_CONFIG_HOME is honoured: dir=%q err=%v", got.Dir, err)
+		}
+		_, err = ResolveQuadletScope(scopeEnv(1000, map[string]string{"XDG_CONFIG_HOME": "rel/xdg"}, runtimeDir), false)
+		if err == nil || !strings.Contains(err.Error(), "XDG_CONFIG_HOME") || !exitcode.IsUsage(err) {
+			t.Errorf("a relative XDG_CONFIG_HOME is a usage error naming it, got %v", err)
+		}
+		// Rootful never reads the user's config directory.
+		got, err = ResolveQuadletScope(scopeEnv(0, map[string]string{"XDG_CONFIG_HOME": "rel/xdg"}), true)
+		if err != nil || got.Dir != "/etc/containers/systemd" {
+			t.Errorf("rootful ignores XDG_CONFIG_HOME: dir=%q err=%v", got.Dir, err)
+		}
+	})
+
+	t.Run("unresolvable home", func(t *testing.T) {
+		env := scopeEnv(1000, nil, runtimeDir)
+		env.Home = func() (string, error) { return "", errors.New("$HOME is not defined") }
+		_, err := ResolveQuadletScope(env, false)
+		if err == nil || !strings.Contains(err.Error(), "$HOME is not defined") || !exitcode.IsUsage(err) {
+			t.Errorf("an unresolvable home is a usage error carrying the cause, got %v", err)
+		}
+	})
+
+	t.Run("session", func(t *testing.T) {
+		got, err := ResolveQuadletScope(scopeEnv(1000, nil, runtimeDir), false)
+		if err != nil || !reflect.DeepEqual(got.Env, sess) {
+			t.Errorf("a stripped session is derived: env=%v err=%v", got.Env, err)
+		}
+		inherited := map[string]string{
+			"XDG_RUNTIME_DIR":          "/run/user/1000",
+			"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+		}
+		got, err = ResolveQuadletScope(scopeEnv(1000, inherited, runtimeDir), false)
+		if err != nil || len(got.Env) != 0 {
+			t.Errorf("an inherited session is left as it is: env=%v err=%v", got.Env, err)
+		}
+		_, err = ResolveQuadletScope(scopeEnv(1000, nil), false)
+		if err == nil || exitcode.IsUsage(err) || !strings.Contains(err.Error(), runtimeDir) {
+			t.Errorf("a missing runtime directory is a plain failure (exit 1) naming it, got %v", err)
+		}
+		probeFails := scopeEnv(1000, nil)
+		probeFails.IsDir = func(string) (bool, error) { return false, errors.New("permission denied") }
+		if _, err = ResolveQuadletScope(probeFails, false); err == nil || !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("a probe that cannot run is an error carrying the cause, got %v", err)
+		}
+		// Off Linux there is no session to repair, and nothing is probed.
+		other := scopeEnv(1000, nil)
+		other.Linux = false
+		other.IsDir = func(string) (bool, error) { t.Error("no probe off Linux"); return false, nil }
+		if got, err = ResolveQuadletScope(other, false); err != nil || len(got.Env) != 0 {
+			t.Errorf("non-Linux has no session: env=%v err=%v", got.Env, err)
+		}
+		// A rootful scope has no user session either.
+		if got, err = ResolveQuadletScope(scopeEnv(0, nil), true); err != nil || len(got.Env) != 0 {
+			t.Errorf("a rootful scope has no session: env=%v err=%v", got.Env, err)
+		}
+	})
+}
+
+// LiveScopeEnv reads this process, and statIsDir tells a missing path (no
+// answer to give) from one that cannot be looked at (an error).
+func TestLiveScopeEnv(t *testing.T) {
+	env := LiveScopeEnv()
+	if env.Euid != os.Geteuid() || env.Linux != (runtime.GOOS == "linux") || env.Getenv == nil || env.Home == nil {
+		t.Errorf("LiveScopeEnv() = %+v, want this process's values", env)
+	}
+	dir := t.TempDir()
+	file := filepath.Join(dir, "f")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if sc.UserMode != (os.Geteuid() != 0) {
-		t.Errorf("UserMode = %v, want it to follow euid %d", sc.UserMode, os.Geteuid())
+	for _, c := range []struct {
+		path string
+		want bool
+	}{{dir, true}, {file, false}, {filepath.Join(dir, "gone"), false}} {
+		if got, err := env.IsDir(c.path); err != nil || got != c.want {
+			t.Errorf("IsDir(%q) = %v, %v, want %v, nil", c.path, got, err, c.want)
+		}
 	}
-	if sc.UserMode {
-		if !strings.HasSuffix(filepath.ToSlash(sc.Dir), quadletUserSub) {
-			t.Errorf("user mode must resolve under the home dir, got %+v", sc)
-		}
-	} else if sc.Dir != quadletSystem {
-		t.Errorf("system mode must resolve to %q, got %+v", quadletSystem, sc)
+	if _, err := env.IsDir("bad\x00path"); err == nil {
+		t.Error("a path that cannot be looked at is an error, not a missing directory")
 	}
-	// The user-mode directory tracks the home dir, which is what lets a test (and
-	// an operator with a relocated home) redirect it without a config key.
-	if sc.UserMode {
-		home := t.TempDir()
-		t.Setenv("HOME", home)        // unix
-		t.Setenv("USERPROFILE", home) // windows
-		moved, merr := ResolveQuadletScope()
-		if merr != nil {
-			t.Fatal(merr)
+}
+
+// WithEnv attaches the session to a rootless scope's commands, never aliasing the
+// scope's slice, and leaves a system scope's commands as they are.
+func TestQuadletScopeWithEnv(t *testing.T) {
+	user := QuadletScope{UserMode: true, Env: []string{"XDG_RUNTIME_DIR=/run/user/1000"}}
+	c := user.WithEnv(gdurunner.Cmd{Argv: []string{"x"}, Env: []string{"A=1"}})
+	if want := []string{"A=1", "XDG_RUNTIME_DIR=/run/user/1000"}; !reflect.DeepEqual(c.Env, want) {
+		t.Errorf("env = %v, want %v", c.Env, want)
+	}
+	c.Env[0] = "changed"
+	if user.Env[0] != "XDG_RUNTIME_DIR=/run/user/1000" {
+		t.Error("WithEnv must copy, not append into the scope's own slice")
+	}
+	if got := (QuadletScope{Env: user.Env}).WithEnv(gdurunner.Cmd{}); got.Env != nil {
+		t.Errorf("a system scope carries no session, got %v", got.Env)
+	}
+}
+
+// EnsureLinger asks logind, makes no change when the user lingers, enables it for
+// the user's own account when not, and says what to ask an administrator when
+// that is refused. Every call carries the session.
+func TestEnsureLinger(t *testing.T) {
+	sc := QuadletScope{UserMode: true, Euid: 1000, Env: []string{"XDG_RUNTIME_DIR=/run/user/1000"}}
+	show := []string{"loginctl", "show-user", "1000", "--property=Linger"}
+	enable := []string{"loginctl", "enable-linger"}
+	for _, c := range []struct {
+		name        string
+		f           *fakeRunner
+		wantEnabled bool
+		wantErr     []string
+		wantArgv    [][]string
+	}{
+		{"already lingers: no enable call", &fakeRunner{out: "Linger=yes\n"}, false, nil, [][]string{show}},
+		{"off: enabled", &fakeRunner{outByCall: map[int]string{0: "Linger=no\n"}}, true, nil, [][]string{show, enable}},
+		{"enable refused: the administrator form", &fakeRunner{outByCall: map[int]string{0: "Linger=no\n", 1: "Access denied"},
+			errByCall: map[int]error{1: errors.New("exit status 1")}}, false,
+			[]string{"Linger=no", "Access denied", "sudo loginctl enable-linger alice"}, [][]string{show, enable}},
+		{"probe fails: an error naming the command", &fakeRunner{err: errors.New("exit status 1")}, false,
+			[]string{"loginctl show-user 1000 --property=Linger", "logind"}, [][]string{show}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			enabled, err := EnsureLinger(bg(), c.f, sc, "alice")
+			if enabled != c.wantEnabled {
+				t.Errorf("enabled = %v, want %v", enabled, c.wantEnabled)
+			}
+			if len(c.wantErr) == 0 && err != nil {
+				t.Fatal(err)
+			}
+			for _, w := range c.wantErr {
+				if err == nil || !strings.Contains(err.Error(), w) {
+					t.Errorf("err = %v, want it to contain %q", err, w)
+				}
+			}
+			if len(c.f.calls) != len(c.wantArgv) {
+				t.Fatalf("calls = %+v, want %v", c.f.calls, c.wantArgv)
+			}
+			for i, w := range c.wantArgv {
+				if !reflect.DeepEqual(c.f.calls[i].argv, w) || !reflect.DeepEqual(c.f.calls[i].env, sc.Env) {
+					t.Errorf("call %d = %v env %v, want %v env %v", i, c.f.calls[i].argv, c.f.calls[i].env, w, sc.Env)
+				}
+			}
+		})
+	}
+	state, err := ProbeLinger(bg(), &splitRunner{stdout: "Linger=no\n", stderr: "a warning\n"}, sc)
+	if err != nil || state != "no" {
+		t.Errorf("ProbeLinger = %q, %v, want the stdout state alone", state, err)
+	}
+}
+
+// PodmanIDMap reads the mapping from stdout alone, for the uid map or the gid map.
+func TestPodmanIDMap(t *testing.T) {
+	for _, c := range []struct {
+		gid  bool
+		want string
+	}{{false, "UIDMap"}, {true, "GIDMap"}} {
+		r := &splitRunner{stdout: "0:1 1:65536 \n", stderr: "WARN[0000] a warning\n"}
+		out, err := PodmanIDMap(bg(), r, "podman", c.gid, noApprovals)
+		if err != nil || out != "0:1 1:65536 \n" {
+			t.Fatalf("out=%q err=%v", out, err)
 		}
-		if want := filepath.Join(home, filepath.FromSlash(quadletUserSub)); moved.Dir != want {
-			t.Errorf("user dir = %q, want %q", moved.Dir, want)
+		if want := podman.IDMap([]string{"podman"}, c.gid).Argv; !reflect.DeepEqual(r.calls[0].argv, want) {
+			t.Errorf("argv = %v, want the %s query %v", r.calls[0].argv, c.want, want)
 		}
+	}
+	if _, err := PodmanIDMap(bg(), &splitRunner{err: errors.New("boom")}, "podman", false, noApprovals); err == nil ||
+		!strings.Contains(err.Error(), "boom") {
+		t.Errorf("a failed query is an error carrying the cause, got %v", err)
+	}
+	f := &fakeRunner{}
+	if _, err := PodmanIDMap(bg(), f, "podman; rm -rf /", false, noApprovals); err == nil || len(f.calls) != 0 {
+		t.Errorf("an unsafe command is refused before anything runs: err=%v calls=%d", err, len(f.calls))
 	}
 }
 
 // TestPodmanDeployReloadThenStart pins how a deploy brings the unit up: reload,
-// ask systemd whether the service is running, then start it if it is not (a
-// new, stopped or failed unit) or restart it if it is -- a running container
-// keeps the secrets it was created with, so only a restart loads the new ones.
+// ask systemd for the service's state, then restart it when it is active or
+// reloading (a running container keeps the secrets it was created with, so only a
+// restart loads the new ones) and start it for any other answer, or none.
+// deployFns are the two seams PodmanDeploy takes, recording when they ran so a test
+// can assert the order: the question comes before the write.
+type deployFns struct {
+	asked, wrote int
+	answer       bool
+	askErr       error
+	writeErr     error
+	callsAtWrite int
+	f            *fakeRunner
+}
+
+func (d *deployFns) approve() (bool, error) { d.asked++; return d.answer, d.askErr }
+func (d *deployFns) write() (string, error) {
+	d.wrote++
+	if d.f != nil { // nil where the test records calls on another runner
+		d.callsAtWrite = len(d.f.calls)
+	}
+	return "wrote\n", d.writeErr
+}
+
 func TestPodmanDeployReloadThenStart(t *testing.T) {
 	for _, c := range []struct {
 		name    string
 		user    bool
-		running bool
-		verb    string
+		state   string
+		changed bool
+		verb    string // "" leaves the service alone
 	}{
-		{"new or stopped unit, user scope", true, false, "start"},
-		{"running unit, user scope", true, true, "restart"},
-		{"new or stopped unit, system scope", false, false, "start"},
-		{"running unit, system scope", false, true, "restart"},
+		{"inactive unit, user scope", true, "inactive\n", true, "start"},
+		{"active unit, user scope", true, "active\n", true, "restart"},
+		{"reloading unit, user scope", true, "reloading\n", true, "restart"},
+		{"failed unit, user scope", true, "failed\n", true, "start"},
+		{"unanswered probe starts, user scope", true, "", true, "start"},
+		{"inactive unit, system scope", false, "inactive\n", true, "start"},
+		{"active unit, system scope", false, "active\n", true, "restart"},
+		{"reloading unit, system scope", false, "reloading\n", true, "restart"},
+		{"unchanged inactive unit is started, nothing reloaded", true, "inactive\n", false, "start"},
+		{"unchanged active unit is left running", true, "active\n", false, ""},
+		{"unchanged reloading unit is left running", false, "reloading\n", false, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			f := &fakeRunner{}
-			if !c.running {
-				// is-active exits 3 for an inactive unit.
-				f.errByCall = map[int]error{1: fmt.Errorf("exit status 3")}
+			// is-active exits non-zero for every state but active, so a state
+			// other than active or reloading arrives with an exit error.
+			f := &fakeRunner{outByCall: map[int]string{0: c.state}}
+			if c.state != "active\n" && c.state != "reloading\n" {
+				f.errByCall = map[int]error{0: fmt.Errorf("exit status 3")}
 			}
-			sc := QuadletScope{Dir: t.TempDir(), UserMode: c.user}
-			out, err := PodmanDeploy(f, sc, []string{"solmq-connector.service"})
-			if err != nil {
-				t.Fatal(err)
+			d := &deployFns{answer: true, f: f}
+			sc := QuadletScope{Dir: t.TempDir(), UserMode: c.user, Env: []string{"XDG_RUNTIME_DIR=/run/user/1000"}}
+			out, cancelled, err := PodmanDeploy(bg(), f, sc, []string{"solmq-connector.service"}, c.changed, d.approve, d.write)
+			if err != nil || cancelled {
+				t.Fatalf("err = %v, cancelled = %v", err, cancelled)
 			}
-			want := [][]string{
-				sc.systemctlArgs("daemon-reload"),
-				sc.systemctlArgs("is-active", "--quiet", "solmq-connector.service"),
-				sc.systemctlArgs(c.verb, "solmq-connector.service"),
+			prefix := []string{"systemctl"}
+			if c.user {
+				prefix = append(prefix, "--user")
+			}
+			sysctl := func(args ...string) []string { return append(append([]string(nil), prefix...), args...) }
+			want := [][]string{sysctl("is-active", "solmq-connector.service")}
+			if c.changed {
+				want = append(want, sysctl("daemon-reload"))
+			}
+			if c.verb != "" {
+				want = append(want, sysctl(c.verb, "solmq-connector.service"))
 			}
 			if len(f.calls) != len(want) {
 				t.Fatalf("want %d calls, got %+v", len(want), f.calls)
@@ -432,25 +603,101 @@ func TestPodmanDeployReloadThenStart(t *testing.T) {
 				if !reflect.DeepEqual(f.calls[i].argv, w) {
 					t.Errorf("call %d argv = %v, want %v", i, f.calls[i].argv, w)
 				}
+				if c.user && !reflect.DeepEqual(f.calls[i].env, sc.Env) {
+					t.Errorf("call %d env = %v, want the session %v", i, f.calls[i].env, sc.Env)
+				}
+				if !c.user && f.calls[i].env != nil {
+					t.Errorf("call %d env = %v, a system scope carries no session", i, f.calls[i].env)
+				}
 			}
-			if said := strings.Contains(out, "was running; restarting it"); said != c.running {
-				t.Errorf("output %q: restart notice present = %v, want %v", out, said, c.running)
+			running := c.state == "active\n" || c.state == "reloading\n"
+			wantAsked := 0
+			if c.changed && running {
+				wantAsked = 1
+			}
+			wantWrote := 0
+			if c.changed {
+				wantWrote = 1
+			}
+			if d.asked != wantAsked || d.wrote != wantWrote {
+				t.Errorf("asked %d times (want %d), wrote %d times (want %d)", d.asked, wantAsked, d.wrote, wantWrote)
+			}
+			if d.wrote == 1 && d.callsAtWrite != 1 {
+				t.Errorf("write ran after %d calls, want after the is-active probe alone", d.callsAtWrite)
+			}
+			if said := strings.Contains(out, "was running; restarting it"); said != (c.verb == "restart") {
+				t.Errorf("output %q: restart notice present = %v, want %v", out, said, c.verb == "restart")
+			}
+			if said := strings.Contains(out, "unchanged and left running"); said != (c.verb == "" && running) {
+				t.Errorf("output %q: left-running note present = %v", out, said)
+			}
+			if c.verb == "" && !strings.Contains(out, "`solmq-conn-util restart`") {
+				t.Errorf("output %q should say how to restart it", out)
 			}
 		})
 	}
 }
 
+// A running service that would restart asks first, and a "no" leaves the host
+// exactly as it was: nothing written, nothing reloaded, nothing restarted.
+func TestPodmanDeployDeclinedChangesNothing(t *testing.T) {
+	f := &fakeRunner{outByCall: map[int]string{0: "active\n"}}
+	d := &deployFns{answer: false, f: f}
+	sc := QuadletScope{Dir: t.TempDir(), UserMode: true}
+	out, cancelled, err := PodmanDeploy(bg(), f, sc, []string{"a.service"}, true, d.approve, d.write)
+	if err != nil || !cancelled || out != "" {
+		t.Fatalf("out = %q, cancelled = %v, err = %v; want a cancelled, silent deploy", out, cancelled, err)
+	}
+	if d.asked != 1 || d.wrote != 0 {
+		t.Errorf("asked %d, wrote %d; want one question and no write", d.asked, d.wrote)
+	}
+	if len(f.calls) != 1 || f.calls[0].argv[len(f.calls[0].argv)-2] != "is-active" {
+		t.Errorf("only the state probe may run, got %+v", f.calls)
+	}
+}
+
+// A question that cannot be asked ends the deploy with its own error, before any
+// write: no terminal and no --no-prompt is the typical cause.
+func TestPodmanDeployUnaskableQuestionStopsBeforeAnyWrite(t *testing.T) {
+	f := &fakeRunner{outByCall: map[int]string{0: "active\n"}}
+	d := &deployFns{askErr: fmt.Errorf("confirming the redeploy interactively: no terminal; pass --no-prompt instead"), f: f}
+	sc := QuadletScope{Dir: t.TempDir()}
+	_, cancelled, err := PodmanDeploy(bg(), f, sc, []string{"a.service"}, true, d.approve, d.write)
+	if err == nil || cancelled || !strings.Contains(err.Error(), "--no-prompt") {
+		t.Fatalf("err = %v, cancelled = %v; want the question's own error", err, cancelled)
+	}
+	if d.wrote != 0 || len(f.calls) != 1 {
+		t.Errorf("wrote %d times, %d calls; want no write and only the probe", d.wrote, len(f.calls))
+	}
+}
+
+// A write that fails stops the deploy where it fails: no reload, no start.
+func TestPodmanDeployWriteFailureStopsBeforeSystemctl(t *testing.T) {
+	f := &fakeRunner{outByCall: map[int]string{0: "inactive\n"}, errByCall: map[int]error{0: fmt.Errorf("exit status 3")}}
+	d := &deployFns{writeErr: fmt.Errorf("boom"), f: f}
+	sc := QuadletScope{Dir: t.TempDir()}
+	out, _, err := PodmanDeploy(bg(), f, sc, []string{"a.service"}, true, d.approve, d.write)
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("err = %v, want the write's own", err)
+	}
+	if !strings.Contains(out, "wrote") || len(f.calls) != 1 {
+		t.Errorf("out = %q, %d calls; want the write's output kept and only the probe run", out, len(f.calls))
+	}
+}
+
 func TestPodmanDeploySystemModeNoUserFlag(t *testing.T) {
 	f := &fakeRunner{}
+	d := &deployFns{answer: true, f: f}
 	sc := QuadletScope{Dir: t.TempDir(), UserMode: false}
-	if _, err := PodmanDeploy(f, sc, []string{"a.service"}); err != nil {
+	if _, _, err := PodmanDeploy(bg(), f, sc, []string{"a.service"}, true, d.approve, d.write); err != nil {
 		t.Fatal(err)
 	}
-	if reflect.DeepEqual(f.calls[0].argv, []string{"systemctl", "--user", "daemon-reload"}) {
+	// Call 0 is the state probe, call 1 the reload.
+	if reflect.DeepEqual(f.calls[1].argv, []string{"systemctl", "--user", "daemon-reload"}) {
 		t.Error("system mode must not pass --user")
 	}
-	if !reflect.DeepEqual(f.calls[0].argv, []string{"systemctl", "daemon-reload"}) {
-		t.Errorf("argv = %v", f.calls[0].argv)
+	if !reflect.DeepEqual(f.calls[1].argv, []string{"systemctl", "daemon-reload"}) {
+		t.Errorf("argv = %v", f.calls[1].argv)
 	}
 }
 
@@ -462,7 +709,7 @@ func TestPodmanRemoveStopsRemovesReloads(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := QuadletScope{Dir: dir, UserMode: false}
-	if _, err := PodmanRemove(f, sc, []string{"solmq-connector.service"}, []string{unit}); err != nil {
+	if _, err := PodmanRemove(bg(), f, sc, []string{"solmq-connector.service"}, []string{unit}); err != nil {
 		t.Fatal(err)
 	}
 	want := [][]string{
@@ -480,23 +727,28 @@ func TestPodmanRemoveStopsRemovesReloads(t *testing.T) {
 }
 
 func TestPodmanDeployStartFailureIsReported(t *testing.T) {
-	// daemon-reload is call 0 and is-active (call 1) decides the verb for the
-	// start or restart (call 2); a failure injected at any step must surface
-	// naming the step, and nothing after it may run.
+	// is-active is call 0 and decides the verb, daemon-reload is call 1 and the
+	// start or restart is call 2; a failure injected at any step must surface
+	// naming the step, and nothing after it may run. The verb follows the state
+	// is-active prints, as systemctl does: "inactive" with exit 3 starts, and
+	// "active" restarts.
 	for _, c := range []struct {
 		name      string
 		errs      map[int]error
+		probe     string
 		wantErr   string
 		wantCalls int
 	}{
-		{"daemon-reload", map[int]error{0: fmt.Errorf("boom")}, "systemctl daemon-reload: boom", 1},
-		{"start", map[int]error{1: fmt.Errorf("exit status 3"), 2: fmt.Errorf("boom")}, "systemctl start a.service: boom", 3},
-		{"restart", map[int]error{2: fmt.Errorf("boom")}, "systemctl restart a.service: boom", 3},
+		{"daemon-reload", map[int]error{1: fmt.Errorf("boom")}, "active\n", "systemctl daemon-reload: boom", 2},
+		{"start", map[int]error{0: fmt.Errorf("exit status 3"), 2: fmt.Errorf("boom")}, "inactive\n",
+			"systemctl start a.service: boom", 3},
+		{"restart", map[int]error{2: fmt.Errorf("boom")}, "active\n", "systemctl restart a.service: boom", 3},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			f := &fakeRunner{errByCall: c.errs}
+			f := &fakeRunner{errByCall: c.errs, outByCall: map[int]string{0: c.probe}}
+			d := &deployFns{answer: true, f: f}
 			sc := QuadletScope{Dir: t.TempDir(), UserMode: true}
-			_, err := PodmanDeploy(f, sc, []string{"a.service"})
+			_, _, err := PodmanDeploy(bg(), f, sc, []string{"a.service"}, true, d.approve, d.write)
 			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
 				t.Fatalf("err = %v, want it to contain %q", err, c.wantErr)
 			}
@@ -509,7 +761,7 @@ func TestPodmanDeployStartFailureIsReported(t *testing.T) {
 
 func TestDockerUnknownAction(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Docker(f, "docker", "restart", "x", "/srv/spec", nil, nil); err == nil {
+	if _, err := Docker(bg(), f, "docker", "restart", "x", "/srv/spec", nil, noApprovals); err == nil {
 		t.Fatal("unknown action must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -522,7 +774,7 @@ func TestPodmanRemoveStopFailureIsReported(t *testing.T) {
 	// fails every call exercises the stop-failure branch.
 	f := &fakeRunner{err: fmt.Errorf("boom")}
 	sc := QuadletScope{Dir: t.TempDir(), UserMode: false}
-	_, err := PodmanRemove(f, sc, []string{"solmq-connector.service"}, []string{"solmq-connector.container"})
+	_, err := PodmanRemove(bg(), f, sc, []string{"solmq-connector.service"}, []string{"solmq-connector.container"})
 	if err == nil {
 		t.Fatal("a systemctl stop failure must surface")
 	}
@@ -537,7 +789,7 @@ func TestPodmanSecretCreateRemovesThenCreatesValueOnStdin(t *testing.T) {
 	f := &fakeRunner{}
 	const name = "mq-conn-1-password"
 	const value = "s3cr3t"
-	if _, err := PodmanSecretCreate(f, "podman", name, value, false, nil); err != nil {
+	if _, err := PodmanSecretCreate(bg(), f, "podman", name, value, false, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.calls) != 2 {
@@ -570,39 +822,49 @@ func TestPodmanSecretCreateRemovesThenCreatesValueOnStdin(t *testing.T) {
 // the value on stdin, so a failed create leaves the previous one in place.
 func TestPodmanSecretCreateReplacesInOneCall(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := PodmanSecretCreate(f, "podman", "c-tls-ts", "bytes", true, nil); err != nil {
+	if _, err := PodmanSecretCreate(bg(), f, "podman", "c-tls-ts", "bytes", true, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	if want := []string{"podman", "secret", "create", "--replace", "c-tls-ts", "-"}; len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) || f.calls[0].stdin != "bytes" {
 		t.Errorf("calls = %+v, want one %v with the value on stdin", f.calls, want)
 	}
 	failing := &fakeRunner{err: fmt.Errorf("boom")}
-	if _, err := PodmanSecretCreate(failing, "podman", "c-tls-ts", "bytes", true, nil); err == nil || !strings.Contains(err.Error(), "podman secret create --replace c-tls-ts") {
+	if _, err := PodmanSecretCreate(bg(), failing, "podman", "c-tls-ts", "bytes", true, noApprovals); err == nil || !strings.Contains(err.Error(), "podman secret create --replace c-tls-ts") {
 		t.Errorf("err = %v", err)
 	}
 }
 
 // PodmanVersion reads the client version from stdout alone, and
-// PodmanSupportsReplace holds it to 4.7.
+// podman.SupportsReplace holds it to 4.7, whatever space surrounds it.
 func TestPodmanVersion(t *testing.T) {
 	r := &splitRunner{stdout: "5.8.2\n", stderr: "WARN[0000] a warning\n"}
-	v, err := PodmanVersion(r, "podman", nil)
+	v, err := PodmanVersion(bg(), r, "podman", noApprovals)
 	if err != nil || v != "5.8.2" {
 		t.Fatalf("v=%q err=%v", v, err)
 	}
 	if want := []string{"podman", "version", "--format", "{{.Client.Version}}"}; !reflect.DeepEqual(r.calls[0].argv, want) {
 		t.Errorf("argv = %v, want %v", r.calls[0].argv, want)
 	}
-	for v, want := range map[string]bool{"5.8.2": true, "4.7.0": true, "4.9.4-rhel": true, "v4.7.1": true, "4.6.2": false, "4.5": false, "3.4.4": false, "": false, "out": false, "4": false} {
-		if got := PodmanSupportsReplace(v); got != want {
-			t.Errorf("PodmanSupportsReplace(%q) = %v, want %v", v, got, want)
+	for v, want := range map[string]bool{"5.8.2": true, "  5.8.2\n": true, "\t4.7.0 \n": true, "4.7.0": true, "4.9.4-rhel": true, "v4.7.1": true, "4.6.2": false, "4.5": false, "3.4.4": false, "": false, "out": false, "4": false} {
+		if got := podman.SupportsReplace(v); got != want {
+			t.Errorf("podman.SupportsReplace(%q) = %v, want %v", v, got, want)
 		}
+	}
+	padded := &splitRunner{stdout: "  4.7.0 \n"}
+	if v, err := PodmanVersion(bg(), padded, "podman", noApprovals); err != nil || !podman.SupportsReplace(v) {
+		t.Errorf("a version with surrounding space must parse: v=%q err=%v", v, err)
+	}
+	if _, err := PodmanVersion(bg(), &splitRunner{err: errors.New("boom")}, "podman", noApprovals); err == nil {
+		t.Error("a failed version call is an error")
+	}
+	if _, err := PodmanVersion(bg(), &splitRunner{}, "podman; id", noApprovals); err == nil {
+		t.Error("an unsafe command is refused")
 	}
 }
 
 func TestPodmanSecretCreateSkipsCreateWhenRmFails(t *testing.T) {
 	f := &fakeRunner{err: fmt.Errorf("boom")}
-	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t", false, nil)
+	_, err := PodmanSecretCreate(bg(), f, "podman", "mq-conn-1-password", "s3cr3t", false, noApprovals)
 	if err == nil {
 		t.Fatal("a failed rm must surface as an error")
 	}
@@ -616,7 +878,7 @@ func TestPodmanSecretCreateSkipsCreateWhenRmFails(t *testing.T) {
 
 func TestPodmanSecretCreateReportsCreateFailure(t *testing.T) {
 	f := &fakeRunner{errByCall: map[int]error{1: fmt.Errorf("boom")}}
-	_, err := PodmanSecretCreate(f, "podman", "mq-conn-1-password", "s3cr3t", false, nil)
+	_, err := PodmanSecretCreate(bg(), f, "podman", "mq-conn-1-password", "s3cr3t", false, noApprovals)
 	if err == nil {
 		t.Fatal("a failed create must surface as an error")
 	}
@@ -630,7 +892,7 @@ func TestPodmanSecretCreateReportsCreateFailure(t *testing.T) {
 
 func TestPodmanSecretCreateRejectsUnsafeCommand(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := PodmanSecretCreate(f, "podman; rm -rf /", "name", "value", false, nil); err == nil {
+	if _, err := PodmanSecretCreate(bg(), f, "podman; rm -rf /", "name", "value", false, noApprovals); err == nil {
 		t.Fatal("unsafe command must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -641,7 +903,7 @@ func TestPodmanSecretCreateRejectsUnsafeCommand(t *testing.T) {
 func TestPodmanSecretRemoveBatchesNames(t *testing.T) {
 	f := &fakeRunner{}
 	names := []string{"mq-conn-1-user", "mq-conn-1-password", "truststore-password"}
-	if _, err := PodmanSecretRemove(f, "podman", names, nil); err != nil {
+	if _, err := PodmanSecretRemove(bg(), f, "podman", names, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.calls) != 1 {
@@ -655,7 +917,7 @@ func TestPodmanSecretRemoveBatchesNames(t *testing.T) {
 
 func TestPodmanSecretRemoveNoNamesIsNoop(t *testing.T) {
 	f := &fakeRunner{}
-	out, err := PodmanSecretRemove(f, "podman", nil, nil)
+	out, err := PodmanSecretRemove(bg(), f, "podman", nil, noApprovals)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -669,7 +931,7 @@ func TestPodmanSecretRemoveNoNamesIsNoop(t *testing.T) {
 
 func TestPodmanSecretRemoveRejectsUnsafeCommand(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := PodmanSecretRemove(f, "podman; rm -rf /", []string{"name"}, nil); err == nil {
+	if _, err := PodmanSecretRemove(bg(), f, "podman; rm -rf /", []string{"name"}, noApprovals); err == nil {
 		t.Fatal("unsafe command must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -679,7 +941,7 @@ func TestPodmanSecretRemoveRejectsUnsafeCommand(t *testing.T) {
 
 func TestPodmanSecretRemoveReportsFailure(t *testing.T) {
 	f := &fakeRunner{err: fmt.Errorf("boom")}
-	_, err := PodmanSecretRemove(f, "podman", []string{"name"}, nil)
+	_, err := PodmanSecretRemove(bg(), f, "podman", []string{"name"}, noApprovals)
 	if err == nil {
 		t.Fatal("a failed rm must surface as an error")
 	}
@@ -782,84 +1044,37 @@ func TestWriteFileTargetIsDirectoryReturnsError(t *testing.T) {
 	}
 }
 
-// TestOSRunWritesNothingToStderr pins that Run prints nothing of its own: the
-// child's streams are captured into the returned combined output, and the
-// caller (cmd/solmq-conn-util's report) decides what an operator sees. It
-// reuses the TestHelperProcess re-exec trick already used above so no external
-// binary is needed, and temporarily swaps os.Stderr for a pipe to capture
-// anything that leaks past the buffer.
-func TestOSRunWritesNothingToStderr(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
-	}
-	origStderr := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	os.Stderr = w
-
-	argv := helperProcessArgv(exe, "stdin")
-	out, runErr := (OS{}).Run(Cmd{Argv: argv, Stdin: "echo-test\n"})
-
-	w.Close()
-	os.Stderr = origStderr
-	data, readErr := io.ReadAll(r)
-	if readErr != nil {
-		t.Fatalf("reading captured stderr: %v", readErr)
-	}
-	if runErr != nil {
-		t.Fatalf("Run returned error: %v", runErr)
-	}
-	if got := string(data); got != "" {
-		t.Errorf("Run wrote %q to stderr, want nothing", got)
-	}
-	// The child's own output still reaches the caller through the return value,
-	// which is what the removed echo used to duplicate.
-	if !strings.Contains(out, "echo-test") {
-		t.Errorf("combined output = %q, want it to carry the child's output", out)
-	}
-}
-
-// TestOSRunRejectsUnresolvableArgv0 pins that a binary LookPath cannot find is
-// an error rather than a silent exec attempt (exec.Command would otherwise
-// defer the same failure to Start).
-func TestOSRunRejectsUnresolvableArgv0(t *testing.T) {
-	_, err := (OS{}).Run(Cmd{Argv: []string{"solmq-conn-test-nonexistent-binary"}})
-	if err == nil {
-		t.Fatal("Run must fail when argv[0] cannot be resolved on PATH")
-	}
-}
-
 // ---- Preflight ----------------------------------------------------------------
+
+// deployProbe is the one probe the failure tests hand a kubernetes Preflight.
+var deployProbe = []rbac.Probe{{Verb: "create", Resource: "deployments"}}
 
 func TestPreflightKubernetesArgvDeployNoNamespace(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl --context prod", ActionDeploy, "", nil); err != nil {
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl --context prod", false, deployProbe, noApprovals); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"kubectl", "--context", "prod", "auth", "can-i", "create", "deployment"}
-	if !reflect.DeepEqual(f.calls[0].argv, want) {
-		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	want := []string{"kubectl", "--context", "prod", "auth", "can-i", "create", "deployments"}
+	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("calls = %+v, want one with argv %v", f.calls, want)
 	}
 }
 
 func TestPreflightKubernetesArgvRemoveWithNamespace(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformKubernetes, "oc", ActionRemove, "solace", nil); err != nil {
+	probes := []rbac.Probe{{Verb: "delete", Resource: "deployments", Namespace: "solace"}}
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "oc", false, probes, noApprovals); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"oc", "auth", "can-i", "delete", "deployment", "--namespace", "solace"}
-	if !reflect.DeepEqual(f.calls[0].argv, want) {
-		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	want := []string{"oc", "auth", "can-i", "delete", "deployments", "-n", "solace"}
+	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("calls = %+v, want one with argv %v", f.calls, want)
 	}
 }
 
 func TestPreflightDockerArgvIsInfo(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformDocker, "docker --context foo", ActionDeploy, "", nil); err != nil {
+	if _, err := Preflight(bg(), f, validate.PlatformDocker, "docker --context foo", false, nil, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"docker", "--context", "foo", "info"}
@@ -870,7 +1085,7 @@ func TestPreflightDockerArgvIsInfo(t *testing.T) {
 
 func TestPreflightPodmanArgvIsInfo(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformPodman, "podman", ActionRemove, "", nil); err != nil {
+	if _, err := Preflight(bg(), f, validate.PlatformPodman, "podman", false, nil, noApprovals); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"podman", "info"}
@@ -883,20 +1098,23 @@ func TestPreflightFailureWrapsPlatformHint(t *testing.T) {
 	cases := []struct {
 		platform string
 		command  string
+		rootless bool
 		hint     string
 	}{
-		{validate.PlatformKubernetes, "kubectl", "oc login"},
-		{validate.PlatformDocker, "docker", "docker daemon"},
-		{validate.PlatformPodman, "podman", "podman machine"},
+		{validate.PlatformKubernetes, "kubectl", false, "oc login"},
+		{validate.PlatformDocker, "docker", false, "sudo systemctl start docker"},
+		{validate.PlatformPodman, "podman", true, "systemctl --user start podman.socket"},
+		{validate.PlatformPodman, "podman", false, "sudo systemctl start podman.socket"},
 	}
 	for _, c := range cases {
-		f := &fakeRunner{err: fmt.Errorf("connection refused")}
-		_, err := Preflight(f, c.platform, c.command, ActionDeploy, "", nil)
+		f := &fakeRunner{err: fmt.Errorf("connection refused"), out: "dial unix /run/podman.sock: no such file"}
+		var probes []rbac.Probe
+		if c.platform == validate.PlatformKubernetes {
+			probes = deployProbe
+		}
+		out, err := Preflight(bg(), f, c.platform, c.command, c.rootless, probes, noApprovals)
 		if err == nil {
 			t.Fatalf("%s: preflight failure must surface as an error", c.platform)
-		}
-		if !strings.Contains(err.Error(), "preflight failed for "+c.platform) {
-			t.Errorf("%s: error missing platform prefix: %v", c.platform, err)
 		}
 		if !strings.Contains(err.Error(), "connection refused") {
 			t.Errorf("%s: error must preserve the underlying cause: %v", c.platform, err)
@@ -904,54 +1122,75 @@ func TestPreflightFailureWrapsPlatformHint(t *testing.T) {
 		if !strings.Contains(err.Error(), c.hint) {
 			t.Errorf("%s: error missing actionable hint (want to contain %q): %v", c.platform, c.hint, err)
 		}
+		if c.platform == validate.PlatformKubernetes {
+			if !strings.Contains(err.Error(), "preflight failed for "+c.platform) {
+				t.Errorf("%s: error missing platform prefix: %v", c.platform, err)
+			}
+			continue
+		}
+		// One message: the engine's own output is inside the error, and the output
+		// the caller prints is empty, so nothing is said twice.
+		if !strings.Contains(err.Error(), "cannot talk to the") || !strings.Contains(err.Error(), fmt.Sprintf("%q info", c.command)) ||
+			!strings.Contains(err.Error(), "no such file") || out != "" {
+			t.Errorf("%s: want containercli's one message carrying the engine's output, got out=%q err=%v", c.platform, out, err)
+		}
 	}
 }
 
-// TestPreflightReadVerbsAskOnlyWhatTheyUse is CR-0006: status, logs and cli
-// change nothing, so their probe asks for the one read or exec they need rather
-// than deploy's create -- which refused every view-only operator up front. A
-// subresource travels in --subresource: "pods/log" would name a pod called log.
-func TestPreflightReadVerbsAskOnlyWhatTheyUse(t *testing.T) {
-	for _, c := range []struct {
-		action string
-		want   []string
-	}{
-		{ActionStatus, []string{"kubectl", "auth", "can-i", "get", "pods", "--namespace", "prod"}},
-		{ActionLogs, []string{"kubectl", "auth", "can-i", "get", "pods", "--subresource", "log", "--namespace", "prod"}},
-		{ActionCLI, []string{"kubectl", "auth", "can-i", "create", "pods", "--subresource", "exec", "--namespace", "prod"}},
-	} {
+// The engine's output is appended to the error, so a control character in it is
+// dropped there: a terminal escape from the engine is never acted on.
+func TestPreflightFailureDropsControlCharactersFromEngineOutput(t *testing.T) {
+	f := &fakeRunner{err: fmt.Errorf("refused"), out: "bad\x1b[2Jnews\nsecond line"}
+	_, err := Preflight(bg(), f, validate.PlatformDocker, "docker", false, nil, noApprovals)
+	if err == nil || strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("want an error without the escape, got %q", err)
+	}
+	if !strings.Contains(err.Error(), "bad[2Jnews\nsecond line") {
+		t.Errorf("the output should survive with its line break, got %q", err)
+	}
+}
+
+// TestKubernetesReadVerbsAskNothing: status, logs and cli change nothing, so on
+// kubernetes they ask for no permission up front -- the read or exec itself reports
+// a refusal -- and a view-only operator is never turned away by a question. docker
+// and podman have no permission to ask about: reachability only.
+func TestKubernetesReadVerbsAskNothing(t *testing.T) {
+	for _, action := range []string{ActionStatus, ActionLogs, ActionCLI} {
+		probes, err := KubernetesProbes(action, "prod", nil, false)
+		if err != nil || len(probes) != 0 {
+			t.Errorf("%s: probes = %+v, err = %v, want none", action, probes, err)
+		}
 		f := &fakeRunner{}
-		if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", c.action, "prod", nil); err != nil {
-			t.Fatalf("%s: %v", c.action, err)
+		if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", false, probes, noApprovals); err != nil || len(f.calls) != 0 {
+			t.Errorf("%s: err = %v, calls = %+v, want nothing run", action, err, f.calls)
 		}
-		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
-			t.Errorf("%s: argv = %v, want %v", c.action, f.calls[0].argv, c.want)
-		}
-		// docker and podman have no permission to ask about: reachability only.
 		f = &fakeRunner{}
-		if _, err := Preflight(f, validate.PlatformDocker, "docker", c.action, "", nil); err != nil || !reflect.DeepEqual(f.calls[0].argv, []string{"docker", "info"}) {
-			t.Errorf("%s on docker: argv = %v, err = %v, want docker info", c.action, f.calls[0].argv, err)
+		if _, err := Preflight(bg(), f, validate.PlatformDocker, "docker", false, nil, noApprovals); err != nil || !reflect.DeepEqual(f.calls[0].argv, []string{"docker", "info"}) {
+			t.Errorf("%s on docker: argv = %v, err = %v, want docker info", action, f.calls[0].argv, err)
 		}
 	}
 }
 
 // TestPreflightRefusalNamesThePermission: can-i exits 1 both when the cluster
 // is unreachable and when the answer is no. A no is not fixed by logging in, so
-// it names the permission and the namespace instead of the login hint.
+// it names the permission and the namespace instead of the login hint, and is a
+// *rbac.RefusedError behind the platform prefix.
 func TestPreflightRefusalNamesThePermission(t *testing.T) {
 	for _, c := range []struct {
 		out, ns, want string
 	}{
-		{"no\n", "prod", `your account may not get pods/log in namespace "prod" (kubectl auth can-i answered "no")`},
-		{"Warning: something\nno - RBAC: access denied\n", "", `your account may not get pods/log in the current namespace (kubectl auth can-i answered "no - RBAC: access denied")`},
+		{"no\n", "prod", `not allowed to create deployments in namespace "prod" (auth can-i answered "no")`},
+		{"Warning: something\nno - RBAC: access denied\n", "", `not allowed to create deployments in the current namespace (auth can-i answered "no - RBAC: access denied")`},
 	} {
 		f := &fakeRunner{out: c.out, err: fmt.Errorf("exit status 1")}
-		out, err := Preflight(f, validate.PlatformKubernetes, "kubectl", ActionLogs, c.ns, nil)
-		if err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("out %q: error = %v, want it to contain %s", c.out, err, c.want)
+		probes := []rbac.Probe{{Verb: "create", Resource: "deployments", Namespace: c.ns}}
+		out, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", false, probes, noApprovals)
+		var refused *rbac.RefusedError
+		if err == nil || !strings.Contains(err.Error(), c.want) || !errors.As(err, &refused) {
+			t.Errorf("out %q: error = %v, want a *RefusedError containing %s", c.out, err, c.want)
 		}
-		if err != nil && strings.Contains(err.Error(), "oc login") {
-			t.Errorf("out %q: a refusal must not blame the login: %v", c.out, err)
+		if err != nil && (strings.Contains(err.Error(), "oc login") || !strings.Contains(err.Error(), "preflight failed for kubernetes")) {
+			t.Errorf("out %q: a refusal must not blame the login, and names the platform: %v", c.out, err)
 		}
 		if out != "" {
 			t.Errorf("out %q: the answer is in the error; nothing else to print, got %q", c.out, out)
@@ -959,14 +1198,48 @@ func TestPreflightRefusalNamesThePermission(t *testing.T) {
 	}
 	// An unreachable cluster still gets the login hint.
 	f := &fakeRunner{out: "error: You must be logged in to the server (Unauthorized)\n", err: fmt.Errorf("exit status 1")}
-	if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", ActionLogs, "prod", nil); err == nil || !strings.Contains(err.Error(), "oc login") {
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", false, deployProbe, noApprovals); err == nil || !strings.Contains(err.Error(), "oc login") {
 		t.Errorf("an unreachable cluster keeps the login hint, got %v", err)
+	}
+}
+
+// TestPreflightStopsAtTheFirstRefusal: every probe of a command runs before its
+// first write, in order, and the first refusal ends the run -- later ones are not
+// asked.
+func TestPreflightStopsAtTheFirstRefusal(t *testing.T) {
+	probes := []rbac.Probe{
+		{Verb: "create", Resource: "deployments", Namespace: "ns"},
+		{Verb: "create", Resource: "secrets", Namespace: "ns"},
+		{Verb: "create", Resource: "services", Namespace: "ns"},
+	}
+	f := &fakeRunner{outByCall: map[int]string{1: "no\n"}, errByCall: map[int]error{1: fmt.Errorf("exit status 1")}}
+	_, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", false, probes, noApprovals)
+	var refused *rbac.RefusedError
+	if !errors.As(err, &refused) || refused.Probe.Resource != "secrets" {
+		t.Fatalf("want a refusal of secrets, got %v", err)
+	}
+	if len(f.calls) != 2 {
+		t.Errorf("want 2 probes asked (deployments, secrets), got %+v", f.calls)
+	}
+	f = &fakeRunner{}
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", false, probes, noApprovals); err != nil || len(f.calls) != 3 {
+		t.Errorf("all allowed: err = %v, want 3 probes asked, got %+v", err, f.calls)
+	}
+}
+
+// A probe whose answer is not a yes is never taken for one: a wrapper that changed
+// can-i's output exits 0 without a verdict.
+func TestPreflightRefusesAnAnswerThatIsNotYes(t *testing.T) {
+	f := &fakeRunner{out: "ok\n"}
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", false, deployProbe, noApprovals); err == nil ||
+		!strings.Contains(err.Error(), "could not read the answer") {
+		t.Errorf("an exit 0 without yes must be refused, got %v", err)
 	}
 }
 
 func TestPreflightRejectsDisallowedBinaryBeforeRunning(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformKubernetes, "curl", ActionDeploy, "", nil); err == nil {
+	if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "curl", false, nil, noApprovals); err == nil {
 		t.Fatal("a binary outside the platform allowlist must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -976,26 +1249,81 @@ func TestPreflightRejectsDisallowedBinaryBeforeRunning(t *testing.T) {
 
 func TestPreflightExtraAllowedThreadsThrough(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformPodman, "sudo podman", ActionDeploy, "", nil); err == nil {
-		t.Fatal("sudo podman must be rejected without extraAllowed")
+	if _, err := Preflight(bg(), f, validate.PlatformPodman, "lima podman", false, nil, noApprovals); err == nil {
+		t.Fatal("lima podman must be rejected without an approval")
 	}
 	f = &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformPodman, "sudo podman", ActionDeploy, "", []string{"sudo"}); err != nil {
-		t.Fatalf("sudo podman with extraAllowed=[sudo] unexpected error: %v", err)
+	if _, err := Preflight(bg(), f, validate.PlatformPodman, "lima podman", false, nil, approve(t, "lima")); err != nil {
+		t.Fatalf("lima podman with lima approved unexpected error: %v", err)
 	}
-	want := []string{"sudo", "podman", "info"}
+	want := []string{"lima", "podman", "info"}
 	if !reflect.DeepEqual(f.calls[0].argv, want) {
 		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
 	}
-}
 
-func TestPreflightUnknownAction(t *testing.T) {
-	f := &fakeRunner{}
-	if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", "rollback", "", nil); err == nil {
-		t.Fatal("unknown action must be rejected")
+	// sudo is refused before the probe runs, approvals or not.
+	f = &fakeRunner{}
+	if _, err := Preflight(bg(), f, validate.PlatformPodman, "sudo podman", false, nil, approve(t, "lima")); err == nil ||
+		!strings.Contains(err.Error(), "privilege-escalation wrapper") {
+		t.Fatalf("sudo podman must be refused as an escalation wrapper, got %v", err)
 	}
 	if len(f.calls) != 0 {
-		t.Fatal("nothing must run for an unknown action")
+		t.Fatal("the probe must never run when the command itself is rejected")
+	}
+}
+
+func TestKubernetesProbesUnknownAction(t *testing.T) {
+	if probes, err := KubernetesProbes("rollback", "", nil, false); err == nil || len(probes) != 0 {
+		t.Fatalf("unknown action must be rejected, got %+v, %v", probes, err)
+	}
+	if _, err := KubernetesProbes(ActionDeploy, "", []nsgate.Object{{Kind: "CronJob", Name: "x"}}, false); err == nil ||
+		!strings.Contains(err.Error(), "CronJob") {
+		t.Fatalf("a kind with no resource mapped must be an error naming it, got %v", err)
+	}
+}
+
+// The probe set of a deploy and a remove is the plural resource of every object the
+// manifest writes, once each, plus persistentvolumes (cluster-wide) for the libs
+// claim's volume, and never namespaces: the namespace flow asks for that only when
+// the namespace is absent.
+func TestKubernetesProbesDeployAndRemoveSets(t *testing.T) {
+	base := []nsgate.Object{{Kind: "Deployment", Name: "d"}, {Kind: "Service", Name: "d"}, {Kind: "ConfigMap", Name: "d-config"}}
+	withSecrets := append(append([]nsgate.Object(nil), base...),
+		nsgate.Object{Kind: "Secret", Name: "d-credentials"}, nsgate.Object{Kind: "Secret", Name: "d-stores"})
+	withPVC := append(append([]nsgate.Object(nil), withSecrets...), nsgate.Object{Kind: "PersistentVolumeClaim", Name: "d-libs"})
+	for _, c := range []struct {
+		name    string
+		written []nsgate.Object
+		pv      bool
+		want    []string
+	}{
+		{"no secret, no volume", base, false, []string{"deployments", "services", "configmaps"}},
+		{"secrets are asked once", withSecrets, false, []string{"deployments", "services", "configmaps", "secrets"}},
+		{"libs claim adds the claim and the volume", withPVC, true,
+			[]string{"deployments", "services", "configmaps", "secrets", "persistentvolumeclaims", "persistentvolumes"}},
+	} {
+		for _, verb := range []struct{ action, can string }{{ActionDeploy, "create"}, {ActionRemove, "delete"}} {
+			probes, err := KubernetesProbes(verb.action, "ns", c.written, c.pv)
+			if err != nil {
+				t.Fatalf("%s %s: %v", c.name, verb.action, err)
+			}
+			var got []string
+			for _, p := range probes {
+				got = append(got, p.Resource)
+				if p.Verb != verb.can || p.Namespace != "ns" || p.Resource == "namespaces" {
+					t.Errorf("%s %s: probe %+v, want verb %s in ns", c.name, verb.action, p, verb.can)
+				}
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("%s %s: resources = %v, want %v", c.name, verb.action, got, c.want)
+			}
+		}
+	}
+	// The volume is cluster-scoped, so rbac.CanI asks it of the whole cluster.
+	probes, _ := KubernetesProbes(ActionDeploy, "ns", withPVC, true)
+	argv := rbac.CanI([]string{"kubectl"}, probes[len(probes)-1]).Argv
+	if want := []string{"kubectl", "auth", "can-i", "create", "persistentvolumes", "--all-namespaces"}; !reflect.DeepEqual(argv, want) {
+		t.Errorf("persistentvolumes probe argv = %v, want %v", argv, want)
 	}
 }
 
@@ -1036,7 +1364,7 @@ func TestKubernetesPodsJSONArgv(t *testing.T) {
 	}
 	for _, c := range cases {
 		f := &fakeRunner{}
-		if _, err := KubernetesPodsJSON(f, []string{"kubectl"}, c.namespace, c.selector, c.names, c.allNamespaces); err != nil {
+		if _, err := KubernetesPodsJSON(bg(), f, []string{"kubectl"}, c.namespace, c.selector, c.names, c.allNamespaces); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
@@ -1047,7 +1375,7 @@ func TestKubernetesPodsJSONArgv(t *testing.T) {
 
 func TestKubernetesPodsJSONRunFailureWraps(t *testing.T) {
 	f := &fakeRunner{err: fmt.Errorf("boom")}
-	_, err := KubernetesPodsJSON(f, []string{"kubectl"}, "", "app=solmq-connector", nil, false)
+	_, err := KubernetesPodsJSON(bg(), f, []string{"kubectl"}, "", "app=solmq-connector", nil, false)
 	if err == nil {
 		t.Fatal("a run failure must surface as an error")
 	}
@@ -1073,7 +1401,7 @@ func TestKubernetesGetJSONArgv(t *testing.T) {
 	}
 	for _, c := range cases {
 		f := &fakeRunner{}
-		if _, err := KubernetesGetJSON(f, []string{"kubectl"}, c.namespace, c.kind, c.obj); err != nil {
+		if _, err := KubernetesGetJSON(bg(), f, []string{"kubectl"}, c.namespace, c.kind, c.obj); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
@@ -1087,7 +1415,7 @@ func TestKubernetesGetJSONArgv(t *testing.T) {
 // turns that into "MISSING" rather than a failed run.
 func TestKubernetesGetJSONMissingObjectIsAnError(t *testing.T) {
 	f := &fakeRunner{err: fmt.Errorf("secrets \"nope\" not found")}
-	_, err := KubernetesGetJSON(f, []string{"kubectl"}, "solace", "secret", "nope")
+	_, err := KubernetesGetJSON(bg(), f, []string{"kubectl"}, "solace", "secret", "nope")
 	if err == nil {
 		t.Fatal("a missing object must surface as an error")
 	}
@@ -1122,7 +1450,7 @@ func TestKubernetesTopArgv(t *testing.T) {
 	}
 	for _, c := range cases {
 		f := &fakeRunner{}
-		if _, err := KubernetesTop(f, []string{"kubectl"}, c.namespace, c.selector, c.names, c.allNamespaces); err != nil {
+		if _, err := KubernetesTop(bg(), f, []string{"kubectl"}, c.namespace, c.selector, c.names, c.allNamespaces); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
@@ -1136,7 +1464,7 @@ func TestKubernetesTopArgv(t *testing.T) {
 // dropping the whole report.
 func TestKubernetesTopWithoutMetricsAPIWraps(t *testing.T) {
 	f := &fakeRunner{err: fmt.Errorf("Metrics API not available")}
-	_, err := KubernetesTop(f, []string{"kubectl"}, "", "app=x", nil, false)
+	_, err := KubernetesTop(bg(), f, []string{"kubectl"}, "", "app=x", nil, false)
 	if err == nil {
 		t.Fatal("an unavailable metrics API must surface as an error")
 	}
@@ -1149,19 +1477,19 @@ func TestKubernetesTopWithoutMetricsAPIWraps(t *testing.T) {
 // container view on docker and podman: every target in a single invocation.
 func TestEngineInspectJSONArgv(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := EngineInspectJSON(f, []string{"docker"}, []string{"a", "b", "c"}); err != nil {
+	if _, err := EngineInspectJSON(bg(), f, []string{"docker"}, []string{"a", "b", "c"}); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"docker", "inspect", "a", "b", "c"}
+	want := []string{"docker", "container", "inspect", "a", "b", "c"}
 	if !reflect.DeepEqual(f.calls[0].argv, want) {
 		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
 	}
 	// A chained command keeps its own tokens ahead of the subcommand.
 	f2 := &fakeRunner{}
-	if _, err := EngineInspectJSON(f2, []string{"sudo", "podman"}, []string{"solmq"}); err != nil {
+	if _, err := EngineInspectJSON(bg(), f2, []string{"sudo", "podman"}, []string{"solmq"}); err != nil {
 		t.Fatal(err)
 	}
-	want2 := []string{"sudo", "podman", "inspect", "solmq"}
+	want2 := []string{"sudo", "podman", "container", "inspect", "solmq"}
 	if !reflect.DeepEqual(f2.calls[0].argv, want2) {
 		t.Errorf("argv = %v, want %v", f2.calls[0].argv, want2)
 	}
@@ -1169,7 +1497,7 @@ func TestEngineInspectJSONArgv(t *testing.T) {
 
 func TestEngineInspectJSONNoNamesIsAnErrorAndRunsNothing(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := EngineInspectJSON(f, []string{"docker"}, nil); err == nil {
+	if _, err := EngineInspectJSON(bg(), f, []string{"docker"}, nil); err == nil {
 		t.Fatal("inspecting nothing must be an error")
 	}
 	if len(f.calls) != 0 {
@@ -1179,7 +1507,7 @@ func TestEngineInspectJSONNoNamesIsAnErrorAndRunsNothing(t *testing.T) {
 
 func TestEngineInspectJSONFailureNamesTheTargets(t *testing.T) {
 	f := &fakeRunner{err: fmt.Errorf("no such object")}
-	_, err := EngineInspectJSON(f, []string{"docker"}, []string{"a", "b"})
+	_, err := EngineInspectJSON(bg(), f, []string{"docker"}, []string{"a", "b"})
 	if err == nil {
 		t.Fatal("a run failure must surface as an error")
 	}
@@ -1188,9 +1516,40 @@ func TestEngineInspectJSONFailureNamesTheTargets(t *testing.T) {
 	}
 }
 
+// What the engine said is appended to the error; a terminal escape in it is dropped,
+// the line breaks are kept.
+func TestEngineFailuresDropControlCharactersFromTheEnginesOutput(t *testing.T) {
+	for name, call := range map[string]func(r gdurunner.Runner) error{
+		"EngineInspectJSON": func(r gdurunner.Runner) error {
+			_, err := EngineInspectJSON(bg(), r, []string{"docker"}, []string{"c"})
+			return err
+		},
+		"EngineImageInspectJSON": func(r gdurunner.Runner) error {
+			_, err := EngineImageInspectJSON(bg(), r, []string{"docker"}, "img:1")
+			return err
+		},
+		"EngineStats": func(r gdurunner.Runner) error {
+			_, err := EngineStats(bg(), r, []string{"docker"}, []string{"c"})
+			return err
+		},
+		"EngineList": func(r gdurunner.Runner) error {
+			_, err := EngineList(bg(), r, []string{"docker"}, false)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := &splitRunner{stderr: "no such\x1b[2J thing\nsecond", err: fmt.Errorf("exit status 1")}
+			err := call(r)
+			if err == nil || strings.Contains(err.Error(), "\x1b") || !strings.Contains(err.Error(), "no such[2J thing\nsecond") {
+				t.Errorf("err = %q, want the output with the escape dropped and the line break kept", err)
+			}
+		})
+	}
+}
+
 func TestEngineImageInspectJSONArgv(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := EngineImageInspectJSON(f, []string{"podman"}, "solace/x:2.14.1"); err != nil {
+	if _, err := EngineImageInspectJSON(bg(), f, []string{"podman"}, "solace/x:2.14.1"); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"podman", "image", "inspect", "solace/x:2.14.1"}
@@ -1204,7 +1563,7 @@ func TestEngineImageInspectJSONArgv(t *testing.T) {
 // are what both render identically.
 func TestEngineStatsArgv(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := EngineStats(f, []string{"docker"}, []string{"a", "b"}); err != nil {
+	if _, err := EngineStats(bg(), f, []string{"docker"}, []string{"a", "b"}); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"docker", "stats", "--no-stream", "--format",
@@ -1221,12 +1580,21 @@ func TestEngineStatsArgv(t *testing.T) {
 
 func TestEngineListArgv(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := EngineList(f, []string{"podman"}); err != nil {
+	if _, err := EngineList(bg(), f, []string{"podman"}, false); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"podman", "ps", "--all", "--no-trunc", "--format", "{{.Names}}\t{{.Image}}"}
+	want := []string{"podman", "ps", "--all", "--no-trunc", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"}
 	if !reflect.DeepEqual(f.calls[0].argv, want) {
 		t.Errorf("argv = %v, want %v", f.calls[0].argv, want)
+	}
+	// Only the running ones, for the redeploy check.
+	f = &fakeRunner{}
+	if _, err := EngineList(bg(), f, []string{"docker"}, true); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"docker", "ps", "--all", "--no-trunc", "--filter", "status=running", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"}
+	if !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("running argv = %v, want %v", f.calls[0].argv, want)
 	}
 	// --all is deliberate: an instance that died is exactly what a search like
 	// this is for.
@@ -1272,6 +1640,11 @@ func TestSystemctlNRestarts(t *testing.T) {
 			wantArgv: []string{"systemctl", "show", "solmq-connector.service", "-p", "NRestarts", "--value"},
 		},
 		{
+			// A count below zero is no count at all.
+			name: "negative count is refused", scope: QuadletScope{}, out: "-1\n", wantErr: true,
+			wantArgv: []string{"systemctl", "show", "solmq-connector.service", "-p", "NRestarts", "--value"},
+		},
+		{
 			name: "no systemd on this host", scope: QuadletScope{}, err: fmt.Errorf("executable file not found"), wantErr: true,
 			wantArgv: []string{"systemctl", "show", "solmq-connector.service", "-p", "NRestarts", "--value"},
 		},
@@ -1279,7 +1652,7 @@ func TestSystemctlNRestarts(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeRunner{outByCall: map[int]string{0: c.out}, err: c.err}
-			got, err := SystemctlNRestarts(f, c.scope, "solmq-connector.service")
+			got, err := SystemctlNRestarts(bg(), f, c.scope, "solmq-connector.service")
 			if (err != nil) != c.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
 			}
@@ -1290,117 +1663,6 @@ func TestSystemctlNRestarts(t *testing.T) {
 				t.Errorf("argv = %v, want %v", f.calls[0].argv, c.wantArgv)
 			}
 		})
-	}
-}
-
-// ---- ScriptInstalled -----------------------------------------------------------
-
-// probePayload is the sh -c program ScriptInstalled sends: it reports presence
-// as a marker on stdout and exits 0 either way, so a missing file cannot be
-// confused with an unreachable target (see ScriptInstalled's doc comment).
-const probePayload = "if [ -f /tmp/solmq-status.sh ]; then echo " + ScriptPresentMarker + "; else echo " + ScriptAbsentMarker + "; fi"
-
-func TestScriptInstalledArgv(t *testing.T) {
-	cases := []struct {
-		name      string
-		cmd       []string
-		platform  string
-		target    string
-		namespace string
-		want      []string
-	}{
-		{
-			name: "kubernetes no namespace", cmd: []string{"kubectl"}, platform: validate.PlatformKubernetes,
-			target: "pod-0",
-			want:   []string{"kubectl", "exec", "pod-0", "-c", spec.ConnectorContainerName, "--", "sh", "-c", probePayload},
-		},
-		{
-			name: "kubernetes with namespace", cmd: []string{"oc"}, platform: validate.PlatformKubernetes,
-			target: "pod-0", namespace: "solace",
-			want: []string{"oc", "exec", "pod-0", "-n", "solace", "-c", spec.ConnectorContainerName, "--", "sh", "-c", probePayload},
-		},
-		{
-			name: "docker", cmd: []string{"docker"}, platform: validate.PlatformDocker,
-			target: "solmq-connector",
-			want:   []string{"docker", "exec", "solmq-connector", "sh", "-c", probePayload},
-		},
-		{
-			name: "podman", cmd: []string{"podman"}, platform: validate.PlatformPodman,
-			target: "solmq-connector",
-			want:   []string{"podman", "exec", "solmq-connector", "sh", "-c", probePayload},
-		},
-	}
-	for _, c := range cases {
-		f := &fakeRunner{out: ScriptPresentMarker}
-		if _, err := ScriptInstalled(f, c.cmd, c.platform, c.target, c.namespace, "/tmp/solmq-status.sh"); err != nil {
-			t.Fatalf("%s: %v", c.name, err)
-		}
-		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
-			t.Errorf("%s: argv = %v, want %v", c.name, f.calls[0].argv, c.want)
-		}
-	}
-}
-
-// TestScriptInstalledReadsMarkers pins the marker contract, including that a
-// marker is believed even when the engine also reported a non-zero exit: the
-// probe answers on stdout precisely so the exit status does not have to carry
-// two different meanings.
-func TestScriptInstalledReadsMarkers(t *testing.T) {
-	cases := []struct {
-		name string
-		out  string
-		err  error
-		want bool
-	}{
-		{name: "present marker", out: ScriptPresentMarker + "\n", want: true},
-		{name: "absent marker", out: ScriptAbsentMarker + "\n", want: false},
-		{name: "marker among engine chatter", out: "Defaulted container to connector\n" + ScriptAbsentMarker + "\n", want: false},
-		{name: "present marker despite a non-zero exit", out: ScriptPresentMarker + "\n", err: fmt.Errorf("exit status 1"), want: true},
-	}
-	for _, c := range cases {
-		f := &fakeRunner{out: c.out, err: c.err}
-		got, err := ScriptInstalled(f, []string{"kubectl"}, validate.PlatformKubernetes, "pod-0", "", "/tmp/solmq-status.sh")
-		if err != nil {
-			t.Fatalf("%s: unexpected error %v", c.name, err)
-		}
-		if got != c.want {
-			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
-		}
-	}
-}
-
-// TestScriptInstalledUnreachableTargetIsError covers the case the markers
-// exist to separate out: no answer at all means the probe never ran, which must
-// surface as an error rather than a silent "absent" that would trigger an
-// install against a target that cannot be reached.
-func TestScriptInstalledUnreachableTargetIsError(t *testing.T) {
-	cases := []struct {
-		name string
-		out  string
-		err  error
-	}{
-		{name: "engine error, no marker", out: "Error: No such container: solmq-connector\n", err: fmt.Errorf("exit status 1")},
-		{name: "clean exit but no marker", out: "unexpected\n"},
-	}
-	for _, c := range cases {
-		f := &fakeRunner{out: c.out, err: c.err}
-		got, err := ScriptInstalled(f, []string{"docker"}, validate.PlatformDocker, "solmq-connector", "", "/tmp/solmq-status.sh")
-		if err == nil {
-			t.Fatalf("%s: a probe with no marker must surface as an error", c.name)
-		}
-		if got {
-			t.Errorf("%s: want false alongside the error", c.name)
-		}
-	}
-}
-
-func TestScriptInstalledUnknownPlatform(t *testing.T) {
-	f := &fakeRunner{}
-	if _, err := ScriptInstalled(f, []string{"kubectl"}, "bogus", "pod-0", "", "/tmp/solmq-status.sh"); err == nil {
-		t.Fatal("unknown platform must be rejected")
-	}
-	if len(f.calls) != 0 {
-		t.Fatal("nothing must run for an unknown platform")
 	}
 }
 
@@ -1418,27 +1680,27 @@ func TestInstallScriptArgv(t *testing.T) {
 		{
 			name: "kubernetes no namespace", cmd: []string{"kubectl"}, platform: validate.PlatformKubernetes,
 			target: "pod-0",
-			want:   []string{"kubectl", "exec", "-i", "pod-0", "-c", spec.ConnectorContainerName, "--", "sh", "-c", "mkdir -p /tmp && cat > /tmp/solmq-status.sh"},
+			want:   []string{"kubectl", "exec", "-i", "pod-0", "-c", spec.ConnectorContainerName, "--", "sh", "-c", "mkdir -p '/tmp' && cat > '/tmp/solmq-status.sh'"},
 		},
 		{
 			name: "kubernetes with namespace", cmd: []string{"oc"}, platform: validate.PlatformKubernetes,
 			target: "pod-0", namespace: "solace",
-			want: []string{"oc", "exec", "-i", "pod-0", "-n", "solace", "-c", spec.ConnectorContainerName, "--", "sh", "-c", "mkdir -p /tmp && cat > /tmp/solmq-status.sh"},
+			want: []string{"oc", "exec", "-i", "pod-0", "-n", "solace", "-c", spec.ConnectorContainerName, "--", "sh", "-c", "mkdir -p '/tmp' && cat > '/tmp/solmq-status.sh'"},
 		},
 		{
 			name: "docker", cmd: []string{"docker"}, platform: validate.PlatformDocker,
 			target: "solmq-connector",
-			want:   []string{"docker", "exec", "-i", "solmq-connector", "sh", "-c", "mkdir -p /tmp && cat > /tmp/solmq-status.sh"},
+			want:   []string{"docker", "exec", "-i", "solmq-connector", "sh", "-c", "mkdir -p '/tmp' && cat > '/tmp/solmq-status.sh'"},
 		},
 		{
 			name: "podman", cmd: []string{"podman"}, platform: validate.PlatformPodman,
 			target: "solmq-connector",
-			want:   []string{"podman", "exec", "-i", "solmq-connector", "sh", "-c", "mkdir -p /tmp && cat > /tmp/solmq-status.sh"},
+			want:   []string{"podman", "exec", "-i", "solmq-connector", "sh", "-c", "mkdir -p '/tmp' && cat > '/tmp/solmq-status.sh'"},
 		},
 	}
 	for _, c := range cases {
 		f := &fakeRunner{}
-		if _, err := InstallScript(f, c.cmd, c.platform, c.target, c.namespace, "/tmp", "/tmp/solmq-status.sh", "#!/bin/sh\necho ok\n"); err != nil {
+		if _, err := InstallScript(bg(), f, c.cmd, c.platform, c.target, c.namespace, "/tmp/solmq-status.sh", "#!/bin/sh\necho ok\n"); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
@@ -1450,7 +1712,7 @@ func TestInstallScriptArgv(t *testing.T) {
 func TestInstallScriptPassesScriptOnStdinNotArgv(t *testing.T) {
 	f := &fakeRunner{}
 	script := "#!/bin/sh\necho ok\n"
-	if _, err := InstallScript(f, []string{"docker"}, validate.PlatformDocker, "solmq-connector", "", "/tmp", "/tmp/solmq-status.sh", script); err != nil {
+	if _, err := InstallScript(bg(), f, []string{"docker"}, validate.PlatformDocker, "solmq-connector", "", "/tmp/solmq-status.sh", script); err != nil {
 		t.Fatal(err)
 	}
 	if f.calls[0].stdin != script {
@@ -1463,9 +1725,21 @@ func TestInstallScriptPassesScriptOnStdinNotArgv(t *testing.T) {
 	}
 }
 
+// An engine upload with nothing to name is refused by containercli.Upload before
+// anything runs.
+func TestInstallScriptRefusesAnEmptyTargetOnAnEngine(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := InstallScript(bg(), f, []string{"docker"}, validate.PlatformDocker, "", "", "/tmp/x.sh", "x"); err == nil {
+		t.Fatal("an upload with no container must be refused")
+	}
+	if len(f.calls) != 0 {
+		t.Fatal("nothing must run")
+	}
+}
+
 func TestInstallScriptUnknownPlatform(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := InstallScript(f, []string{"kubectl"}, "bogus", "pod-0", "", "/tmp", "/tmp/x.sh", "x"); err == nil {
+	if _, err := InstallScript(bg(), f, []string{"kubectl"}, "bogus", "pod-0", "", "/tmp/x.sh", "x"); err == nil {
 		t.Fatal("unknown platform must be rejected")
 	}
 	if len(f.calls) != 0 {
@@ -1475,6 +1749,14 @@ func TestInstallScriptUnknownPlatform(t *testing.T) {
 
 // ---- RunStatusScript ------------------------------------------------------------
 
+// runPayload is the argv tail RunStatusScript sends after the engine's own
+// flags: the presence check and the run in one sh -c program, with the path and
+// any arguments as positional parameters rather than inside the program text.
+func runPayload(args ...string) []string {
+	return append([]string{"sh", "-c", `if [ -f "$0" ]; then exec sh "$0" "$@"; else echo ` + ScriptAbsentMarker + `; fi`,
+		"/tmp/solmq-status.sh"}, args...)
+}
+
 func TestRunStatusScriptArgv(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -1482,32 +1764,38 @@ func TestRunStatusScriptArgv(t *testing.T) {
 		platform  string
 		target    string
 		namespace string
+		args      []string
 		want      []string
 	}{
 		{
 			name: "kubernetes no namespace", cmd: []string{"kubectl"}, platform: validate.PlatformKubernetes,
 			target: "pod-0",
-			want:   []string{"kubectl", "exec", "pod-0", "-c", spec.ConnectorContainerName, "--", "sh", "/tmp/solmq-status.sh"},
+			want:   append([]string{"kubectl", "exec", "pod-0", "-c", spec.ConnectorContainerName, "--"}, runPayload()...),
 		},
 		{
 			name: "kubernetes with namespace", cmd: []string{"oc"}, platform: validate.PlatformKubernetes,
 			target: "pod-0", namespace: "solace",
-			want: []string{"oc", "exec", "pod-0", "-n", "solace", "-c", spec.ConnectorContainerName, "--", "sh", "/tmp/solmq-status.sh"},
+			want: append([]string{"oc", "exec", "pod-0", "-n", "solace", "-c", spec.ConnectorContainerName, "--"}, runPayload()...),
+		},
+		{
+			name: "kubernetes with an argument", cmd: []string{"kubectl"}, platform: validate.PlatformKubernetes,
+			target: "pod-0", args: []string{"--details"},
+			want: append([]string{"kubectl", "exec", "pod-0", "-c", spec.ConnectorContainerName, "--"}, runPayload("--details")...),
 		},
 		{
 			name: "docker", cmd: []string{"docker"}, platform: validate.PlatformDocker,
 			target: "solmq-connector",
-			want:   []string{"docker", "exec", "solmq-connector", "sh", "/tmp/solmq-status.sh"},
+			want:   append([]string{"docker", "exec", "solmq-connector"}, runPayload()...),
 		},
 		{
-			name: "podman", cmd: []string{"podman"}, platform: validate.PlatformPodman,
-			target: "solmq-connector",
-			want:   []string{"podman", "exec", "solmq-connector", "sh", "/tmp/solmq-status.sh"},
+			name: "podman with an argument", cmd: []string{"podman"}, platform: validate.PlatformPodman,
+			target: "solmq-connector", args: []string{"--details"},
+			want: append([]string{"podman", "exec", "solmq-connector"}, runPayload("--details")...),
 		},
 	}
 	for _, c := range cases {
 		f := &fakeRunner{}
-		if _, err := RunStatusScript(f, c.cmd, c.platform, c.target, c.namespace, "/tmp/solmq-status.sh"); err != nil {
+		if _, _, err := RunStatusScript(bg(), f, c.cmd, c.platform, c.target, c.namespace, "/tmp/solmq-status.sh", c.args...); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
@@ -1516,130 +1804,63 @@ func TestRunStatusScriptArgv(t *testing.T) {
 	}
 }
 
-// TestRunStatusScriptReturnsOutputAlongsideNonZeroExit pins the contract: the
-// status script's own exit convention (1 standby, 2 error) is expected, not a
-// runner failure, so the output must never be dropped just because the exit
-// code is non-zero.
-func TestRunStatusScriptReturnsOutputAlongsideNonZeroExit(t *testing.T) {
-	f := &fakeRunner{err: fmt.Errorf("exit status 1"), out: "STANDBY\n"}
-	out, err := RunStatusScript(f, []string{"kubectl"}, validate.PlatformKubernetes, "pod-0", "", "/tmp/solmq-status.sh")
-	if err == nil {
-		t.Fatal("a non-zero script exit is expected and must be returned, not swallowed")
+// TestRunStatusScriptReadsTheAbsentMarker pins how one exec answers both
+// questions: the marker on a line of its own means the script is not there and
+// nothing ran, while anything else is the script's report.
+func TestRunStatusScriptReadsTheAbsentMarker(t *testing.T) {
+	cases := []struct {
+		name        string
+		out         string
+		wantPresent bool
+	}{
+		{name: "absent marker", out: ScriptAbsentMarker + "\n", wantPresent: false},
+		{name: "marker among engine chatter", out: "Defaulted container to connector\n" + ScriptAbsentMarker + "\r\n", wantPresent: false},
+		{name: "a report is present", out: "leader-election state: active\n", wantPresent: true},
+		{name: "marker inside a longer line is not absent", out: "health-detail: {\"x\":\"" + ScriptAbsentMarker + "\"}\n", wantPresent: true},
 	}
-	if out != "STANDBY\n" {
-		t.Errorf("output = %q, want %q alongside the error", out, "STANDBY\n")
+	for _, c := range cases {
+		f := &fakeRunner{out: c.out}
+		out, present, err := RunStatusScript(bg(), f, []string{"kubectl"}, validate.PlatformKubernetes, "pod-0", "", "/tmp/solmq-status.sh")
+		if err != nil {
+			t.Fatalf("%s: unexpected error %v", c.name, err)
+		}
+		if present != c.wantPresent {
+			t.Errorf("%s: present = %v, want %v", c.name, present, c.wantPresent)
+		}
+		if present && out != c.out {
+			t.Errorf("%s: output = %q, want the report %q", c.name, out, c.out)
+		}
+		if !present && out != "" {
+			t.Errorf("%s: an absent script has no report, got %q", c.name, out)
+		}
+	}
+}
+
+// TestRunStatusScriptReturnsOutputAlongsideNonZeroExit pins the contract: the
+// script itself always exits 0, so a non-zero exit is the exec failing (an
+// unreachable target), and whatever the engine printed must come back with the
+// error for the message rather than being dropped.
+func TestRunStatusScriptReturnsOutputAlongsideNonZeroExit(t *testing.T) {
+	f := &fakeRunner{err: fmt.Errorf("exit status 1"), out: "Error: No such container: solmq-connector\n"}
+	out, present, err := RunStatusScript(bg(), f, []string{"docker"}, validate.PlatformDocker, "solmq-connector", "", "/tmp/solmq-status.sh")
+	if err == nil {
+		t.Fatal("a failed exec must be returned, not swallowed")
+	}
+	if !present {
+		t.Error("a failed exec is not an absent script: no marker was seen, so nothing may be installed on its say-so")
+	}
+	if out != "Error: No such container: solmq-connector\n" {
+		t.Errorf("output = %q, want the engine's message alongside the error", out)
 	}
 }
 
 func TestRunStatusScriptUnknownPlatform(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := RunStatusScript(f, []string{"kubectl"}, "bogus", "pod-0", "", "/tmp/x.sh"); err == nil {
+	if _, _, err := RunStatusScript(bg(), f, []string{"kubectl"}, "bogus", "pod-0", "", "/tmp/x.sh"); err == nil {
 		t.Fatal("unknown platform must be rejected")
 	}
 	if len(f.calls) != 0 {
 		t.Fatal("nothing must run for an unknown platform")
-	}
-}
-
-// ---- OS.Stream (the real streaming boundary) --------------------------------
-
-// writerFunc adapts a function to io.Writer, so a test can observe output at the
-// moment it is written rather than after the process has exited -- which is the
-// whole distinction between Stream and Run.
-type writerFunc func(p []byte) (int, error)
-
-func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
-
-// TestOSStreamDeliversOutputBeforeExitAndCancelIsCleanEnd is the test that
-// justifies the Streamer seam existing at all: the child prints one line and
-// then blocks for far longer than this test will wait, so seeing that line
-// proves the output was not buffered until exit. Cancelling then ends the run,
-// and reports success -- a follow that the operator stopped did not fail.
-func TestOSStreamDeliversOutputBeforeExitAndCancelIsCleanEnd(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var once sync.Once
-	arrived := make(chan struct{})
-	var mu sync.Mutex
-	var got strings.Builder
-	w := writerFunc(func(p []byte) (int, error) {
-		mu.Lock()
-		got.Write(p)
-		seen := strings.Contains(got.String(), "drip-line")
-		mu.Unlock()
-		if seen {
-			once.Do(func() { close(arrived) })
-		}
-		return len(p), nil
-	})
-
-	errc := make(chan error, 1)
-	go func() {
-		errc <- (OS{}).Stream(ctx, Cmd{Argv: helperProcessArgv(os.Args[0], "drip")}, w, io.Discard)
-	}()
-
-	select {
-	case <-arrived:
-	case err := <-errc:
-		t.Fatalf("the child exited before its first line was seen (err=%v); Stream is buffering", err)
-	case <-time.After(30 * time.Second):
-		t.Fatal("no output arrived while the child was still running; Stream is buffering")
-	}
-
-	cancel()
-	select {
-	case err := <-errc:
-		if err != nil {
-			t.Errorf("a cancelled stream is a clean end, got %v", err)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("Stream did not return after the context was cancelled")
-	}
-}
-
-// TestOSStreamKeepsStdoutAndStderrApart pins the reason Stream takes two
-// writers where Run merges into one: `logs > app.log` must land log lines in the
-// file and leave the platform's own diagnostics on the terminal.
-func TestOSStreamKeepsStdoutAndStderrApart(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	var out, errOut strings.Builder
-	if err := (OS{}).Stream(context.Background(), Cmd{Argv: helperProcessArgv(os.Args[0], "both")}, &out, &errOut); err != nil {
-		t.Fatalf("Stream: %v", err)
-	}
-	if !strings.Contains(out.String(), "stdout-line") || strings.Contains(out.String(), "stderr-line") {
-		t.Errorf("stdout writer should carry only stdout, got %q", out.String())
-	}
-	if !strings.Contains(errOut.String(), "stderr-line") || strings.Contains(errOut.String(), "stdout-line") {
-		t.Errorf("stderr writer should carry only stderr, got %q", errOut.String())
-	}
-}
-
-// TestOSStreamReportsAFailureThatWasNotCancelled is the other half of the
-// cancellation rule: an uncancelled non-zero exit is a real failure and must
-// still be reported.
-func TestOSStreamReportsAFailureThatWasNotCancelled(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	var out strings.Builder
-	err := (OS{}).Stream(context.Background(), Cmd{Argv: helperProcessArgv(os.Args[0], "fail")}, &out, io.Discard)
-	if err == nil {
-		t.Fatal("a non-zero exit with no cancellation must be an error")
-	}
-	if !strings.Contains(out.String(), "before-exit") {
-		t.Errorf("output written before the failure should still reach the writer, got %q", out.String())
-	}
-}
-
-// TestOSStreamRejectsEmptyAndUnresolvableArgv pins that Stream refuses exactly
-// what Run refuses -- both go through resolveArgv0, so the two cannot drift.
-func TestOSStreamRejectsEmptyAndUnresolvableArgv(t *testing.T) {
-	if err := (OS{}).Stream(context.Background(), Cmd{}, io.Discard, io.Discard); err == nil {
-		t.Error("an empty argv must be refused")
-	}
-	err := (OS{}).Stream(context.Background(), Cmd{Argv: []string{"solmq-no-such-binary-anywhere"}}, io.Discard, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "resolving") {
-		t.Errorf("an unresolvable binary must be refused by name, got %v", err)
 	}
 }
 
@@ -1718,8 +1939,9 @@ func TestLogsArgvRefusesPreviousOffKubernetes(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s: --previous must be refused", platform)
 		}
-		if !strings.Contains(err.Error(), platform) {
-			t.Errorf("%s: the error should name the platform, got %v", platform, err)
+		// containercli.NoPrevious names the engine as a message spells it (Docker).
+		if !strings.Contains(strings.ToLower(err.Error()), platform) || !strings.Contains(err.Error(), "--previous is a kubernetes option") {
+			t.Errorf("%s: the error should name the platform and the option, got %v", platform, err)
 		}
 	}
 }
@@ -1789,14 +2011,26 @@ func TestExecArgvPerPlatform(t *testing.T) {
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := ExecArgv([]string{"cli"}, c.platform, "pod-0", c.namespace, c.opts)
+			// The in-container command is the caller's, appended after the flags
+			// (and after the "--" on kubernetes).
+			got, err := ExecArgv([]string{"cli"}, c.platform, "pod-0", c.namespace, c.opts, "id", "-u")
 			if err != nil {
 				t.Fatalf("ExecArgv: %v", err)
 			}
-			if !reflect.DeepEqual(got, c.want) {
-				t.Errorf("argv = %v, want %v", got, c.want)
+			if want := append(append([]string(nil), c.want...), "id", "-u"); !reflect.DeepEqual(got, want) {
+				t.Errorf("argv = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+// An exec with nothing to run is a caller mistake on every platform, refused rather
+// than built.
+func TestExecArgvRefusesAnEmptyCommand(t *testing.T) {
+	for _, platform := range []string{validate.PlatformKubernetes, validate.PlatformDocker, validate.PlatformPodman} {
+		if _, err := ExecArgv([]string{"cli"}, platform, "pod-0", "", ExecOpts{}); err == nil {
+			t.Errorf("%s: an exec with no command must be refused", platform)
+		}
 	}
 }
 
@@ -1827,230 +2061,12 @@ func TestExecArgvUnknownPlatform(t *testing.T) {
 	}
 }
 
-// ---- OS.Attach (the terminal-handover boundary) --------------------------------
+// ---- runParsed (the parse-safety boundary) -------------------------------------
 
-// regularFile reports whether f is a plain file rather than a pipe, which is
-// how the stdiokind helper mode tells an inherited descriptor from one os/exec
-// substituted a pipe for. Go reports an anonymous pipe as ModeNamedPipe on
-// Windows and unix alike, so IsRegular separates the two on both.
-func regularFile(f *os.File) bool {
-	fi, err := f.Stat()
-	return err == nil && fi.Mode().IsRegular()
-}
-
-// attachFiles opens three temp files to stand in for a terminal, since a test
-// has no terminal to hand over. They are regular files, which is the whole
-// point: the child reports back what kind of descriptor it was given.
-func attachFiles(t *testing.T) (stdin, stdout, stderr *os.File) {
-	t.Helper()
-	dir := t.TempDir()
-	open := func(name string) *os.File {
-		f, err := os.Create(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatalf("creating %s: %v", name, err)
-		}
-		t.Cleanup(func() { _ = f.Close() })
-		return f
-	}
-	return open("stdin"), open("stdout"), open("stderr")
-}
-
-// readFile returns what the child wrote to one of those files.
-func readFile(t *testing.T, f *os.File) string {
-	t.Helper()
-	b, err := os.ReadFile(f.Name())
-	if err != nil {
-		t.Fatalf("reading %s: %v", f.Name(), err)
-	}
-	return string(b)
-}
-
-// TestOSAttachHandsTheChildTheCallersFilesNotPipes is the test that justifies
-// the seam existing at all. Stream copies through io.Writers, and os/exec
-// answers any writer that is not an *os.File with a pipe -- so a future
-// "simplification" of Attach onto io.Writer would silently take the terminal
-// away from the engine and leave an operator with a shell that has no prompt.
-// The child reports what it was actually given.
-func TestOSAttachHandsTheChildTheCallersFilesNotPipes(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	stdin, stdout, stderr := attachFiles(t)
-	code, err := (OS{}).Attach(Cmd{Argv: helperProcessArgv(os.Args[0], "stdiokind")}, stdin, stdout, stderr)
-	if err != nil || code != 0 {
-		t.Fatalf("Attach = (%d, %v), want (0, nil); stderr %q", code, err, readFile(t, stderr))
-	}
-	if got, want := readFile(t, stdout), "in=true out=true err=true\n"; !strings.Contains(got, want) {
-		t.Errorf("the child saw %q, want %q -- os/exec interposed a pipe", got, want)
-	}
-}
-
-// TestOSAttachStdinIsTheHandedFile pins the other half: what the caller gives
-// as stdin is what the child reads, with nothing copied through this process.
-func TestOSAttachStdinIsTheHandedFile(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	stdin, stdout, stderr := attachFiles(t)
-	if _, err := stdin.WriteString("hello-attach\n"); err != nil {
-		t.Fatalf("writing stdin: %v", err)
-	}
-	if _, err := stdin.Seek(0, io.SeekStart); err != nil {
-		t.Fatalf("rewinding stdin: %v", err)
-	}
-	code, err := (OS{}).Attach(Cmd{Argv: helperProcessArgv(os.Args[0], "stdin")}, stdin, stdout, stderr)
-	if err != nil || code != 0 {
-		t.Fatalf("Attach = (%d, %v), want (0, nil); stderr %q", code, err, readFile(t, stderr))
-	}
-	if got := readFile(t, stdout); got != "hello-attach\n" {
-		t.Errorf("child echoed %q, want the handed stdin", got)
-	}
-}
-
-// TestOSAttachReportsTheChildExitStatus pins the fact the cli verb's exit-code
-// contract rests on: a session that ended non-zero is reported as that status,
-// not as an error, because only the caller knows whether it means the engine
-// could not attach or the operator's last command failed.
-func TestOSAttachReportsTheChildExitStatus(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	stdin, stdout, stderr := attachFiles(t)
-	code, err := (OS{}).Attach(Cmd{Argv: helperProcessArgv(os.Args[0], "fail")}, stdin, stdout, stderr)
-	if err != nil {
-		t.Fatalf("a child that ran and exited non-zero is not an error here: %v", err)
-	}
-	if code != 3 {
-		t.Errorf("code = %d, want 3", code)
-	}
-	if got := readFile(t, stdout); !strings.Contains(got, "before-exit") {
-		t.Errorf("the child's output should still have reached the caller's file, got %q", got)
-	}
-}
-
-// TestOSAttachEnvReachesChild covers the third call site of the applyCmdEnv
-// split, so the credential channel cannot behave differently here than under
-// Run.
-func TestOSAttachEnvReachesChild(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	t.Setenv("RUNNER_TEST_AMBIENT_ONLY", "ambient")
-	t.Setenv("RUNNER_TEST_OVERRIDE", "ambient")
-	stdin, stdout, stderr := attachFiles(t)
-	cmd := Cmd{
-		Argv: helperProcessArgv(os.Args[0], "env"),
-		Env:  []string{"RUNNER_TEST_OVERRIDE=supplied", "RUNNER_TEST_EXTRA_ONLY=extra"},
-	}
-	code, err := (OS{}).Attach(cmd, stdin, stdout, stderr)
-	if err != nil || code != 0 {
-		t.Fatalf("Attach = (%d, %v), want (0, nil); stderr %q", code, err, readFile(t, stderr))
-	}
-	want := "AMBIENT_ONLY=ambient OVERRIDE=supplied EXTRA_ONLY=extra\n"
-	if got := readFile(t, stdout); got != want {
-		t.Errorf("child env = %q, want %q", got, want)
-	}
-}
-
-// TestOSAttachRefusesACmdCarryingStdinText pins the contradiction guard: a Cmd
-// that wants a string written to the child cannot also be a session reading the
-// operator's keyboard, and honouring one of them silently is the class of bug
-// LogsArgv's --previous guard exists to prevent.
-func TestOSAttachRefusesACmdCarryingStdinText(t *testing.T) {
-	stdin, stdout, stderr := attachFiles(t)
-	_, err := (OS{}).Attach(Cmd{Argv: []string{"go"}, Stdin: "payload"}, stdin, stdout, stderr)
-	if err == nil {
-		t.Fatal("a Cmd carrying stdin text must be refused")
-	}
-	if !strings.Contains(err.Error(), "Cmd.Stdin") {
-		t.Errorf("the error should name the field, got %v", err)
-	}
-}
-
-// TestOSAttachRefusesANilFile fails here rather than at the child's first
-// write, where os/exec panics on a typed-nil *os.File in its io.Writer field.
-func TestOSAttachRefusesANilFile(t *testing.T) {
-	stdin, stdout, stderr := attachFiles(t)
-	for _, c := range []struct {
-		name          string
-		in, out, errf *os.File
-	}{
-		{"no stdin", nil, stdout, stderr},
-		{"no stdout", stdin, nil, stderr},
-		{"no stderr", stdin, stdout, nil},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			if _, err := (OS{}).Attach(Cmd{Argv: []string{"go"}}, c.in, c.out, c.errf); err == nil {
-				t.Fatal("a nil file must be refused")
-			}
-		})
-	}
-}
-
-// TestOSAttachRejectsEmptyAndUnresolvableArgv mirrors the Run and Stream
-// refusals: all three go through resolveArgv0, so the rules cannot drift apart.
-func TestOSAttachRejectsEmptyAndUnresolvableArgv(t *testing.T) {
-	stdin, stdout, stderr := attachFiles(t)
-	if _, err := (OS{}).Attach(Cmd{}, stdin, stdout, stderr); err == nil {
-		t.Error("an empty argv must be refused")
-	}
-	if _, err := (OS{}).Attach(Cmd{Argv: []string{"solmq-no-such-binary-xyz"}}, stdin, stdout, stderr); err == nil {
-		t.Error("an unresolvable argv[0] must be refused")
-	}
-}
-
-// ---- OS.RunSplit and runParsed (the parse-safety boundary) ---------------------
-
-// TestOSRunSplitKeepsTheStreamsApart is the regression test for the bug this
-// seam exists to fix: `oc get -o json` on OpenShift prints "Warning: ... is
-// deprecated" on stderr, and Run merges that into stdout ahead of the JSON,
-// where it fails to parse on its first character. Split, the answer is clean.
-func TestOSRunSplitKeepsTheStreamsApart(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	out, errOut, err := (OS{}).RunSplit(Cmd{Argv: helperProcessArgv(os.Args[0], "both")})
-	if err != nil {
-		t.Fatalf("RunSplit returned error: %v", err)
-	}
-	if out != "stdout-line\n" {
-		t.Errorf("stdout = %q, want only the stdout line", out)
-	}
-	if errOut != "stderr-line\n" {
-		t.Errorf("stderr = %q, want only the stderr line", errOut)
-	}
-}
-
-// TestOSRunSplitWiresStdinAndEnv pins that the split path is otherwise Run: the
-// credential channel and stdin behave identically, so a caller does not have to
-// know which one a helper used.
-func TestOSRunSplitWiresStdinAndEnv(t *testing.T) {
-	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
-	out, _, err := (OS{}).RunSplit(Cmd{Argv: helperProcessArgv(os.Args[0], "stdin"), Stdin: "hello-split\n"})
-	if err != nil || out != "hello-split\n" {
-		t.Fatalf("stdin: out=%q err=%v", out, err)
-	}
-
-	t.Setenv("RUNNER_TEST_AMBIENT_ONLY", "ambient")
-	t.Setenv("RUNNER_TEST_OVERRIDE", "ambient")
-	out, _, err = (OS{}).RunSplit(Cmd{
-		Argv: helperProcessArgv(os.Args[0], "env"),
-		Env:  []string{"RUNNER_TEST_OVERRIDE=supplied", "RUNNER_TEST_EXTRA_ONLY=extra"},
-	})
-	if err != nil {
-		t.Fatalf("env: %v", err)
-	}
-	if want := "AMBIENT_ONLY=ambient OVERRIDE=supplied EXTRA_ONLY=extra\n"; out != want {
-		t.Errorf("env: out = %q, want %q", out, want)
-	}
-}
-
-// TestOSRunSplitRejectsEmptyAndUnresolvableArgv mirrors Run, Stream and Attach:
-// all four go through resolveArgv0, so the refusals cannot drift apart.
-func TestOSRunSplitRejectsEmptyAndUnresolvableArgv(t *testing.T) {
-	if _, _, err := (OS{}).RunSplit(Cmd{}); err == nil {
-		t.Error("an empty argv must be refused")
-	}
-	if _, _, err := (OS{}).RunSplit(Cmd{Argv: []string{"solmq-no-such-binary-xyz"}}); err == nil {
-		t.Error("an unresolvable argv[0] must be refused")
-	}
-}
-
-// splitRunner is a fake that satisfies Splitter as well as Runner, so the
-// helpers can be tested on the path production actually takes. Run is left
-// deliberately wrong -- it returns the two streams merged, the way OS.Run does
-// -- so a helper that failed to use the split path produces unparseable output
-// and the test says so.
+// splitRunner is a fake that writes its two scripted streams to the two writers
+// a caller hands it, so the helpers can be tested on the path production takes.
+// A helper that merged the streams (Combined, rather than Split) would parse the
+// warning along with the payload, and the test says so.
 type splitRunner struct {
 	calls  []call
 	stdout string
@@ -2058,14 +2074,16 @@ type splitRunner struct {
 	err    error
 }
 
-func (s *splitRunner) Run(c Cmd) (string, error) {
-	s.calls = append(s.calls, call{argv: c.Argv, stdin: c.Stdin, env: c.Env})
-	return s.stderr + s.stdout, s.err
+func (s *splitRunner) Run(_ context.Context, c gdurunner.Cmd, stdout, stderr io.Writer) error {
+	s.calls = append(s.calls, call{argv: c.Argv, stdin: string(c.Stdin), env: c.Env})
+	emit(stdout, s.stdout)
+	emit(stderr, s.stderr)
+	return s.err
 }
 
-func (s *splitRunner) RunSplit(c Cmd) (string, string, error) {
-	s.calls = append(s.calls, call{argv: c.Argv, stdin: c.Stdin, env: c.Env})
-	return s.stdout, s.stderr, s.err
+// Attach is never reached: nothing in this package attaches a terminal.
+func (s *splitRunner) Attach(c gdurunner.Cmd, _, _, _ *os.File) (int, error) {
+	return 0, fmt.Errorf("%s: this fake does not attach", c.Argv[0])
 }
 
 // TestParsingHelpersIgnoreAWarningOnStderr walks every helper whose output is
@@ -2082,31 +2100,31 @@ func TestParsingHelpersIgnoreAWarningOnStderr(t *testing.T) {
 
 	for _, c := range []struct {
 		name string
-		call func(r Runner) (string, error)
+		call func(r gdurunner.Runner) (string, error)
 	}{
-		{"KubernetesPodsJSON", func(r Runner) (string, error) {
-			return KubernetesPodsJSON(r, []string{"oc"}, "ns", "", nil, false)
+		{"KubernetesPodsJSON", func(r gdurunner.Runner) (string, error) {
+			return KubernetesPodsJSON(bg(), r, []string{"oc"}, "ns", "", nil, false)
 		}},
-		{"KubernetesGetJSON", func(r Runner) (string, error) {
-			return KubernetesGetJSON(r, []string{"oc"}, "ns", "deployment", "d")
+		{"KubernetesGetJSON", func(r gdurunner.Runner) (string, error) {
+			return KubernetesGetJSON(bg(), r, []string{"oc"}, "ns", "deployment", "d")
 		}},
-		{"KubernetesListJSON", func(r Runner) (string, error) {
-			return KubernetesListJSON(r, []string{"oc"}, "ns", "all")
+		{"KubernetesListJSON", func(r gdurunner.Runner) (string, error) {
+			return KubernetesListJSON(bg(), r, []string{"oc"}, "ns")
 		}},
-		{"KubernetesTop", func(r Runner) (string, error) {
-			return KubernetesTop(r, []string{"oc"}, "ns", "", nil, false)
+		{"KubernetesTop", func(r gdurunner.Runner) (string, error) {
+			return KubernetesTop(bg(), r, []string{"oc"}, "ns", "", nil, false)
 		}},
-		{"EngineInspectJSON", func(r Runner) (string, error) {
-			return EngineInspectJSON(r, []string{"docker"}, []string{"c"})
+		{"EngineInspectJSON", func(r gdurunner.Runner) (string, error) {
+			return EngineInspectJSON(bg(), r, []string{"docker"}, []string{"c"})
 		}},
-		{"EngineImageInspectJSON", func(r Runner) (string, error) {
-			return EngineImageInspectJSON(r, []string{"docker"}, "img:1")
+		{"EngineImageInspectJSON", func(r gdurunner.Runner) (string, error) {
+			return EngineImageInspectJSON(bg(), r, []string{"docker"}, "img:1")
 		}},
-		{"EngineStats", func(r Runner) (string, error) {
-			return EngineStats(r, []string{"docker"}, []string{"c"})
+		{"EngineStats", func(r gdurunner.Runner) (string, error) {
+			return EngineStats(bg(), r, []string{"docker"}, []string{"c"})
 		}},
-		{"EngineList", func(r Runner) (string, error) {
-			return EngineList(r, []string{"docker"})
+		{"EngineList", func(r gdurunner.Runner) (string, error) {
+			return EngineList(bg(), r, []string{"docker"}, false)
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -2125,7 +2143,7 @@ func TestParsingHelpersIgnoreAWarningOnStderr(t *testing.T) {
 	// line count wrong and the image check pass without comparing anything.
 	t.Run("DockerImageCommand", func(t *testing.T) {
 		r := &splitRunner{stdout: "[\"java\"]\n[\"--x\"]\n", stderr: warning}
-		ep, cmd, found, err := DockerImageCommand(r, "docker", "img:1", nil)
+		ep, cmd, found, err := DockerImageCommand(bg(), r, "docker", "img:1", noApprovals)
 		if err != nil || !found || !reflect.DeepEqual(ep, []string{"java"}) || !reflect.DeepEqual(cmd, []string{"--x"}) {
 			t.Errorf("ep=%q cmd=%q found=%v err=%v, want the stdout answer despite the warning", ep, cmd, found, err)
 		}
@@ -2136,7 +2154,7 @@ func TestParsingHelpersIgnoreAWarningOnStderr(t *testing.T) {
 	// hence its own case.
 	t.Run("SystemctlNRestarts", func(t *testing.T) {
 		r := &splitRunner{stdout: "3\n", stderr: warning}
-		n, err := SystemctlNRestarts(r, sc, "x.service")
+		n, err := SystemctlNRestarts(bg(), r, sc, "x.service")
 		if err != nil {
 			t.Fatalf("SystemctlNRestarts: %v", err)
 		}
@@ -2144,23 +2162,6 @@ func TestParsingHelpersIgnoreAWarningOnStderr(t *testing.T) {
 			t.Errorf("restarts = %d, want 3", n)
 		}
 	})
-}
-
-// TestParsingHelpersFallBackToRun pins the other half of runParsed: a Runner
-// with no Splitter still works, on exactly the combined output Run has always
-// returned. Every argv-recording fake in the suite depends on that.
-func TestParsingHelpersFallBackToRun(t *testing.T) {
-	f := &fakeRunner{out: `{"items":[]}`}
-	got, err := KubernetesListJSON(f, []string{"kubectl"}, "ns", "all")
-	if err != nil {
-		t.Fatalf("KubernetesListJSON: %v", err)
-	}
-	if got != `{"items":[]}` {
-		t.Errorf("output = %q, want what Run returned", got)
-	}
-	if len(f.calls) != 1 {
-		t.Errorf("want 1 call through Run, got %d", len(f.calls))
-	}
 }
 
 // TestParsedFailureCarriesBothStreams pins that splitting did not cost the
@@ -2172,7 +2173,7 @@ func TestParsedFailureCarriesBothStreams(t *testing.T) {
 		stderr: "Error from server (Forbidden): pods is forbidden",
 		err:    fmt.Errorf("exit status 1"),
 	}
-	_, err := KubernetesListJSON(r, []string{"oc"}, "ns", "all")
+	_, err := KubernetesListJSON(bg(), r, []string{"oc"}, "ns")
 	if err == nil {
 		t.Fatal("a failed command must be reported")
 	}
@@ -2183,13 +2184,60 @@ func TestParsedFailureCarriesBothStreams(t *testing.T) {
 	}
 }
 
+// TestHelpersPassTheCallersContextToTheRunner pins that every helper hands the
+// caller's context to the shared runner rather than minting its own: a context
+// that is already done starts nothing, whether the helper captures combined
+// (Combined), keeps the streams apart (runParsed) or runs several commands in a
+// row. runnertest.Fake refuses a done context before it records a call, so an
+// empty call list is the proof.
+func TestHelpersPassTheCallersContextToTheRunner(t *testing.T) {
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, c := range []struct {
+		name string
+		call func(r gdurunner.Runner) error
+	}{
+		{"Kubernetes (combined)", func(r gdurunner.Runner) error {
+			_, err := Kubernetes(done, r, "kubectl", ActionDeploy, "x", noApprovals)
+			return err
+		}},
+		{"KubernetesGetJSON (split)", func(r gdurunner.Runner) error {
+			_, err := KubernetesGetJSON(done, r, []string{"kubectl"}, "ns", "secret", "s")
+			return err
+		}},
+		{"PodmanDeploy (several commands)", func(r gdurunner.Runner) error {
+			// The state probe's error is ignored, so the service reads as not
+			// running and the write and the reload follow; the reload is what the
+			// done context stops.
+			d := &deployFns{answer: true}
+			_, _, err := PodmanDeploy(done, r, QuadletScope{}, []string{"a.service"}, true, d.approve, d.write)
+			return err
+		}},
+		{"Preflight", func(r gdurunner.Runner) error {
+			_, err := Preflight(done, r, validate.PlatformDocker, "docker", false, nil, noApprovals)
+			return err
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := &runnertest.Fake{}
+			err := c.call(f)
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("err = %v, want it to wrap context.Canceled", err)
+			}
+			if n := len(f.Calls()); n != 0 {
+				t.Errorf("a done context must start nothing, got %d calls", n)
+			}
+		})
+	}
+}
+
 // DockerImageCommand reads the image's entrypoint and command through the
 // engine, one inspect call; an engine that cannot answer -- the image not
 // pulled yet -- or an answer that does not parse leaves nothing to compare,
 // and an unsafe command never runs.
 func TestDockerImageCommand(t *testing.T) {
 	f := &fakeRunner{out: "[\"java\",\"-cp\",\"@/app/jib-classpath-file\"]\n[\"--x=1\"]\n"}
-	ep, cmd, found, err := DockerImageCommand(f, "docker", "img:1", nil)
+	ep, cmd, found, err := DockerImageCommand(bg(), f, "docker", "img:1", noApprovals)
 	if err != nil || !found || !reflect.DeepEqual(ep, []string{"java", "-cp", "@/app/jib-classpath-file"}) || !reflect.DeepEqual(cmd, []string{"--x=1"}) {
 		t.Fatalf("ep=%q cmd=%q found=%v err=%v", ep, cmd, found, err)
 	}
@@ -2205,12 +2253,12 @@ func TestDockerImageCommand(t *testing.T) {
 		{"one line", &fakeRunner{out: "[\"java\"]"}},
 		{"not json", &fakeRunner{out: "out\nout"}},
 	} {
-		if _, _, found, err := DockerImageCommand(c.f, "docker", "img:1", nil); found || err != nil {
+		if _, _, found, err := DockerImageCommand(bg(), c.f, "docker", "img:1", noApprovals); found || err != nil {
 			t.Errorf("%s: found=%v err=%v, want nothing to compare", c.name, found, err)
 		}
 	}
 	unsafe := &fakeRunner{}
-	if _, _, _, err := DockerImageCommand(unsafe, "docker; rm -rf /", "img:1", nil); err == nil || len(unsafe.calls) != 0 {
+	if _, _, _, err := DockerImageCommand(bg(), unsafe, "docker; rm -rf /", "img:1", noApprovals); err == nil || len(unsafe.calls) != 0 {
 		t.Errorf("an unsafe command must be rejected before running: err=%v calls=%d", err, len(unsafe.calls))
 	}
 }
@@ -2219,14 +2267,14 @@ func TestDockerImageCommand(t *testing.T) {
 // unsafe one before running anything.
 func TestDockerImagePull(t *testing.T) {
 	f := &fakeRunner{out: "pulled"}
-	if out, err := DockerImagePull(f, "docker --context remote", "img:1", nil); err != nil || out != "pulled" {
+	if out, err := DockerImagePull(bg(), f, "docker --context remote", "img:1", noApprovals); err != nil || out != "pulled" {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
 	if want := []string{"docker", "--context", "remote", "image", "pull", "img:1"}; len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) {
 		t.Errorf("argv = %v, want %v", f.calls, want)
 	}
 	unsafe := &fakeRunner{}
-	if _, err := DockerImagePull(unsafe, "docker; rm -rf /", "img:1", nil); err == nil || len(unsafe.calls) != 0 {
+	if _, err := DockerImagePull(bg(), unsafe, "docker; rm -rf /", "img:1", noApprovals); err == nil || len(unsafe.calls) != 0 {
 		t.Errorf("an unsafe command must be rejected before running: err=%v calls=%d", err, len(unsafe.calls))
 	}
 }
@@ -2238,29 +2286,38 @@ func TestDockerImagePull(t *testing.T) {
 func TestLifecycleArgv(t *testing.T) {
 	for _, c := range []struct {
 		name string
-		run  func(r Runner) (string, error)
+		run  func(r gdurunner.Runner) (string, error)
 		want []string
 	}{
-		{"kubernetes stop", func(r Runner) (string, error) {
-			return KubernetesLifecycle(r, "kubectl", ActionStop, "ns", "c", 3, nil)
-		}, []string{"kubectl", "--namespace", "ns", "scale", "deployment/c", "--replicas=0"}},
-		{"kubernetes start", func(r Runner) (string, error) {
-			return KubernetesLifecycle(r, "oc", ActionStart, "ns", "c", 3, nil)
-		}, []string{"oc", "--namespace", "ns", "scale", "deployment/c", "--replicas=3"}},
-		{"kubernetes restart, current namespace", func(r Runner) (string, error) {
-			return KubernetesLifecycle(r, "kubectl", ActionRestart, "", "c", 1, nil)
+		{"kubernetes stop", func(r gdurunner.Runner) (string, error) {
+			return KubernetesLifecycle(bg(), r, "kubectl", ActionStop, "ns", "c", 3, noApprovals)
+		}, []string{"kubectl", "scale", "deployment/c", "-n", "ns", "--replicas=0"}},
+		{"kubernetes start", func(r gdurunner.Runner) (string, error) {
+			return KubernetesLifecycle(bg(), r, "oc", ActionStart, "ns", "c", 3, noApprovals)
+		}, []string{"oc", "scale", "deployment/c", "-n", "ns", "--replicas=3"}},
+		{"kubernetes restart, current namespace", func(r gdurunner.Runner) (string, error) {
+			return KubernetesLifecycle(bg(), r, "kubectl", ActionRestart, "", "c", 1, noApprovals)
 		}, []string{"kubectl", "rollout", "restart", "deployment/c"}},
-		{"docker stop", func(r Runner) (string, error) {
-			return DockerLifecycle(r, "docker --context prod", ActionStop, "connector", nil)
+		{"kubernetes restart, in a namespace", func(r gdurunner.Runner) (string, error) {
+			return KubernetesLifecycle(bg(), r, "kubectl", ActionRestart, "ns", "c", 1, noApprovals)
+		}, []string{"kubectl", "rollout", "restart", "deployment/c", "-n", "ns"}},
+		{"kubernetes rollout status", func(r gdurunner.Runner) (string, error) {
+			return KubernetesRolloutStatus(bg(), r, "kubectl", "ns", "c", noApprovals)
+		}, []string{"kubectl", "rollout", "status", "deployment/c", "-n", "ns", "--timeout=300s"}},
+		{"docker stop", func(r gdurunner.Runner) (string, error) {
+			return DockerLifecycle(bg(), r, "docker --context prod", ActionStop, "connector", noApprovals)
 		}, []string{"docker", "--context", "prod", "stop", "connector"}},
-		{"docker restart", func(r Runner) (string, error) {
-			return DockerLifecycle(r, "docker", ActionRestart, "connector", nil)
+		{"docker start", func(r gdurunner.Runner) (string, error) {
+			return DockerLifecycle(bg(), r, "docker", ActionStart, "connector", noApprovals)
+		}, []string{"docker", "start", "connector"}},
+		{"docker restart", func(r gdurunner.Runner) (string, error) {
+			return DockerLifecycle(bg(), r, "docker", ActionRestart, "connector", noApprovals)
 		}, []string{"docker", "restart", "connector"}},
-		{"podman start, user unit", func(r Runner) (string, error) {
-			return PodmanLifecycle(r, QuadletScope{UserMode: true}, ActionStart, "connector.service")
+		{"podman start, user unit", func(r gdurunner.Runner) (string, error) {
+			return PodmanLifecycle(bg(), r, QuadletScope{UserMode: true}, ActionStart, "connector.service")
 		}, []string{"systemctl", "--user", "start", "connector.service"}},
-		{"podman stop, system unit", func(r Runner) (string, error) {
-			return PodmanLifecycle(r, QuadletScope{}, ActionStop, "connector.service")
+		{"podman stop, system unit", func(r gdurunner.Runner) (string, error) {
+			return PodmanLifecycle(bg(), r, QuadletScope{}, ActionStop, "connector.service")
 		}, []string{"systemctl", "stop", "connector.service"}},
 	} {
 		f := &fakeRunner{}
@@ -2272,13 +2329,19 @@ func TestLifecycleArgv(t *testing.T) {
 			t.Errorf("%s: argv = %+v, want %v", c.name, f.calls, c.want)
 		}
 	}
-	for _, bad := range []func(r Runner) (string, error){
-		func(r Runner) (string, error) {
-			return KubernetesLifecycle(r, "kubectl", ActionDeploy, "ns", "c", 1, nil)
+	for _, bad := range []func(r gdurunner.Runner) (string, error){
+		func(r gdurunner.Runner) (string, error) {
+			return KubernetesLifecycle(bg(), r, "kubectl", ActionDeploy, "ns", "c", 1, noApprovals)
 		},
-		func(r Runner) (string, error) { return DockerLifecycle(r, "docker", "kill", "c", nil) },
-		func(r Runner) (string, error) { return PodmanLifecycle(r, QuadletScope{}, ActionRemove, "c.service") },
-		func(r Runner) (string, error) { return DockerLifecycle(r, "docker; rm -rf /", ActionStop, "c", nil) },
+		func(r gdurunner.Runner) (string, error) {
+			return DockerLifecycle(bg(), r, "docker", "kill", "c", noApprovals)
+		},
+		func(r gdurunner.Runner) (string, error) {
+			return PodmanLifecycle(bg(), r, QuadletScope{}, ActionRemove, "c.service")
+		},
+		func(r gdurunner.Runner) (string, error) {
+			return DockerLifecycle(bg(), r, "docker; rm -rf /", ActionStop, "c", noApprovals)
+		},
 	} {
 		f := &fakeRunner{}
 		if _, err := bad(f); err == nil || len(f.calls) != 0 {
@@ -2291,12 +2354,194 @@ func TestLifecycleArgv(t *testing.T) {
 // which scale and rollout restart both do.
 func TestPreflightKubernetesLifecycleAsksToPatch(t *testing.T) {
 	for _, action := range []string{ActionStart, ActionStop, ActionRestart} {
-		f := &fakeRunner{}
-		if _, err := Preflight(f, validate.PlatformKubernetes, "kubectl", action, "ns", nil); err != nil {
+		probes, err := KubernetesProbes(action, "ns", nil, false)
+		if err != nil {
 			t.Fatalf("%s: %v", action, err)
 		}
-		if want := []string{"kubectl", "auth", "can-i", "patch", "deployment", "--namespace", "ns"}; !reflect.DeepEqual(f.calls[0].argv, want) {
-			t.Errorf("%s: argv = %v, want %v", action, f.calls[0].argv, want)
+		f := &fakeRunner{}
+		if _, err := Preflight(bg(), f, validate.PlatformKubernetes, "kubectl", false, probes, noApprovals); err != nil {
+			t.Fatalf("%s: %v", action, err)
 		}
+		if want := []string{"kubectl", "auth", "can-i", "patch", "deployments", "-n", "ns"}; len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].argv, want) {
+			t.Errorf("%s: calls = %+v, want one with argv %v", action, f.calls, want)
+		}
+	}
+}
+
+// The namespace read is stdout alone and never taken for an answer it is not: exactly
+// namespace/<ns> exists, nothing is absent, anything else and any failure is unknown.
+func TestKubernetesNamespaceState(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		out  string
+		err  error
+		want kube.NamespaceState
+	}{
+		{"exists", "namespace/ns\n", nil, kube.NamespaceExists},
+		{"absent", "", nil, kube.NamespaceAbsent},
+		{"somebody else's", "namespace/other\n", nil, kube.NamespaceUnknown},
+		{"read refused", "namespace/ns", fmt.Errorf("exit status 1"), kube.NamespaceUnknown},
+	} {
+		f := &fakeRunner{outByCall: map[int]string{0: c.out}, err: c.err}
+		if got := KubernetesNamespaceState(bg(), f, []string{"kubectl"}, "ns"); got != c.want {
+			t.Errorf("%s: state = %v, want %v", c.name, got, c.want)
+		}
+		if want := []string{"kubectl", "get", "namespace", "ns", "--ignore-not-found", "-o", "name"}; !reflect.DeepEqual(f.calls[0].argv, want) {
+			t.Errorf("%s: argv = %v, want %v", c.name, f.calls[0].argv, want)
+		}
+	}
+}
+
+// The namespace gate's two calls: nsgate.List's one query, and kube.DeleteNamespace.
+func TestKubernetesNamespaceGateArgv(t *testing.T) {
+	f := &fakeRunner{}
+	if _, err := KubernetesListJSON(bg(), f, []string{"oc", "--context", "p"}, "ns"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"oc", "--context", "p", "get", "all,persistentvolumeclaims,secrets,configmaps", "-n", "ns", "-o", "json"}; !reflect.DeepEqual(f.calls[0].argv, want) {
+		t.Errorf("list argv = %v, want %v", f.calls[0].argv, want)
+	}
+	if _, err := KubernetesDeleteNamespace(bg(), f, []string{"oc"}, "ns"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"oc", "delete", "namespace", "ns", "--ignore-not-found"}; !reflect.DeepEqual(f.calls[1].argv, want) {
+		t.Errorf("delete argv = %v, want %v", f.calls[1].argv, want)
+	}
+}
+
+// CheckProbe reads the verdict from stdout alone, so a warning kubectl prints on
+// stderr after it cannot hide it.
+func TestCheckProbeReadsStdoutAlone(t *testing.T) {
+	r := &splitRunner{stdout: "yes\n", stderr: "Warning: a deprecated flag\n"}
+	if err := CheckProbe(bg(), r, []string{"kubectl"}, rbac.Probe{Verb: "create", Resource: "secrets"}); err != nil {
+		t.Errorf("a yes with a warning on stderr must pass, got %v", err)
+	}
+}
+
+// ---- redeploy probes: DockerDeployDigest, PodmanSecretMatches -------------------------
+
+// routeRunner answers each call from a function of its argv, on stdout, so a test
+// can give `ps` and `inspect` different answers. It records every argv.
+type routeRunner struct {
+	calls [][]string
+	reply func(argv []string) (string, error)
+}
+
+func (r *routeRunner) Run(_ context.Context, c gdurunner.Cmd, stdout, _ io.Writer) error {
+	r.calls = append(r.calls, c.Argv)
+	out, err := r.reply(c.Argv)
+	emit(stdout, out)
+	return err
+}
+
+func (r *routeRunner) Attach(c gdurunner.Cmd, _, _, _ *os.File) (int, error) {
+	return 0, fmt.Errorf("%s: this fake does not attach", c.Argv[0])
+}
+
+const deployKey = "solace-connector/deploy-sha256"
+
+// DockerDeployDigest asks `ps` for the running containers and matches the name
+// exactly in Go, so a sibling such as solmq-connector-2 is not solmq-connector; then,
+// for a running container, reads the deploy digest label off its inspect.
+func TestDockerDeployDigest(t *testing.T) {
+	inspectDoc := func(name, label string) string {
+		return `[{"Name":"/` + name + `","State":{"Status":"running"},"Config":{"Image":"i","Labels":{` + label + `}}}]`
+	}
+	for _, c := range []struct {
+		name        string
+		ps          string
+		psErr       error
+		inspect     string
+		inspectErr  error
+		wantRunning bool
+		wantDigest  string
+		wantErr     bool
+	}{
+		{name: "not running", ps: "other\timg\tUp 1 hour\n"},
+		{name: "a sibling is not the container", ps: "solmq-connector-2\timg\tUp 1 hour\n"},
+		{name: "running, label present", ps: "solmq-connector\timg\tUp 1 hour\n",
+			inspect: inspectDoc("solmq-connector", `"`+deployKey+`":"abc"`), wantRunning: true, wantDigest: "abc"},
+		{name: "running, label missing", ps: "solmq-connector\timg\tUp 1 hour\n",
+			inspect: inspectDoc("solmq-connector", `"other":"x"`), wantRunning: true},
+		{name: "running, inspect fails", ps: "solmq-connector\timg\tUp 1 hour\n",
+			inspectErr: fmt.Errorf("boom"), wantRunning: true},
+		{name: "running, inspect is not json", ps: "solmq-connector\timg\tUp 1 hour\n",
+			inspect: "not json", wantRunning: true},
+		{name: "running, inspect answers another name", ps: "solmq-connector\timg\tUp 1 hour\n",
+			inspect: inspectDoc("elsewhere", `"`+deployKey+`":"abc"`), wantRunning: true},
+		{name: "the listing fails", psErr: fmt.Errorf("daemon down"), wantErr: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := &routeRunner{reply: func(argv []string) (string, error) {
+				if contains(argv, "ps") {
+					return c.ps, c.psErr
+				}
+				return c.inspect, c.inspectErr
+			}}
+			running, digest, err := DockerDeployDigest(bg(), r, "docker", "solmq-connector", deployKey, noApprovals)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err = %v, want error = %v", err, c.wantErr)
+			}
+			if c.wantErr {
+				if !strings.Contains(err.Error(), "solmq-connector") || !strings.Contains(err.Error(), "daemon down") {
+					t.Errorf("the error should name the container and carry the cause, got %v", err)
+				}
+				return
+			}
+			if running != c.wantRunning || digest != c.wantDigest {
+				t.Errorf("running = %v, digest = %q; want %v, %q", running, digest, c.wantRunning, c.wantDigest)
+			}
+			wantPS := []string{"docker", "ps", "--all", "--no-trunc", "--filter", "status=running", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"}
+			if !reflect.DeepEqual(r.calls[0], wantPS) {
+				t.Errorf("listing argv = %v, want %v", r.calls[0], wantPS)
+			}
+			if c.wantRunning && !reflect.DeepEqual(r.calls[1], []string{"docker", "container", "inspect", "solmq-connector"}) {
+				t.Errorf("inspect argv = %v", r.calls[1])
+			}
+			if !c.wantRunning && len(r.calls) != 1 {
+				t.Errorf("a container that is not running is not inspected, got %v", r.calls)
+			}
+		})
+	}
+	if _, _, err := DockerDeployDigest(bg(), &routeRunner{reply: nil}, "docker; id", "c", deployKey, noApprovals); err == nil {
+		t.Error("an unsafe command is refused before anything runs")
+	}
+}
+
+// PodmanSecretMatches reads the stored value back from stdout alone and compares it
+// exactly. Anything that is not a clear match reads as false: the caller counts that
+// as a change. The value never appears in an argv.
+func TestPodmanSecretMatches(t *testing.T) {
+	const value = "s3cr3t"
+	r := &splitRunner{stdout: value + "\n", stderr: "WARN[0000] a warning\n"}
+	if !PodmanSecretMatches(bg(), r, "podman", "solmq-conn-app", value, noApprovals) {
+		t.Error("the stored value equal to the new one matches, despite a warning on stderr")
+	}
+	want := []string{"podman", "secret", "inspect", "--showsecret", "--format", "{{.SecretData}}", "solmq-conn-app"}
+	if !reflect.DeepEqual(r.calls[0].argv, want) {
+		t.Errorf("argv = %v, want %v", r.calls[0].argv, want)
+	}
+	for _, a := range r.calls[0].argv {
+		if strings.Contains(a, value) {
+			t.Errorf("the value reached argv: %q", a)
+		}
+	}
+	for name, rr := range map[string]*splitRunner{
+		"a different value":   {stdout: "other\n"},
+		"no trailing newline": {stdout: value},
+		"an extra newline":    {stdout: value + "\n\n"},
+		"a failed probe":      {stdout: value + "\n", err: fmt.Errorf("no such secret")},
+		"nothing printed":     {},
+	} {
+		if PodmanSecretMatches(bg(), rr, "podman", "n", value, noApprovals) {
+			t.Errorf("%s must read as a change", name)
+		}
+	}
+	unsafe := &splitRunner{stdout: value + "\n"}
+	if PodmanSecretMatches(bg(), unsafe, "podman; id", "n", value, noApprovals) || len(unsafe.calls) != 0 {
+		t.Errorf("an unsafe command runs nothing: calls=%d", len(unsafe.calls))
+	}
+	if PodmanSecretMatches(bg(), unsafe, "podman", "", value, noApprovals) || len(unsafe.calls) != 0 {
+		t.Errorf("an empty name runs nothing: calls=%d", len(unsafe.calls))
 	}
 }

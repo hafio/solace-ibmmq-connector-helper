@@ -8,8 +8,7 @@ package dockergen
 import (
 	"strconv"
 
-	"strings"
-
+	"github.com/hafio/go-deploy-utility/containerart/compose"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
@@ -55,6 +54,13 @@ type CreatedStore struct {
 // the container.
 const StoresDigestVar = "_GEN_TLS_STORES_SHA256"
 
+// DeployDigestVar is the environment variable compose fills the
+// spec.LabelDeployDigestKey label from: deploy sets it to
+// containercli.ComposeDigest of the file and the rest of the compose
+// environment. Its name starts with the generated-variable prefix, so no
+// operator credential can collide with it.
+const DeployDigestVar = "_GEN_DEPLOY_SHA256"
+
 // Input is everything the compose renderer needs. The caller resolves stores/libs
 // to host bind mounts and reduces credentials to their stable names before
 // calling.
@@ -85,16 +91,16 @@ type yw = yamlwriter.Writer
 // with content:, mounted into the service at /app/external/spring/config/application.yml
 // and statusscript.ContainerPath respectively.
 //
-// The leading name: is the compose project. It needs no composeEscape: the
-// validator holds project-name to a DNS-1123 label, which cannot contain the
-// '$' that the doubling below exists for.
+// Every name written here -- the project, the service, the container and each
+// config and secret -- goes through compose.Quote, so a name YAML would read as
+// a boolean or a number stays the string the operator wrote.
 func Render(in Input) string {
 	w := &yw{}
 
 	// Omitted when empty, like every other optional line here, so a caller that
 	// builds a spec.Docker without going through ParseEnv renders as before.
 	if in.Docker.ProjectName != "" {
-		w.Line(0, "name: "+in.Docker.ProjectName)
+		w.Line(0, "name: "+compose.Quote(in.Docker.ProjectName))
 	}
 	w.Line(0, "services:")
 	renderService(w, in, in.Instance)
@@ -109,30 +115,32 @@ func Render(in Input) string {
 		renderContentConfig(w, in.Instance.Name+"-stores-init", storescript.Render())
 	}
 
-	secrets := append([]string(nil), in.Secrets...)
-	for _, c := range in.Created {
-		secrets = append(secrets, c.Secret)
-	}
-	renderSecrets(w, secrets)
+	// The top-level secrets map. Each entry uses compose's environment
+	// provider, so the value is read from the environment `docker compose`
+	// itself runs with -- it is never written to a file by this tool, and never
+	// appears in the compose document. Requires Docker Compose v2.23.1 or
+	// newer. Where each one lands in the container is the service's business;
+	// see renderService.
+	w.Raw(compose.TopSecrets(secretList(in)))
 
 	return w.String()
 }
 
-// renderSecrets emits the top-level secrets map. Each entry uses compose's
-// environment provider, so the value is read from the environment `docker
-// compose` itself runs with -- it is never written to a file by this tool, and
-// never appears in the compose document. Requires Docker Compose v2.23.1 or
-// newer. Where each one lands in the container is the service's business; see
-// renderService.
-func renderSecrets(w *yw, names []string) {
-	if len(names) == 0 {
-		return
+// secretList is the service's secrets in the order both the service block and
+// the top-level map list them: the credentials, each mounted at
+// spec.SecretsMountPath/<name> where the connector's configtree import reads it
+// as a property, then the created stores, each encoded under its store name in
+// spec.EncodedStoresMountPath for the storescript to decode. Every secret is
+// read from the environment variable of its own name.
+func secretList(in Input) []compose.Secret {
+	var out []compose.Secret
+	for _, n := range in.Secrets {
+		out = append(out, compose.Secret{Name: n, Target: spec.SecretsMountPath + "/" + n, EnvVar: n})
 	}
-	w.Line(0, "secrets:")
-	for _, n := range names {
-		w.Line(2, n+":")
-		w.Line(4, "environment: "+n)
+	for _, c := range in.Created {
+		out = append(out, compose.Secret{Name: c.Secret, Target: spec.EncodedStoresMountPath + "/" + c.Name, EnvVar: c.Secret})
 	}
+	return out
 }
 
 // renderService emits the service block: image, container name, labels, and
@@ -141,15 +149,15 @@ func renderSecrets(w *yw, names []string) {
 // no dangling key with a null value is produced.
 func renderService(w *yw, in Input, inst Instance) {
 	d := in.Docker
-	w.Line(2, inst.Name+":")
+	w.Line(2, compose.Quote(inst.Name)+":")
 	w.Line(4, "image: "+inst.Image)
-	w.Line(4, "container_name: "+inst.Name)
+	w.Line(4, "container_name: "+compose.Quote(inst.Name))
 	// A service carrying created stores starts through the storescript, which
 	// decodes them and then execs the image's own command, handed over here --
 	// setting entrypoint: drops the image's CMD too.
 	if len(in.Created) > 0 {
-		w.Line(4, "entrypoint: "+flowList([]string{storescript.Shell, storescript.ContainerPath}))
-		w.Line(4, "command: "+flowList(storescript.Command()))
+		w.Line(4, "entrypoint: "+compose.FlowList([]string{storescript.Shell, storescript.ContainerPath}))
+		w.Line(4, "command: "+compose.FlowList(storescript.Command()))
 	}
 	// labels: le-mode is always set; role: active only for standalone and
 	// active_active -- an active_standby role is only knowable live from the
@@ -169,6 +177,9 @@ func renderService(w *yw, in Input, inst Instance) {
 	if in.Digest {
 		w.Line(6, spec.LabelStoresDigestKey+": ${"+StoresDigestVar+":-}")
 	}
+	// Always present, stores or not: it is what makes compose notice a rotated
+	// credential, whose value is not part of the service's configuration.
+	w.Line(6, spec.LabelDeployDigestKey+": ${"+DeployDigestVar+":-}")
 	if d.Restart != "" {
 		w.Line(4, "restart: "+d.Restart)
 	}
@@ -178,17 +189,13 @@ func renderService(w *yw, in Input, inst Instance) {
 	// the user: line alone; the rest of the posture holds either way, and the
 	// connector needs no capability (it binds an unprivileged port).
 	if !inst.RunAs.Image {
-		w.Line(4, `user: "`+inst.RunAs.String()+`"`)
+		w.Line(4, "user: "+compose.Quote(inst.RunAs.String()))
 	}
-	w.Line(4, "privileged: false")
-	w.Line(4, "cap_drop:")
-	w.Line(6, "- ALL")
-	w.Line(4, "security_opt:")
-	w.Line(6, "- no-new-privileges=true")
+	w.Raw(compose.Posture)
 	if len(d.Ports) > 0 {
 		w.Line(4, "ports:")
 		for _, p := range d.Ports {
-			w.Line(6, `- "`+p.String()+`"`)
+			w.Line(6, "- "+compose.Quote(p.String()))
 		}
 	}
 	// environment: TZ only when set, each JVM options variable only when it has
@@ -198,43 +205,28 @@ func renderService(w *yw, in Input, inst Instance) {
 	if inst.Timezone != "" || tool != "" || jdk != "" || in.Syslog != nil {
 		w.Line(4, "environment:")
 		if inst.Timezone != "" {
-			w.Line(6, "TZ: "+inst.Timezone)
+			w.Line(6, "TZ: "+compose.Quote(inst.Timezone))
 		}
 		if tool != "" {
-			w.Line(6, "JAVA_TOOL_OPTIONS: "+composeQuote(tool))
+			w.Line(6, "JAVA_TOOL_OPTIONS: "+compose.Quote(tool))
 		}
 		if jdk != "" {
-			w.Line(6, "JDK_JAVA_OPTIONS: "+composeQuote(jdk))
+			w.Line(6, "JDK_JAVA_OPTIONS: "+compose.Quote(jdk))
 		}
 		// The logback config reads host/port/appname from these at runtime, the
 		// same three the kubernetes Deployment sets.
 		if s := in.Syslog; s != nil {
-			w.Line(6, "LOGGING_SYSLOG_APPNAME: "+inst.Name)
-			w.Line(6, "LOGGING_SYSLOG_HOST: "+s.Host)
-			w.Line(6, `LOGGING_SYSLOG_PORT: "`+strconv.Itoa(s.Port)+`"`)
+			w.Line(6, "LOGGING_SYSLOG_APPNAME: "+compose.Quote(inst.Name))
+			w.Line(6, "LOGGING_SYSLOG_HOST: "+compose.Quote(s.Host))
+			w.Line(6, "LOGGING_SYSLOG_PORT: "+compose.Quote(strconv.Itoa(s.Port)))
 		}
 	}
-	// secrets: each is mounted at spec.SecretsMountPath/<name>, where the
-	// connector's configtree import reads it as a property.
-	//
-	// Long syntax, not the one-line `- name` form, because the short form mounts
-	// at compose's own /run/secrets/<name> with no way to say otherwise, and
-	// /run/secrets is exactly the directory this tool had to move off (see
-	// spec.SecretsMountPath). An absolute target is what compose takes instead.
-	//
-	// A created store lands encoded beside them, under its store name in
-	// spec.EncodedStoresMountPath, for the storescript to decode.
-	if len(in.Secrets) > 0 || len(in.Created) > 0 {
-		w.Line(4, "secrets:")
-		for _, n := range in.Secrets {
-			w.Line(6, "- source: "+n)
-			w.Line(8, "target: "+spec.SecretsMountPath+"/"+n)
-		}
-		for _, c := range in.Created {
-			w.Line(6, "- source: "+c.Secret)
-			w.Line(8, "target: "+spec.EncodedStoresMountPath+"/"+c.Name)
-		}
-	}
+	// secrets: long syntax, not the one-line `- name` form, because the short
+	// form mounts at compose's own /run/secrets/<name> with no way to say
+	// otherwise, and /run/secrets is exactly the directory this tool had to move
+	// off (see spec.SecretsMountPath). An absolute target is what compose takes
+	// instead. See secretList for where each one lands.
+	w.Raw(compose.ServiceSecrets(secretList(in)))
 	// configs: the inlined application.yml and status script, plus the logback
 	// config when syslog is configured.
 	// Neither target is nested inside a volume mount below, so the engine's
@@ -242,16 +234,16 @@ func renderService(w *yw, in Input, inst Instance) {
 	// was not true while the status script lived under /app/external/libs, where
 	// a libs volume mounted over it (see statusscript.ContainerDir).
 	w.Line(4, "configs:")
-	w.Line(6, "- source: "+inst.Name+"-app")
+	w.Line(6, "- source: "+compose.Quote(inst.Name+"-app"))
 	w.Line(8, "target: /app/external/spring/config/application.yml")
-	w.Line(6, "- source: "+inst.Name+"-status")
+	w.Line(6, "- source: "+compose.Quote(inst.Name+"-status"))
 	w.Line(8, "target: "+statusscript.ContainerPath)
 	if in.Syslog != nil {
-		w.Line(6, "- source: "+inst.Name+"-logback")
+		w.Line(6, "- source: "+compose.Quote(inst.Name+"-logback"))
 		w.Line(8, "target: "+logback.ContainerPath)
 	}
 	if len(in.Created) > 0 {
-		w.Line(6, "- source: "+inst.Name+"-stores-init")
+		w.Line(6, "- source: "+compose.Quote(inst.Name+"-stores-init"))
 		w.Line(8, "target: "+storescript.ContainerPath)
 		// The decoded stores live in memory, owned by the identity the
 		// connector runs as and closed to everyone else; the existing stores
@@ -269,10 +261,10 @@ func renderService(w *yw, in Input, inst Instance) {
 	if len(in.Stores) > 0 || in.Libs != nil {
 		w.Line(4, "volumes:")
 		for _, s := range in.Stores {
-			w.Line(6, "- "+s.Source+":"+s.Target+":ro")
+			w.Line(6, "- "+compose.Quote(s.Source+":"+s.Target+":ro"))
 		}
 		if in.Libs != nil {
-			w.Line(6, "- "+in.Libs.Source+":"+in.Libs.Target+":ro")
+			w.Line(6, "- "+compose.Quote(in.Libs.Source+":"+in.Libs.Target+":ro"))
 		}
 	}
 }
@@ -294,7 +286,7 @@ func renderService(w *yw, in Input, inst Instance) {
 // call.
 func renderHealthcheck(w *yw) {
 	w.Line(4, "healthcheck:")
-	w.Line(6, `test: ["CMD", "`+statusscript.HealthShell+`", "`+statusscript.ContainerPath+`", "`+statusscript.HealthArg+`"]`)
+	w.Line(6, "test: "+compose.FlowList([]string{"CMD", statusscript.HealthShell, statusscript.ContainerPath, statusscript.HealthArg}))
 	w.Line(6, "interval: "+seconds(statusscript.HealthIntervalSeconds))
 	w.Line(6, "timeout: "+seconds(statusscript.HealthTimeoutSeconds))
 	w.Line(6, "retries: "+strconv.Itoa(statusscript.HealthRetries))
@@ -304,64 +296,21 @@ func renderHealthcheck(w *yw) {
 // seconds spells a duration the way compose wants it.
 func seconds(n int) string { return strconv.Itoa(n) + "s" }
 
-// flowList renders a list of fixed strings as a one-line YAML flow sequence of
-// double-quoted scalars, as the healthcheck's test: is written. Every value is
-// the tool's own constant, never an operator's, and holds no '$' or quote.
-func flowList(items []string) string {
-	q := make([]string, len(items))
-	for i, it := range items {
-		q[i] = `"` + it + `"`
-	}
-	return "[" + strings.Join(q, ", ") + "]"
-}
-
 // renderContentConfig emits one top-level configs entry inlining payload as a
 // block scalar under content: -- the application.yml and the status script are
 // both rendered through it. Blank lines are preserved as truly empty lines (no
-// indent, no trailing spaces), and every line is composeEscape'd.
-//
-// The two entries share one renderer so neither can be escaped without the
-// other: an unescaped content block is not a cosmetic difference but a broken
-// deploy (the status script) or a leaked credential (application.yml).
+// indent, no trailing spaces), and every line goes through compose.Escape, which
+// says why: unescaped, the status script breaks the deploy and application.yml's
+// placeholders leak the credentials. The entries share one renderer so neither
+// can be left unescaped.
 func renderContentConfig(w *yw, name, payload string) {
-	w.Line(2, name+":")
+	w.Line(2, compose.Quote(name)+":")
 	w.Line(4, "content: |")
 	for _, ln := range yamlwriter.SplitLines(payload) {
 		if ln == "" {
 			w.Raw("\n")
 		} else {
-			w.Line(6, composeEscape(ln))
+			w.Line(6, compose.Escape(ln))
 		}
 	}
 }
-
-// composeQuote renders an operator-supplied value as a double-quoted compose
-// scalar: backslashes and quotes escaped for YAML, and every '$' doubled so
-// compose's interpolation hands the container the value as written. validate
-// rejects all three characters in the values routed here, so this is the
-// render-side half of that pair, not the only defence.
-func composeQuote(s string) string {
-	return `"` + composeEscape(strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s)) + `"`
-}
-
-// composeEscape doubles every '$'. Docker Compose interpolates the whole
-// document -- configs content included -- and renders "$$" back to a single
-// "$", so this is what makes the file the container receives identical to what
-// was generated. It applies to the inlined content only; the rest of the
-// document is built from charset-validated values that cannot carry a '$'.
-//
-// Without it, both content blocks are corrupted:
-//
-//   - The status script is shell. Its variables ($PORT, $CONFIGS, ...) are
-//     replaced with blanks, and compose refuses the document outright on the
-//     first $( -- command substitution is not valid interpolation syntax.
-//   - application.yml's ${...} placeholders are Spring's, resolved from the
-//     configtree import of the secrets directory. Compose resolves them first, from the
-//     environment the CLI hands the compose child (runner.Cmd.Env), inlining
-//     the credential values as plaintext into the document and bypassing the
-//     secrets model entirely.
-//
-// Only the compose renderer needs this: the kubernetes ConfigMap and the podman
-// quadlet (which writes both files to disk beside the unit) have no
-// interpolation layer between this generator and the container.
-func composeEscape(s string) string { return strings.ReplaceAll(s, "$", "$$") }

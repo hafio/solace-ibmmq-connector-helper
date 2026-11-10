@@ -1,184 +1,115 @@
 package main
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
+	"github.com/hafio/go-deploy-utility/confirm"
+	"github.com/hafio/go-deploy-utility/execguard"
+	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/kube"
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
-	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
 
-// This file is the namespace half of a kubernetes teardown, which is deliberately
-// not part of the manifest delete.
+// This file is the namespace on each side of a kubernetes deploy: created before
+// the apply, only when it is absent, and offered for deletion after a remove.
 //
-// Deleting a Namespace cascades to everything inside it, so a manifest carrying
-// one -- piped to `kubectl delete -f -` -- takes workloads this tool never
-// deployed along with its own. remove therefore renders without the Namespace
-// document (deploy.Input.OmitNamespace) and the namespace is settled here
-// instead: refused outright for the namespaces no tool should ever delete, and
-// offered only once nothing else is living in it.
+// Creating comes first (ensureNamespace). The deploy manifest carries no Namespace
+// document (deploy.Input.OmitNamespace), because applying one asks the cluster for
+// permission to create namespaces on every run, even when the namespace exists. The
+// namespace is read first, and only an absent one is created, by its own apply and
+// only when this identity may.
 //
-// The invariant this file exists to hold: a namespace containing anything this
-// release does not own is never removed. Not interactively, not under
-// --no-prompt, not on any path. The occupancy check runs first and an occupant
-// of any kind ends it; --no-prompt only removes the question in the case where
-// the namespace is already empty.
-
-// namespaceProbeTypes is what the occupancy check asks kubectl for. `all` covers
-// the workload and service kinds; the three after it do not appear under `all`
-// and are exactly the ones whose loss would hurt most.
+// Deleting is deliberately not part of the manifest delete. Deleting a Namespace
+// cascades to everything inside it, so a manifest carrying one -- piped to
+// `kubectl delete -f -` -- takes workloads this tool never deployed along with its
+// own. remove therefore renders without the Namespace document (deploy.Input.Teardown)
+// and the namespace is settled here instead, in nsgate's order: refused outright for
+// the namespaces no tool should ever delete, and offered only once nothing else is
+// living in it.
 //
-// A tool-authored constant, never operator input.
-const namespaceProbeTypes = "all,persistentvolumeclaims,secrets,configmaps"
+// The invariant this half exists to hold: a namespace containing anything this
+// release does not own is never removed. Not interactively, not under --no-prompt,
+// not on any path. The occupancy check runs first and an occupant of any kind ends
+// it; --no-prompt only removes the question in the case where the namespace is
+// already empty. And nothing in the gate fails the remove: every way out of it short
+// of a confirmed delete keeps the namespace with a warning and exits 0.
 
-// wellKnownNamespaces are refused outright, ahead of any occupancy result.
-// Deleting one of these is unrecoverable and breaks the cluster rather than one
-// application, so no emptiness check should be able to authorise it -- an
-// operator who has typed the wrong namespace into env.yaml is the likeliest way
-// to arrive here.
-var wellKnownNamespaces = map[string]bool{
-	"default":         true,
-	"kube-system":     true,
-	"kube-public":     true,
-	"kube-node-lease": true,
-}
-
-// clusterDefaultOccupants exist in every namespace kubernetes creates, so they
-// are not evidence that anyone is using it.
-var clusterDefaultOccupants = map[string]string{
-	"ConfigMap":      "kube-root-ca.crt",
-	"ServiceAccount": "default",
-}
-
-// nsItem is the slice of a kubectl object this check needs.
+// ensureNamespace makes sure ns exists before the apply, asking for no cluster-wide
+// permission when it already does (docs/developer.md, the shared module's rules):
 //
-// Parsed here rather than through internal/statusreport because that package
-// models pods and containers for the status report; this is a different
-// question about arbitrary object kinds, and the four fields below are the
-// whole of it.
-type nsItem struct {
-	Kind     string `json:"kind"`
-	Type     string `json:"type"` // secrets only: kubernetes.io/service-account-token
-	Metadata struct {
-		Name              string `json:"name"`
-		DeletionTimestamp string `json:"deletionTimestamp"`
-		OwnerReferences   []struct {
-			Kind string `json:"kind"`
-			Name string `json:"name"`
-		} `json:"ownerReferences"`
-	} `json:"metadata"`
-}
-
-// ownedNames is every object name this release put in the namespace, so a
-// straggler of our own is not mistaken for someone else's workload.
+//   - exists: nothing more.
+//   - absent: probe `create namespaces`, then apply the Namespace on its own. A
+//     refused probe is kube.MissingNamespace, a failure; an unanswered one (no
+//     login, no cluster) is its own error.
+//   - unknown (the read was refused or failed): the same probe. Allowed, apply it.
+//     Refused, warn and carry on, since the apply's own write stops a deploy into a
+//     namespace that is not there. Unanswered is an error.
 //
-// The check runs after the teardown, so these are mostly already gone; this is
-// the safety net for one that has not finished terminating and carries no
-// deletionTimestamp yet.
-func ownedNames(k *spec.Kubernetes) map[string]bool {
-	owned := map[string]bool{}
-	if k == nil {
-		return owned
+// ok is false when the deploy must stop, with the exit code to return.
+func ensureNamespace(r gdurunner.Runner, base []string, command, ns string, approvals execguard.Approvals) (code int, ok bool) {
+	state := runner.KubernetesNamespaceState(bg(), r, base, ns)
+	if state == kube.NamespaceExists {
+		return exitcode.OK, true
 	}
-	for _, n := range k.CreatedNames() {
-		owned[n] = true
-	}
-	delete(owned, "")
-	return owned
-}
-
-// namespaceOccupants lists what is living in the namespace that this release
-// does not own, as sorted "kind/name" entries.
-//
-// Three things are deliberately not occupants:
-//
-//   - anything with a deletionTimestamp -- that is the teardown that just ran,
-//     still terminating, and the single most likely false positive;
-//   - our own objects, and anything owned by one of them (the ReplicaSets and
-//     Pods behind the Deployment name their owner, so one rule covers them);
-//   - the defaults kubernetes puts in every namespace it creates.
-func namespaceOccupants(doc string, owned map[string]bool) ([]string, error) {
-	var list struct {
-		Items []nsItem `json:"items"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(doc)), &list); err != nil {
-		return nil, fmt.Errorf("reading the namespace contents: %w", err)
-	}
-	var out []string
-	for _, it := range list.Items {
-		if isOurs(it, owned) || isClusterDefault(it) {
-			continue
+	perr := runner.CheckProbe(bg(), r, base, rbac.Probe{Verb: "create", Resource: "namespaces"})
+	var refused *rbac.RefusedError
+	switch {
+	case perr == nil:
+		manifest, merr := kube.NamespaceManifest(ns)
+		if merr != nil {
+			return report(runner.ActionDeploy, tgtKubernetes, "", merr), false
 		}
-		out = append(out, strings.ToLower(it.Kind)+"/"+it.Metadata.Name)
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
-// isOurs reports whether an item belongs to the release just torn down, either
-// by name, by owner, or by already being on its way out.
-func isOurs(it nsItem, owned map[string]bool) bool {
-	if it.Metadata.DeletionTimestamp != "" {
-		return true
-	}
-	if owned[it.Metadata.Name] {
-		return true
-	}
-	for _, ref := range it.Metadata.OwnerReferences {
-		if owned[ref.Name] {
-			return true
+		if out, aerr := runner.Kubernetes(bg(), r, command, runner.ActionDeploy, string(manifest), approvals); aerr != nil {
+			return report("create namespace "+ns+" for", tgtKubernetes, out, aerr), false
 		}
+	case !errors.As(perr, &refused):
+		return report(runner.ActionDeploy, tgtKubernetes, "", perr), false
+	case state == kube.NamespaceAbsent:
+		return report(runner.ActionDeploy, tgtKubernetes, "", kube.MissingNamespace(base, ns, perr)), false
+	default:
+		fmt.Fprintf(os.Stderr, "warning: namespace %s could not be read (that needs get namespaces) and this identity may "+
+			"not create namespaces (%v); carrying on, and the deploy stops at its first write if the namespace is missing\n", ns, perr)
 	}
-	return false
-}
-
-// isClusterDefault reports whether an item is one kubernetes creates in every
-// namespace, which says nothing about whether anyone is using it.
-func isClusterDefault(it nsItem) bool {
-	if name, ok := clusterDefaultOccupants[it.Kind]; ok && it.Metadata.Name == name {
-		return true
-	}
-	// Older clusters mint a service-account token Secret per namespace.
-	return it.Kind == "Secret" && it.Type == "kubernetes.io/service-account-token"
+	return exitcode.OK, true
 }
 
 // removeNamespace is the second half of a kubernetes teardown, run after the
-// manifest delete succeeds.
+// manifest delete succeeds, in nsgate's order. base is the guarded kubectl argv.
 //
-// It never removes a namespace it cannot prove is empty: a failed probe, a
-// well-known name, or any occupant at all leaves it in place. The exit code
-// stays 0 throughout -- the teardown the operator asked for did succeed, and
+// It never removes a namespace it cannot prove is empty: a failed listing, a
+// protected name, or any occupant at all leaves it in place, and so does a refused
+// delete permission (asked before the question, so nobody is asked and then
+// refused), a declined question, a missing terminal and a failed delete. The exit
+// code stays 0 throughout -- the teardown the operator asked for did succeed, and
 // declining to delete a namespace is an outcome, not a failure.
-func removeNamespace(r runner.Runner, o actionOpts, k *spec.Kubernetes) int {
-	command, ns := k.Command, k.Deployment.Namespace
+func removeNamespace(r gdurunner.Runner, o actionOpts, k *spec.Kubernetes, base []string) int {
+	ns := k.Deployment.Namespace
 	if ns == "" {
 		fmt.Fprintf(os.Stderr, "remove: no namespace in env.yaml to remove\n")
-		return 0
+		return exitcode.OK
 	}
-	if wellKnownNamespaces[ns] {
+	if nsgate.Protected(ns) {
 		fmt.Fprintf(os.Stderr, "remove: %s is a cluster namespace and is never removed\n", ns)
-		return 0
+		return exitcode.OK
 	}
 
-	argv, err := runner.ParseCommand(validate.PlatformKubernetes, command, o.allow)
-	if err != nil {
-		return errExit(err)
-	}
-	doc, lerr := runner.KubernetesListJSON(r, argv, ns, namespaceProbeTypes)
+	doc, lerr := runner.KubernetesListJSON(bg(), r, base, ns)
 	if lerr != nil {
 		// A namespace is not worth deleting on a guess.
 		fmt.Fprintf(os.Stderr, "remove: could not check what is in namespace %s, so it was left in place: %v\n", ns, lerr)
-		return 0
+		return exitcode.OK
 	}
-	occupants, perr := namespaceOccupants(doc, ownedNames(k))
+	occupants, perr := nsgate.Occupants(doc, k.CreatedNames())
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "remove: could not check what is in namespace %s, so it was left in place: %v\n", ns, perr)
-		return 0
+		return exitcode.OK
 	}
 	if len(occupants) > 0 {
 		fmt.Fprintf(os.Stderr, "\nnamespace %s still holds %d resource(s) this release does not own:\n", ns, len(occupants))
@@ -186,39 +117,47 @@ func removeNamespace(r runner.Runner, o actionOpts, k *spec.Kubernetes) int {
 			fmt.Fprintln(os.Stderr, "  "+occ)
 		}
 		fmt.Fprintf(os.Stderr, "leaving namespace %s in place.\n", ns)
-		return 0
+		return exitcode.OK
 	}
 
+	// The permission is asked before the question, so nobody is asked and then
+	// refused.
+	if derr := runner.CheckProbe(bg(), r, base, nsgate.DeleteProbe()); derr != nil {
+		fmt.Fprintf(os.Stderr, "warning: namespace %s was left in place: %v\n", ns, derr)
+		return exitcode.OK
+	}
 	if !o.noPrompt {
 		ok, cerr := confirmNamespaceRemoval(ns)
 		if cerr != nil {
-			return errExit(cerr)
+			// The prompter's error already names --no-prompt as the way to answer
+			// without a terminal.
+			fmt.Fprintf(os.Stderr, "warning: namespace %s was left in place, since it could not be asked about: %v\n", ns, cerr)
+			return exitcode.OK
 		}
 		if !ok {
 			fmt.Fprintf(os.Stderr, "remove: namespace %s left in place\n", ns)
-			return 0
+			return exitcode.OK
 		}
 	}
-	out, rerr := runner.Kubernetes(r, command, runner.ActionRemove, deploy.NamespaceManifest(ns), o.allow)
-	return report("remove namespace", tgtKubernetes, out, rerr)
+	out, derr := runner.KubernetesDeleteNamespace(bg(), r, base, ns)
+	if derr != nil {
+		if s := strings.TrimSpace(out); s != "" {
+			fmt.Fprintln(os.Stderr, s)
+		}
+		fmt.Fprintf(os.Stderr, "warning: namespace %s was left in place, since deleting it failed: %v\n", ns, derr)
+		return exitcode.OK
+	}
+	return report("remove namespace", tgtKubernetes, out, nil)
 }
 
-// confirmNamespaceRemoval asks the second question, through the same promptLine
-// seam and non-TTY refusal every other prompt uses.
+// confirmNamespaceRemoval asks the second question, through the same prompter
+// and non-TTY refusal every other prompt uses.
 //
 // It is asked separately from the teardown confirmation because it destroys
 // something the teardown does not, and something the operator may well not have
 // created: saying yes to removing a deployment is not saying yes to removing
 // the namespace around it.
 func confirmNamespaceRemoval(ns string) (bool, error) {
-	line, err := promptLine(fmt.Sprintf("namespace %s holds nothing else -- remove the namespace too? [y/N] ", ns))
-	if err != nil {
-		return false, fmt.Errorf("confirming the namespace removal interactively: %w; pass %s instead", err, noPromptFlagName)
-	}
-	switch strings.ToLower(line) {
-	case "y", "yes":
-		return true, nil
-	default:
-		return false, nil
-	}
+	return prompter.Gate(false, confirm.Lenient,
+		fmt.Sprintf("namespace %s holds nothing else -- remove the namespace too? [y/N] ", ns), "the namespace removal")
 }

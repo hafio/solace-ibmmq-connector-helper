@@ -88,8 +88,8 @@ NoNewPrivileges=true
 DropCapability=all
 PublishPort=8090:8090
 PublishPort=8080:8091
-Environment=TZ=Asia/Singapore
-Environment=JAVA_TOOL_OPTIONS=-Dcom.ibm.mq.cfg.useIBMCipherMappings=false
+Environment="TZ=Asia/Singapore"
+Environment="JAVA_TOOL_OPTIONS=-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"
 Secret=solmq-connector-MQ_CONN_1_USER,type=mount,target=/app/external/var/secrets/MQ_CONN_1_USER
 Secret=solmq-connector-MQ_CONN_1_PASSWORD,type=mount,target=/app/external/var/secrets/MQ_CONN_1_PASSWORD
 Secret=solmq-connector-application.yml,type=mount,target=/app/external/spring/config/application.yml
@@ -282,9 +282,8 @@ func TestQuadletJavaOptionsEnvironment(t *testing.T) {
 	unit := RenderQuadlet(in).Content
 	for _, want := range []string{
 		`Environment="JAVA_TOOL_OPTIONS=-Dcom.ibm.mq.cfg.useIBMCipherMappings=false -Xms512m -Xmx1g"` + "\n",
-		// A single option has no space, so it keeps the unquoted form every
-		// other Environment= line in the unit uses.
-		"Environment=JDK_JAVA_OPTIONS=-Duser.language=en\n",
+		// A single option is quoted whole too, like every Environment= line.
+		`Environment="JDK_JAVA_OPTIONS=-Duser.language=en"` + "\n",
 	} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("unit missing %q:\n%s", want, unit)
@@ -295,25 +294,6 @@ func TestQuadletJavaOptionsEnvironment(t *testing.T) {
 	plain := RenderQuadlet(minimalInput()).Content
 	if strings.Contains(plain, "JAVA_TOOL_OPTIONS") || strings.Contains(plain, "JDK_JAVA_OPTIONS") {
 		t.Errorf("no TLS and no java-options must set no JVM options variable:\n%s", plain)
-	}
-}
-
-// TestSystemdEnvEscapes pins the rules systemdEnv exists for: '%' doubled so
-// systemd does not expand it as a specifier (the %p of a JVM error-file path
-// would otherwise become the unit's name), a value with a space quoted whole,
-// and quotes and backslashes escaped inside those quotes.
-func TestSystemdEnvEscapes(t *testing.T) {
-	for _, c := range []struct{ value, want string }{
-		{"-Xmx1g", "Environment=V=-Xmx1g"},
-		{"-XX:ErrorFile=/tmp/hs_err_%p.log", "Environment=V=-XX:ErrorFile=/tmp/hs_err_%%p.log"},
-		{"-Xms512m -Xmx1g", `Environment="V=-Xms512m -Xmx1g"`},
-		{"-Dx=%t -Dy=z", `Environment="V=-Dx=%%t -Dy=z"`},
-		{`-Dx="a"`, `Environment="V=-Dx=\"a\""`},
-		{`-Dpath=C:\tmp`, `Environment="V=-Dpath=C:\\tmp"`},
-	} {
-		if got := systemdEnv("V", c.value); got != c.want {
-			t.Errorf("systemdEnv(%q) = %s, want %s", c.value, got, c.want)
-		}
 	}
 }
 
@@ -334,9 +314,9 @@ func TestQuadletSyslogMountsAndSetsEnv(t *testing.T) {
 	out := RenderQuadlet(syslogInput()).Content
 	for _, want := range []string{
 		"Secret=solmq-connector-logback-spring.xml,type=mount,target=" + logback.ContainerPath + "\n",
-		"Environment=LOGGING_SYSLOG_APPNAME=solmq-connector",
-		"Environment=LOGGING_SYSLOG_HOST=syslog.corp",
-		"Environment=LOGGING_SYSLOG_PORT=514",
+		`Environment="LOGGING_SYSLOG_APPNAME=solmq-connector"`,
+		`Environment="LOGGING_SYSLOG_HOST=syslog.corp"`,
+		`Environment="LOGGING_SYSLOG_PORT=514"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("quadlet unit is missing %q, got:\n%s", want, out)

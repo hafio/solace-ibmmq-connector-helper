@@ -8,6 +8,11 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/containercli"
+	"github.com/hafio/go-deploy-utility/execguard"
+	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/rootless"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusreport"
@@ -44,7 +49,7 @@ type instanceRequest struct {
 	command  string
 	pods     []string
 	conts    []string
-	allow    []string
+	approved execguard.Approvals
 	all      bool
 }
 
@@ -66,6 +71,21 @@ type instanceSession struct {
 	command string
 	cmdArgv []string
 	ns      string
+}
+
+// rootless is whether this session's podman engine is a rootless one, which only
+// picks the hint a failed preflight carries. It is the rule deploy applies
+// (rootless.Decide over podman.rootful, absent meaning rootless), without
+// repairing the user session; a refusal from that rule is reported by the verbs
+// that resolve the full scope, so here it only reads as not rootless. False off
+// podman.
+func (s instanceSession) rootless() bool {
+	if s.platform != validate.PlatformPodman {
+		return false
+	}
+	rootful := s.env != nil && s.env.Podman != nil && s.env.Podman.Rootful
+	mode, err := rootless.Decide(host().scope.Euid, rootful, "podman.rootful")
+	return err == nil && mode
 }
 
 // resolveInstanceSession loads env.yaml, settles the platform and the namespace,
@@ -105,7 +125,7 @@ func resolveInstanceSession(t instanceRequest) (instanceSession, error) {
 	}
 
 	command := instanceCommand(platform, t.command, e)
-	cmdArgv, err := runner.ParseCommand(platform, command, t.allow)
+	cmdArgv, err := runner.ParseCommand(platform, command, t.approved)
 	if err != nil {
 		return s, err
 	}
@@ -195,7 +215,7 @@ func kubeDiscovery(s instanceSession, pods []string, all bool) (selector, match,
 		return "", "", "", nil
 	default:
 		if s.env == nil || s.env.Kubernetes == nil {
-			return "", "", "", fmt.Errorf("no kubernetes: section in env.yaml to discover pods from; %s", namingHint(s))
+			return "", "", "", exitcode.Usagef("no kubernetes: section in env.yaml to discover pods from; %s", namingHint(s))
 		}
 		name := s.env.Kubernetes.Deployment.Name
 		return "app=" + name, "", name, nil
@@ -221,20 +241,21 @@ func noPodsFound(selector, ns string, all bool) error {
 //
 // notes carries the containers --all found but had to skip. Names come back
 // from the engine there rather than from the operator, so they are re-checked
-// before they can reach an argv, and a skip is said out loud rather than
-// silently narrowing the result.
-func engineNames(r runner.Runner, s instanceSession, conts []string, all bool) (names, notes []string, err error) {
+// before they can reach an argv (containercli.ValidName), and a skip is said out
+// loud rather than silently narrowing the result.
+func engineNames(r gdurunner.Runner, s instanceSession, conts []string, all bool) (names, notes []string, err error) {
 	switch {
 	case all:
-		out, lerr := runner.EngineList(r, s.cmdArgv)
+		out, lerr := runner.EngineList(bg(), r, s.cmdArgv, false)
 		if lerr != nil {
 			return nil, nil, lerr
 		}
-		for _, n := range statusreport.EngineNamesByImage(out, statusreport.ImageMatch) {
-			if validate.SafeToken(n) {
-				names = append(names, n)
+		for _, row := range containercli.ByImage(containercli.ParseList(out), statusreport.ImageMatch) {
+			if containercli.ValidName(row.Name) {
+				names = append(names, row.Name)
 			} else {
-				notes = append(notes, fmt.Sprintf("skipping container %q: its name contains an unsafe character (%s)", n, validate.UnsafeTokenReason))
+				// %q escapes whatever control character the engine put in the name.
+				notes = append(notes, fmt.Sprintf("skipping container %q: its name contains an unsafe character (docker and podman names are [A-Za-z0-9][A-Za-z0-9_.-]*)", row.Name))
 			}
 		}
 		if len(names) == 0 {
@@ -258,12 +279,12 @@ func engineNames(r runner.Runner, s instanceSession, conts []string, all bool) (
 func configuredInstanceName(s instanceSession) (string, error) {
 	if s.platform == validate.PlatformDocker {
 		if s.env == nil || s.env.Docker == nil {
-			return "", fmt.Errorf("no docker: section in env.yaml to discover the container name from; %s", namingHint(s))
+			return "", exitcode.Usagef("no docker: section in env.yaml to discover the container name from; %s", namingHint(s))
 		}
 		return s.env.Docker.Name, nil
 	}
 	if s.env == nil || s.env.Podman == nil {
-		return "", fmt.Errorf("no podman: section in env.yaml to discover the container name from; %s", namingHint(s))
+		return "", exitcode.Usagef("no podman: section in env.yaml to discover the container name from; %s", namingHint(s))
 	}
 	return s.env.Podman.Name, nil
 }
@@ -350,13 +371,13 @@ func sortInstances(insts []statusreport.Instance) {
 //
 // It is what both the logs picker and index resolution index into, so the two
 // cannot disagree about which instance is number 0.
-func instanceCandidates(r runner.Runner, s instanceSession, all bool) ([]instanceRef, error) {
+func instanceCandidates(r gdurunner.Runner, s instanceSession, all bool) ([]instanceRef, error) {
 	if s.platform == validate.PlatformKubernetes {
 		selector, match, _, err := kubeDiscovery(s, nil, all)
 		if err != nil {
 			return nil, err
 		}
-		doc, derr := runner.KubernetesPodsJSON(r, s.cmdArgv, s.ns, selector, nil, all)
+		doc, derr := runner.KubernetesPodsJSON(bg(), r, s.cmdArgv, s.ns, selector, nil, all)
 		if derr != nil {
 			return nil, derr
 		}
@@ -428,7 +449,7 @@ func anyIndex(names []string) bool {
 // candidate is actually named "0". That is why an all-digit value forces the
 // enumeration -- the name check needs the list to check against. When no entry
 // looks like an index, nothing is fetched and the names pass straight through.
-func resolveIndexes(r runner.Runner, s instanceSession, names []string, all bool) ([]string, error) {
+func resolveIndexes(r gdurunner.Runner, s instanceSession, names []string, all bool) ([]string, error) {
 	if !anyIndex(names) {
 		return names, nil
 	}
@@ -514,7 +535,7 @@ type pickerLine struct {
 // `get pods <name>` call on kubernetes was to learn which container to name,
 // and the namespace it also read back was the one the query was already scoped
 // by.
-func resolveOneInstance(r runner.Runner, sess instanceSession, named string, line pickerLine) (instanceRef, bool, error) {
+func resolveOneInstance(r gdurunner.Runner, sess instanceSession, named string, line pickerLine) (instanceRef, bool, error) {
 	var ref instanceRef
 	flag := podOrContainerFlag(sess.platform)
 

@@ -3,6 +3,9 @@ package gen
 import (
 	"strings"
 	"testing"
+
+	"github.com/hafio/go-deploy-utility/containerart/artifacttest"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/certfixture"
 )
 
 // renderAll renders the kubernetes manifests, the compose file and the quadlet
@@ -39,6 +42,33 @@ func renderAll(t *testing.T, runAs string) map[string]string {
 	return map[string]string{"kubernetes": k8s, "docker": compose.Compose, "podman": quadlet.Unit.Content}
 }
 
+// renderShapes renders the compose file and the quadlet unit for every shape
+// the generators vary, keyed by a name the failure message carries: each run-as
+// value, then one connector with every optional block set -- timezone,
+// java-options, syslog and a created store -- so a line written behind a
+// conditional is held to the same checks as the rest.
+func renderShapes(t *testing.T) (composes, units map[string]string) {
+	t.Helper()
+	composes, units = map[string]string{}, map[string]string{}
+	for _, runAs := range []string{"", "1234:5678", "0", "image"} {
+		out := renderAll(t, runAs)
+		composes["docker run-as "+runAs], units["podman run-as "+runAs] = out["docker"], out["podman"]
+	}
+	ca := certfixture.CA(t, "Root")
+	res := Resolver{Env: storeEnv, Rand: fixedStatusRand, ReadFile: storeFiles(map[string][]byte{"./ca.pem": certfixture.PEM(ca)})}
+	const extras = "timezone: UTC\njava-options:\n  tool: -Xms512m\n  jdk: -Dregion=apac\nlogging:\n  syslog:\n    host: syslog.corp\n    port: 514\n"
+	dp, errs, _ := GenerateDocker(createdEnv(extras+"docker:\n  command: docker\n  name: c\n"), res)
+	if len(errs) > 0 {
+		t.Fatalf("docker with every optional block: %v", errs)
+	}
+	pp, errs, _ := GeneratePodman(createdEnv(extras+"podman:\n  command: podman\n  name: c\n"), res)
+	if len(errs) > 0 {
+		t.Fatalf("podman with every optional block: %v", errs)
+	}
+	composes["docker with every optional block"], units["podman with every optional block"] = dp.Compose, pp.Unit.Content
+	return composes, units
+}
+
 // TestArtifactsStateTheirPosture pins what every artifact says about the
 // container's identity and privileges, for the default (no run-as written), an
 // explicit id, uid 0 and image. The posture -- no privilege escalation or
@@ -52,8 +82,6 @@ func TestArtifactsStateTheirPosture(t *testing.T) {
 			"seccompProfile:\n          type: RuntimeDefault\n",
 			"          securityContext:\n            allowPrivilegeEscalation: false\n            privileged: false\n            capabilities:\n              drop:\n                - ALL\n",
 		},
-		"docker": {"    privileged: false\n    cap_drop:\n      - ALL\n    security_opt:\n      - no-new-privileges=true\n"},
-		"podman": {"NoNewPrivileges=true\nDropCapability=all\n"},
 	}
 	for _, c := range []struct {
 		runAs                 string
@@ -69,6 +97,10 @@ func TestArtifactsStateTheirPosture(t *testing.T) {
 	} {
 		t.Run("run-as "+c.runAs, func(t *testing.T) {
 			out := renderAll(t, c.runAs)
+			// The compose and quadlet posture is the shared block, held to it by
+			// the shared check; the kubernetes strings stay local.
+			artifacttest.AssertComposePosture(t, "docker run-as "+c.runAs, out["docker"])
+			artifacttest.AssertQuadletPosture(t, "podman run-as "+c.runAs, out["podman"])
 			for platform, want := range map[string][]string{"kubernetes": c.kube, "docker": c.docker, "podman": c.podman} {
 				for _, w := range append(append([]string(nil), posture[platform]...), want...) {
 					if !strings.Contains(out[platform], w) {
@@ -98,21 +130,45 @@ func TestArtifactsStateTheirPosture(t *testing.T) {
 // seccomp or SELinux confinement, or sharing the host's namespaces. None is
 // emitted today; this keeps it that way.
 func TestArtifactsCarryNoWideningTokens(t *testing.T) {
-	widening := []string{
-		"privileged: true", "--privileged", "Privileged=true",
-		"allowPrivilegeEscalation: true", "no-new-privileges:false", "no-new-privileges=false", "NoNewPrivileges=false",
-		"cap_add", "AddCapability", "SYS_ADMIN",
-		"Unconfined", "unconfined", "SecurityLabelDisable", "label=disable", "label:disable",
-		"hostNetwork", "hostPID", "hostIPC", "network_mode: host", "Network=host", "pid: host", "ipc: host",
-	}
+	// The shared compose and quadlet spellings and host networking, which this
+	// tool never writes, plus the kubernetes ones, which are local.
+	tokens := append(artifacttest.Widening(), artifacttest.HostNetwork()...)
+	tokens = append(tokens, "allowPrivilegeEscalation: true", "hostNetwork", "hostPID", "hostIPC")
 	for _, runAs := range []string{"", "1234:5678", "0", "image"} {
 		for platform, out := range renderAll(t, runAs) {
-			for _, w := range widening {
-				if strings.Contains(out, w) {
-					t.Errorf("%s artifact for run-as %q carries the widening token %q:\n%s", platform, runAs, w, out)
-				}
-			}
+			artifacttest.AssertAbsent(t, platform+" run-as "+runAs, out, tokens)
 		}
+	}
+	composes, units := renderShapes(t)
+	for name, out := range composes {
+		artifacttest.AssertAbsent(t, name, out, tokens)
+	}
+	for name, out := range units {
+		artifacttest.AssertAbsent(t, name, out, tokens)
+	}
+}
+
+// TestQuadletKeysAreWithinTheFloor holds every [Container] key of every unit
+// shape to podman 4.5, the floor the tool documents: quadlet refuses a unit
+// carrying a key it does not know, so a key newer than the floor fails the unit
+// on an older host. The Health* keys and Secret= are the newest, at 4.5.
+func TestQuadletKeysAreWithinTheFloor(t *testing.T) {
+	_, units := renderShapes(t)
+	for name, unit := range units {
+		artifacttest.AssertQuadletKeys(t, name, unit, "4.5")
+	}
+}
+
+// TestSecretTargetsAreAbsolutePaths holds every secret of every compose file and
+// quadlet unit shape to an absolute target: a bare name lands under the
+// engine's own /run/secrets, where the connector never looks.
+func TestSecretTargetsAreAbsolutePaths(t *testing.T) {
+	composes, units := renderShapes(t)
+	for name, out := range composes {
+		artifacttest.AssertSecretTargets(t, name, out)
+	}
+	for name, out := range units {
+		artifacttest.AssertSecretTargets(t, name, out)
 	}
 }
 

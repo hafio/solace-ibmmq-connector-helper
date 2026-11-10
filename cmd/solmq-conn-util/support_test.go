@@ -6,20 +6,25 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/hafio/go-deploy-utility/notice"
+	"github.com/hafio/go-deploy-utility/notice/noticetest"
+	"github.com/hafio/go-deploy-utility/paritydoc"
 )
 
-// supportNoticeDocs are the hand-written docs that must carry
-// supportNoticeMarkdown verbatim. They have no renderer to take it from, so
-// this list is what keeps them from drifting away from support.go.
+// supportNoticeDocs are the hand-written docs that must carry supportNotice
+// verbatim, as paths relative to the repository root. They have no renderer to
+// take it from, so this list is what keeps them from drifting away from
+// support.go.
 var supportNoticeDocs = []string{
-	"../../README.md",
-	"../../docs/getting-started.md",
-	"../../docs/configuration.md",
-	"../../docs/operations.md",
-	"../../docs/troubleshooting.md",
-	"../../docs/DESIGN.md",
-	"../../docs/DEVELOPMENT.md",
-	"../../docs/parity.md",
+	"README.md",
+	"docs/getting-started.md",
+	"docs/configuration.md",
+	"docs/operations.md",
+	"docs/troubleshooting.md",
+	"docs/DESIGN.md",
+	"docs/DEVELOPMENT.md",
+	"docs/parity.md",
 }
 
 const supportNoticePagePath = "../../solmq-conn-util-generator.html"
@@ -31,65 +36,15 @@ var supportNoticeElemRE = regexp.MustCompile(`(?s)<div[^>]*\bid="support-notice"
 
 var htmlTagRE = regexp.MustCompile(`<[^>]+>`)
 
-// assertNoticeAtTop requires the notice block verbatim, as its own paragraph,
-// ahead of the doc's first section heading. The blank lines either side are
-// part of the contract: a Markdown line that directly follows a blockquote is
-// folded into it, so without them the doc's intro paragraph would render
-// inside the warning.
-func assertNoticeAtTop(t *testing.T, name, doc string) {
-	t.Helper()
-	block := strings.Join(supportNoticeMarkdown, "\n")
-	i := strings.Index(doc, "\n\n"+block+"\n\n")
-	if i < 0 {
-		t.Errorf("%s does not carry the support notice verbatim, with a blank line either side; "+
-			"paste supportNoticeMarkdown (cmd/solmq-conn-util/support.go) directly under the H1:\n\n%s", name, block)
-		return
-	}
-	if h := strings.Index(doc, "\n## "); h >= 0 && h < i {
-		t.Errorf("%s carries the support notice below its first section heading; move it directly under the H1", name)
-	}
-}
-
-// supportNoticePlain reduces the Markdown block to its words: no quote
-// markers, no alert tag, no bold or code-span markup.
-func supportNoticePlain() string {
-	var words []string
-	for _, ln := range supportNoticeMarkdown {
-		ln = strings.TrimSpace(strings.TrimPrefix(ln, ">"))
-		if ln == "[!WARNING]" {
-			continue
-		}
-		ln = strings.NewReplacer("**", "", bt, "").Replace(ln)
-		words = append(words, strings.Fields(ln)...)
-	}
-	return strings.Join(words, " ")
-}
-
 // TestSupportNoticeInHandWrittenDocs pins the support statement at the top of
 // the README and every hand-written doc under docs/ -- each one a page a
 // reader can land on directly without passing through any other -- and holds
 // both forms of the statement to plain ASCII, since they reach terminals, logs
 // and the in-binary output.
 func TestSupportNoticeInHandWrittenDocs(t *testing.T) {
-	for _, form := range [][]string{supportNoticeMarkdown, supportNoticeVersion} {
-		for _, ln := range form {
-			for i := 0; i < len(ln); i++ {
-				if ln[i] > 0x7e || (ln[i] < 0x20 && ln[i] != '\t') {
-					t.Errorf("support notice line has a non-ASCII or control byte 0x%02x at %d: %q", ln[i], i, ln)
-				}
-			}
-		}
-	}
-	for _, rel := range supportNoticeDocs {
-		path := filepath.FromSlash(rel)
-		t.Run(filepath.Base(path), func(t *testing.T) {
-			b, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("read %s: %v", path, err)
-			}
-			assertNoticeAtTop(t, rel, normLF(string(b)))
-		})
-	}
+	noticetest.AssertASCII(t, "the support notice", supportNotice.Lines())
+	noticetest.AssertASCII(t, "the short support notice", notice.Short())
+	noticetest.AssertDocs(t, supportNotice, "../..", noticetest.Options{Files: supportNoticeDocs})
 }
 
 // TestSupportNoticeInGeneratedDocs pins the notice at the top of both
@@ -101,7 +56,7 @@ func TestSupportNoticeInGeneratedDocs(t *testing.T) {
 		"docs/commands.md":     renderCommandsDoc,
 		"docs/abbreviation.md": renderAbbreviationDoc,
 	} {
-		assertNoticeAtTop(t, name, render())
+		noticetest.Assert(t, name, []byte(render()), supportNotice, noticetest.Options{})
 	}
 }
 
@@ -124,13 +79,27 @@ func TestSupportNoticeInGeneratorPage(t *testing.T) {
 		t.Fatalf("%s has no element with id=\"support-notice\"", supportNoticePagePath)
 	}
 	got := strings.Join(strings.Fields(htmlTagRE.ReplaceAllString(page[m[2]:m[3]], "")), " ")
-	if want := supportNoticePlain(); got != want {
-		t.Errorf("the generator page's support notice has drifted from supportNoticeMarkdown (cmd/solmq-conn-util/support.go)\n got: %s\nwant: %s", got, want)
+	if want := supportNotice.Plain(); got != want {
+		t.Errorf("the generator page's support notice has drifted from supportNotice (cmd/solmq-conn-util/support.go)\n got: %s\nwant: %s", got, want)
 	}
 	if body := strings.Index(page, `<div class="page">`); body < 0 || body < m[0] {
 		t.Errorf("the support notice must sit above the page body, directly under the header")
 	}
 	if strings.Contains(page, "100vh - 60px") {
 		t.Errorf("the page is still sized to a guessed header height (calc(100vh - 60px)); the notice strip needs body to lay out as a flex column instead")
+	}
+}
+
+// TestParityDocMatchesTheSharedBody holds docs/parity.md to the body the shared
+// module owns (paritydoc/body.md): both tools carry it unchanged below their own
+// support notice, so the page cannot drift from the other tool's copy.
+func TestParityDocMatchesTheSharedBody(t *testing.T) {
+	path := filepath.FromSlash("../../docs/parity.md")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if err := paritydoc.Check(b); err != nil {
+		t.Fatal(err)
 	}
 }

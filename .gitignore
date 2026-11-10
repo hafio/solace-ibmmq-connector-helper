@@ -21,3 +21,7 @@ graphify-out/cache
 graphify-out/.graphify_python
 cross-platform.md
 tmp
+
+# Local workspace files: never committed (docs/consuming.md in go-deploy-utility)
+go.work
+go.work.sum

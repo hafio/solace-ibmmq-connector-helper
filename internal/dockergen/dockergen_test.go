@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafio/go-deploy-utility/containerart/compose"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/logback"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
@@ -58,14 +59,15 @@ func TestRenderFull_WithEverything(t *testing.T) {
 		Libs: &Mount{Source: "/abs/libs", Target: "/app/external/libs"},
 	}
 
-	want := `name: solace-ibmmq-connectors
+	want := `name: "solace-ibmmq-connectors"
 services:
-  solmq-connector:
+  "solmq-connector":
     image: solace/solace-pubsub-connector-ibmmq:2.13.0
-    container_name: solmq-connector
+    container_name: "solmq-connector"
     labels:
       solace-connector/le-mode: active_active
       solace-connector/role: active
+      solace-connector/deploy-sha256: ${_GEN_DEPLOY_SHA256:-}
     restart: unless-stopped
     user: "1000:0"
     privileged: false
@@ -77,19 +79,19 @@ services:
       - "8090:8090"
       - "8080:8091"
     environment:
-      TZ: Asia/Singapore
+      TZ: "Asia/Singapore"
       JAVA_TOOL_OPTIONS: "-Dcom.ibm.mq.cfg.useIBMCipherMappings=false"
     secrets:
-      - source: SOLACE_CLIENT_USERNAME
+      - source: "SOLACE_CLIENT_USERNAME"
         target: /app/external/var/secrets/SOLACE_CLIENT_USERNAME
-      - source: SOLACE_CLIENT_PASSWORD
+      - source: "SOLACE_CLIENT_PASSWORD"
         target: /app/external/var/secrets/SOLACE_CLIENT_PASSWORD
-      - source: TRUSTSTORE_PASSWORD
+      - source: "TRUSTSTORE_PASSWORD"
         target: /app/external/var/secrets/TRUSTSTORE_PASSWORD
     configs:
-      - source: solmq-connector-app
+      - source: "solmq-connector-app"
         target: /app/external/spring/config/application.yml
-      - source: solmq-connector-status
+      - source: "solmq-connector-status"
         target: /app/external/.status-script
     healthcheck:
       test: ["CMD", "sh", "/app/external/.status-script", "--health"]
@@ -98,10 +100,10 @@ services:
       retries: 3
       start_period: 60s
     volumes:
-      - /abs/certs/truststore.jks:/app/external/classpath/truststores/truststore:ro
-      - /abs/libs:/app/external/libs:ro
+      - "/abs/certs/truststore.jks:/app/external/classpath/truststores/truststore:ro"
+      - "/abs/libs:/app/external/libs:ro"
 configs:
-  solmq-connector-app:
+  "solmq-connector-app":
     content: |
       spring:
         application:
@@ -109,18 +111,18 @@ configs:
 
       logging:
         level: INFO
-  solmq-connector-status:
+  "solmq-connector-status":
     content: |
       #!/bin/sh
       STATUS_URL="http://localhost:8080/actuator/health"
 
       curl -fsS "$$STATUS_URL"
 secrets:
-  SOLACE_CLIENT_USERNAME:
+  "SOLACE_CLIENT_USERNAME":
     environment: SOLACE_CLIENT_USERNAME
-  SOLACE_CLIENT_PASSWORD:
+  "SOLACE_CLIENT_PASSWORD":
     environment: SOLACE_CLIENT_PASSWORD
-  TRUSTSTORE_PASSWORD:
+  "TRUSTSTORE_PASSWORD":
     environment: TRUSTSTORE_PASSWORD
 `
 
@@ -157,21 +159,22 @@ func TestRenderFull_Minimal(t *testing.T) {
 	}
 
 	want := `services:
-  solmq:
+  "solmq":
     image: img:1
-    container_name: solmq
+    container_name: "solmq"
     labels:
       solace-connector/le-mode: standalone
       solace-connector/role: active
+      solace-connector/deploy-sha256: ${_GEN_DEPLOY_SHA256:-}
     privileged: false
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges=true
     configs:
-      - source: solmq-app
+      - source: "solmq-app"
         target: /app/external/spring/config/application.yml
-      - source: solmq-status
+      - source: "solmq-status"
         target: /app/external/.status-script
     healthcheck:
       test: ["CMD", "sh", "/app/external/.status-script", "--health"]
@@ -180,10 +183,10 @@ func TestRenderFull_Minimal(t *testing.T) {
       retries: 3
       start_period: 60s
 configs:
-  solmq-app:
+  "solmq-app":
     content: |
       key: value
-  solmq-status:
+  "solmq-status":
     content: |
       echo ok
 `
@@ -206,10 +209,10 @@ func TestSecretsBranches(t *testing.T) {
 	// Long syntax with an absolute target: the short `- MQ_USER` form would put
 	// the file in compose's own /run/secrets, which is the directory
 	// spec.SecretsMountPath exists to stay off.
-	if !strings.Contains(withSecret, "    secrets:\n      - source: MQ_USER\n        target: "+spec.SecretsMountPath+"/MQ_USER\n") {
+	if !strings.Contains(withSecret, "    secrets:\n      - source: \"MQ_USER\"\n        target: "+spec.SecretsMountPath+"/MQ_USER\n") {
 		t.Errorf("per-service secrets list missing or not absolute-targeted:\n%s", withSecret)
 	}
-	if !strings.Contains(withSecret, "secrets:\n  MQ_USER:\n    environment: MQ_USER\n") {
+	if !strings.Contains(withSecret, "secrets:\n  \"MQ_USER\":\n    environment: MQ_USER\n") {
 		t.Errorf("top-level environment-provider secrets block missing:\n%s", withSecret)
 	}
 
@@ -232,7 +235,7 @@ func TestEnvironmentBranches(t *testing.T) {
 		Docker:   &spec.Docker{Name: "s"},
 		Instance: Instance{Name: "s", Image: "img", Timezone: "UTC", AppYAML: "k: v\n", MQTLS: false, StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
-	if !strings.Contains(tzOnly, "    environment:\n      TZ: UTC\n") {
+	if !strings.Contains(tzOnly, "    environment:\n      TZ: \"UTC\"\n") {
 		t.Errorf("TZ-only environment block missing:\n%s", tzOnly)
 	}
 	if strings.Contains(tzOnly, "JAVA_TOOL_OPTIONS") {
@@ -284,7 +287,7 @@ func TestStoresOnlyAndLibsOnly(t *testing.T) {
 		Instance: Instance{Name: "s", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 		Stores:   []Mount{{Source: "/h/a.jks", Target: "/c/a.jks"}},
 	})
-	if !strings.Contains(storesOnly, "    volumes:\n      - /h/a.jks:/c/a.jks:ro\n") {
+	if !strings.Contains(storesOnly, "    volumes:\n      - \"/h/a.jks:/c/a.jks:ro\"\n") {
 		t.Errorf("stores-only volumes missing:\n%s", storesOnly)
 	}
 
@@ -293,7 +296,7 @@ func TestStoresOnlyAndLibsOnly(t *testing.T) {
 		Instance: Instance{Name: "s", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 		Libs:     &Mount{Source: "/h/libs", Target: "/c/libs"},
 	})
-	if !strings.Contains(libsOnly, "    volumes:\n      - /h/libs:/c/libs:ro\n") {
+	if !strings.Contains(libsOnly, "    volumes:\n      - \"/h/libs:/c/libs:ro\"\n") {
 		t.Errorf("libs-only volumes missing:\n%s", libsOnly)
 	}
 }
@@ -381,23 +384,6 @@ func TestJavaOptionsEnvironment(t *testing.T) {
 	}
 }
 
-// TestComposeQuoteEscapes pins the render-side half of the java-options gate:
-// validate refuses these characters, but a value that reached the renderer
-// anyway must still come out as the string the operator wrote -- '$' doubled
-// against compose interpolation, quotes and backslashes escaped for YAML.
-func TestComposeQuoteEscapes(t *testing.T) {
-	for in, want := range map[string]string{
-		"-Xmx1g":        `"-Xmx1g"`,
-		"-Dx=${Y}":      `"-Dx=$${Y}"`,
-		`-Dx="a"`:       `"-Dx=\"a\""`,
-		`-Dpath=C:\tmp`: `"-Dpath=C:\\tmp"`,
-	} {
-		if got := composeQuote(in); got != want {
-			t.Errorf("composeQuote(%q) = %s, want %s", in, got, want)
-		}
-	}
-}
-
 // TestStatusScriptConfigSourceAndTarget covers the second configs entry: the
 // service references <name>-status and mounts it at
 // /app/external/.status-script.
@@ -406,10 +392,10 @@ func TestStatusScriptConfigSourceAndTarget(t *testing.T) {
 		Docker:   &spec.Docker{Name: "s"},
 		Instance: Instance{Name: "solmq", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
-	if !strings.Contains(out, "      - source: solmq-status\n        target: /app/external/.status-script\n") {
+	if !strings.Contains(out, "      - source: \"solmq-status\"\n        target: /app/external/.status-script\n") {
 		t.Errorf("status config source/target pair missing:\n%s", out)
 	}
-	if !strings.Contains(out, "  solmq-status:\n    content: |\n") {
+	if !strings.Contains(out, "  \"solmq-status\":\n    content: |\n") {
 		t.Errorf("top-level solmq-status config entry missing:\n%s", out)
 	}
 }
@@ -427,7 +413,7 @@ func TestHealthcheckRunsTheStatusScript(t *testing.T) {
 		Instance: Instance{Name: "solmq", Image: "img", AppYAML: "k: v\n", StatusScript: "echo ok\n", LeaderMode: spec.LeaderStandalone},
 	})
 
-	wantTest := `      test: ["CMD", "` + statusscript.HealthShell + `", "` + statusscript.ContainerPath + `", "` + statusscript.HealthArg + `"]` + "\n"
+	wantTest := "      test: " + compose.FlowList([]string{"CMD", statusscript.HealthShell, statusscript.ContainerPath, statusscript.HealthArg}) + "\n"
 	if !strings.Contains(out, wantTest) {
 		t.Errorf("healthcheck test line missing:\nwant %q\ngot:\n%s", wantTest, out)
 	}
@@ -464,7 +450,7 @@ func TestStatusScriptContentIsEscaped(t *testing.T) {
 		Docker:   &spec.Docker{Name: "s"},
 		Instance: Instance{Name: "s", Image: "img", AppYAML: "k: v\n", StatusScript: statusScript1, LeaderMode: spec.LeaderStandalone},
 	})
-	want := "  s-status:\n    content: |\n      #!/bin/sh\n      STATUS_URL=\"http://localhost:8080/actuator/health\"\n\n      curl -fsS \"$$STATUS_URL\"\n"
+	want := "  \"s-status\":\n    content: |\n      #!/bin/sh\n      STATUS_URL=\"http://localhost:8080/actuator/health\"\n\n      curl -fsS \"$$STATUS_URL\"\n"
 	if !strings.Contains(out, want) {
 		t.Errorf("status script content not inlined as expected:\n%s", out)
 	}
@@ -498,7 +484,11 @@ func TestContentEscapesDollarsForCompose(t *testing.T) {
 	// No lone '$' may survive anywhere in the document: compose reads one as the
 	// start of an interpolation, so a single survivor is the whole bug back
 	// again. Dropping every "$$" pair leaves exactly the unescaped ones behind.
-	if bare := strings.ReplaceAll(out, "$$", ""); strings.Contains(bare, "$") {
+	// The deploy-digest label is the one deliberate interpolation, once per
+	// service, so it is dropped once.
+	bare := strings.ReplaceAll(out, "$$", "")
+	bare = strings.Replace(bare, "${"+DeployDigestVar+":-}", "", 1)
+	if strings.Contains(bare, "$") {
 		t.Errorf("unescaped '$' survives in:\n%s", out)
 	}
 }
@@ -529,7 +519,7 @@ func TestAppYAMLSecretPlaceholdersAreNotInterpolated(t *testing.T) {
 	}
 	// The secrets blocks reference the same names and must stay unescaped:
 	// those are compose's own, not Spring's.
-	if !strings.Contains(out, "  LOCAL_SOLACE_CLIENT_USERNAME:\n    environment: LOCAL_SOLACE_CLIENT_USERNAME\n") {
+	if !strings.Contains(out, "  \"LOCAL_SOLACE_CLIENT_USERNAME\":\n    environment: LOCAL_SOLACE_CLIENT_USERNAME\n") {
 		t.Errorf("secrets provider entry should not be escaped:\n%s", out)
 	}
 }
@@ -547,12 +537,12 @@ func TestRenderSyslogAddsConfigAndEnv(t *testing.T) {
 	out := Render(in)
 
 	for _, want := range []string{
-		"solmq-connector-logback:",
-		"- source: solmq-connector-logback",
+		`"solmq-connector-logback":`,
+		`- source: "solmq-connector-logback"`,
 		"target: " + logback.ContainerPath,
 		"ch.qos.logback.classic.net.SyslogAppender",
-		"LOGGING_SYSLOG_APPNAME: solmq-connector",
-		"LOGGING_SYSLOG_HOST: syslog.corp",
+		`LOGGING_SYSLOG_APPNAME: "solmq-connector"`,
+		`LOGGING_SYSLOG_HOST: "syslog.corp"`,
 		`LOGGING_SYSLOG_PORT: "514"`,
 	} {
 		if !strings.Contains(out, want) {
@@ -624,17 +614,17 @@ func TestRenderCreatedStores(t *testing.T) {
 		Digest:   true,
 	})
 	for _, want := range []string{
-		"    container_name: solmq\n    entrypoint: [\"/bin/sh\", \"/app/external/.stores-init\"]\n" +
+		"    container_name: \"solmq\"\n    entrypoint: [\"/bin/sh\", \"/app/external/.stores-init\"]\n" +
 			"    command: [\"java\", \"-cp\", \"@/app/jib-classpath-file\", \"com.solace.connector.jms.JmsConnector\", \"--spring.config.additional-location=optional:file:/app/external/spring/config/,optional:file:/app/external/spring/config/*/\"]\n",
-		"      solace-connector/stores-sha256: ${_GEN_TLS_STORES_SHA256:-}\n",
-		"    secrets:\n      - source: SOL_PASSWORD\n        target: /app/external/var/secrets/SOL_PASSWORD\n" +
-			"      - source: _GEN_TLS_SOLACE_CA_STORE\n        target: /app/external/var/stores/solace-ca\n",
-		"      - source: solmq-stores-init\n        target: /app/external/.stores-init\n",
+		"      solace-connector/stores-sha256: ${_GEN_TLS_STORES_SHA256:-}\n      solace-connector/deploy-sha256: ${_GEN_DEPLOY_SHA256:-}\n",
+		"    secrets:\n      - source: \"SOL_PASSWORD\"\n        target: /app/external/var/secrets/SOL_PASSWORD\n" +
+			"      - source: \"_GEN_TLS_SOLACE_CA_STORE\"\n        target: /app/external/var/stores/solace-ca\n",
+		"      - source: \"solmq-stores-init\"\n        target: /app/external/.stores-init\n",
 		"    tmpfs:\n      - /app/external/classpath/truststores:mode=0700,uid=1000,gid=0\n",
-		"    volumes:\n      - /h/mq-ca.p12:/app/external/classpath/truststores/mq-ca:ro\n",
-		"  solmq-stores-init:\n    content: |\n      #!/bin/sh\n",
+		"    volumes:\n      - \"/h/mq-ca.p12:/app/external/classpath/truststores/mq-ca:ro\"\n",
+		"  \"solmq-stores-init\":\n    content: |\n      #!/bin/sh\n",
 		"      base64 -d \"$$f\" > \"/app/external/classpath/truststores/$$name.tmp\"\n",
-		"secrets:\n  SOL_PASSWORD:\n    environment: SOL_PASSWORD\n  _GEN_TLS_SOLACE_CA_STORE:\n    environment: _GEN_TLS_SOLACE_CA_STORE\n",
+		"secrets:\n  \"SOL_PASSWORD\":\n    environment: SOL_PASSWORD\n  \"_GEN_TLS_SOLACE_CA_STORE\":\n    environment: _GEN_TLS_SOLACE_CA_STORE\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("compose lacks %q:\n%s", want, out)
@@ -660,6 +650,11 @@ func TestRenderCreatedStoresRunAsImageAndNone(t *testing.T) {
 		if strings.Contains(out, absent) {
 			t.Errorf("no store selected, but the compose holds %q:\n%s", absent, out)
 		}
+	}
+	// The deploy digest label does not depend on a store: it is what makes
+	// compose notice a rotated credential.
+	if !strings.Contains(out, "      solace-connector/deploy-sha256: ${_GEN_DEPLOY_SHA256:-}\n") {
+		t.Errorf("every service carries the deploy digest label:\n%s", out)
 	}
 	// Existing stores alone: the digest label, with a default so a hand-run
 	// compose up is silent, and nothing of the created-store machinery.

@@ -260,6 +260,11 @@ type Podman struct {
 	// keep the image's own user. Defaulted to DefaultRunAs; deployed rootless,
 	// the ids map into the invoking user's subuid/subgid range.
 	RunAs string `yaml:"run-as"`
+	// Rootful deploys the rootful engine, which needs root. Rootless is the
+	// default: deploy as the unprivileged user that owns the containers, with no
+	// sudo. Setting it as a non-root user is refused, and so is running as root
+	// without it. Unset means false.
+	Rootful bool `yaml:"rootful"`
 }
 
 // applyDockerDefaults fills command/name/project-name/restart/run-as.

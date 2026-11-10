@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/containercli/inspect"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 )
 
@@ -534,69 +535,27 @@ func withUsed(r *Resource, used string) *Resource {
 
 // ---- docker / podman ---------------------------------------------------------
 
-// engineContainer is the subset of a `docker|podman inspect` object this report
-// reads. Both engines share these paths; where they differ (the healthcheck
-// key) both spellings are decoded and whichever answered is used.
-type engineContainer struct {
-	Name    string `json:"Name"`
-	Created string `json:"Created"`
-	State   struct {
-		Status      string                   `json:"Status"`
-		Running     bool                     `json:"Running"`
-		Restarting  bool                     `json:"Restarting"`
-		Paused      bool                     `json:"Paused"`
-		ExitCode    int                      `json:"ExitCode"`
-		StartedAt   string                   `json:"StartedAt"`
-		OOMKilled   bool                     `json:"OOMKilled"`
-		Error       string                   `json:"Error"`
-		Health      *struct{ Status string } `json:"Health"`
-		Healthcheck *struct{ Status string } `json:"Healthcheck"`
-	} `json:"State"`
-	RestartCount int    `json:"RestartCount"`
-	Image        string `json:"Image"`
-	Config       struct {
-		Image  string            `json:"Image"`
-		Labels map[string]string `json:"Labels"`
-	} `json:"Config"`
-	HostConfig struct {
-		NanoCpus int64 `json:"NanoCpus"`
-		Memory   int64 `json:"Memory"`
-	} `json:"HostConfig"`
-	Mounts []struct {
-		Type        string `json:"Type"`
-		Name        string `json:"Name"`
-		Source      string `json:"Source"`
-		Destination string `json:"Destination"`
-	} `json:"Mounts"`
-	NetworkSettings struct {
-		Networks map[string]struct{} `json:"Networks"`
-	} `json:"NetworkSettings"`
-	// Podman lists the secrets a container was created with; docker does not
-	// (its compose secrets arrive as mounts), so an absent key is normal.
-	Secrets []struct {
-		Name string `json:"Name"`
-	} `json:"Secrets"`
-}
-
 // ComposeProjectLabel is the label docker compose stamps on every container it
 // creates, naming the project the container was brought up as part of.
 const ComposeProjectLabel = "com.docker.compose.project"
 
-// ParseInspect turns a `docker|podman inspect <names...>` array into instances,
-// in the order the engine returned them. imageMatch, when non-empty, keeps only
-// containers whose configured image contains it (the --all filter).
+// ParseInspect turns a `docker|podman container inspect <names...>` array into
+// instances, in the order the engine returned them. imageMatch, when non-empty,
+// keeps only containers whose configured image contains it (the --all filter).
+//
+// The array is decoded by inspect.Decode, which settles where the two engines
+// differ (docker's leading slash on the name, the healthcheck key), and every
+// string the engine supplied is passed through inspect.Printable on the way into
+// the report, so a terminal escape inside a name, a mount path or an error text
+// never reaches the screen.
 func ParseInspect(doc string, now time.Time, imageMatch string) ([]Instance, error) {
-	doc = strings.TrimSpace(doc)
-	if doc == "" {
-		return nil, fmt.Errorf("empty response")
-	}
-	var cs []engineContainer
-	if err := json.Unmarshal([]byte(doc), &cs); err != nil {
-		return nil, fmt.Errorf("decoding inspect response: %w", err)
+	cs, err := inspect.Decode(doc)
+	if err != nil {
+		return nil, err
 	}
 	out := make([]Instance, 0, len(cs))
 	for _, ec := range cs {
-		if imageMatch != "" && !strings.Contains(ec.Config.Image, imageMatch) {
+		if imageMatch != "" && !strings.Contains(ec.Image, imageMatch) {
 			continue
 		}
 		out = append(out, instanceFromInspect(ec, now))
@@ -604,14 +563,14 @@ func ParseInspect(doc string, now time.Time, imageMatch string) ([]Instance, err
 	return out, nil
 }
 
-func instanceFromInspect(ec engineContainer, now time.Time) Instance {
-	// docker reports a container name with a leading slash; podman does not.
-	inst := Instance{Name: strings.TrimPrefix(ec.Name, "/")}
-	inst.Group = ec.Config.Labels[ComposeProjectLabel]
+func instanceFromInspect(ec inspect.Container, now time.Time) Instance {
+	// inspect.Decode has already dropped docker's leading slash from the name.
+	inst := Instance{Name: inspect.Printable(ec.Name)}
+	inst.Group = inspect.Printable(ec.Labels[ComposeProjectLabel])
 
 	c := &Container{
 		Restarts:  ec.RestartCount,
-		Image:     ec.Config.Image,
+		Image:     inspect.Printable(ec.Image),
 		StartedAt: ec.State.StartedAt,
 		Ready:     NotApplicable,
 		Health:    NotApplicable,
@@ -638,22 +597,22 @@ func instanceFromInspect(ec engineContainer, now time.Time) Instance {
 	case ec.State.OOMKilled:
 		c.Reason = "OOMKilled"
 	case ec.State.Error != "":
-		c.Reason = ec.State.Error
+		c.Reason = inspect.Printable(ec.State.Error)
 	}
-	if h := healthStatus(ec); h != "" {
+	if h := inspect.Printable(ec.State.Health.Status); h != "" {
 		c.Health = h
 	}
 	if c.StartedAt == "" {
 		c.StartedAt = ec.Created
 	}
 	c.Age = Age(c.StartedAt, now)
-	if lim := Cores(ec.HostConfig.NanoCpus); lim != "" {
+	if lim := Cores(ec.NanoCPUs); lim != "" {
 		// The stats percentage is relative to the whole host, so the container's
 		// own quota is the ceiling worth naming beside it -- spelled with its
 		// unit here, once, rather than assembled at render time.
 		c.CPU = &Resource{Limit: lim + " cpu"}
 	}
-	if lim := Bytes(ec.HostConfig.Memory); lim != "" {
+	if lim := Bytes(ec.Memory); lim != "" {
 		c.Memory = &Resource{Limit: lim}
 	}
 	c.Components = engineComponents(ec)
@@ -661,47 +620,32 @@ func instanceFromInspect(ec engineContainer, now time.Time) Instance {
 	return inst
 }
 
-// healthStatus returns the engine's healthcheck verdict, from whichever key
-// this engine version uses. An empty verdict means the container defines no
-// healthcheck at all, which is the common case here: the compose and quadlet
-// artifacts this tool generates declare none, so the line usually reads n/a
-// unless the image itself carries a HEALTHCHECK.
-func healthStatus(ec engineContainer) string {
-	if ec.State.Health != nil && ec.State.Health.Status != "" {
-		return ec.State.Health.Status
-	}
-	if ec.State.Healthcheck != nil && ec.State.Healthcheck.Status != "" {
-		return ec.State.Healthcheck.Status
-	}
-	return ""
-}
-
 // engineComponents lists what the container references: its mounts (the
 // configs and libs this tool bind-mounts, or a named volume), its networks,
 // and on podman the secrets it was created with. Everything here is already
 // present by definition -- the container exists with it attached -- so status
 // is "attached" rather than a presence probe the engine cannot answer.
-func engineComponents(ec engineContainer) []Component {
+func engineComponents(ec inspect.Container) []Component {
 	var out []Component
 	for _, m := range ec.Mounts {
-		name := m.Name
+		name := inspect.Printable(m.Name)
 		if name == "" {
-			name = m.Source
+			name = inspect.Printable(m.Source)
 		}
-		kind := m.Type
+		kind := inspect.Printable(m.Type)
 		if kind == "" {
 			kind = "mount"
 		}
-		out = append(out, Component{Kind: kind, Name: name, Status: "attached", Detail: m.Destination})
+		out = append(out, Component{Kind: kind, Name: name, Status: "attached", Detail: inspect.Printable(m.Destination)})
 	}
-	for n := range ec.NetworkSettings.Networks {
-		out = append(out, Component{Kind: "network", Name: n, Status: "attached"})
+	for _, n := range ec.Networks {
+		out = append(out, Component{Kind: "network", Name: inspect.Printable(n), Status: "attached"})
 	}
-	for _, s := range ec.Secrets {
-		out = append(out, Component{Kind: "secret", Name: s.Name, Status: "attached"})
+	for _, n := range ec.Secrets {
+		out = append(out, Component{Kind: "secret", Name: inspect.Printable(n), Status: "attached"})
 	}
-	// Networks come out of a map, so the order is not the engine's: sort the
-	// whole list so a repeated run prints the same block.
+	// Sort the whole list by kind then name, so a repeated run prints the same
+	// block.
 	sortComponents(out)
 	return out
 }
@@ -784,25 +728,6 @@ func ApplyStats(insts []Instance, out string) {
 			c.Memory.Percent = s.memPct
 		}
 	}
-}
-
-// EngineNamesByImage filters `docker|podman ps --all --format
-// <name>\t<image>` down to the containers whose image contains match. Used by
-// --all, where the operator names no target and the image reference is the only
-// thing that identifies a connector instance.
-func EngineNamesByImage(out, match string) []string {
-	var names []string
-	for _, line := range strings.Split(out, "\n") {
-		f := strings.Split(strings.TrimRight(line, "\r"), "\t")
-		if len(f) < 2 {
-			continue
-		}
-		name, image := strings.TrimSpace(f[0]), strings.TrimSpace(f[1])
-		if name != "" && strings.Contains(image, match) {
-			names = append(names, name)
-		}
-	}
-	return names
 }
 
 // ---- the in-container script's report ----------------------------------------

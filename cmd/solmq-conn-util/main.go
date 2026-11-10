@@ -6,7 +6,7 @@
 // podman/systemctl.
 //
 //	solmq-conn-util generate [config] [--platform kubernetes|docker|podman] [-e env.yaml] [-o out]
-//	solmq-conn-util deploy   [--platform kubernetes|docker|podman] [-e env.yaml]
+//	solmq-conn-util deploy   [--no-prompt] [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util remove   [--no-prompt] [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util status   <container|application|all> [-d] [-w] [--all] [--output table|json] [--install] [--platform kubernetes|docker|podman] [-e env.yaml]
 //	solmq-conn-util logs     [--follow] [--previous] [--tail N] [--since d] [--timestamps] [--pod name|index] [--container name|index] [--platform kubernetes|docker|podman] [-e env.yaml]
@@ -18,7 +18,7 @@
 package main
 
 import (
-	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -29,6 +29,17 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hafio/go-deploy-utility/abbrev"
+	"github.com/hafio/go-deploy-utility/confirm"
+	"github.com/hafio/go-deploy-utility/containercli"
+	"github.com/hafio/go-deploy-utility/execguard"
+	"github.com/hafio/go-deploy-utility/exitcode"
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
+	"github.com/hafio/go-deploy-utility/kube/rbac"
+	"github.com/hafio/go-deploy-utility/notice"
+	"github.com/hafio/go-deploy-utility/podman"
+	gdurunner "github.com/hafio/go-deploy-utility/runner"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/dockergen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/examples"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/gen"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/libs"
@@ -73,15 +84,23 @@ var platformAliasList = []struct{ Alias, Canonical string }{
 	{"pm", tgtPodman},
 }
 
-// platformAliases is platformAliasList keyed for lookup.
-var platformAliases = buildPlatformAliases()
+// platformAbbrev is platformNames and platformAliasList as the shared module's
+// abbreviation set, which enforces the alias rule when it is built: lower-case
+// letters and digits, shorter than the word, unique, never a canonical name.
+var platformAbbrev = newPlatformAbbrev()
 
-func buildPlatformAliases() map[string]string {
-	m := make(map[string]string, len(platformAliasList))
-	for _, e := range platformAliasList {
-		m[e.Alias] = e.Canonical
+func newPlatformAbbrev() *abbrev.Set {
+	entries := make([]abbrev.Entry, 0, len(platformNames))
+	for _, name := range platformNames {
+		e := abbrev.Entry{Canonical: name}
+		for _, a := range platformAliasList {
+			if a.Canonical == name {
+				e.Short = append(e.Short, a.Alias)
+			}
+		}
+		entries = append(entries, e)
 	}
-	return m
+	return abbrev.New("platform", entries)
 }
 
 // platformSpellings lists every accepted --platform value, canonical names
@@ -98,7 +117,7 @@ func platformSpellings() []string {
 // known alias, otherwise val unchanged -- resolvePlatform's validation is what
 // rejects an unknown value.
 func resolvePlatformAlias(val string) string {
-	if canon, ok := platformAliases[val]; ok {
+	if canon, ok := platformAbbrev.Expand(val); ok {
 		return canon
 	}
 	return val
@@ -116,8 +135,13 @@ func main() {
 // run is the CLI entry point: it dispatches with the production Runner. Tests
 // that need to inspect what would run call dispatch directly with a fake.
 func run(args []string) int {
-	return dispatch(args, runner.OS{})
+	return dispatch(args, gdurunner.Exec{})
 }
+
+// bg is the context every runner helper call outside logs --follow runs under.
+// Ctrl-C keeps its default effect there: the process ends, and Exec's children
+// share the terminal's process group and see the same interrupt.
+func bg() context.Context { return context.Background() }
 
 // verbHandlers maps each modeled verb (cliVerbs in commands.go) to its
 // implementation, threading r down to whichever action ends up shelling out.
@@ -125,44 +149,42 @@ func run(args []string) int {
 // TestDispatchHandlersMatchModel gates: a verb added to one side and not the
 // other fails that test rather than drifting silently (see task 2's
 // examples-default-dir drift for what this class of bug looks like).
-var verbHandlers = map[string]func(args []string, r runner.Runner) int{
-	"generate":      func(args []string, r runner.Runner) int { return runGenerate(args) },
-	"deploy":        func(args []string, r runner.Runner) int { return runAction(runner.ActionDeploy, args, r) },
-	"remove":        func(args []string, r runner.Runner) int { return runAction(runner.ActionRemove, args, r) },
-	"start":         func(args []string, r runner.Runner) int { return runLifecycle(runner.ActionStart, args, r) },
-	"stop":          func(args []string, r runner.Runner) int { return runLifecycle(runner.ActionStop, args, r) },
-	"restart":       func(args []string, r runner.Runner) int { return runLifecycle(runner.ActionRestart, args, r) },
-	"status":        func(args []string, r runner.Runner) int { return runStatus(args, r) },
-	"logs":          func(args []string, r runner.Runner) int { return runLogs(args, r) },
-	"cli":           func(args []string, r runner.Runner) int { return runShell(args, r) },
-	"version":       func(args []string, r runner.Runner) int { return actVersion() },
-	"validate":      func(args []string, r runner.Runner) int { return runValidate(args) },
-	"examples":      func(args []string, r runner.Runner) int { return runExamples(args) },
-	"download":      func(args []string, r runner.Runner) int { return runDownload(args) },
-	"auto-complete": func(args []string, r runner.Runner) int { return runAutoComplete(args) },
-	"help":          func(args []string, r runner.Runner) int { return runHelp(args) },
+var verbHandlers = map[string]func(args []string, r gdurunner.Runner) int{
+	"generate":      func(args []string, r gdurunner.Runner) int { return runGenerate(args) },
+	"deploy":        func(args []string, r gdurunner.Runner) int { return runAction(runner.ActionDeploy, args, r) },
+	"remove":        func(args []string, r gdurunner.Runner) int { return runAction(runner.ActionRemove, args, r) },
+	"start":         func(args []string, r gdurunner.Runner) int { return runLifecycle(runner.ActionStart, args, r) },
+	"stop":          func(args []string, r gdurunner.Runner) int { return runLifecycle(runner.ActionStop, args, r) },
+	"restart":       func(args []string, r gdurunner.Runner) int { return runLifecycle(runner.ActionRestart, args, r) },
+	"status":        func(args []string, r gdurunner.Runner) int { return runStatus(args, r) },
+	"logs":          func(args []string, r gdurunner.Runner) int { return runLogs(args, r) },
+	"cli":           func(args []string, r gdurunner.Runner) int { return runShell(args, r) },
+	"version":       func(args []string, r gdurunner.Runner) int { return actVersion() },
+	"validate":      func(args []string, r gdurunner.Runner) int { return runValidate(args, r) },
+	"examples":      func(args []string, r gdurunner.Runner) int { return runExamples(args) },
+	"download":      func(args []string, r gdurunner.Runner) int { return runDownload(args) },
+	"auto-complete": func(args []string, r gdurunner.Runner) int { return runAutoComplete(args) },
+	"help":          func(args []string, r gdurunner.Runner) int { return runHelp(args) },
 }
 
-// verbAliases maps each alternate spelling (cliVerb.Aliases in commands.go) to
-// its canonical verb name. Built from the model instead of hand-written so it
+// commandAbbrev is cliVerbs (Name and Aliases in commands.go) as the shared
+// module's abbreviation set. Built from the model instead of hand-written so it
 // can never drift from cliVerbs -- see resolveVerb.
-var verbAliases = buildVerbAliases()
+var commandAbbrev = newCommandAbbrev()
 
-func buildVerbAliases() map[string]string {
-	m := make(map[string]string)
+func newCommandAbbrev() *abbrev.Set {
+	entries := make([]abbrev.Entry, 0, len(cliVerbs))
 	for _, v := range cliVerbs {
-		for _, a := range v.Aliases {
-			m[a] = v.Name
-		}
+		entries = append(entries, abbrev.Entry{Canonical: v.Name, Short: v.Aliases})
 	}
-	return m
+	return abbrev.New("command", entries)
 }
 
 // resolveVerb returns name's canonical verb if name is a modeled alias,
 // otherwise name unchanged (already canonical, or unknown -- either way
 // dispatch's verbHandlers lookup is what decides that).
 func resolveVerb(name string) string {
-	if canon, ok := verbAliases[name]; ok {
+	if canon, ok := commandAbbrev.Expand(name); ok {
 		return canon
 	}
 	return name
@@ -174,21 +196,21 @@ func resolveVerb(name string) string {
 // its canonical verb the same way, right after that -h/--help normalization;
 // the unknown-command message below still echoes args[0] as typed, never the
 // resolved name.
-func dispatch(args []string, r runner.Runner) int {
+func dispatch(args []string, r gdurunner.Runner) int {
 	if len(args) == 0 {
 		usage(os.Stderr)
-		return 2
+		return exitcode.Usage
 	}
 	if args[0] == "-h" || args[0] == "--help" {
 		usage(os.Stdout)
-		return 0
+		return exitcode.OK
 	}
 	verb := resolveVerb(args[0])
 	h, ok := verbHandlers[verb]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", args[0])
 		usage(os.Stderr)
-		return 2
+		return exitcode.Usage
 	}
 	// `<command> -h` straight after the verb prints that command's own page --
 	// for every verb, including the ones that parse no flags of their own
@@ -196,7 +218,7 @@ func dispatch(args []string, r runner.Runner) int {
 	// through the flag parser; see flagExit.
 	if len(args) > 1 && (args[1] == "-h" || args[1] == "--help") {
 		fmt.Fprint(os.Stdout, verbUsage(verb))
-		return 0
+		return exitcode.OK
 	}
 	return h(args[1:], r)
 }
@@ -213,16 +235,16 @@ func dispatch(args []string, r runner.Runner) int {
 func runHelp(args []string) int {
 	if len(args) == 0 {
 		usage(os.Stdout)
-		return 0
+		return exitcode.OK
 	}
 	page := verbUsage(resolveVerb(args[0]))
 	if page == "" {
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", args[0])
 		usage(os.Stderr)
-		return 2
+		return exitcode.Usage
 	}
 	fmt.Fprint(os.Stdout, page)
-	return 0
+	return exitcode.OK
 }
 
 // verbFlagSet is the flag set every verb parses with. Its Usage is silenced
@@ -244,10 +266,10 @@ func verbFlagSet(name string) *flag.FlagSet {
 func flagExit(verb string, err error) int {
 	if errors.Is(err, flag.ErrHelp) {
 		fmt.Fprint(os.Stdout, verbUsage(verb))
-		return 0
+		return exitcode.OK
 	}
 	fmt.Fprintf(os.Stderr, "run 'solmq-conn-util help %s' for its arguments and flags\n", verb)
-	return 2
+	return exitcode.Usage
 }
 
 // targetNames returns the modeled target/platform names for verb, in the order
@@ -352,19 +374,19 @@ func runGenerate(args []string) int {
 		case contains(platformNames, pos[0]):
 			fmt.Fprintf(os.Stderr, "generate: %q is no longer a positional target; pass --platform %s instead\n", pos[0], pos[0])
 			fmt.Fprint(os.Stderr, verbUsage("generate"))
-			return 2
+			return exitcode.Usage
 		default:
 			fmt.Fprintf(os.Stderr, "generate: unknown target %q (want %s)\n", pos[0], wantList(append(targetNames("generate"), platformNames...)))
-			return 2
+			return exitcode.Usage
 		}
 	}
 	e, lerr := loadEnvFile(*env)
 	if lerr != nil {
-		return errExit(lerr)
+		return usageExit(lerr)
 	}
 	platformName, perr := resolvePlatform(*platform, presentPlatforms(e), true)
 	if perr != nil {
-		return errExit(perr)
+		return usageExit(perr)
 	}
 	return platformGenerators[platformName](*env, *out)
 }
@@ -372,7 +394,7 @@ func runGenerate(args []string) int {
 func genConfig(envPath, out string) int {
 	req, _, envDir, err := loadEnv(envPath)
 	if err != nil {
-		return errExit(err)
+		return usageExit(err)
 	}
 	doc, errs, warns := gen.Config(req, resolver(envDir))
 	printWarnings(warns)
@@ -385,7 +407,7 @@ func genConfig(envPath, out string) int {
 func genKubernetes(envPath, out string) int {
 	req, _, envDir, err := loadEnv(envPath)
 	if err != nil {
-		return errExit(err)
+		return usageExit(err)
 	}
 	manifest, errs, warns := gen.GenerateKubernetes(req, resolver(envDir), gen.KubeOpts{})
 	printWarnings(warns)
@@ -398,7 +420,7 @@ func genKubernetes(envPath, out string) int {
 func genDocker(envPath, out string) int {
 	req, _, envDir, err := loadEnv(envPath)
 	if err != nil {
-		return errExit(err)
+		return usageExit(err)
 	}
 	plan, errs, warns := gen.GenerateDocker(req, resolver(envDir))
 	printWarnings(warns)
@@ -411,7 +433,7 @@ func genDocker(envPath, out string) int {
 func genPodman(envPath, out string) int {
 	req, _, envDir, err := loadEnv(envPath)
 	if err != nil {
-		return errExit(err)
+		return usageExit(err)
 	}
 	plan, errs, warns := gen.GeneratePodman(req, resolver(envDir))
 	printWarnings(warns)
@@ -427,18 +449,21 @@ func genPodman(envPath, out string) int {
 // Gated against platformNames by TestPlatformMapsCoverThreeNames (deploy/
 // remove no longer model a positional Targets list in commands.go -- the
 // platform is resolved by resolvePlatform, not looked up from args[0]).
-// extraAllowed carries the values of a repeatable --allow-command flag (nil
-// when unused).
 // actionOpts is one deploy/remove invocation, as an options struct rather than
 // a growing positional list: removeNamespace applies to exactly one platform,
 // and threading it as a fourth argument through all three would put a
 // kubernetes-only concern in the docker and podman signatures.
+//
+// approvals carries the operator's repeatable --allow-command values, already
+// checked by execguard.Approve (the zero value when the flag was not given).
 type actionOpts struct {
-	action  string
-	envPath string
-	allow   []string
-	// noPrompt skips both questions a teardown asks: the confirmation and, when
-	// the namespace turns out to be empty, whether to remove it too.
+	action    string
+	envPath   string
+	approvals execguard.Approvals
+	// noPrompt skips the questions: both a teardown asks (the confirmation and,
+	// when the namespace turns out to be empty, whether to remove it too) and the
+	// one a docker or podman deploy asks before it restarts or recreates a
+	// running service.
 	//
 	// It cannot authorise more than that. A namespace holding anything this
 	// release does not own is never removed, with or without this set -- the
@@ -446,7 +471,7 @@ type actionOpts struct {
 	noPrompt bool
 }
 
-var actTargets = map[string]func(o actionOpts, r runner.Runner) int{
+var actTargets = map[string]func(o actionOpts, r gdurunner.Runner) int{
 	tgtKubernetes: actKubernetes,
 	tgtDocker:     actDocker,
 	tgtPodman:     actPodman,
@@ -458,42 +483,46 @@ var actTargets = map[string]func(o actionOpts, r runner.Runner) int{
 // ...) is rejected with a hint at --platform, and anything else is an
 // unexpected argument -- both usage errors (exit 2), per
 // platformResolutionDetail in commands.go.
-func runAction(action string, args []string, r runner.Runner) int {
+func runAction(action string, args []string, r gdurunner.Runner) int {
 	fs := verbFlagSet(action)
 	env := envFlag(fs)
 	platform := platformFlag(fs)
 	allow := allowCommandFlag(fs)
-	// remove only: deploy has nothing to confirm, so --no-prompt is an unknown flag
-	// there rather than a no-op that quietly accepts it.
-	var noPrompt *bool
-	if action == runner.ActionRemove {
-		noPrompt = noPromptFlag(fs)
-	}
+	noPrompt := noPromptFlag(fs)
 	pos, err := collectFlagsAndDirs(fs, args)
 	if err != nil {
 		return flagExit(action, err)
+	}
+	approvals, aerr := approvalsFrom(*allow)
+	if aerr != nil {
+		return usageExit(aerr)
 	}
 	if len(pos) > 0 {
 		if contains(platformNames, pos[0]) {
 			fmt.Fprintf(os.Stderr, "%s: %q is no longer a positional platform; pass --platform %s instead\n", action, pos[0], pos[0])
 			fmt.Fprint(os.Stderr, verbUsage(action))
-			return 2
+			return exitcode.Usage
 		}
 		fmt.Fprintf(os.Stderr, "%s: unexpected argument %q (the platform is now selected with --platform)\n", action, pos[0])
-		return 2
+		return exitcode.Usage
 	}
 	e, lerr := loadEnvFile(*env)
 	if lerr != nil {
-		return errExit(lerr)
+		return usageExit(lerr)
 	}
 	platformName, perr := resolvePlatform(*platform, presentPlatforms(e), true)
 	if perr != nil {
-		return errExit(perr)
+		return usageExit(perr)
+	}
+	// A flag that would do nothing is refused, as solace-util refuses it: a
+	// kubernetes deploy asks nothing, so there is no question for it to answer.
+	if action == runner.ActionDeploy && platformName == validate.PlatformKubernetes && *noPrompt {
+		return usageExit(fmt.Errorf("%s has no effect on a kubernetes deploy, which asks nothing (kubectl apply and the rollout decide); leave it off", noPromptFlagName))
 	}
 	// The one destructive verb asks before it acts, and asks here -- ahead of
 	// the per-platform preflight probe -- so a cancelled teardown touches the
 	// cluster not at all, not even with a read.
-	if noPrompt != nil && !*noPrompt {
+	if action == runner.ActionRemove && !*noPrompt {
 		ok, cerr := confirmRemove(platformName, removeTarget(platformName, e))
 		if cerr != nil {
 			return errExit(cerr)
@@ -502,55 +531,87 @@ func runAction(action string, args []string, r runner.Runner) int {
 			// Declining is an answer, not a failure -- the same reasoning
 			// watchStatus records for a deliberate Ctrl-C.
 			fmt.Fprintln(os.Stderr, "remove: cancelled")
-			return 0
+			return exitcode.OK
 		}
 	}
 	return actTargets[platformName](actionOpts{
-		action:   action,
-		envPath:  *env,
-		allow:    *allow,
-		noPrompt: noPrompt != nil && *noPrompt,
+		action:    action,
+		envPath:   *env,
+		approvals: approvals,
+		noPrompt:  *noPrompt,
 	}, r)
 }
 
-// preflight runs the read-only login/reachability probe (runner.Preflight)
-// before any generate-write or mutating exec. On failure it reports the
-// probe's combined output and wrapped error (which already names the platform
-// and carries a login hint) and the caller must stop without writing or
-// executing anything further.
-func preflight(r runner.Runner, action, platform, command, namespace string, extraAllowed []string) (code int, ok bool) {
-	out, err := runner.Preflight(r, platform, command, action, namespace, extraAllowed)
+// preflight runs the read-only probes (runner.Preflight) before any
+// generate-write or mutating exec: the engine's info on docker and podman, and on
+// kubernetes each of probes (runner.KubernetesProbes), the writes the command is
+// about to make. On failure it reports the probe's output and wrapped error (which
+// already names the platform and says what to do) and the caller must stop without
+// writing or executing anything further.
+//
+// rootless is whether a podman deployment runs rootless, which picks the hint the
+// failure carries; it is false on every other platform.
+func preflight(r gdurunner.Runner, action, platform, command string, rootless bool, probes []rbac.Probe, approvals execguard.Approvals) (code int, ok bool) {
+	out, err := runner.Preflight(bg(), r, platform, command, rootless, probes, approvals)
 	if err != nil {
 		return report(action, platform, out, err), false
 	}
-	return 0, true
+	return exitcode.OK, true
 }
 
-func actKubernetes(o actionOpts, r runner.Runner) int {
-	action, envPath, extraAllowed := o.action, o.envPath, o.allow
+// preflightRead is preflight for the read verbs (status, logs, cli): the engine
+// check on docker and podman, nothing on kubernetes, which asks for no permission
+// ahead of a read (runner.KubernetesProbes). It reports whether a probe ran, so a
+// caller announces its step only when there is a call behind it.
+func preflightRead(r gdurunner.Runner, action, platform, command string, rootless bool, approvals execguard.Approvals) (code int, ok bool) {
+	if platform == validate.PlatformKubernetes {
+		return exitcode.OK, true
+	}
+	return preflight(r, action, platform, command, rootless, nil, approvals)
+}
+
+func actKubernetes(o actionOpts, r gdurunner.Runner) int {
+	action, envPath, approvals := o.action, o.envPath, o.approvals
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
-		return errExit(err)
+		return usageExit(err)
 	}
 	if e.Kubernetes == nil {
-		return errExit(fmt.Errorf("env.yaml has no kubernetes: section to %s", action))
+		return usageExit(fmt.Errorf("env.yaml has no kubernetes: section to %s", action))
 	}
 	// A teardown renders differently in three ways -- no Namespace document,
 	// the documents reversed so kubectl does not block deleting a PVC a running
 	// pod still holds, and every Secret by name alone, so nothing is resolved.
-	// See deploy.Input.Teardown.
+	// See deploy.Input.Teardown. A deploy renders without the Namespace too
+	// (OmitNamespace): ensureNamespace creates it, and only when it is absent.
 	var probes []gen.SecretProbe
-	manifest, errs, warns := gen.GenerateKubernetes(req, resolver(envDir),
-		gen.KubeOpts{Teardown: action == runner.ActionRemove, Probes: &probes}, extraAllowed...)
+	var written []nsgate.Object
+	res := resolver(envDir)
+	res.Approvals = approvals
+	manifest, errs, warns := gen.GenerateKubernetes(req, res, gen.KubeOpts{Teardown: action == runner.ActionRemove,
+		OmitNamespace: action == runner.ActionDeploy, Written: &written, Probes: &probes})
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
 	}
-	if code, ok := preflight(r, action, validate.PlatformKubernetes, e.Kubernetes.Command, e.Kubernetes.Deployment.Namespace, extraAllowed); !ok {
+	k := e.Kubernetes
+	ns := k.Deployment.Namespace
+	base, berr := runner.ParseCommand(validate.PlatformKubernetes, k.Command, approvals)
+	if berr != nil {
+		return report(action, tgtKubernetes, "", berr)
+	}
+	// Every probe of the command runs before its first write, the first refusal
+	// stopping it: the kinds the manifest writes, and persistentvolumes (cluster
+	// scoped) for the libs claim's volume.
+	kprobes, kerr := runner.KubernetesProbes(action, ns, written, k.LibsPVCName() != "")
+	if kerr != nil {
+		return errExit(kerr)
+	}
+	if code, ok := preflight(r, action, validate.PlatformKubernetes, k.Command, false, kprobes, approvals); !ok {
 		return code
 	}
 	if action == runner.ActionDeploy && len(probes) > 0 {
-		perrs, pwarns := probeOperatorSecrets(r, e.Kubernetes, probes, extraAllowed)
+		perrs, pwarns := probeOperatorSecrets(r, e.Kubernetes, probes, approvals)
 		for _, w := range pwarns {
 			fmt.Fprintln(os.Stderr, "warning:", w)
 		}
@@ -558,30 +619,39 @@ func actKubernetes(o actionOpts, r runner.Runner) int {
 			return failAll(perrs)
 		}
 	}
-	out, rerr := runner.Kubernetes(r, e.Kubernetes.Command, action, manifest, extraAllowed)
+	if action == runner.ActionDeploy {
+		if code, ok := ensureNamespace(r, base, k.Command, ns, approvals); !ok {
+			return code
+		}
+	}
+	out, rerr := runner.Kubernetes(bg(), r, k.Command, action, manifest, approvals)
 	warnIfPVUnchanged(action, out)
+	if action == runner.ActionDeploy && rerr == nil {
+		out, rerr = waitForRollout(r, k, out, approvals)
+	}
 	if code := report(action, tgtKubernetes, out, rerr); code != 0 {
 		// A failed teardown leaves the namespace alone: whatever did not come
 		// down is still in there.
 		return code
 	}
 	if action == runner.ActionRemove {
-		return removeNamespace(r, o, e.Kubernetes)
+		return removeNamespace(r, o, k, base)
 	}
-	return 0
+	return exitcode.OK
 }
 
-func actDocker(o actionOpts, r runner.Runner) int {
-	action, envPath, extraAllowed := o.action, o.envPath, o.allow
+func actDocker(o actionOpts, r gdurunner.Runner) int {
+	action, envPath, approvals := o.action, o.envPath, o.approvals
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
-		return errExit(err)
+		return usageExit(err)
 	}
 	if e.Docker == nil {
-		return errExit(fmt.Errorf("env.yaml has no docker: section to %s", action))
+		return usageExit(fmt.Errorf("env.yaml has no docker: section to %s", action))
 	}
 	res := resolver(envDir)
-	plan, errs, warns := gen.GenerateDocker(req, res, extraAllowed...)
+	res.Approvals = approvals
+	plan, errs, warns := gen.GenerateDocker(req, res)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
@@ -590,7 +660,7 @@ func actDocker(o actionOpts, r runner.Runner) int {
 	// named variable, not leave a compose file behind for a run that never began.
 	kvs, cerr := gen.ResolveCredentials(plan.Secrets, res)
 	if cerr != nil {
-		return errExit(cerr)
+		return usageExit(cerr)
 	}
 	if action == runner.ActionDeploy {
 		// docker bind-mounts the TLS stores and the libs jars, which the
@@ -615,23 +685,68 @@ func actDocker(o actionOpts, r runner.Runner) int {
 		skvs, swarns, serr := gen.ResolveDockerStores(plan, res, gen.EnvVarMax(runtime.GOOS), runtime.GOOS)
 		printWarnings(swarns)
 		if serr != nil {
-			return errExit(serr)
+			return usageExit(serr)
 		}
 		storeKVs = skvs
 	}
-	if code, ok := preflight(r, action, validate.PlatformDocker, e.Docker.Command, "", extraAllowed); !ok {
+	if code, ok := preflight(r, action, validate.PlatformDocker, e.Docker.Command, false, nil, approvals); !ok {
 		return code
 	}
 	if action == runner.ActionDeploy && len(plan.Stores) > 0 {
-		if err := checkImageCommand(r, e.Docker.Command, plan.Image, extraAllowed); err != nil {
+		if err := checkImageCommand(r, e.Docker.Command, plan.Image, approvals); err != nil {
 			return errExit(err)
 		}
+	}
+	env := envPairs(append(kvs, storeKVs...))
+	if action == runner.ActionDeploy {
+		// One digest covers the file and every value the compose child receives
+		// (credentials, created stores, the stores digest), computed before the
+		// digest variable itself is added. Compose fills the deploy-digest label
+		// from it, so a changed file or a rotated credential recreates the
+		// container and an unchanged deploy changes nothing; compose decides, and
+		// the digest only predicts whether it is about to recreate a running
+		// container, so as to ask first.
+		digest := containercli.ComposeDigest([]byte(plan.Compose), env)
+		if code, ok := confirmDockerRedeploy(r, o, e.Docker, digest); !ok {
+			return code
+		}
+		env = append(env, dockergen.DeployDigestVar+"="+digest)
 	}
 	// The compose file goes to compose on stdin and never touches the disk:
 	// every deploy and remove renders it afresh, so nothing needs it kept, and
 	// `generate --platform docker -o` writes one (0600) for a hand-run compose.
-	out, rerr := runner.Docker(r, e.Docker.Command, action, plan.Compose, envDir, envPairs(append(kvs, storeKVs...)), extraAllowed)
+	out, rerr := runner.Docker(bg(), r, e.Docker.Command, action, plan.Compose, envDir, env, approvals)
 	return report(action, tgtDocker, out, rerr)
+}
+
+// confirmDockerRedeploy asks before a deploy that compose is about to answer by
+// recreating a running container. It is asked nothing of when the container is
+// not running, or when its deploy-digest label is the digest this deploy would
+// stamp: compose then starts it or leaves it alone, and nothing running changes.
+// A label that is missing (a container an earlier build created) or an inspect
+// that fails counts as changed, since neither proves the container is current.
+//
+// A listing that cannot be read is an error, exit 1: without it the deploy cannot
+// say whether it would restart a running service. A declined question leaves
+// everything as it was and exits 0. ok is false when the deploy must stop, with
+// the exit code to return.
+func confirmDockerRedeploy(r gdurunner.Runner, o actionOpts, d *spec.Docker, digest string) (code int, ok bool) {
+	running, have, err := runner.DockerDeployDigest(bg(), r, d.Command, d.Name, spec.LabelDeployDigestKey, o.approvals)
+	if err != nil {
+		return errExit(err), false
+	}
+	if !running || have == digest {
+		return exitcode.OK, true
+	}
+	approved, cerr := confirmRedeploy(o.noPrompt, fmt.Sprintf(
+		"container %s is running and its compose file or credentials changed (or cannot be compared), so compose will recreate it", d.Name))
+	if cerr != nil {
+		return errExit(cerr), false
+	}
+	if !approved {
+		return redeployCancelled(), false
+	}
+	return exitcode.OK, true
 }
 
 // checkImageCommand holds a docker deploy that carries created stores to the
@@ -640,16 +755,16 @@ func actDocker(o actionOpts, r runner.Runner) int {
 // any other way fails the deploy before anything is written. An image the
 // engine does not have yet is pulled first and then inspected, so the check
 // never passes without comparing anything.
-func checkImageCommand(r runner.Runner, command, image string, extraAllowed []string) error {
-	entrypoint, cmd, found, err := runner.DockerImageCommand(r, command, image, extraAllowed)
+func checkImageCommand(r gdurunner.Runner, command, image string, approvals execguard.Approvals) error {
+	entrypoint, cmd, found, err := runner.DockerImageCommand(bg(), r, command, image, approvals)
 	if err != nil {
 		return err
 	}
 	if !found {
-		if out, perr := runner.DockerImagePull(r, command, image, extraAllowed); perr != nil {
+		if out, perr := runner.DockerImagePull(bg(), r, command, image, approvals); perr != nil {
 			return fmt.Errorf("pulling %s to check how it starts before deploying a created store: %w\n%s", image, perr, strings.TrimSpace(out))
 		}
-		if entrypoint, cmd, found, err = runner.DockerImageCommand(r, command, image, extraAllowed); err != nil {
+		if entrypoint, cmd, found, err = runner.DockerImageCommand(bg(), r, command, image, approvals); err != nil {
 			return err
 		}
 		if !found {
@@ -673,72 +788,75 @@ func envPairs(kvs []gen.KV) []string {
 	return out
 }
 
-func actPodman(o actionOpts, r runner.Runner) int {
-	action, envPath, extraAllowed := o.action, o.envPath, o.allow
+func actPodman(o actionOpts, r gdurunner.Runner) int {
+	action, envPath, approvals := o.action, o.envPath, o.approvals
 	req, e, envDir, err := loadEnv(envPath)
 	if err != nil {
-		return errExit(err)
+		return usageExit(err)
 	}
 	if e.Podman == nil {
-		return errExit(fmt.Errorf("env.yaml has no podman: section to %s", action))
+		return usageExit(fmt.Errorf("env.yaml has no podman: section to %s", action))
 	}
-	sc, serr := runner.ResolveQuadletScope()
+	// The refusals from the rootless rule and the quadlet directory exit 2, a
+	// session that cannot be repaired exits 1: see runner.ResolveQuadletScope.
+	h := host()
+	sc, serr := runner.ResolveQuadletScope(h.scope, e.Podman.Rootful)
 	if serr != nil {
 		return errExit(serr)
 	}
 	res := resolver(envDir)
-	plan, errs, warns := gen.GeneratePodman(req, res, extraAllowed...)
+	res.Approvals = approvals
+	plan, errs, warns := gen.GeneratePodman(req, res)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		return failFast(errs)
 	}
-	if code, ok := preflight(r, action, validate.PlatformPodman, e.Podman.Command, "", extraAllowed); !ok {
+	if code, ok := preflight(r, action, validate.PlatformPodman, e.Podman.Command, sc.UserMode, nil, approvals); !ok {
 		return code
 	}
 	if action == runner.ActionRemove {
-		return podmanRemove(sc, plan, e.Podman, r, extraAllowed)
+		return podmanRemove(sc, plan, e.Podman, r, approvals)
 	}
 	// Everything but libs.dir reaches the container from podman's secret store,
 	// readable by any uid; the libs jars are a bind mount, read with the host's
 	// ids when deployed as root and through the subordinate ranges rootless --
-	// which also have to exist for the run-as ids to be mapped at all.
-	if sc.UserMode && runtime.GOOS == "linux" {
-		for _, w := range subIDWarnings(plan.RunAs, os.ReadFile, os.Getuid(), currentUserName()) {
-			fmt.Fprintln(os.Stderr, "warning:", w)
+	// which also have to exist for the run-as ids to be mapped at all. A rootless
+	// unit also needs the user's manager to outlive its login. Both are settled
+	// before anything is written.
+	if sc.UserMode && h.scope.Linux {
+		if err := ensureLinger(r, sc, h); err != nil {
+			return errExit(err)
+		}
+		if err := checkSubIDs(r, e.Podman, plan.RunAs, h, approvals); err != nil {
+			return errExit(err)
 		}
 	}
 	for _, w := range podmanHostChecks(plan, sc) {
 		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
-	return podmanDeploy(sc, plan, e.Podman, res, r, extraAllowed)
+	return podmanDeploy(sc, plan, e.Podman, res, r, approvals, o.noPrompt)
 }
 
-func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, res gen.Resolver, r runner.Runner, extraAllowed []string) int {
+// podmanSecret is one secret the unit mounts: its name in podman's store and the
+// value to store under it. The value is never printed.
+type podmanSecret struct{ name, value string }
+
+func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, res gen.Resolver, r gdurunner.Runner, approvals execguard.Approvals, noPrompt bool) int {
 	// Everything the unit mounts is resolved first -- the credentials, then the
 	// documents and stores -- so a missing variable or an unreadable or
 	// oversized store stops the deploy before anything is created: the unit
 	// references secrets that must already exist.
 	kvs, cerr := gen.ResolveCredentials(plan.Secrets, res)
 	if cerr != nil {
-		return errExit(cerr)
+		return usageExit(cerr)
 	}
 	files, fwarns, ferr := gen.ResolvePodmanFiles(plan.Files, res)
 	printWarnings(fwarns)
 	if ferr != nil {
-		return errExit(ferr)
+		return usageExit(ferr)
 	}
 	// Read before the new unit replaces it: the stores the last deploy mounted.
 	previous := previousStoreSecrets(sc, plan, p)
-	// podman 4.7 replaces a secret in one step; an older one, or a version that
-	// cannot be read, keeps to remove-then-create (runner.PodmanSecretCreate).
-	version, _ := runner.PodmanVersion(r, p.Command, extraAllowed)
-	replace := runner.PodmanSupportsReplace(version)
-	for _, kv := range kvs {
-		out, err := runner.PodmanSecretCreate(r, p.Command, gen.PodmanSecretStoreName(p.Name, kv.Key), kv.Val, replace, extraAllowed)
-		if err != nil {
-			return report(runner.ActionDeploy, tgtPodman, out, err)
-		}
-	}
 	// application.yml carries a live credential (the reserved status account's
 	// password, read back out of this same file by the status script at run
 	// time -- see statusscript.Render) and the stores are key material, so the
@@ -746,12 +864,31 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	// secret store, and deploy writes none of them to a file of its own. Only
 	// the unit is written, to the quadlet directory, the one place systemd
 	// scans; where podman keeps the secrets is its secret driver's business.
+	var secrets []podmanSecret
+	for _, kv := range kvs {
+		secrets = append(secrets, podmanSecret{name: gen.PodmanSecretStoreName(p.Name, kv.Key), value: kv.Val})
+	}
 	mounted := make(map[string]bool, len(files))
 	for _, kv := range files {
 		mounted[kv.Key] = true
-		out, err := runner.PodmanSecretCreate(r, p.Command, kv.Key, kv.Val, replace, extraAllowed)
-		if err != nil {
-			return report(runner.ActionDeploy, tgtPodman, out, err)
+		secrets = append(secrets, podmanSecret{name: kv.Key, value: kv.Val})
+	}
+	// Nothing is written before the answer, so first compare: the unit with the
+	// file on disk (a missing or unreadable one is a change), and each secret's
+	// stored value, read back from podman, with the one about to be written (a
+	// missing secret and a probe that fails are changes). Reading a value back
+	// needs podman 4.7, the release that also brings `secret create --replace`;
+	// an older podman, or a version that cannot be read, counts every secret as
+	// changed and probes none. The version is read first for that reason.
+	version, _ := runner.PodmanVersion(bg(), r, p.Command, approvals)
+	replace := podman.SupportsReplace(version)
+	unitPath := filepath.Join(sc.Dir, plan.Unit.Filename)
+	installed, rerr := os.ReadFile(unitPath)
+	unitChanged := rerr != nil || string(installed) != plan.Unit.Content
+	var changed []podmanSecret
+	for _, s := range secrets {
+		if !replace || !runner.PodmanSecretMatches(bg(), r, p.Command, s.name, s.value, approvals) {
+			changed = append(changed, s)
 		}
 	}
 	// A file secret this spec no longer mounts -- syslog dropped, or a store no
@@ -763,17 +900,58 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 			stale = append(stale, n)
 		}
 	}
-	if out, err := runner.PodmanSecretRemove(r, p.Command, stale, extraAllowed); err != nil {
-		return report(runner.ActionDeploy, tgtPodman, out, err)
+	write := func() (string, error) {
+		var out strings.Builder
+		// podman 4.7 replaces a secret in one step; an older one, or a version that
+		// cannot be read, keeps to remove-then-create (runner.PodmanSecretCreate).
+		for _, s := range changed {
+			o, err := runner.PodmanSecretCreate(bg(), r, p.Command, s.name, s.value, replace, approvals)
+			out.WriteString(o)
+			if err != nil {
+				return out.String(), err
+			}
+		}
+		o, err := runner.PodmanSecretRemove(bg(), r, p.Command, stale, approvals)
+		out.WriteString(o)
+		if err != nil {
+			return out.String(), err
+		}
+		if unitChanged {
+			if err := runner.WriteFile(unitPath, plan.Unit.Content, 0o644); err != nil {
+				return out.String(), err
+			}
+		}
+		return out.String(), nil
 	}
-	if err := runner.WriteFile(filepath.Join(sc.Dir, plan.Unit.Filename), plan.Unit.Content, 0o644); err != nil {
-		return errExit(err)
+	approve := func() (bool, error) {
+		return confirmRedeploy(noPrompt, fmt.Sprintf("%s is running and %s changed, so it will be restarted",
+			plan.Service, podmanChangeSummary(unitChanged, changed)))
 	}
-	out, rerr := runner.PodmanDeploy(r, sc, []string{plan.Service})
-	return report(runner.ActionDeploy, tgtPodman, out, rerr)
+	out, cancelled, err := runner.PodmanDeploy(bg(), r, sc, []string{plan.Service}, unitChanged || len(changed) > 0, approve, write)
+	if cancelled {
+		return redeployCancelled()
+	}
+	return report(runner.ActionDeploy, tgtPodman, out, err)
 }
 
-func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r runner.Runner, extraAllowed []string) int {
+// podmanChangeSummary names what differs, for the redeploy question: the unit,
+// and the secrets by name -- never a value or a digest.
+func podmanChangeSummary(unit bool, secrets []podmanSecret) string {
+	var parts []string
+	if unit {
+		parts = append(parts, "its unit")
+	}
+	if len(secrets) > 0 {
+		names := make([]string, len(secrets))
+		for i, s := range secrets {
+			names[i] = s.name
+		}
+		parts = append(parts, "the secrets "+strings.Join(names, ", "))
+	}
+	return strings.Join(parts, " and ")
+}
+
+func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r gdurunner.Runner, approvals execguard.Approvals) int {
 	// The stores the deployed unit mounts, read before the unit is deleted, and
 	// the ones this spec mounts, in case the unit is already gone.
 	stores := previousStoreSecrets(sc, plan, p)
@@ -784,7 +962,7 @@ func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 			stores = append(stores, f.StoreName)
 		}
 	}
-	out, rerr := runner.PodmanRemove(r, sc, []string{plan.Service}, []string{plan.Unit.Filename})
+	out, rerr := runner.PodmanRemove(bg(), r, sc, []string{plan.Service}, []string{plan.Unit.Filename})
 	// The secrets go last, after the unit that mounted them is gone: the
 	// credentials, and every file secret the instance can own, whether or not
 	// this spec still mounts it. Leaving credential or key material behind is
@@ -796,7 +974,7 @@ func podmanRemove(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 	}
 	names = append(names, gen.PodmanFileSecretNames(p.Name)...)
 	names = append(names, stores...)
-	so, serr := runner.PodmanSecretRemove(r, p.Command, names, extraAllowed)
+	so, serr := runner.PodmanSecretRemove(bg(), r, p.Command, names, approvals)
 	out += so
 	if rerr == nil {
 		rerr = serr
@@ -886,58 +1064,27 @@ func resolvePlatform(flagVal string, present []string, requireSection bool) (str
 	}
 }
 
-// promptLine is the injectable stdin-read seam behind the interactive
-// platform menu and the status install confirmation: readStdinLine in
-// production, a canned fake in tests (mirroring the runner.Runner seam
-// dispatch already threads explicitly -- see useFakeRunner in main_test.go).
-var promptLine = readStdinLine
+// prompter is the run's one confirmation seam: the platform menu, the status
+// install prompt and both remove questions go through it, so a single buffered
+// reader serves every question in the run. Tests replace it with a prompter
+// whose terminal answer and input they control (withPrompter in main_test.go),
+// because go test's own stdin is never a character device.
+var prompter = confirm.New(confirm.Options{})
 
-// stdinIsTerminal reports whether stdin is a character device, which is this
-// tool's one definition of "the operator is here to answer". Both the prompts
-// below and cli's refusal to open a shell nobody can type into read it, so the
-// two cannot come to different conclusions about the same terminal.
+// stderrIsTerminal reports whether there is a screen to draw a progress line
+// on. Deliberately separate from the prompter's terminal answer (stdin), because
+// the two differ in exactly the cases that matter -- `status app > report.txt`
+// still has a terminal to spin on, and `status app 2>steps.log` still has an
+// operator to prompt.
 //
-// A var rather than a func for the reason promptLine is one: go test's own
-// stdin is never a character device, so a hard-coded probe would make every
-// path behind it unreachable from a test.
-var stdinIsTerminal = func() bool {
-	fi, err := os.Stdin.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
-}
-
-// stderrIsTerminal is the same probe for the other end: whether there is a
-// screen to draw a progress line on. Deliberately separate from
-// stdinIsTerminal, because the two answers differ in exactly the cases that
-// matter -- `status app > report.txt` still has a terminal to spin on, and
-// `status app 2>steps.log` still has an operator to prompt.
-//
-// A var for stdinIsTerminal's reason: go test's own stderr is a pipe, so a
+// A var for the reason prompter is one: go test's own stderr is a pipe, so a
 // hard-coded probe would make the spinner unreachable from a test.
-var stderrIsTerminal = func() bool {
-	fi, err := os.Stderr.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
-}
-
-// readStdinLine refuses to read when stdin is not a character device (a
-// script, a CI job, or anything else that is not an interactive terminal) so
-// a non-interactive invocation fails fast with actionable guidance instead of
-// blocking forever on a read that will never return.
-func readStdinLine(question string) (string, error) {
-	if !stdinIsTerminal() {
-		return "", fmt.Errorf("stdin is not a terminal, so this prompt cannot be answered interactively")
-	}
-	fmt.Fprint(os.Stderr, question)
-	line, rerr := bufio.NewReader(os.Stdin).ReadString('\n')
-	if rerr != nil && line == "" {
-		return "", fmt.Errorf("reading input: %w", rerr)
-	}
-	return strings.TrimSpace(line), nil
-}
+var stderrIsTerminal = func() bool { return confirm.IsCharDevice(os.Stderr) }
 
 // promptPlatformMenu lists present as a numbered menu and reads the operator's
-// choice via promptLine. A non-TTY refusal is wrapped with a --platform hint
-// so the operator has an immediate next step instead of a bare "not a
-// terminal" error.
+// choice via the prompter. A non-TTY refusal or an unanswered prompt is wrapped
+// with a --platform hint so the operator has an immediate next step instead of
+// a bare "not a terminal" error.
 func promptPlatformMenu(present []string) (string, error) {
 	var b strings.Builder
 	b.WriteString("multiple platforms are configured in env.yaml; choose one:\n")
@@ -945,7 +1092,10 @@ func promptPlatformMenu(present []string) (string, error) {
 		fmt.Fprintf(&b, "  %d) %s\n", i+1, p)
 	}
 	b.WriteString("> ")
-	line, err := promptLine(b.String())
+	line, answered, err := prompter.ReadLine(b.String())
+	if err == nil && !answered {
+		err = confirm.Unanswered()
+	}
 	if err != nil {
 		return "", fmt.Errorf("choosing a platform interactively: %w; pass --platform instead", err)
 	}
@@ -985,15 +1135,15 @@ func actVersion() int {
 	// The support statement goes under the version line, never into it: this
 	// is the output people paste into a problem report, and the first line is
 	// still the only thing a script needs to read.
-	for _, ln := range supportNoticeVersion {
+	for _, ln := range notice.Short() {
 		fmt.Println(ln)
 	}
-	return 0
+	return exitcode.OK
 }
 
 // ---- validate / examples -----------------------------------------------------
 
-func runValidate(args []string) int {
+func runValidate(args []string, r gdurunner.Runner) int {
 	fs := verbFlagSet("validate")
 	env := envFlag(fs)
 	if _, err := collectFlagsAndDirs(fs, args); err != nil {
@@ -1001,30 +1151,42 @@ func runValidate(args []string) int {
 	}
 	req, e, envDir, lerr := loadEnv(*env)
 	if lerr != nil {
-		return errExit(lerr)
+		return usageExit(lerr)
 	}
 	res := resolver(envDir)
-	errs, warns := gen.Validate(req, res)
-	herrs, hwarns := hostChecks(req, e, res)
-	errs, warns = append(errs, herrs...), append(warns, hwarns...)
+	verrs, warns := gen.Validate(req, res)
+	eerrs, herrs, hwarns := hostChecks(req, e, res, r)
+	nverr := len(verrs) + len(eerrs)
+	errs, warns := append(append(verrs, eerrs...), herrs...), append(warns, hwarns...)
 	printWarnings(warns)
 	if len(errs) > 0 {
 		for _, e := range errs { // validate: report every error
 			fmt.Fprintln(os.Stderr, "error:", e.String())
 		}
 		fmt.Fprintf(os.Stderr, "\n%d error(s)\n", len(errs))
-		return 1
+		// A problem in what env.yaml and the workflows say is a usage error; a
+		// host that is not ready for a deploy that would otherwise generate is
+		// a failure, the same as the deploy's own host check.
+		if nverr > 0 {
+			return exitcode.Usage
+		}
+		return exitcode.Failure
 	}
 	fmt.Fprintln(os.Stderr, "ok: no errors")
-	return 0
+	return exitcode.OK
 }
 
 // hostChecks runs, for validate, the checks a docker or podman deploy makes on
 // this host before it starts anything, for each of those sections env.yaml
-// has: dockerHostChecks and podmanHostChecks. Each needs its platform's plan,
-// so it runs only once the spec generates for that platform; until then
-// gen.Validate's own errors are the ones to fix.
-func hostChecks(req gen.Request, e *spec.Env, res gen.Resolver) (errs, warns []gen.Issue) {
+// has: dockerHostChecks and podmanHostChecks, and for a rootless podman unit on
+// Linux the linger and subordinate-id probes, run through r. Each needs its
+// platform's plan, so it runs only once the spec generates for that platform;
+// until then gen.Validate's own errors are the ones to fix.
+//
+// envErrs are what env.yaml or the user running validate got wrong (the
+// rootless rule, the quadlet directory), which is a usage error like any other
+// validate error; errs are a host that is not ready, a failure.
+func hostChecks(req gen.Request, e *spec.Env, res gen.Resolver, r gdurunner.Runner) (envErrs, errs, warns []gen.Issue) {
 	issue := func(msg string) gen.Issue { return gen.Issue{File: defaultEnvFile, Msg: msg} }
 	if e.Docker != nil {
 		if plan, perrs, _ := gen.GenerateDocker(req, res); len(perrs) == 0 {
@@ -1038,14 +1200,26 @@ func hostChecks(req gen.Request, e *spec.Env, res gen.Resolver) (errs, warns []g
 		}
 	}
 	if e.Podman != nil {
-		sc, serr := runner.ResolveQuadletScope()
-		if plan, perrs, _ := gen.GeneratePodman(req, res); serr == nil && len(perrs) == 0 {
+		h := host()
+		sc, serr := runner.ResolveQuadletScope(h.scope, e.Podman.Rootful)
+		plan, perrs, _ := gen.GeneratePodman(req, res)
+		switch {
+		case serr != nil && exitcode.IsUsage(serr):
+			envErrs = append(envErrs, issue(serr.Error()))
+		case serr != nil:
+			errs = append(errs, issue(serr.Error()))
+		case len(perrs) == 0:
 			for _, w := range podmanHostChecks(plan, sc) {
 				warns = append(warns, issue(w))
 			}
+			if sc.UserMode && h.scope.Linux {
+				for _, err := range rootlessHostErrors(r, e.Podman, plan.RunAs, sc, h) {
+					errs = append(errs, issue(err.Error()))
+				}
+			}
 		}
 	}
-	return errs, warns
+	return envErrs, errs, warns
 }
 
 // runExamples writes the embedded starter env.yaml + workflows to dir (default
@@ -1074,7 +1248,7 @@ func runExamples(args []string) int {
 	}
 	fmt.Fprintf(os.Stderr, "\n%d written, %d skipped in %q\n", len(written), len(skipped), dir)
 	fmt.Fprintf(os.Stderr, "next: solmq-conn-util generate config -e %s\n", filepath.Join(dir, defaultEnvFile))
-	return 0
+	return exitcode.OK
 }
 
 // ---- download --------------------------------------------------------------
@@ -1092,9 +1266,9 @@ var downloadSets = map[string]string{
 // downloadFn is the injectable seam behind runDownload's call into
 // internal/libs: libs.Download in production, a fake in tests that captures
 // the Input it received instead of touching the network -- mirrors the
-// runner.Runner seam dispatch threads explicitly, so this package's own tests
+// gdurunner.Runner seam dispatch threads explicitly, so this package's own tests
 // stay decoupled from internal/libs's HTTP/Maven behavior. download never
-// shells out, so it carries no runner.Runner of its own; this is its only
+// shells out, so it carries no gdurunner.Runner of its own; this is its only
 // injected boundary.
 var downloadFn = libs.Download
 
@@ -1166,25 +1340,25 @@ func runDownload(args []string) int {
 	if len(pos) == 0 {
 		fmt.Fprintf(os.Stderr, "download: missing target (%s)\n\n", pipeList(targetNames("download")))
 		fmt.Fprint(os.Stderr, verbUsage("download"))
-		return 2
+		return exitcode.Usage
 	}
 	target := pos[0]
 	if !contains(targetNames("download"), target) {
 		fmt.Fprintf(os.Stderr, "download: unknown target %q (want %s)\n", target, wantList(targetNames("download")))
-		return 2
+		return exitcode.Usage
 	}
 
 	setWords := targetSetNames("download", target)
 	if len(pos) < 2 {
 		fmt.Fprintf(os.Stderr, "download: missing set (%s)\n\n", pipeList(setWords))
 		fmt.Fprint(os.Stderr, verbUsage("download"))
-		return 2
+		return exitcode.Usage
 	}
 	setArg := pos[1]
 	set, ok := downloadSets[setArg]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "download: unknown set %q (want %s)\n", setArg, wantList(setWords))
-		return 2
+		return exitcode.Usage
 	}
 
 	dir := "./libs"
@@ -1193,12 +1367,12 @@ func runDownload(args []string) int {
 	}
 	if len(pos) > 3 {
 		fmt.Fprintf(os.Stderr, "download: unexpected argument %q\n", pos[3])
-		return 2
+		return exitcode.Usage
 	}
 
 	deployedImage, ierr := downloadDeployedImage(fs, *envPath)
 	if ierr != nil {
-		return errExit(ierr)
+		return usageExit(ierr)
 	}
 
 	rep, derr := downloadFn(libs.Input{
@@ -1293,9 +1467,9 @@ func reportDownload(rep libs.Report, dir string) int {
 		fmt.Fprintln(os.Stderr, next)
 	}
 	if len(rep.Failed) > 0 {
-		return 1
+		return exitcode.Failure
 	}
-	return 0
+	return exitcode.OK
 }
 
 // ---- auto-complete -------------------------------------------------------
@@ -1323,12 +1497,12 @@ func runAutoComplete(args []string) int {
 	if len(pos) == 0 {
 		fmt.Fprintf(os.Stderr, "auto-complete: missing shell (%s)\n\n", pipeList(targetNames("auto-complete")))
 		fmt.Fprint(os.Stderr, verbUsage("auto-complete"))
-		return 2
+		return exitcode.Usage
 	}
 	h, ok := completionShellRenderers[pos[0]]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "auto-complete: unknown shell %q (want %s)\n", pos[0], wantList(targetNames("auto-complete")))
-		return 2
+		return exitcode.Usage
 	}
 	return emit("", h())
 }
@@ -1352,63 +1526,76 @@ func outFlag(fs *flag.FlagSet) *string {
 }
 
 // allowCommandValue implements flag.Value for a repeatable --allow-command: it
-// validates each value against the same bare-name/safe-charset rules
-// CheckDeployCommand applies to the command itself (a path or an unsafe
-// character in the escape hatch would just move the hole), then appends it.
+// only collects the raw values. approvalsFrom checks them all once the flags are
+// parsed, through execguard.Approve, so a path, an unsafe character or a
+// privilege-escalation wrapper is refused with the shared message.
 type allowCommandValue struct{ vals *[]string }
 
 func (allowCommandValue) String() string { return "" } // flag.Value needs a zero-value String; nothing to show before parsing
 
 func (v allowCommandValue) Set(s string) error {
-	if strings.ContainsRune(s, '/') {
-		return fmt.Errorf("--allow-command %q: a path is not accepted here; use a bare binary name, resolved from PATH", s)
-	}
-	if !validate.SafeToken(s) {
-		return fmt.Errorf("--allow-command %q: contains an unsafe character (%s)", s, validate.UnsafeTokenReason)
-	}
 	*v.vals = append(*v.vals, s)
 	return nil
 }
 
-// allowCommandFlag registers the repeatable --allow-command flag (deploy/remove
-// only -- runGenerate/runValidate never call this) and returns the accumulated,
-// already-validated values. A bad value fails fs.Parse, which callers surface
-// as the standard usage-error exit (2).
+// allowCommandFlag registers the repeatable --allow-command flag (deploy/remove,
+// the lifecycle verbs, status, logs and cli -- runGenerate/runValidate never call
+// this) and returns the accumulated raw values. The caller passes them to
+// approvalsFrom after flag parsing.
 func allowCommandFlag(fs *flag.FlagSet) *[]string {
 	vals := &[]string{}
 	fs.Var(allowCommandValue{vals}, "allow-command", "approve an extra command binary for this invocation (repeatable)")
 	return vals
 }
 
-// noPromptFlag registers remove's --no-prompt confirmation skip.
+// approvalsFrom turns the raw --allow-command values into this run's approvals,
+// once per run. A bad value is a usage error (exit 2) carrying the shared guard's
+// message; the zero Approvals comes back with it.
+func approvalsFrom(vals []string) (execguard.Approvals, error) {
+	a, err := execguard.Approve("solmq-conn-util", vals)
+	return a, exitcode.AsUsage(err)
+}
+
+// noPromptFlag registers the --no-prompt skip of remove and deploy.
 //
-// runAction registers it for remove only, never for deploy: deploy has nothing
-// to confirm, so accepting the flag there would silently do nothing -- the kind
-// of surprise checkStatusFlags refuses for the same reason. On deploy it is an
-// unknown flag, which is the honest answer.
+// On remove it answers the teardown questions. On deploy it approves restarting
+// or recreating a docker or podman service that is running and whose artifact or
+// secrets changed (confirmRedeploy). Kubernetes asks nothing, so runAction refuses
+// the flag there (exit 2) rather than accept one that does nothing.
 func noPromptFlag(fs *flag.FlagSet) *bool {
-	return fs.Bool("no-prompt", false, "tear down without asking for confirmation")
+	return fs.Bool("no-prompt", false, "approve without asking (remove: the teardown; deploy: restarting a changed service)")
+}
+
+// confirmRedeploy asks before a deploy restarts or recreates a service that is
+// running, through the same prompter and non-TTY refusal confirmRemove uses.
+// "y"/"yes" proceeds; anything else, a blank line included, declines.
+//
+// what is the service and the reason it would restart, so a run pointed at the
+// wrong env.yaml is caught here. With noPrompt it approves without asking; a
+// non-TTY with no flag is an error naming --no-prompt, exit 1.
+func confirmRedeploy(noPrompt bool, what string) (bool, error) {
+	return prompter.Gate(noPrompt, confirm.Lenient,
+		fmt.Sprintf("deploy: %s -- continue? [y/N] ", what), "the redeploy")
+}
+
+// redeployCancelled is what a declined redeploy says: the host is exactly as it
+// was, so the next deploy asks again.
+func redeployCancelled() int {
+	fmt.Fprintln(os.Stderr, "deploy: cancelled; nothing changed")
+	return exitcode.OK
 }
 
 // confirmRemove asks once before anything is torn down, through the same
-// promptLine seam and non-TTY refusal promptPlatformMenu and confirmInstall
-// use. "y"/"yes" (case-insensitive) proceeds; anything else, a blank line
-// included, cancels -- the safe answer is the one you get by pressing Enter.
+// prompter and non-TTY refusal promptPlatformMenu and confirmInstall use.
+// "y"/"yes" (case-insensitive) proceeds; anything else, a blank line included,
+// cancels -- the safe answer is the one you get by pressing Enter.
 //
 // what names the actual target so a run pointed at the wrong env.yaml is caught
 // here: on kubernetes that means the namespace, which is usually the only thing
 // distinguishing production from a scratch cluster.
 func confirmRemove(platform, what string) (bool, error) {
-	line, err := promptLine(fmt.Sprintf("remove %s: this tears down %s -- continue? [y/N] ", platform, what))
-	if err != nil {
-		return false, fmt.Errorf("confirming the teardown interactively: %w; pass %s instead", err, noPromptFlagName)
-	}
-	switch strings.ToLower(line) {
-	case "y", "yes":
-		return true, nil
-	default:
-		return false, nil
-	}
+	return prompter.Gate(false, confirm.Lenient,
+		fmt.Sprintf("remove %s: this tears down %s -- continue? [y/N] ", platform, what), "the teardown")
 }
 
 // removeTarget describes what remove is about to destroy on the resolved
@@ -1538,12 +1725,12 @@ func absPath(dir, p string) string {
 func emit(out, content string) int {
 	if out == "" {
 		fmt.Print(content)
-		return 0
+		return exitcode.OK
 	}
 	if err := os.WriteFile(out, []byte(content), 0o600); err != nil {
 		return errExit(err)
 	}
-	return 0
+	return exitcode.OK
 }
 
 // report prints a deployer's combined output and a final ok/error line.
@@ -1553,10 +1740,10 @@ func report(action, platform, out string, err error) int {
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %s %s failed: %v\n", action, platform, err)
-		return 1
+		return exitcode.Code(err)
 	}
 	fmt.Fprintf(os.Stderr, "ok: %s %s\n", action, platform)
-	return 0
+	return exitcode.OK
 }
 
 // warnIfPVUnchanged says so when a deploy re-applied a PersistentVolume that
@@ -1583,14 +1770,29 @@ func warnIfPVUnchanged(action, out string) {
 	}
 }
 
+// errExit reports an error and returns its exit code: 1 for something that ran
+// and failed, or that the live system refused, unless the error was marked with
+// exitcode.Usagef or exitcode.AsUsage where it was made, which makes it 2. An
+// error that is about what the tool was given -- argv, the env file, the files and
+// variables it names, the platform it selects -- is marked, or goes through
+// usageExit.
 func errExit(err error) int {
 	fmt.Fprintln(os.Stderr, "error:", err)
-	return 1
+	return exitcode.Code(err)
 }
 
+// usageExit prints err exactly as errExit does and exits 2: the tool refused
+// before acting because of what it was given.
+func usageExit(err error) int {
+	fmt.Fprintln(os.Stderr, "error:", err)
+	return exitcode.Usage
+}
+
+// failFast reports the first issue gen found in what the env file and workflows
+// describe, before anything ran, so it exits 2.
 func failFast(errs []gen.Issue) int {
 	fmt.Fprintln(os.Stderr, "error:", errs[0].String())
-	return 1
+	return exitcode.Usage
 }
 
 // failAll reports every error, one per line, and exits non-zero.
@@ -1598,7 +1800,7 @@ func failAll(errs []error) int {
 	for _, err := range errs {
 		fmt.Fprintln(os.Stderr, "error:", err)
 	}
-	return 1
+	return exitcode.Failure
 }
 
 func printWarnings(warns []gen.Issue) {

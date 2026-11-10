@@ -232,7 +232,7 @@ func TestCreatedStoresOnEachPlatform(t *testing.T) {
 	if len(dp.Stores) != 1 || dp.Stores[0].Secret != "_GEN_TLS_TS_STORE" || !dp.Stores[0].Build.Trusted || dp.Image != "img:v1" || len(dp.Mounts) != 0 {
 		t.Fatalf("docker plan = %+v, want one trusted created store, no bind mount", dp)
 	}
-	if !strings.Contains(dp.Compose, "      - source: _GEN_TLS_TS_STORE\n        target: /app/external/var/stores/ts\n") {
+	if !strings.Contains(dp.Compose, "      - source: \"_GEN_TLS_TS_STORE\"\n        target: /app/external/var/stores/ts\n") {
 		t.Errorf("the compose does not carry the created store:\n%s", dp.Compose)
 	}
 	env, _, err := ResolveDockerStores(dp, res, 131072, "linux")
@@ -444,10 +444,10 @@ func TestValidateReadsWhatDeployReads(t *testing.T) {
 		{name: "a created store that does not build", req: validateEnv(created("ts", "CA_PW", "./junk.pem")+existing("ks", "./k.p12"), docker),
 			errs: []string{"holds no certificate"}},
 		{name: "unset password: built with a stand-in", req: validateEnv(created("ts", "NOPE", "./junk.pem")+existing("ks", "./k.p12"), podman),
-			errs: []string{"holds no certificate"}, warns: []string{"tls.stores.ts.password-env names NOPE, which is not set in this environment"}},
+			errs: []string{"holds no certificate"}, warns: []string{"tls.stores.ts.password-env names environment variable NOPE, which is not set; export it before running"}},
 		{name: "unset password: a JKS is not opened, but read", req: validateEnv("    ts:\n      password-env: NOPE\n      create:\n        jks: ./gone.jks\n"+existing("ks", "./k.p12"), kube),
 			errs:  []string{`reading tls.stores.ts.create.jks "./gone.jks"`},
-			warns: []string{"tls.stores.ts.password-env names NOPE, which is not set in this environment"}},
+			warns: []string{"tls.stores.ts.password-env names environment variable NOPE, which is not set; export it before running"}},
 		{name: "unset password: a JKS that is not one", req: validateEnv("    ts:\n      password-env: NOPE\n      create:\n        jks: ./t.p12\n"+existing("ks", "./k.p12"), kube),
 			errs: []string{`tls.stores.ts.create.jks (./t.p12) is already a PKCS12 file, not a JKS`}},
 		{name: "unset password: a JKS beside certs, the certs still built", req: validateEnv("    ts:\n      password-env: NOPE\n      create:\n        certs:\n          - ./junk.pem\n        jks: ./jks.p12\n"+existing("ks", "./k.p12"), kube),

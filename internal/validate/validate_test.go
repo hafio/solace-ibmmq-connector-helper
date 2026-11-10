@@ -396,7 +396,8 @@ func TestDeployKubeChecks(t *testing.T) {
 }
 
 // TestCredentialsEnvChecks covers checkDefaultsCredentials: a store password-env
-// that names a variable absent from the environment is a WARNING, not an error:
+// that names a variable absent from the environment, or set but empty, is a
+// WARNING, not an error:
 // authoring a spec or generating a config must not require every production
 // credential to be exported. The deploy path resolves values and fails hard there.
 func TestCredentialsEnvChecks(t *testing.T) {
@@ -408,18 +409,32 @@ func TestCredentialsEnvChecks(t *testing.T) {
 		Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("MQ", spec.DestQueue, false))},
 		Defaults:  d, Env: env,
 	})
-	if !hasErr(warns, `tls.stores.ts.password-env names TRUSTSTORE_PASSWORD, which is not set in this environment`) {
+	if !hasErr(warns, `tls.stores.ts.password-env names environment variable TRUSTSTORE_PASSWORD, which is not set; export it before running`) {
 		t.Fatalf("want missing-env-var warning, got %v", warns)
 	}
 	if hasErr(errs, "TRUSTSTORE_PASSWORD") {
 		t.Fatalf("an unset -env variable must not be fatal at validate time, got %v", errs)
+	}
+
+	// Set but empty warns too, and says so: deploying with a blank password is
+	// refused, and the fix differs from a missing export.
+	empty := func(string) (string, bool) { return "", true }
+	errs, warns = Run(Context{
+		Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), vMQ("MQ", spec.DestQueue, false))},
+		Defaults:  d, Env: empty,
+	})
+	if !hasErr(warns, `tls.stores.ts.password-env names environment variable TRUSTSTORE_PASSWORD, which is set but empty; export it before running`) {
+		t.Fatalf("want set-but-empty warning, got %v", warns)
+	}
+	if hasErr(errs, "TRUSTSTORE_PASSWORD") {
+		t.Fatalf("a set but empty -env variable must not be fatal at validate time, got %v", errs)
 	}
 }
 
 // TestCheckCredRules pins the checkCred rules for one credential position: the
 // literal/-env forms are mutually exclusive, an -env value must be a bare
 // variable name (not a ${...} reference), it must be a valid identifier, and --
-// when Context.Env is supplied -- it must actually be set.
+// when Context.Env is supplied -- it must actually be set and not empty.
 func TestCheckCredRules(t *testing.T) {
 	side := func(mutate func(*spec.Side)) spec.Side {
 		s := vMQ("MQ", spec.DestQueue, false)
@@ -438,12 +453,12 @@ func TestCheckCredRules(t *testing.T) {
 		{
 			name: "both literal and env set",
 			s:    side(func(s *spec.Side) { s.Password = "secret" }), // PasswordEnv already set by vMQ
-			want: "sets both a literal value and target password-env",
+			want: "target password and target password-env are both set",
 		},
 		{
 			name: "env value is a ${...} reference, not a bare name",
 			s:    side(func(s *spec.Side) { s.PasswordEnv = "${MQ_PASSWORD}" }),
-			want: "must be a bare variable name, not a ${...} reference",
+			want: "target password-env holds a variable reference, not a name",
 		},
 		{
 			name: "env value is not a valid identifier",
@@ -454,7 +469,14 @@ func TestCheckCredRules(t *testing.T) {
 			name:      "env var unset when Env is supplied",
 			s:         side(func(s *spec.Side) {}),
 			env:       func(string) (string, bool) { return "", false },
-			want:      "which is not set in this environment",
+			want:      "target password-env names environment variable MQ_PASSWORD, which is not set; export it before running",
+			asWarning: true,
+		},
+		{
+			name:      "env var set but empty when Env is supplied",
+			s:         side(func(s *spec.Side) {}),
+			env:       func(string) (string, bool) { return "", true },
+			want:      "target password-env names environment variable MQ_PASSWORD, which is set but empty; export it before running",
 			asWarning: true,
 		},
 	}
@@ -486,6 +508,28 @@ func TestCheckCredLiteralLooksLikeEnvRefWarns(t *testing.T) {
 	})
 	if !hasErr(warns, "target password looks like a variable reference; it is used as a literal value. Use target password-env: VAR") {
 		t.Fatalf("want literal-looks-like-env-ref warning, got %v", warns)
+	}
+}
+
+// TestCheckCredInvalidNameNotEchoed pins the envref rule that a name failing the
+// name rules is never printed: the likeliest such "name" is the secret itself,
+// pasted into the -env key by mistake.
+func TestCheckCredInvalidNameNotEchoed(t *testing.T) {
+	for _, name := range []string{"s3cr3t pass!", "${S3CR3TPASS}", "1s3cr3tpass"} {
+		m := vMQ("MQ", spec.DestQueue, false)
+		m.PasswordEnv = name
+		errs, warns := Run(Context{
+			Workflows: []spec.Workflow{wf("x.yaml", vSolace("Q", spec.DestQueue, ""), m)},
+			Defaults:  &spec.Defaults{}, Env: func(string) (string, bool) { return "v", true },
+		})
+		if !hasErr(errs, "target password-env") {
+			t.Fatalf("%q: want an error naming the key, got errs=%v", name, errs)
+		}
+		for _, e := range append(errs, warns...) {
+			if strings.Contains(e.String(), name) {
+				t.Errorf("%q must not be echoed back, got %q", name, e.String())
+			}
+		}
 	}
 }
 

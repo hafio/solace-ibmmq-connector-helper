@@ -81,10 +81,10 @@ func sharedIDs(ra spec.RunAsID) hostReader {
 func rootlessIDs(ra spec.RunAsID) hostReader {
 	h := hostReader{runAs: ra, uid: -1, gid: -1}
 	if ra.Image || ra.UID == 0 {
-		h.uid = os.Getuid()
+		h.uid = os.Geteuid()
 	}
 	if ra.Image || ra.GID == 0 {
-		h.gid = os.Getgid()
+		h.gid = os.Getegid()
 	}
 	return h
 }
@@ -245,91 +245,13 @@ func (h hostReader) can(info fs.FileInfo, want fs.FileMode) bool {
 	}
 }
 
-// subIDWarnings checks that rootless podman can map the run-as ids at all.
-// Container id 0 is the invoking user and ids 1..n are the n subordinate ids
-// /etc/subuid and /etc/subgid grant that user (several ranges add up), so a
-// non-zero id needs a range at least that wide; with none at all the user
-// namespace holds only the invoker, and the unit fails to start where root in
-// the container used to work. A grant can also come from elsewhere (an NSS
-// subid plugin), which is why this only warns. read is os.ReadFile; uid and
-// name identify the invoking user.
-func subIDWarnings(ra spec.RunAsID, read func(string) ([]byte, error), uid int, name string) []string {
-	if ra.Image || (ra.UID == 0 && ra.GID == 0) || !subIDsFromFiles(read) {
-		return nil
-	}
-	var out []string
-	for _, c := range []struct {
-		file, what string
-		id         int
-	}{{"/etc/subuid", "uid", ra.UID}, {"/etc/subgid", "gid", ra.GID}} {
-		if c.id == 0 {
-			continue // id 0 is the invoking user or group itself
-		}
-		n := subIDCount(read, c.file, uid, name)
-		switch {
-		case n >= c.id:
-			continue
-		case n == 0:
-			out = append(out, fmt.Sprintf("podman.run-as %s needs a subordinate %s range, but %s grants %s none, so rootless podman cannot map %s %d and the unit will not start. Add a range no other user holds (for example sudo usermod --add-sub%ss 100000-165535 %s, then podman system migrate), deploy as root, or set podman.run-as: image",
-				ra, c.what, c.file, name, c.what, c.id, c.what, name))
-		default:
-			out = append(out, fmt.Sprintf("podman.run-as %s needs %s %d mapped, but %s grants %s %d subordinate ids, which map container ids up to %d, so the unit will not start. Widen the range (sudo usermod --add-sub%ss, then podman system migrate), pick a smaller id, or deploy as root",
-				ra, c.what, c.id, c.file, name, n, n, c.what))
-		}
-	}
-	return out
-}
-
-// subIDCount totals the subordinate ids file grants the user named name (or
-// numbered uid): lines are owner:start:count, and an owner may hold several.
-// An unreadable file grants none.
-func subIDCount(read func(string) ([]byte, error), file string, uid int, name string) int {
-	data, err := read(file)
-	if err != nil {
-		return 0
-	}
-	total := 0
-	for _, line := range strings.Split(string(data), "\n") {
-		f := strings.Split(strings.TrimSpace(line), ":")
-		if len(f) != 3 || (f[0] != name && f[0] != strconv.Itoa(uid)) {
-			continue
-		}
-		if n, err := strconv.Atoi(f[2]); err == nil && n > 0 {
-			total += n
-		}
-	}
-	return total
-}
-
-// subIDsFromFiles reports whether the subordinate ids come from /etc/subuid
-// and /etc/subgid: yes unless /etc/nsswitch.conf names another source on a
-// subid: line. shadow-utils reads one source, so an SSSD or other plugin there
-// replaces the files, and their contents say nothing.
-func subIDsFromFiles(read func(string) ([]byte, error)) bool {
-	data, err := read("/etc/nsswitch.conf")
-	if err != nil {
-		return true
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if i := strings.IndexByte(line, '#'); i >= 0 {
-			line = line[:i]
-		}
-		key, val, ok := strings.Cut(line, ":")
-		if !ok || strings.TrimSpace(key) != "subid" {
-			continue
-		}
-		src := strings.Fields(val)
-		return len(src) == 0 || (len(src) == 1 && src[0] == "files")
-	}
-	return true
-}
-
-// currentUserName is the invoking user's login name, which /etc/subuid lines
-// usually start with, or its uid in decimal when the name cannot be looked up
-// (subIDCount matches either).
+// currentUserName is the effective user's login name, which /etc/subuid lines
+// usually start with and which an administrator's usermod line names, or its
+// uid in decimal when the name cannot be looked up.
 func currentUserName() string {
-	if u, err := user.Current(); err == nil && u.Username != "" {
+	euid := strconv.Itoa(os.Geteuid())
+	if u, err := user.LookupId(euid); err == nil && u.Username != "" {
 		return u.Username
 	}
-	return strconv.Itoa(os.Getuid())
+	return euid
 }

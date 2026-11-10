@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
 )
 
 // parseKube decodes a kubernetes: section through ParseEnv, the path every
@@ -178,9 +180,10 @@ func TestDerivedObjectNames(t *testing.T) {
 	}
 }
 
-// TestCreatedNames pins the list remove uses to recognise its own objects and
-// validate uses to hold each name to a DNS-1123 label: the Deployment and its
-// ConfigMap always, then exactly the Secrets and claim the config asks for.
+// TestCreatedNames pins the list the namespace gate uses to recognise its own
+// objects and validate uses to hold each name to a DNS-1123 label: the Deployment,
+// its Service and its ConfigMap always, then exactly the Secrets and claim the
+// config asks for, each with its kind.
 func TestCreatedNames(t *testing.T) {
 	all := parseKube(t, `  secrets:
     credentials:
@@ -194,13 +197,19 @@ func TestCreatedNames(t *testing.T) {
       create:
         nfs: {server: nfs1, path: /libs}
 `)
-	want := []string{"solmq", "solmq-config", "solmq-credentials", "solmq-stores", "solmq-image-pull", "solmq-libs"}
+	want := []nsgate.Object{
+		{Kind: "Deployment", Name: "solmq"}, {Kind: "Service", Name: "solmq"}, {Kind: "ConfigMap", Name: "solmq-config"},
+		{Kind: "Secret", Name: "solmq-credentials"}, {Kind: "Secret", Name: "solmq-stores"},
+		{Kind: "Secret", Name: "solmq-image-pull"}, {Kind: "PersistentVolumeClaim", Name: "solmq-libs"},
+	}
 	if got := all.CreatedNames(); !reflect.DeepEqual(got, want) {
 		t.Errorf("CreatedNames = %v, want %v", got, want)
 	}
 
 	referenced := parseKube(t, "  secrets:\n    credentials:\n      existing: their-creds\n    image-pull:\n      name: regcred\n")
-	if got, want := referenced.CreatedNames(), []string{"solmq", "solmq-config", "solmq-stores"}; !reflect.DeepEqual(got, want) {
+	if got, want := referenced.CreatedNames(), []nsgate.Object{
+		{Kind: "Deployment", Name: "solmq"}, {Kind: "Service", Name: "solmq"}, {Kind: "ConfigMap", Name: "solmq-config"},
+		{Kind: "Secret", Name: "solmq-stores"}}; !reflect.DeepEqual(got, want) {
 		t.Errorf("CreatedNames = %v, want %v -- a referenced object is not the tool's, the stores Secret always is", got, want)
 	}
 }

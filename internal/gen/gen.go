@@ -6,8 +6,11 @@
 package gen
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -17,6 +20,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hafio/go-deploy-utility/envref"
+	"github.com/hafio/go-deploy-utility/execguard"
+	"github.com/hafio/go-deploy-utility/kube/nsgate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/consolidate"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/deploy"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/dockergen"
@@ -66,6 +72,11 @@ type Resolver struct {
 	// environment variable holds for a docker created store (EnvVarMax).
 	// Tests pin it; empty means runtime.GOOS.
 	GOOS string
+	// Approvals are the operator's --allow-command approvals for this run,
+	// threaded into every command-field check. The zero value approves nothing,
+	// which is what `generate` and `validate` use, so an exotic command validates
+	// clean only at deploy time.
+	Approvals execguard.Approvals
 }
 
 func (res Resolver) now() time.Time {
@@ -108,7 +119,8 @@ func Config(r Request, res Resolver) (out string, errs, warns []Issue) {
 	if len(errs) > 0 {
 		return "", errs, warns
 	}
-	statusPW, err := resolveStatusPassword(res)
+	// No platform, so no artifact a redeploy compares: random, as on kubernetes.
+	statusPW, err := resolveStatusPassword(res, "", nil)
 	if err != nil {
 		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
@@ -182,9 +194,9 @@ const statusPasswordPlaceholder = "validate-only-placeholder"
 // Credentials/stores are resolved and embedded (stringData/base64), so this is
 // the same rendered output the deploy path applies.
 //
-// extraAllowed threads deploy/remove's --allow-command values into the
-// kubernetes.command allowlist check; plain `generate kubernetes` calls this
-// with none, so an exotic command validates clean only at deploy time.
+// res.Approvals threads the --allow-command approvals into the kubernetes.command
+// allowlist check; plain `generate kubernetes` leaves it empty, so an exotic
+// command validates clean only at deploy time.
 // KubeOpts steers the kubernetes render, mirroring PodmanOpts rather than
 // widening the signature every time a caller needs a variant.
 type KubeOpts struct {
@@ -194,6 +206,14 @@ type KubeOpts struct {
 	// every Secret is rendered by name alone (deploy.Input.Teardown), so remove
 	// needs no exported credential and no store source.
 	Teardown bool
+	// OmitNamespace renders a deploy without the Namespace document
+	// (deploy.Input.OmitNamespace), for a caller that creates the namespace on its
+	// own only when it is absent. `generate kubernetes` leaves it false.
+	OmitNamespace bool
+	// Written, when non-nil, receives the objects the rendered set writes, by kind
+	// and name (deploy.Written), for the permission probes that run before the
+	// apply or the delete.
+	Written *[]nsgate.Object
 	// Probes, when non-nil, receives the Secrets the rendered pod reads but the
 	// tool does not write -- each operator Secret a store names
 	// (existing.secret) and an existing credentials Secret -- with the keys the
@@ -210,7 +230,7 @@ type SecretProbe struct {
 	Field string
 }
 
-func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...string) (out string, errs, warns []Issue) {
+func GenerateKubernetes(r Request, res Resolver, opts KubeOpts) (out string, errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
 	k := e.Kubernetes
 	if k == nil {
@@ -226,7 +246,7 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		CheckKubernetes: true,
 		Teardown:        opts.Teardown,
 		Env:             res.Env,
-		AllowCommands:   extraAllowed,
+		AllowCommands:   res.Approvals,
 	})
 	errs = append(pissues, verrs...)
 	warns = append(ewarns, w...)
@@ -234,7 +254,9 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 		return "", errs, warns
 	}
 
-	statusPW, err := resolveStatusPassword(res)
+	// Random, never derived: on kubernetes the literal sits in a ConfigMap, which
+	// may be readable where the credentials' Secrets are not (resolveStatusPassword).
+	statusPW, err := resolveStatusPassword(res, "", nil)
 	if err != nil {
 		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
@@ -248,7 +270,8 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 	if rerrs != nil {
 		return "", rerrs, warns
 	}
-	in := deploy.Input{Kube: k, Defaults: &e.Defaults, Syslog: e.Defaults.Syslog, Teardown: opts.Teardown}
+	in := deploy.Input{Kube: k, Defaults: &e.Defaults, Syslog: e.Defaults.Syslog, Teardown: opts.Teardown,
+		OmitNamespace: opts.OmitNamespace}
 	switch {
 	case opts.Teardown:
 		// Delete needs names only: no credential is resolved, no store opened.
@@ -295,7 +318,15 @@ func GenerateKubernetes(r Request, res Resolver, opts KubeOpts, extraAllowed ...
 			return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 		}
 	}
-	return deploy.Render(in), nil, warns
+	if opts.Written != nil {
+		*opts.Written = deploy.Written(in)
+	}
+	// Render refuses only a namespace validate.Run has already reported above.
+	rendered, err := deploy.Render(in)
+	if err != nil {
+		return "", []Issue{{File: fileEnv, Msg: err.Error()}}, warns
+	}
+	return rendered, nil, warns
 }
 
 // secretProbes lists the operator-managed Secrets the rendered pod mounts and
@@ -373,9 +404,9 @@ func StoreField(store string) string { return "tls.stores." + store + ".existing
 // application.yml inlined under compose configs:). Store/libs host paths are
 // resolved to absolute so the compose is portable regardless of cwd.
 //
-// extraAllowed threads deploy/remove's --allow-command values into the
-// docker.command allowlist check; plain `generate docker` calls this with none.
-func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan DockerPlan, errs, warns []Issue) {
+// res.Approvals threads the --allow-command approvals into the docker.command
+// allowlist check; plain `generate docker` leaves it empty.
+func GenerateDocker(r Request, res Resolver) (plan DockerPlan, errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
 	d := e.Docker
 	if d == nil {
@@ -383,7 +414,7 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 	}
 	verrs, w := validate.Run(validate.Context{
 		Workflows: wfs, Defaults: &e.Defaults, Image: e.Image, Timezone: e.Timezone, JavaOptions: e.JavaOptions, Docker: d, CheckDocker: true, Env: res.Env,
-		AllowCommands: extraAllowed,
+		AllowCommands: res.Approvals,
 	})
 	errs = append(pissues, verrs...)
 	warns = append(ewarns, w...)
@@ -391,7 +422,7 @@ func GenerateDocker(r Request, res Resolver, extraAllowed ...string) (plan Docke
 		return DockerPlan{}, errs, warns
 	}
 
-	statusPW, err := resolveStatusPassword(res)
+	statusPW, err := statusPasswordFor(res, d.Name, wfs, &e.Defaults)
 	if err != nil {
 		return DockerPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
@@ -657,9 +688,9 @@ func ResolvePodmanFiles(files []PodmanFile, res Resolver) ([]KV, []Issue, error)
 // documents and stores it mounts are returned on the plan for deploy to load
 // into podman's secret store; nothing is read from or written to the host here.
 //
-// extraAllowed threads deploy/remove's --allow-command values into the
-// podman.command allowlist check; plain `generate podman` calls this with none.
-func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan PodmanPlan, errs, warns []Issue) {
+// res.Approvals threads the --allow-command approvals into the podman.command
+// allowlist check; plain `generate podman` leaves it empty.
+func GeneratePodman(r Request, res Resolver) (plan PodmanPlan, errs, warns []Issue) {
 	wfs, e, pissues, ewarns := parse(r, res)
 	p := e.Podman
 	if p == nil {
@@ -667,7 +698,7 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 	}
 	verrs, w := validate.Run(validate.Context{
 		Workflows: wfs, Defaults: &e.Defaults, Image: e.Image, Timezone: e.Timezone, JavaOptions: e.JavaOptions, Podman: p, CheckPodman: true, Env: res.Env,
-		AllowCommands: extraAllowed,
+		AllowCommands: res.Approvals,
 	})
 	errs = append(pissues, verrs...)
 	warns = append(ewarns, w...)
@@ -675,7 +706,7 @@ func GeneratePodman(r Request, res Resolver, extraAllowed ...string) (plan Podma
 		return PodmanPlan{}, errs, warns
 	}
 
-	statusPW, err := resolveStatusPassword(res)
+	statusPW, err := statusPasswordFor(res, p.Name, wfs, &e.Defaults)
 	if err != nil {
 		return PodmanPlan{}, []Issue{{File: fileEnv, Msg: err.Error()}}, warns
 	}
@@ -760,7 +791,9 @@ func runAsOf(section, raw string) (spec.RunAsID, []Issue) {
 // value, an -env reference the value of that host variable. The result is secret
 // material -- callers hand it straight to the secret store and never log it.
 //
-// Errors name the stable secret name and the variable, never a value.
+// An -env variable that is unset or set but empty is an error: deploying with a
+// blank password is worse than refusing to deploy. Errors name the stable secret
+// name and the variable, never a value.
 func ResolveCredentials(refs []consolidate.SecretRef, res Resolver) ([]KV, error) {
 	out := make([]KV, 0, len(refs))
 	for _, r := range refs {
@@ -768,32 +801,78 @@ func ResolveCredentials(refs []consolidate.SecretRef, res Resolver) ([]KV, error
 			out = append(out, KV{Key: r.Stable, Val: r.Literal})
 			continue
 		}
-		if res.Env == nil {
-			return nil, fmt.Errorf("secret %s reads environment variable %s, but this command has no environment access", r.Stable, r.EnvVar)
-		}
-		v, ok := res.Env(r.EnvVar)
-		if !ok {
-			return nil, fmt.Errorf("secret %s: environment variable %s is not set; export it before deploying", r.Stable, r.EnvVar)
+		field := "secret " + r.Stable
+		v, err := envref.Ref{Field: field, EnvKey: field, Name: r.EnvVar}.Resolve(res.Env)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, KV{Key: r.Stable, Val: v})
 	}
 	return out, nil
 }
 
+// statusPasswordLabel versions the derivation of the reserved status account's
+// password (see resolveStatusPassword): changing how it is derived must change
+// every password, so the label changes with it.
+const statusPasswordLabel = "solmq-conn-util/status-password/v1"
+
+// statusPasswordFor is the password for a docker or podman deployment name, resolved from
+// the workflows and defaults it will render. The credentials it is derived from are
+// the model's secret references, and those do not depend on the status password
+// (it is a literal user, never a secret reference), so the model is built once with a
+// placeholder to collect them and the real build follows with the result: no
+// circularity. A model that cannot be built (a mount-name collision) or whose
+// credentials cannot be resolved here -- generate and validate tolerate an unset
+// -env variable; deploy refuses one separately, before it uses the artifact --
+// gets no derived password: resolveStatusPassword then falls back to a random one,
+// and the real build reports the collision.
+func statusPasswordFor(res Resolver, name string, wfs []spec.Workflow, d *spec.Defaults) (string, error) {
+	var refs []consolidate.SecretRef
+	if b, _, err := build(wfs, d, statusPasswordPlaceholder); err == nil {
+		refs = b.model.Secrets
+	}
+	return resolveStatusPassword(res, name, refs)
+}
+
 // resolveStatusPassword returns the password for the tool-reserved status
 // actuator account (spec.StatusUserName): the operator's override from
 // spec.StatusUserPasswordEnvVar when set and non-empty (validate.Run has
-// already charset-checked it, so it is used verbatim), otherwise 16 random
-// bytes hex-encoded into a 32-lowercase-hex-char literal. The result is
-// rendered as a literal that the in-container status script (internal/
-// statusscript) reads back out of application.yml, so it must be strong by
-// default -- never a fixed or predictable fallback -- and it must stay
-// stable within one generate call, which is why every build() call site
-// resolves it exactly once and threads the same value through.
-func resolveStatusPassword(res Resolver) (string, error) {
+// already charset-checked it, so it is used verbatim); otherwise one derived from
+// the deployment's own secrets, so it is the same on every render until a
+// credential changes; and only when there is nothing to derive it from, 16
+// random bytes.
+//
+// The derivation is the first 16 bytes of an HMAC-SHA-256, hex-encoded into the
+// same 32-lowercase-hex-char literal a random one is. The key is every resolved
+// credential (key and value, each length-prefixed, sorted by key so the order the
+// spec lists them in does not matter); the message is the versioned label and the
+// deployment name. A random password on every render made every redeploy look
+// changed, while a credential rotation changes the artifact anyway. With no
+// credentials, or one that cannot be resolved, the key would be empty or partial,
+// so that case is the random path, never a keyed one.
+//
+// Only docker and podman pass refs: whoever can read their artifact (the docker
+// group, or the podman secret's owner) can read the credentials themselves. On
+// kubernetes the literal sits in a ConfigMap, which RBAC may let someone read who
+// cannot read the credentials' Secrets, and a value derived from the credentials
+// would give them an offline check for every guess at one. Kubernetes and
+// `generate config` therefore pass none and stay random.
+//
+// The result is rendered as a literal that the in-container status script
+// (internal/statusscript) reads back out of application.yml, so it must be strong:
+// never a fixed or predictable fallback. It stays stable within one generate call
+// because every call site resolves it exactly once and threads the same value
+// through. It is secret material: nothing here prints it, and an error never
+// carries a credential value.
+func resolveStatusPassword(res Resolver, name string, refs []consolidate.SecretRef) (string, error) {
 	if res.Env != nil {
 		if v, ok := res.Env(spec.StatusUserPasswordEnvVar); ok && v != "" {
 			return v, nil
+		}
+	}
+	if len(refs) > 0 {
+		if kvs, err := ResolveCredentials(refs, res); err == nil {
+			return deriveStatusPassword(kvs, name), nil
 		}
 	}
 	read := res.Rand
@@ -805,6 +884,26 @@ func resolveStatusPassword(res Resolver) (string, error) {
 		return "", fmt.Errorf("generating the %s account password: %v; set %s to provide one explicitly", spec.StatusUserName, err, spec.StatusUserPasswordEnvVar)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// deriveStatusPassword is the HMAC described on resolveStatusPassword. kvs must not
+// be empty. Every field is length-prefixed, so no two different inputs are the same
+// bytes ("a"+"bc" is not "ab"+"c").
+func deriveStatusPassword(kvs []KV, name string) string {
+	sorted := slices.Clone(kvs)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Key < sorted[j].Key })
+	var key []byte
+	for _, kv := range sorted {
+		key = appendField(appendField(key, kv.Key), kv.Val)
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write(appendField(appendField(nil, statusPasswordLabel), name))
+	return hex.EncodeToString(mac.Sum(nil)[:16])
+}
+
+// appendField appends s to b behind its length as eight big-endian bytes.
+func appendField(b []byte, s string) []byte {
+	return append(binary.BigEndian.AppendUint64(b, uint64(len(s))), s...)
 }
 
 // ---- config building ---------------------------------------------------------

@@ -68,7 +68,7 @@ _solmq_conn_util_sets() {
 _solmq_conn_util_flags() {
   case "$1" in
     generate) printf '--platform -e --env -o --out' ;;
-    deploy) printf '--platform -e --env --allow-command' ;;
+    deploy) printf '--no-prompt --platform -e --env --allow-command' ;;
     remove) printf '--no-prompt --platform -e --env --allow-command' ;;
     start) printf '--platform -e --env --allow-command' ;;
     stop) printf '--platform -e --env --allow-command' ;;
