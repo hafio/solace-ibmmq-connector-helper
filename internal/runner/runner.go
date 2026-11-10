@@ -1025,7 +1025,7 @@ type ExecOpts struct {
 	TTY   bool
 }
 
-// ExecArgv builds the `<cmd> exec` argv shared by ScriptInstalled, InstallScript,
+// ExecArgv builds the `<cmd> exec` argv shared by InstallScript,
 // RunStatusScript and the cli verb's attached session, keeping the per-platform
 // shape in one place instead of repeating it in each caller. command is the
 // in-container program and its arguments, which the caller supplies and which must
@@ -1142,52 +1142,17 @@ func LogsArgv(cmd []string, platform, target, namespace string, o LogsOpts) ([]s
 	}
 }
 
-// Markers the presence probe echoes, distinctive enough that engine chatter on
-// the same combined-output stream cannot be mistaken for either answer.
-const (
-	ScriptPresentMarker = "solmq-script-present"
-	ScriptAbsentMarker  = "solmq-script-absent"
-)
+// ScriptAbsentMarker is the one line RunStatusScript's payload echoes when the
+// script is not there. It is distinctive enough that engine chatter on the same
+// combined-output stream cannot be mistaken for it, and a whole line rather than
+// a substring, so a report line that happens to quote it does not count.
+const ScriptAbsentMarker = "solmq-script-absent"
 
-// ScriptInstalled probes whether path already exists inside target, returning
-// (present, nil) on a clear answer and an error only when the probe itself
-// could not be carried out.
-//
-// The answer travels as a marker on stdout instead of an exit code, because an
-// exit code cannot carry it unambiguously: a remote non-zero exit is how
-// `test -f` says "no such file", but it is also how kubectl reports that it
-// could not reach the pod at all, and both arrive here as a failed Run with
-// text on combined output. Deciding between them by whether output happens to
-// be empty misreads whichever case it guesses wrong, and guessing "error" on a
-// missing file would refuse to install on precisely the targets that need it.
-//
-// path is a tool-authored constant, never operator input, so it is folded
-// into the sh -c payload as-is. target and namespace are operator-supplied and
-// must already be validated by the caller.
-func ScriptInstalled(ctx context.Context, r gdurunner.Runner, cmd []string, platform, target, namespace, path string) (bool, error) {
-	// The probe reports its answer as a marker on stdout and always exits 0,
-	// rather than letting "file missing" be a non-zero exit. kubectl exec
-	// surfaces a remote non-zero exit as its own failure plus a "command
-	// terminated with exit code 1" line, so an absent script and an unreachable
-	// pod are indistinguishable by exit status alone -- and treating the wrong
-	// one as an error would refuse to install on exactly the targets that need
-	// it. path is a tool constant, never operator input.
-	argv, err := ExecArgv(cmd, platform, target, namespace, ExecOpts{},
-		ContainerShell, "-c", "if [ -f "+path+" ]; then echo "+ScriptPresentMarker+"; else echo "+ScriptAbsentMarker+"; fi")
-	if err != nil {
-		return false, err
-	}
-	out, runErr := gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: argv})
-	switch {
-	case strings.Contains(out, ScriptPresentMarker):
-		return true, nil
-	case strings.Contains(out, ScriptAbsentMarker):
-		return false, nil
-	case runErr != nil:
-		return false, fmt.Errorf("probing %s on %s: %w\n%s", path, target, runErr, safeOut(out))
-	}
-	return false, fmt.Errorf("probing %s on %s: expected %s or %s in the output, got:\n%s", path, target, ScriptPresentMarker, ScriptAbsentMarker, safeOut(out))
-}
+// statusScriptPayload is the sh -c program RunStatusScript sends. The script's
+// path arrives as $0 and its arguments as $@, so neither is ever spliced into
+// the shell text. exec hands the exit status and both streams straight to the
+// script, which keeps the script's own always-exit-0 contract intact.
+const statusScriptPayload = `if [ -f "$0" ]; then exec ` + ContainerShell + ` "$0" "$@"; else echo ` + ScriptAbsentMarker + `; fi`
 
 // InstallScript pipes script onto the target's stdin and writes it to path,
 // creating path's directory first: `sh -c "mkdir -p '<dir>' && cat > '<path>'"` with
@@ -1217,8 +1182,11 @@ func InstallScript(ctx context.Context, r gdurunner.Runner, cmd []string, platfo
 	return gdurunner.Combined(ctx, r, c)
 }
 
-// RunStatusScript runs the already-installed status script (`sh <path>`) and
-// returns its combined output.
+// RunStatusScript runs the status script at path inside target when it is
+// there, in one exec that also answers whether it is: present is false only when
+// the payload echoed ScriptAbsentMarker on a line of its own, which it does
+// instead of running anything. That folds the install probe into the run, so a
+// deployed instance costs one exec rather than two.
 //
 // The script always exits 0 and reports through its output -- the leader-election
 // state on stdout, anything that went wrong on stderr -- so a non-zero exit
@@ -1227,13 +1195,20 @@ func InstallScript(ctx context.Context, r gdurunner.Runner, cmd []string, platfo
 // than as a state. Output is returned alongside any error so whatever the
 // engine printed is available for the message.
 //
-// path is a tool-authored constant, never operator input. target and
-// namespace are operator-supplied and must already be validated by the
-// caller.
-func RunStatusScript(ctx context.Context, r gdurunner.Runner, cmd []string, platform, target, namespace, path string) (string, error) {
-	argv, err := ExecArgv(cmd, platform, target, namespace, ExecOpts{}, ContainerShell, path)
+// path and args are tool-authored constants, never operator input, and travel
+// as positional parameters rather than inside the sh -c text. target and
+// namespace are operator-supplied and must already be validated by the caller.
+func RunStatusScript(ctx context.Context, r gdurunner.Runner, cmd []string, platform, target, namespace, path string, args ...string) (string, bool, error) {
+	command := append([]string{ContainerShell, "-c", statusScriptPayload, path}, args...)
+	argv, err := ExecArgv(cmd, platform, target, namespace, ExecOpts{}, command...)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: argv})
+	out, runErr := gdurunner.Combined(ctx, r, gdurunner.Cmd{Argv: argv})
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == ScriptAbsentMarker {
+			return "", false, nil
+		}
+	}
+	return out, true, runErr
 }

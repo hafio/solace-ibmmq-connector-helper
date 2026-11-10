@@ -82,6 +82,9 @@ func TestRenderHeaderHasExecOneLiners(t *testing.T) {
 		// The healthcheck is the one caller that passes an argument, so the
 		// header has to name it or the only non-zero exit looks unexplained.
 		"sh " + ContainerPath + " " + HealthArg,
+		// A hand run without the details argument reports less than the CLI's
+		// details level, so the header names the argument that adds the rest.
+		"Add " + DetailsArg + " after the path",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing exec one-liner %q in:\n%s", want, out)
@@ -225,7 +228,7 @@ func splitHealthBlock(t *testing.T, out string) (before, block, after string) {
 
 // TestRenderHealthModeShortCircuits pins the reason the healthcheck can run on
 // a timer at all: it must answer with one call to /actuator/health and stop.
-// The full report makes seven actuator calls and spawns a JVM for
+// The details report makes seven actuator calls and spawns a JVM for
 // `java -version`, which is far too much to repeat every interval inside a
 // container that is already memory- and CPU-limited.
 //
@@ -703,6 +706,76 @@ func TestRenderReportsJavaConfigAndHeap(t *testing.T) {
 	// Jackson's scientific notation (4.32013312E8) as 4.
 	if strings.Contains(out, "HEAP_USED / 1048576") {
 		t.Errorf("the script must not do the byte arithmetic itself:\n%s", out)
+	}
+}
+
+// splitDetailsBlock cuts the rendered script into the part before the
+// --details gate, the gate itself, and the part after it. The gate's body is
+// indented, so the first line that is exactly "fi" closes it.
+func splitDetailsBlock(t *testing.T, out string) (before, block, after string) {
+	t.Helper()
+	guard := `if [ -n "$DETAILS" ]; then` + "\n"
+	i := strings.Index(out, guard)
+	if i < 0 {
+		t.Fatalf("no details gate in:\n%s", out)
+	}
+	rel := strings.Index(out[i:], "\nfi\n")
+	if rel < 0 {
+		t.Fatalf("the details gate is never closed in:\n%s", out)
+	}
+	end := i + rel + len("\nfi\n")
+	return out[:i], out[i:end], out[end:]
+}
+
+// TestRenderGatesDetailsCallsBehindTheArg pins what the basic report saves:
+// without --details the script makes three actuator calls and starts no JVM,
+// and every call only the details lines need sits behind the gate.
+func TestRenderGatesDetailsCallsBehindTheArg(t *testing.T) {
+	out := Render(8090, "solmq-status")
+	_, _, afterHealth := splitHealthBlock(t, out)
+	before, block, after := splitDetailsBlock(t, afterHealth)
+
+	// The argument is read after the --health branch, which owns $1 when the
+	// engine's healthcheck runs, and compared with the exported constant.
+	if !strings.Contains(before, `if [ "${1:-}" = "`+DetailsArg+`" ]; then`+"\n  DETAILS=1\n") {
+		t.Errorf("DETAILS is not set from the %s argument after the %s branch:\n%s", DetailsArg, HealthArg, before)
+	}
+	if !strings.Contains(before, `DETAILS=""`) {
+		t.Errorf("DETAILS must start empty, or set -u aborts the basic report:\n%s", before)
+	}
+
+	for _, inside := range []string{
+		`get "$BASE/metrics/$1"`,
+		`UPTIME=$(metric process.uptime)`,
+		`INFO=$(get "$BASE/info")`,
+		`java -version`,
+		`HEAP_USED=$(metric 'jvm.memory.used?tag=area:heap')`,
+	} {
+		if !strings.Contains(block, inside) {
+			t.Errorf("%q belongs inside the details gate:\n%s", inside, block)
+		}
+	}
+	outside := before + after
+	for _, mustNot := range []string{"$BASE/metrics", "$BASE/info", "java -version", "metric "} {
+		if strings.Contains(outside, mustNot) {
+			t.Errorf("%q runs without %s, which is the cost the gate exists to skip", mustNot, DetailsArg)
+		}
+	}
+	// What the basic level renders, plus the free config line and the health
+	// components read from a document already fetched, stay ungated.
+	for _, want := range []string{
+		`LE=$(get "$BASE/leaderelection")`,
+		`HEALTH=$(get "$BASE/health")`,
+		`WF=$(get "$BASE/workflows")`,
+		`echo "config: $CONFIG_LIST"`,
+		`HC_ROWS=$(printf %s "$HEALTH" | health_components)`,
+	} {
+		if !strings.Contains(outside, want) {
+			t.Errorf("%q must run without %s:\n%s", want, DetailsArg, outside)
+		}
+	}
+	if n := strings.Count(outside, `get "$BASE/`); n != 3 {
+		t.Errorf("the basic report makes %d actuator calls, want 3 (leaderelection, health, workflows)", n)
 	}
 }
 

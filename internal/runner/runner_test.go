@@ -1666,117 +1666,6 @@ func TestSystemctlNRestarts(t *testing.T) {
 	}
 }
 
-// ---- ScriptInstalled -----------------------------------------------------------
-
-// probePayload is the sh -c program ScriptInstalled sends: it reports presence
-// as a marker on stdout and exits 0 either way, so a missing file cannot be
-// confused with an unreachable target (see ScriptInstalled's doc comment).
-const probePayload = "if [ -f /tmp/solmq-status.sh ]; then echo " + ScriptPresentMarker + "; else echo " + ScriptAbsentMarker + "; fi"
-
-func TestScriptInstalledArgv(t *testing.T) {
-	cases := []struct {
-		name      string
-		cmd       []string
-		platform  string
-		target    string
-		namespace string
-		want      []string
-	}{
-		{
-			name: "kubernetes no namespace", cmd: []string{"kubectl"}, platform: validate.PlatformKubernetes,
-			target: "pod-0",
-			want:   []string{"kubectl", "exec", "pod-0", "-c", spec.ConnectorContainerName, "--", "sh", "-c", probePayload},
-		},
-		{
-			name: "kubernetes with namespace", cmd: []string{"oc"}, platform: validate.PlatformKubernetes,
-			target: "pod-0", namespace: "solace",
-			want: []string{"oc", "exec", "pod-0", "-n", "solace", "-c", spec.ConnectorContainerName, "--", "sh", "-c", probePayload},
-		},
-		{
-			name: "docker", cmd: []string{"docker"}, platform: validate.PlatformDocker,
-			target: "solmq-connector",
-			want:   []string{"docker", "exec", "solmq-connector", "sh", "-c", probePayload},
-		},
-		{
-			name: "podman", cmd: []string{"podman"}, platform: validate.PlatformPodman,
-			target: "solmq-connector",
-			want:   []string{"podman", "exec", "solmq-connector", "sh", "-c", probePayload},
-		},
-	}
-	for _, c := range cases {
-		f := &fakeRunner{out: ScriptPresentMarker}
-		if _, err := ScriptInstalled(bg(), f, c.cmd, c.platform, c.target, c.namespace, "/tmp/solmq-status.sh"); err != nil {
-			t.Fatalf("%s: %v", c.name, err)
-		}
-		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
-			t.Errorf("%s: argv = %v, want %v", c.name, f.calls[0].argv, c.want)
-		}
-	}
-}
-
-// TestScriptInstalledReadsMarkers pins the marker contract, including that a
-// marker is believed even when the engine also reported a non-zero exit: the
-// probe answers on stdout precisely so the exit status does not have to carry
-// two different meanings.
-func TestScriptInstalledReadsMarkers(t *testing.T) {
-	cases := []struct {
-		name string
-		out  string
-		err  error
-		want bool
-	}{
-		{name: "present marker", out: ScriptPresentMarker + "\n", want: true},
-		{name: "absent marker", out: ScriptAbsentMarker + "\n", want: false},
-		{name: "marker among engine chatter", out: "Defaulted container to connector\n" + ScriptAbsentMarker + "\n", want: false},
-		{name: "present marker despite a non-zero exit", out: ScriptPresentMarker + "\n", err: fmt.Errorf("exit status 1"), want: true},
-	}
-	for _, c := range cases {
-		f := &fakeRunner{out: c.out, err: c.err}
-		got, err := ScriptInstalled(bg(), f, []string{"kubectl"}, validate.PlatformKubernetes, "pod-0", "", "/tmp/solmq-status.sh")
-		if err != nil {
-			t.Fatalf("%s: unexpected error %v", c.name, err)
-		}
-		if got != c.want {
-			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
-		}
-	}
-}
-
-// TestScriptInstalledUnreachableTargetIsError covers the case the markers
-// exist to separate out: no answer at all means the probe never ran, which must
-// surface as an error rather than a silent "absent" that would trigger an
-// install against a target that cannot be reached.
-func TestScriptInstalledUnreachableTargetIsError(t *testing.T) {
-	cases := []struct {
-		name string
-		out  string
-		err  error
-	}{
-		{name: "engine error, no marker", out: "Error: No such container: solmq-connector\n", err: fmt.Errorf("exit status 1")},
-		{name: "clean exit but no marker", out: "unexpected\n"},
-	}
-	for _, c := range cases {
-		f := &fakeRunner{out: c.out, err: c.err}
-		got, err := ScriptInstalled(bg(), f, []string{"docker"}, validate.PlatformDocker, "solmq-connector", "", "/tmp/solmq-status.sh")
-		if err == nil {
-			t.Fatalf("%s: a probe with no marker must surface as an error", c.name)
-		}
-		if got {
-			t.Errorf("%s: want false alongside the error", c.name)
-		}
-	}
-}
-
-func TestScriptInstalledUnknownPlatform(t *testing.T) {
-	f := &fakeRunner{}
-	if _, err := ScriptInstalled(bg(), f, []string{"kubectl"}, "bogus", "pod-0", "", "/tmp/solmq-status.sh"); err == nil {
-		t.Fatal("unknown platform must be rejected")
-	}
-	if len(f.calls) != 0 {
-		t.Fatal("nothing must run for an unknown platform")
-	}
-}
-
 // ---- InstallScript --------------------------------------------------------------
 
 func TestInstallScriptArgv(t *testing.T) {
@@ -1860,6 +1749,14 @@ func TestInstallScriptUnknownPlatform(t *testing.T) {
 
 // ---- RunStatusScript ------------------------------------------------------------
 
+// runPayload is the argv tail RunStatusScript sends after the engine's own
+// flags: the presence check and the run in one sh -c program, with the path and
+// any arguments as positional parameters rather than inside the program text.
+func runPayload(args ...string) []string {
+	return append([]string{"sh", "-c", `if [ -f "$0" ]; then exec sh "$0" "$@"; else echo ` + ScriptAbsentMarker + `; fi`,
+		"/tmp/solmq-status.sh"}, args...)
+}
+
 func TestRunStatusScriptArgv(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -1867,32 +1764,38 @@ func TestRunStatusScriptArgv(t *testing.T) {
 		platform  string
 		target    string
 		namespace string
+		args      []string
 		want      []string
 	}{
 		{
 			name: "kubernetes no namespace", cmd: []string{"kubectl"}, platform: validate.PlatformKubernetes,
 			target: "pod-0",
-			want:   []string{"kubectl", "exec", "pod-0", "-c", spec.ConnectorContainerName, "--", "sh", "/tmp/solmq-status.sh"},
+			want:   append([]string{"kubectl", "exec", "pod-0", "-c", spec.ConnectorContainerName, "--"}, runPayload()...),
 		},
 		{
 			name: "kubernetes with namespace", cmd: []string{"oc"}, platform: validate.PlatformKubernetes,
 			target: "pod-0", namespace: "solace",
-			want: []string{"oc", "exec", "pod-0", "-n", "solace", "-c", spec.ConnectorContainerName, "--", "sh", "/tmp/solmq-status.sh"},
+			want: append([]string{"oc", "exec", "pod-0", "-n", "solace", "-c", spec.ConnectorContainerName, "--"}, runPayload()...),
+		},
+		{
+			name: "kubernetes with an argument", cmd: []string{"kubectl"}, platform: validate.PlatformKubernetes,
+			target: "pod-0", args: []string{"--details"},
+			want: append([]string{"kubectl", "exec", "pod-0", "-c", spec.ConnectorContainerName, "--"}, runPayload("--details")...),
 		},
 		{
 			name: "docker", cmd: []string{"docker"}, platform: validate.PlatformDocker,
 			target: "solmq-connector",
-			want:   []string{"docker", "exec", "solmq-connector", "sh", "/tmp/solmq-status.sh"},
+			want:   append([]string{"docker", "exec", "solmq-connector"}, runPayload()...),
 		},
 		{
-			name: "podman", cmd: []string{"podman"}, platform: validate.PlatformPodman,
-			target: "solmq-connector",
-			want:   []string{"podman", "exec", "solmq-connector", "sh", "/tmp/solmq-status.sh"},
+			name: "podman with an argument", cmd: []string{"podman"}, platform: validate.PlatformPodman,
+			target: "solmq-connector", args: []string{"--details"},
+			want: append([]string{"podman", "exec", "solmq-connector"}, runPayload("--details")...),
 		},
 	}
 	for _, c := range cases {
 		f := &fakeRunner{}
-		if _, err := RunStatusScript(bg(), f, c.cmd, c.platform, c.target, c.namespace, "/tmp/solmq-status.sh"); err != nil {
+		if _, _, err := RunStatusScript(bg(), f, c.cmd, c.platform, c.target, c.namespace, "/tmp/solmq-status.sh", c.args...); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		if !reflect.DeepEqual(f.calls[0].argv, c.want) {
@@ -1901,24 +1804,59 @@ func TestRunStatusScriptArgv(t *testing.T) {
 	}
 }
 
-// TestRunStatusScriptReturnsOutputAlongsideNonZeroExit pins the contract: the
-// status script's own exit convention (1 standby, 2 error) is expected, not a
-// runner failure, so the output must never be dropped just because the exit
-// code is non-zero.
-func TestRunStatusScriptReturnsOutputAlongsideNonZeroExit(t *testing.T) {
-	f := &fakeRunner{err: fmt.Errorf("exit status 1"), out: "STANDBY\n"}
-	out, err := RunStatusScript(bg(), f, []string{"kubectl"}, validate.PlatformKubernetes, "pod-0", "", "/tmp/solmq-status.sh")
-	if err == nil {
-		t.Fatal("a non-zero script exit is expected and must be returned, not swallowed")
+// TestRunStatusScriptReadsTheAbsentMarker pins how one exec answers both
+// questions: the marker on a line of its own means the script is not there and
+// nothing ran, while anything else is the script's report.
+func TestRunStatusScriptReadsTheAbsentMarker(t *testing.T) {
+	cases := []struct {
+		name        string
+		out         string
+		wantPresent bool
+	}{
+		{name: "absent marker", out: ScriptAbsentMarker + "\n", wantPresent: false},
+		{name: "marker among engine chatter", out: "Defaulted container to connector\n" + ScriptAbsentMarker + "\r\n", wantPresent: false},
+		{name: "a report is present", out: "leader-election state: active\n", wantPresent: true},
+		{name: "marker inside a longer line is not absent", out: "health-detail: {\"x\":\"" + ScriptAbsentMarker + "\"}\n", wantPresent: true},
 	}
-	if out != "STANDBY\n" {
-		t.Errorf("output = %q, want %q alongside the error", out, "STANDBY\n")
+	for _, c := range cases {
+		f := &fakeRunner{out: c.out}
+		out, present, err := RunStatusScript(bg(), f, []string{"kubectl"}, validate.PlatformKubernetes, "pod-0", "", "/tmp/solmq-status.sh")
+		if err != nil {
+			t.Fatalf("%s: unexpected error %v", c.name, err)
+		}
+		if present != c.wantPresent {
+			t.Errorf("%s: present = %v, want %v", c.name, present, c.wantPresent)
+		}
+		if present && out != c.out {
+			t.Errorf("%s: output = %q, want the report %q", c.name, out, c.out)
+		}
+		if !present && out != "" {
+			t.Errorf("%s: an absent script has no report, got %q", c.name, out)
+		}
+	}
+}
+
+// TestRunStatusScriptReturnsOutputAlongsideNonZeroExit pins the contract: the
+// script itself always exits 0, so a non-zero exit is the exec failing (an
+// unreachable target), and whatever the engine printed must come back with the
+// error for the message rather than being dropped.
+func TestRunStatusScriptReturnsOutputAlongsideNonZeroExit(t *testing.T) {
+	f := &fakeRunner{err: fmt.Errorf("exit status 1"), out: "Error: No such container: solmq-connector\n"}
+	out, present, err := RunStatusScript(bg(), f, []string{"docker"}, validate.PlatformDocker, "solmq-connector", "", "/tmp/solmq-status.sh")
+	if err == nil {
+		t.Fatal("a failed exec must be returned, not swallowed")
+	}
+	if !present {
+		t.Error("a failed exec is not an absent script: no marker was seen, so nothing may be installed on its say-so")
+	}
+	if out != "Error: No such container: solmq-connector\n" {
+		t.Errorf("output = %q, want the engine's message alongside the error", out)
 	}
 }
 
 func TestRunStatusScriptUnknownPlatform(t *testing.T) {
 	f := &fakeRunner{}
-	if _, err := RunStatusScript(bg(), f, []string{"kubectl"}, "bogus", "pod-0", "", "/tmp/x.sh"); err == nil {
+	if _, _, err := RunStatusScript(bg(), f, []string{"kubectl"}, "bogus", "pod-0", "", "/tmp/x.sh"); err == nil {
 		t.Fatal("unknown platform must be rejected")
 	}
 	if len(f.calls) != 0 {

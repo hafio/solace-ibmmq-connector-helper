@@ -386,9 +386,9 @@ the `application` and `all` views only; with `container` they are a usage error.
 
 | Flag | Meaning |
 |---|---|
-| `-d`, `--details` | add the enrichment lines below. Costs one sampling call (`kubectl top`, `docker stats`); kubernetes needs a metrics API |
+| `-d`, `--details` | add the enrichment lines below. Costs one sampling call (`kubectl top`, `docker stats`), and four more actuator calls and a `java -version` inside each instance; kubernetes needs a metrics API |
 | `--all` | report every container whose image name contains `solace-pubsub-connector-ibmmq`: every namespace on kubernetes (a `NAMESPACE` column appears when they span several), every container on docker/podman, stopped ones included. Needs no `env.yaml` but still a `--platform`. Not with `--pod`/`--container` |
-| `-w`, `--watch` | re-render every 5s until Ctrl-C (exit 0); the 5s is the pause after each refresh, so a slow collection never shortens it. On a terminal the screen is redrawn under an `Every 5s: ...` header; when stdout is not a terminal each refresh is appended under a `=== <time> ===` section line, with no escape bytes. A refresh that fails is reported on stderr and the next one still runs. The install prompt is asked at most once |
+| `-w`, `--watch` | re-render every 5s until Ctrl-C (exit 0); the 5s is the pause after each refresh, so a slow collection never shortens it. The previous report stays on screen while the next one is collected. On a terminal the screen is redrawn under an `Every 5s: ...` header; when stdout is not a terminal each refresh is appended under a `=== <time> ===` section line, with no escape bytes. A refresh that fails is reported on stderr as a warning naming the retry, and the next one still runs. The install prompt is asked at most once |
 | `--output json` | one document on stdout, notes on stderr. Fields are a compatibility contract under `schemaVersion`; empty fields are omitted. Not with `--watch` |
 | `-v`, `--verbose` | one `step:` line per engine call on stderr, with its elapsed time, instead of the spinner. Printed whether or not stderr is a terminal; nothing under `--watch` |
 | `--pod`, `--container` | limit to these instances, by name or by index into the listed (alphabetical) order; repeatable |
@@ -404,7 +404,8 @@ the `application` and `all` views only; with `container` they are a usage error.
   only when the running image differs from `env.yaml`.
 - Application side: uptime, version, java, the config path the script read,
   heap against `-Xmx`, and per-component health. A line whose source answers
-  nothing is dropped.
+  nothing is dropped. Without `-d` the script does not collect uptime,
+  version, java or heap, so `--output json` omits them too.
 
 ```json
 {
@@ -424,8 +425,10 @@ the `application` and `all` views only; with `container` they are a usage error.
 }
 ```
 
-By default a spinner on stderr names the step in flight (`/ status script
-<pod> 1/2  4s`) and is erased before the report. It appears only when stderr is
+By default a spinner on stderr names the step in flight (`/ status script on
+2 instance(s)  4s`) and is erased before the report. Under `-v` each instance
+gets its own `step:` line as its script finishes, then one line for the whole
+batch. It appears only when stderr is
 a terminal. Progress never changes stdout or the exit code, so
 `status --output json > report.json` is the same bytes either way.
 
@@ -433,14 +436,15 @@ a terminal. Progress never changes stdout or the exit code, so
 
 - **0**: every instance was reported. A standby, an unhealthy container, a
   crash loop or a missing metrics API are answers, not failures.
-- **1**: an instance's script could not be probed, installed or run, or the
+- **1**: an instance's script was missing and not installed, or could not be
+  installed or run, or the
   run could not start (no instances, unreadable `env.yaml`, failed preflight).
 - **2**: usage error.
 
 | View | kubernetes | docker | podman |
 |---|---|---|---|
 | `container` | 1 `get pods` (+ `get deployment`/`get service`); no preflight | preflight + 1 `inspect` | preflight + 1 `inspect` + 1 `systemctl show` per instance (none when the podman scope cannot be resolved, which keeps podman's own count) |
-| `application` | + 1 probe and 1 script run per instance | same | same |
+| `application` | + 1 script run per instance, up to 4 at once; 1 install and 1 more run per instance missing the script | same | same |
 | `-d` adds | 1 `top pod` + 1 `get` per referenced object | 1 `stats` + 1 `image inspect` per image | as docker |
 | `--all` adds | nothing | 1 `ps` | 1 `ps` |
 
@@ -462,8 +466,11 @@ To run the script by hand:
 
 ```sh
 kubectl exec <pod> -- sh /app/external/.status-script
-docker exec <container> sh /app/external/.status-script
+docker exec <container> sh /app/external/.status-script --details
 ```
+
+Without `--details` it skips uptime, version, java and heap, which saves four
+actuator calls and a JVM start.
 
 It always exits 0 and prints problems on stderr, so branch on its output
 (`| grep -q 'state: active'`), not on `$?`. Run with `--health` it makes one

@@ -1,11 +1,11 @@
 package main
 
 // Progress reporting for status, which is the one verb that can spend a long
-// time collecting before it has anything to print. A status run makes two
-// container execs per instance and the script inside each one makes seven
-// sequential actuator calls, so on a real cluster the report can be tens of
-// seconds behind the command -- with nothing on screen to say the run is
-// advancing rather than hung.
+// time collecting before it has anything to print. A status run makes a
+// container exec per instance, several at once, and the script inside each one
+// makes three sequential actuator calls, or seven and a JVM start under
+// --details, so on a real cluster the report can be seconds behind the command
+// -- with nothing on screen to say the run is advancing rather than hung.
 //
 // Two renderings of the same steps, chosen once per run by newProgress:
 //
@@ -129,6 +129,20 @@ func (p *progress) step(format string, args ...any) {
 	}
 }
 
+// done reports one call that ran alongside others, with the time that call
+// took. Under --verbose it is a durable step line of its own, printed as the
+// call finishes, while the step in flight keeps naming the whole batch and is
+// still timed as one. The spinner draws nothing for it: its live line already
+// names the batch and counts its seconds.
+func (p *progress) done(took time.Duration, format string, args ...any) {
+	if p == nil || p.mode != progressSteps {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	fmt.Fprintf(p.w, "step: %s %s\n", fmt.Sprintf(format, args...), progressElapsed(took))
+}
+
 // stop ends the step in flight and leaves the stream as it found it: the live
 // line erased, no goroutine running. Idempotent, and a later step starts a new
 // one -- which is what lets both actStatus and collect defer it, so no path out
@@ -181,8 +195,9 @@ func (p *progress) startLocked() {
 	go p.spin(quit, joined)
 }
 
-// spin advances the live line until quit closes. It is the only goroutine this
-// tool runs besides logs's signal watcher.
+// spin advances the live line until quit closes. Besides it, this tool runs only
+// logs's signal watcher and status's script workers, which never touch progress
+// themselves (see runScripts).
 func (p *progress) spin(quit, joined chan struct{}) {
 	defer close(joined)
 	tick := time.NewTicker(progressFrameRate)

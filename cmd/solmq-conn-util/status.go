@@ -16,7 +16,10 @@ package main
 // for a whole selector, `inspect a b c`), so the cost of a status run barely
 // grows with the number of instances. Only the sampling calls under --details
 // (kubectl top, docker stats) and the in-container script exec are per-run or
-// per-instance costs beyond that.
+// per-instance costs beyond that. The exec is one per instance, checking for
+// the script and running it together, and several run at once (see
+// statusScriptWorkers), so its wall time is the slowest instance's rather than
+// the sum of all of them.
 //
 // Every fact collected here lands in an internal/statusreport model and is
 // rendered from it, so the table view and --output json can never disagree.
@@ -767,107 +770,180 @@ func quoteAll(vals []string) []string {
 
 // ---- the application half ----------------------------------------------------
 
-// collectApplication ensures the status script is present on each instance and
-// runs it, filling in each instance's application block. It reports whether any
-// instance could not be reached and run.
+// statusScriptWorkers is how many instances the status script runs on at once.
+// The script is the run's dominant cost, so running it side by side makes the
+// wall time the slowest instance's rather than the sum of all of them. Four keeps
+// an --all over many pods from opening dozens of exec streams against one API
+// server at once. A var rather than a const for the reason progressFrameRate is
+// one: a test sets it to 1 to pin the order the calls are made in.
+var statusScriptWorkers = 4
+
+// scriptResult is one instance's answer from runner.RunStatusScript: its
+// report, or that the script is not there, or why the exec failed.
+type scriptResult struct {
+	out     string
+	present bool
+	err     error
+}
+
+// collectApplication runs the status script on each instance, filling in each
+// instance's application block. It reports whether any instance could not be
+// reached and run.
 //
-// The probe/install phase is separate from the run phase on purpose: the
-// install confirmation is asked once for every instance that needs it, rather
-// than once per instance.
+// One exec per instance both checks for the script and runs it. Only the
+// instances found without it cost more: the install confirmation is asked once
+// for all of them, rather than once per instance, and each one installed is
+// then run.
 func (c *statusCollector) collectApplication(rep *statusreport.Report) bool {
-	script := statusscript.Render(c.opts.port, c.opts.user)
+	args := c.scriptArgs()
+	every := make([]int, len(rep.Instances))
+	for i := range every {
+		every[i] = i
+	}
+	missing, failed := c.applyScripts(rep, every, args)
+	if len(missing) == 0 {
+		return failed
+	}
+	installed, installFailed := c.installScripts(rep, missing)
+	stillMissing, runFailed := c.applyScripts(rep, installed, args)
+	// The install reported success but the run found nothing at the path: the
+	// write landed somewhere else, or was undone. Said against the instance
+	// rather than offered another install, which would only repeat itself.
+	markMissing(rep, stillMissing, "the status script is still missing after the install")
+	return failed || installFailed || runFailed || len(stillMissing) > 0
+}
+
+// scriptArgs is what the script is run with: DetailsArg only at the details
+// level, the one level that renders the lines it adds.
+func (c *statusCollector) scriptArgs() []string {
+	if c.opts.level == statusreport.LevelDetails {
+		return []string{statusscript.DetailsArg}
+	}
+	return nil
+}
+
+// applyScripts runs the script on the instances at idx and records each answer
+// against its instance: the parsed report, or why the script could not run. It
+// returns the instances the script was not found on, in report order, and
+// whether any instance could not be run.
+//
+// The script always exits 0 and puts its findings in the output, so an error
+// here is the exec failing rather than a standby instance -- reported against
+// that instance, so one unreachable instance does not hide the rest.
+func (c *statusCollector) applyScripts(rep *statusreport.Report, idx []int, args []string) ([]int, bool) {
 	failed := false
-
-	// Indexed by namespace and name, not by name alone: under --all two pods in
-	// different namespaces can share a name, and a bare-name key would report
-	// one of them with the other's answer.
 	var missing []int
-	present := map[int]bool{}
-	for i := range rep.Instances {
+	for n, res := range c.runScripts(rep, idx, args) {
+		i := idx[n]
 		inst := &rep.Instances[i]
-		c.prog.step("install probe %s %d/%d", inst.Name, i+1, len(rep.Instances))
-		ok, err := runner.ScriptInstalled(bg(), c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerPath)
-		if err != nil {
-			inst.Error = fmt.Sprintf("could not check for the status script: %v", err)
+		switch {
+		case res.err != nil:
+			inst.Error = fmt.Sprintf("could not run the status script: %v", res.err)
 			failed = true
-			continue
-		}
-		if ok {
-			present[i] = true
-		} else {
+		case !res.present:
 			missing = append(missing, i)
+		default:
+			inst.Application = statusreport.ParseApplication(res.out)
 		}
 	}
+	return missing, failed
+}
 
-	if len(missing) > 0 {
-		doInstall := c.opts.install
-		if !doInstall && !c.promptedInstall {
-			c.promptedInstall = true
-			// Paused around the prompt: the question goes to stderr too (see
-			// confirmInstall), so a spinner frame drawn under it would overwrite it.
-			var answer bool
-			var cerr error
-			c.prog.pause(func() {
-				answer, cerr = confirmInstall(instanceNames(rep, missing))
-			})
-			if cerr != nil {
-				// The prompt could not be asked at all (stdin is not a TTY). That
-				// cannot be resolved for these instances, but the ones that already
-				// carry the script are still worth reporting, so they are marked and
-				// the run carries on rather than being abandoned.
-				rep.Notes = append(rep.Notes, cerr.Error())
-				markMissing(rep, missing, "the status script is not installed")
-				missing = nil
-				failed = true
-			} else {
-				doInstall = answer
-			}
-		}
-		for n, i := range missing {
-			inst := &rep.Instances[i]
-			if !doInstall {
-				inst.Error = "the status script is not installed, and the install prompt was declined"
-				failed = true
-				continue
-			}
-			c.prog.step("install script %s %d/%d", inst.Name, n+1, len(missing))
-			if _, err := runner.InstallScript(bg(), c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerPath, script); err != nil {
-				inst.Error = fmt.Sprintf("could not install the status script: %v", err)
-				failed = true
-				continue
-			}
-			present[i] = true
-		}
+// runScripts runs the status script on the instances at idx, up to
+// statusScriptWorkers at a time, and returns each answer at its position in
+// idx. Positions rather than names: under --all two pods in different
+// namespaces can share a name.
+//
+// Only this goroutine touches rep and the progress line. The workers are handed
+// each name and namespace by value, take jobs in report order, and send back
+// what they found with how long it took, which is also why one worker makes the
+// calls in exactly report order.
+func (c *statusCollector) runScripts(rep *statusreport.Report, idx []int, args []string) []scriptResult {
+	results := make([]scriptResult, len(idx))
+	if len(idx) == 0 {
+		return results
 	}
+	type job struct {
+		n        int
+		name, ns string
+	}
+	type answer struct {
+		n    int
+		res  scriptResult
+		took time.Duration
+	}
+	jobs := make(chan job, len(idx))
+	for n, i := range idx {
+		jobs <- job{n: n, name: rep.Instances[i].Name, ns: rep.Instances[i].Namespace}
+	}
+	close(jobs)
+	answers := make(chan answer, len(idx))
 
-	// i/N counts the instances the script is actually run on, not every instance
-	// in the report: one whose probe failed, or whose install was declined, never
-	// gets a call, and counting it would leave a gap in the sequence the operator
-	// is watching for movement.
-	ran, total := 0, len(present)
-	for i := range rep.Instances {
+	c.prog.step("status script on %d instance(s)", len(idx))
+	for w := 0; w < max(1, min(statusScriptWorkers, len(idx))); w++ {
+		go func() {
+			for j := range jobs {
+				start := progressNow()
+				out, present, err := runner.RunStatusScript(bg(), c.r, c.cmdArgv, c.platform, j.name, j.ns, statusscript.ContainerPath, args...)
+				answers <- answer{n: j.n, res: scriptResult{out: out, present: present, err: err}, took: progressNow().Sub(start)}
+			}
+		}()
+	}
+	// i/N counts answers as they arrive, which is what tells an operator under
+	// --verbose that the batch is advancing rather than stuck on one exec.
+	for done := 1; done <= len(idx); done++ {
+		a := <-answers
+		results[a.n] = a.res
+		c.prog.done(a.took, "status script %s %d/%d", rep.Instances[idx[a.n]].Name, done, len(idx))
+	}
+	return results
+}
+
+// installScripts installs the status script on the missing instances, asking
+// first unless --install was given, and returns the ones it installed. The
+// question is asked at most once a run, so a watch loop does not block its
+// redraw on the same question every tick.
+func (c *statusCollector) installScripts(rep *statusreport.Report, missing []int) ([]int, bool) {
+	failed := false
+	doInstall := c.opts.install
+	if !doInstall && !c.promptedInstall {
+		c.promptedInstall = true
+		// Paused around the prompt: the question goes to stderr too (see
+		// confirmInstall), so a spinner frame drawn under it would overwrite it.
+		var answer bool
+		var cerr error
+		c.prog.pause(func() {
+			answer, cerr = confirmInstall(instanceNames(rep, missing))
+		})
+		if cerr != nil {
+			// The prompt could not be asked at all (stdin is not a TTY). That
+			// cannot be resolved for these instances, but the ones that already
+			// carry the script are still worth reporting, so they are marked and
+			// the run carries on rather than being abandoned.
+			rep.Notes = append(rep.Notes, cerr.Error())
+			markMissing(rep, missing, "the status script is not installed")
+			return nil, true
+		}
+		doInstall = answer
+	}
+	script := statusscript.Render(c.opts.port, c.opts.user)
+	var installed []int
+	for n, i := range missing {
 		inst := &rep.Instances[i]
-		if !present[i] {
-			continue
-		}
-		ran++
-		// The script always exits 0 and puts its findings in the output, so an
-		// error here is the exec failing rather than a standby instance -- report
-		// it against this instance and keep going, so one unreachable instance
-		// does not hide the rest.
-		//
-		// This is the run's dominant cost: one exec per instance, and seven
-		// sequential actuator calls inside each one.
-		c.prog.step("status script %s %d/%d", inst.Name, ran, total)
-		out, err := runner.RunStatusScript(bg(), c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerPath)
-		if err != nil {
-			inst.Error = fmt.Sprintf("could not run the status script: %v", err)
+		if !doInstall {
+			inst.Error = "the status script is not installed, and the install prompt was declined"
 			failed = true
 			continue
 		}
-		inst.Application = statusreport.ParseApplication(out)
+		c.prog.step("install script %s %d/%d", inst.Name, n+1, len(missing))
+		if _, err := runner.InstallScript(bg(), c.r, c.cmdArgv, c.platform, inst.Name, inst.Namespace, statusscript.ContainerPath, script); err != nil {
+			inst.Error = fmt.Sprintf("could not install the status script: %v", err)
+			failed = true
+			continue
+		}
+		installed = append(installed, i)
 	}
-	return failed
+	return installed, failed
 }
 
 // markMissing records why each of the given instances has no application
@@ -915,6 +991,12 @@ func (c *statusCollector) renderOnce(w io.Writer) int {
 	if err != nil {
 		return errExit(err)
 	}
+	return c.emit(w, rep, failed)
+}
+
+// emit prints a collected report, as the tables or as the JSON document, and
+// returns the exit code it stands for.
+func (c *statusCollector) emit(w io.Writer, rep statusreport.Report, failed bool) int {
 	if c.opts.json {
 		doc, jerr := statusreport.JSON(rep)
 		if jerr != nil {
@@ -970,22 +1052,32 @@ func watchTitle(o statusOpts) string {
 // the time, anything else gets a timestamped section line per refresh. The pause
 // is taken after each refresh, so a slow collection never shortens it.
 //
+// Each refresh collects before it draws: gduwatch.LoopFrames hands the refresh
+// a frame to render into and writes the clear-screen, the header and the frame
+// in one go once the collection is complete, so the previous report stays on
+// screen for the whole collection. A refresh that Ctrl-C cuts short draws
+// nothing at all, leaving the last complete report in place.
+//
 // Ctrl-C (ctx done) exits 0: a watch that was ended on purpose did not fail. The
 // exit code of an individual refresh is deliberately not carried out here --
-// there is no single answer for a loop that ran for an hour. A refresh that
-// fails reports itself on stderr (renderOnce) and returns nil to the loop, so the
-// loop's own warning is effectively unreachable and nothing is printed twice.
+// there is no single answer for a loop that ran for an hour. A collection that
+// fails is returned to the loop, which draws the header and then warns on
+// stderr, naming the retry, so the clear cannot wipe the message.
 func watchStatus(ctx context.Context, o statusOpts, c *statusCollector, wio watchIO) int {
-	err := gduwatch.Loop(ctx, gduwatch.Options{
+	err := gduwatch.LoopFrames(ctx, gduwatch.Options{
 		Every:  o.watch.interval,
 		Title:  watchTitle(o),
 		Redraw: wio.redraw,
 		Out:    wio.out,
 		Warn:   func(msg string) { fmt.Fprintln(os.Stderr, "warning: "+msg) },
 		Sleep:  wio.sleep,
-	}, func(t time.Time) error {
+	}, func(t time.Time, frame io.Writer) error {
 		c.opts.now = t
-		c.renderOnce(wio.out)
+		rep, failed, cerr := c.collect()
+		if cerr != nil {
+			return cerr
+		}
+		c.emit(frame, rep, failed)
 		return nil
 	})
 	if err != nil {

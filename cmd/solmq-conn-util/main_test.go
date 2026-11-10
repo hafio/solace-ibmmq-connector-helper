@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/runner"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/spec"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusreport"
+	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/statusscript"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/storescript"
 	"github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn/internal/validate"
 )
@@ -4237,10 +4239,17 @@ type inspectRunner struct {
 	noAttach
 	err   error
 	calls int
+
+	// onRun, when set, runs at the start of every call, so a test can look at
+	// what the loop has written by the time a collection begins, or interrupt it.
+	onRun func()
 }
 
 func (i *inspectRunner) Run(_ context.Context, _ gdurunner.Cmd, stdout, _ io.Writer) error {
 	i.calls++
+	if i.onRun != nil {
+		i.onRun()
+	}
 	if i.err != nil {
 		return i.err
 	}
@@ -4329,8 +4338,9 @@ func TestWatchStatusSleepsTheIntervalAfterEachRefresh(t *testing.T) {
 }
 
 // TestWatchStatusReportsAFailedCollectionOnceAndCarriesOn covers a refresh the
-// engine refuses: renderOnce reports it on stderr once per refresh, the loop
-// does not add its own "trying again" warning, and the next refresh still runs.
+// engine refuses: the collection error goes back to the shared loop, which warns
+// once per refresh on stderr naming the retry, nothing else reports it, and the
+// next refresh still runs.
 func TestWatchStatusReportsAFailedCollectionOnceAndCarriesOn(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -4347,8 +4357,11 @@ func TestWatchStatusReportsAFailedCollectionOnceAndCarriesOn(t *testing.T) {
 	if n := strings.Count(stderr, "engine down"); n != 2 {
 		t.Errorf("want the failure once per refresh (2), got %d in:\n%s", n, stderr)
 	}
-	if strings.Contains(stderr, "trying again") || strings.Contains(stderr, "warning:") {
-		t.Errorf("the loop must not repeat what renderOnce already said, got:\n%s", stderr)
+	if n := strings.Count(stderr, "warning: inspecting solmq-connector: engine down -- trying again in 5s\n"); n != 2 {
+		t.Errorf("want the loop's warning naming the retry once per refresh (2), each on one line, got %d in:\n%s", n, stderr)
+	}
+	if strings.Contains(stderr, "error:") {
+		t.Errorf("a failed refresh is a warning, not an error, got:\n%s", stderr)
 	}
 	if r.calls != 2 {
 		t.Errorf("the loop should carry on after a failure, got %d collections", r.calls)
@@ -4363,6 +4376,62 @@ func TestWatchStatusCancelledContextExitsZero(t *testing.T) {
 	c, o := watchTestCollector(&inspectRunner{}, statusreport.ViewContainer)
 	if code := watchStatus(ctx, o, c, watchIO{out: io.Discard}); code != 0 {
 		t.Errorf("exit=%d, want 0", code)
+	}
+}
+
+// TestWatchStatusKeepsTheLastReportUntilTheNextIsCollected covers the redraw
+// order: a refresh collects before it clears, so while the next collection runs
+// the previous report is still the whole screen.
+func TestWatchStatusKeepsTheLastReportUntilTheNextIsCollected(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var slept []time.Duration
+	var out bytes.Buffer
+	var onScreen []string
+	r := &inspectRunner{}
+	r.onRun = func() { onScreen = append(onScreen, out.String()) }
+	c, o := watchTestCollector(r, statusreport.ViewContainer)
+	if code := watchStatus(ctx, o, c, watchIO{redraw: true, out: &out, sleep: sleepAfter(2, cancel, &slept)}); code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if len(onScreen) != 2 {
+		t.Fatalf("want 2 collections, got %d", len(onScreen))
+	}
+	if onScreen[0] != "" {
+		t.Errorf("nothing may be drawn before the first report is collected, got %q", onScreen[0])
+	}
+	if n := strings.Count(onScreen[1], gduwatch.ClearScreen); n != 1 || !strings.Contains(onScreen[1], "solmq-connector") {
+		t.Errorf("the second collection should run under the first report, got:\n%q", onScreen[1])
+	}
+	// Each frame is still the clear, the header, then the report.
+	frames := strings.Split(out.String(), gduwatch.ClearScreen)
+	if len(frames) != 3 || frames[0] != "" {
+		t.Fatalf("want two frames, each opening with the clear, got:\n%q", out.String())
+	}
+	for _, f := range frames[1:] {
+		if !strings.HasPrefix(f, "Every 5s: solmq-conn-util status container   ") || !strings.Contains(f, "solmq-connector") {
+			t.Errorf("a frame should be the header and then the report, got:\n%q", f)
+		}
+	}
+}
+
+// TestWatchStatusDrawsNothingForARefreshCutShort covers Ctrl-C arriving during a
+// collection: whatever came back was cut short, so nothing is drawn, not even
+// the header, and the watch still exits 0.
+func TestWatchStatusDrawsNothingForARefreshCutShort(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := &inspectRunner{onRun: cancel}
+	c, o := watchTestCollector(r, statusreport.ViewContainer)
+	var out bytes.Buffer
+	if code := watchStatus(ctx, o, c, watchIO{redraw: true, out: &out}); code != 0 {
+		t.Errorf("exit=%d, want 0", code)
+	}
+	if out.Len() != 0 {
+		t.Errorf("a refresh cut short must draw nothing, got:\n%q", out.String())
+	}
+	if r.calls != 1 {
+		t.Errorf("want the one interrupted collection, got %d", r.calls)
 	}
 }
 
@@ -4702,8 +4771,7 @@ func TestStatusAllWithNoMatchIsActionable(t *testing.T) {
 // verbatim: the values line up, and the banner is unchanged.
 func TestStatusApplicationViewRunsTheScriptAndRendersItsFacts(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
-		{onePodJSON, nil},                                               // get pods
-		{runner.ScriptPresentMarker + "\n", nil},                        // probe: present
+		{onePodJSON, nil}, // get pods
 		{appReport + "workflows:\n   0: running\n  10: stopped\n", nil}, // run
 	}}
 	var code int
@@ -4740,19 +4808,23 @@ func TestStatusApplicationDetailsAddsTheEnrichmentLines(t *testing.T) {
 		"config: /app/external/spring/config/application.yml\n" +
 		"heap: 432013312 of 1073741824\n"
 
-	report := func(args ...string) string {
-		q := &queueRunner{resp: []queuedResp{
-			{onePodJSON, nil},
-			{runner.ScriptPresentMarker + "\n", nil}, {full, nil},
-		}}
-		return captureStdout(t, func() {
+	// report returns what was printed and the argv the script was run with.
+	report := func(args ...string) (string, []string) {
+		q := &queueRunner{resp: []queuedResp{{onePodJSON, nil}, {full, nil}}}
+		out := captureStdout(t, func() {
 			if code := dispatch(args, q); code != 0 {
 				t.Fatalf("%v: exit=%d, want 0", args, code)
 			}
 		})
+		return out, q.calls[len(q.calls)-1].argv
 	}
 
-	details := report("status", "app", "-d", "--platform", "kubernetes", "--pod", "pod-a")
+	details, argv := report("status", "app", "-d", "--platform", "kubernetes", "--pod", "pod-a")
+	// The details level asks the script for what it renders, so the script
+	// spends its extra actuator calls and the JVM start only here.
+	if argv[len(argv)-1] != statusscript.DetailsArg {
+		t.Errorf("-d should run the script with %s, got argv %v", statusscript.DetailsArg, argv)
+	}
 	for _, want := range []string{
 		"uptime:", "3d 4h 31m",
 		"version:", "2.14.1",
@@ -4767,9 +4839,12 @@ func TestStatusApplicationDetailsAddsTheEnrichmentLines(t *testing.T) {
 		}
 	}
 
-	// The same collection at the basic level prints none of it: one script run,
-	// two levels of report.
-	basic := report("status", "app", "--platform", "kubernetes", "--pod", "pod-a")
+	// The basic level prints none of it, even from a script that still reports
+	// it: an instance deployed by an older release ignores the argument.
+	basic, argv := report("status", "app", "--platform", "kubernetes", "--pod", "pod-a")
+	if slices.Contains(argv, statusscript.DetailsArg) {
+		t.Errorf("the basic level must not ask for the details calls, got argv %v", argv)
+	}
 	for _, mustNot := range []string{"uptime:", "version:", "java:", "config:", "heap:", "health components:"} {
 		if strings.Contains(basic, mustNot) {
 			t.Errorf("the basic level must not carry %q, got:\n%s", mustNot, basic)
@@ -4782,11 +4857,10 @@ func TestStatusApplicationDetailsAddsTheEnrichmentLines(t *testing.T) {
 // failure as a body line under the container facts that explain it. Before this
 // change that instance produced one stderr line and no block at all.
 func TestStatusFailedScriptRunStillGetsItsOwnBlock(t *testing.T) {
+	withScriptWorkers(t, 1) // the answers below are in report order
 	q := &queueRunner{resp: []queuedResp{
-		{podsJSON, nil},                          // get pods: pod-a fine, pod-b crash looping
-		{runner.ScriptPresentMarker + "\n", nil}, // pod-a probe
-		{runner.ScriptPresentMarker + "\n", nil}, // pod-b probe
-		{appReport, nil},                         // pod-a run
+		{podsJSON, nil},  // get pods: pod-a fine, pod-b crash looping
+		{appReport, nil}, // pod-a run
 		{"command terminated with exit code 126\n", fmt.Errorf("exit status 126")}, // pod-b run
 	}}
 	var code int
@@ -4816,7 +4890,7 @@ func TestStatusInstallPaths(t *testing.T) {
 	base := func(extra ...queuedResp) *queueRunner {
 		return &queueRunner{resp: append([]queuedResp{
 			{onePodJSON, nil},                       // get pods
-			{runner.ScriptAbsentMarker + "\n", nil}, // probe: absent
+			{runner.ScriptAbsentMarker + "\n", nil}, // run: the script is absent
 		}, extra...)}
 	}
 
@@ -4828,7 +4902,7 @@ func TestStatusInstallPaths(t *testing.T) {
 			}
 		})
 		if len(q.calls) != 4 {
-			t.Fatalf("want 4 calls (get, probe, install, run), got %d: %+v", len(q.calls), q.calls)
+			t.Fatalf("want 4 calls (get, run finding it absent, install, run), got %d: %+v", len(q.calls), q.calls)
 		}
 	})
 
@@ -4892,14 +4966,39 @@ func TestStatusInstallPromptNonTTYRefusesWithInstallHint(t *testing.T) {
 	}
 }
 
+// TestStatusScriptStillMissingAfterInstallFails covers an install that reported
+// success while the run after it still found nothing at the path: the instance
+// says so in its block and the run exits 1, rather than being offered the same
+// install again.
+func TestStatusScriptStillMissingAfterInstallFails(t *testing.T) {
+	q := &queueRunner{resp: []queuedResp{
+		{onePodJSON, nil},
+		{runner.ScriptAbsentMarker + "\n", nil}, // run: absent
+		{"", nil},                               // install
+		{runner.ScriptAbsentMarker + "\n", nil}, // run: still absent
+	}}
+	var code int
+	stdout := captureStdout(t, func() {
+		code = dispatch([]string{"status", "app", "--install", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	if !strings.Contains(stdout, "status: the status script is still missing after the install") {
+		t.Errorf("the instance should say the install did not take, got:\n%s", stdout)
+	}
+	if len(q.calls) != 4 {
+		t.Fatalf("want 4 calls (get, run, install, run) and no second install, got %d: %+v", len(q.calls), q.calls)
+	}
+}
+
 // TestStatusStandbyIsAnAnswerNotAFailure keeps the contract the whole verb is
 // built on: the script always exits 0 and carries the state in its output, so a
 // standby instance prints like any other and the run still exits 0.
 func TestStatusStandbyIsAnAnswerNotAFailure(t *testing.T) {
+	withScriptWorkers(t, 1) // the answers below are in report order
 	q := &queueRunner{resp: []queuedResp{
 		{podsJSON, nil},
-		{runner.ScriptPresentMarker + "\n", nil},
-		{runner.ScriptPresentMarker + "\n", nil},
 		{"leader-election mode: active_standby\nleader-election state: standby\n", nil},
 		{"leader-election mode: active_standby\nleader-election state: active\n", nil},
 	}}
@@ -4917,6 +5016,111 @@ func TestStatusStandbyIsAnAnswerNotAFailure(t *testing.T) {
 	}
 }
 
+// podListJSON is onePodJSON's running pod under each of names, for a test that
+// needs more instances than the fixed fixtures carry.
+func podListJSON(names ...string) string {
+	item := strings.TrimSuffix(strings.TrimPrefix(onePodJSON, `{"items":[`), `]}`)
+	items := make([]string, len(names))
+	for i, n := range names {
+		items[i] = strings.Replace(item, `"name":"pod-a"`, `"name":"`+n+`"`, 1)
+	}
+	return `{"items":[` + strings.Join(items, ",") + `]}`
+}
+
+// targetRunner answers each exec with a report naming the pod it reached, and
+// any other call with its pod list. It is safe to call from several goroutines
+// at once and counts how many execs are in flight together. It holds the first
+// `together` execs until that many have arrived, which a serial run never
+// reaches, and records a timeout instead of hanging when they do not.
+type targetRunner struct {
+	noAttach
+	pods     string
+	together int
+	met      chan struct{}
+
+	mu                sync.Mutex
+	arrived, inFlight int
+	maxInFlight       int
+	timedOut          bool
+}
+
+func newTargetRunner(pods string, together int) *targetRunner {
+	return &targetRunner{pods: pods, together: together, met: make(chan struct{})}
+}
+
+func (r *targetRunner) Run(_ context.Context, c gdurunner.Cmd, stdout, _ io.Writer) error {
+	if len(c.Argv) < 3 || c.Argv[1] != "exec" {
+		scriptOut(stdout, r.pods)
+		return nil
+	}
+	pod := c.Argv[2]
+	r.mu.Lock()
+	r.arrived++
+	r.inFlight++
+	r.maxInFlight = max(r.maxInFlight, r.inFlight)
+	if r.arrived == r.together {
+		close(r.met)
+	}
+	r.mu.Unlock()
+	if r.together > 0 {
+		select {
+		case <-r.met:
+		case <-time.After(5 * time.Second):
+			r.mu.Lock()
+			r.timedOut = true
+			r.mu.Unlock()
+		}
+	}
+	r.mu.Lock()
+	r.inFlight--
+	r.mu.Unlock()
+	scriptOut(stdout, "leader-election mode: mode-"+pod+"\nleader-election state: active\n")
+	return nil
+}
+
+// TestStatusRunsTheScriptsConcurrently covers the batch the application half
+// runs in: the execs overlap, never more of them than the worker limit, and
+// each answer still lands on the instance that gave it.
+func TestStatusRunsTheScriptsConcurrently(t *testing.T) {
+	names := []string{"pod-a", "pod-b", "pod-c", "pod-d", "pod-e"}
+	withScriptWorkers(t, 2)
+	r := newTargetRunner(podListJSON(names...), 2)
+	args := []string{"status", "app", "--output", "json", "--platform", "kubernetes"}
+	for _, n := range names {
+		args = append(args, "--pod", n)
+	}
+	var code int
+	stdout := captureStdout(t, func() { code = dispatch(args, r) })
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0", code)
+	}
+	if r.timedOut {
+		t.Error("the first two execs never overlapped: the scripts ran one after another")
+	}
+	if r.maxInFlight != 2 {
+		t.Errorf("%d execs were in flight at once, want exactly the 2-worker limit", r.maxInFlight)
+	}
+	var doc struct {
+		Instances []struct {
+			Name        string `json:"name"`
+			Application struct {
+				Mode string `json:"leaderElectionMode"`
+			} `json:"application"`
+		} `json:"instances"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("stdout must be one json document: %v\n%s", err, stdout)
+	}
+	if len(doc.Instances) != len(names) {
+		t.Fatalf("want %d instances, got %d:\n%s", len(names), len(doc.Instances), stdout)
+	}
+	for _, inst := range doc.Instances {
+		if inst.Application.Mode != "mode-"+inst.Name {
+			t.Errorf("%s carries %q, another instance's answer", inst.Name, inst.Application.Mode)
+		}
+	}
+}
+
 // ---- output format ---------------------------------------------------------------
 
 // TestStatusJSONOutputIsOneDocument covers --output json: the same model the
@@ -4924,7 +5128,6 @@ func TestStatusStandbyIsAnAnswerNotAFailure(t *testing.T) {
 func TestStatusJSONOutputIsOneDocument(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{
 		{onePodJSON, nil},
-		{runner.ScriptPresentMarker + "\n", nil},
 		{appReport, nil},
 	}}
 	var code int
@@ -5339,6 +5542,16 @@ func withProgressFrameRate(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { progressFrameRate = prev })
 }
 
+// withScriptWorkers sets how many instances the status script runs on at once.
+// 1 pins the calls to report order, which a queueRunner's ordered answers need
+// once a test has more than one instance.
+func withScriptWorkers(t *testing.T, n int) {
+	t.Helper()
+	prev := statusScriptWorkers
+	statusScriptWorkers = n
+	t.Cleanup(func() { statusScriptWorkers = prev })
+}
+
 // progressErase is what blanking a live line of n columns looks like on the
 // wire: back to column 0, n spaces, back again. Spelled out here so the
 // expectations below read as sequences of draws and erases.
@@ -5527,17 +5740,17 @@ func TestProgressSpinnerGoroutineAdvancesAndCountsSeconds(t *testing.T) {
 func TestProgressPauseHandsBackTheStream(t *testing.T) {
 	withProgressFrameRate(t, time.Hour)
 	withProgressClock(t, 0)
-	const probe = "- install probe pod-a 1/1"
-	const runs = "- status script pod-a 1/1"
+	const runs = "- status script on 1 instance(s)"
+	const installs = "- install script pod-a 1/1"
 	const question = "install the status script on pod-a? [y/N] "
 	stderr := captureStderr(t, func() {
 		p := &progress{w: os.Stderr, mode: progressSpinner}
-		p.step("install probe pod-a 1/1")
+		p.step("status script on 1 instance(s)")
 		p.pause(func() { fmt.Fprint(os.Stderr, question) })
-		p.step("status script pod-a 1/1")
+		p.step("install script pod-a 1/1")
 		p.stop()
 	})
-	want := "\r" + probe + progressErase(len(probe)) + question + "\r" + runs + progressErase(len(runs))
+	want := "\r" + runs + progressErase(len(runs)) + question + "\r" + installs + progressErase(len(installs))
 	if stderr != want {
 		t.Errorf("stderr:\n%q\nwant:\n%q", stderr, want)
 	}
@@ -5551,14 +5764,50 @@ func TestProgressStepsPauseFinishesTheStepFirst(t *testing.T) {
 	const question = "install the status script on pod-a? [y/N] "
 	stderr := captureStderr(t, func() {
 		p := &progress{w: os.Stderr, mode: progressSteps}
-		p.step("install probe pod-a 1/1")
+		p.step("status script on 1 instance(s)")
 		p.pause(func() { fmt.Fprint(os.Stderr, question) })
 		p.stop()
 	})
-	want := "step: install probe pod-a 1/1 0.6s\n" + question
+	want := "step: status script on 1 instance(s) 0.6s\n" + question
 	if stderr != want {
 		t.Errorf("stderr:\n%q\nwant:\n%q", stderr, want)
 	}
+}
+
+// TestProgressDoneLinesCarryTheirOwnTime pins the line a call run alongside
+// others gets: under --verbose its own time, printed at once, while the batch
+// step stays in flight and is timed as a whole. The spinner and the off mode
+// print nothing for it.
+func TestProgressDoneLinesCarryTheirOwnTime(t *testing.T) {
+	withProgressFrameRate(t, time.Hour)
+	withProgressClock(t, 600*time.Millisecond)
+	steps := captureStderr(t, func() {
+		p := &progress{w: os.Stderr, mode: progressSteps}
+		p.step("status script on 2 instance(s)")
+		p.done(2100*time.Millisecond, "status script %s %d/%d", "pod-b", 1, 2)
+		p.done(90*time.Second, "status script %s %d/%d", "pod-a", 2, 2)
+		p.stop()
+	})
+	want := "step: status script pod-b 1/2 2.1s\n" +
+		"step: status script pod-a 2/2 1m30s\n" +
+		"step: status script on 2 instance(s) 0.6s\n"
+	if steps != want {
+		t.Errorf("stderr:\n%q\nwant:\n%q", steps, want)
+	}
+
+	for _, mode := range []progressMode{progressSpinner, progressOff} {
+		got := captureStderr(t, func() {
+			p := &progress{w: os.Stderr, mode: mode}
+			p.step("status script on 1 instance(s)")
+			p.done(time.Second, "status script %s %d/%d", "pod-a", 1, 1)
+			p.stop()
+		})
+		if strings.Contains(got, "pod-a") {
+			t.Errorf("mode %d printed a done line, got:\n%q", mode, got)
+		}
+	}
+	var none *progress
+	none.done(time.Second, "status script %s %d/%d", "pod-a", 1, 1) // a nil progress is a no-op
 }
 
 // TestProgressElapsedShapes pins the two shapes a step's duration is printed in.
@@ -5646,12 +5895,11 @@ func TestProgressSpinnerNeverExceedsOneRow(t *testing.T) {
 func TestStatusVerboseNamesEverySlowCall(t *testing.T) {
 	withProgressClock(t, 600*time.Millisecond)
 	withStderrTerminal(t, false) // --verbose prints whether or not there is a screen
+	withScriptWorkers(t, 1)      // one worker reads the clock in a fixed order
 	q := &queueRunner{resp: []queuedResp{
-		{podsJSON, nil},                          // get pods
-		{runner.ScriptPresentMarker + "\n", nil}, // pod-a probe
-		{runner.ScriptPresentMarker + "\n", nil}, // pod-b probe
-		{appReport, nil},                         // pod-a run
-		{appReport, nil},                         // pod-b run
+		{podsJSON, nil},  // get pods
+		{appReport, nil}, // pod-a run
+		{appReport, nil}, // pod-b run
 	}}
 	var code int
 	var stderr string
@@ -5672,13 +5920,14 @@ func TestStatusVerboseNamesEverySlowCall(t *testing.T) {
 	// No "preflight" line: kubernetes asks no permission up front, so there is no
 	// call for the step to name. No "resolve instance names" line either: both
 	// --pod values here are names, and resolveIndexes only enumerates when an
-	// index was typed.
+	// index was typed. Each script run gets its own line with its own time as it
+	// finishes, and the batch they ran in is one step around them: its 3.0s is
+	// the five clock reads between its start and its end.
 	want := []string{
 		"step: list pods 0.6s",
-		"step: install probe pod-a 1/2 0.6s",
-		"step: install probe pod-b 2/2 0.6s",
 		"step: status script pod-a 1/2 0.6s",
 		"step: status script pod-b 2/2 0.6s",
+		"step: status script on 2 instance(s) 3.0s",
 	}
 	if !reflect.DeepEqual(steps, want) {
 		t.Errorf("steps:\n%s\nwant:\n%s", strings.Join(steps, "\n"), strings.Join(want, "\n"))
@@ -5727,7 +5976,6 @@ func TestStatusStdoutIsIdenticalWithAndWithoutTheSpinner(t *testing.T) {
 		withStderrTerminal(t, tty)
 		q := &queueRunner{resp: []queuedResp{
 			{onePodJSON, nil},
-			{runner.ScriptPresentMarker + "\n", nil},
 			{appReport, nil},
 		}}
 		var out string

@@ -565,8 +565,28 @@ rather than guessed from a directory.
 stderr, so a non-zero exec exit means exactly one thing: the exec did not reach
 the instance. `--health` is the one exception and has to be asked for by name:
 it makes one health call and exits 0 only on `UP`. It does none of the rest of
-the report, because the full report makes seven actuator calls and starts a
-JVM, far too much for a timer in a CPU-limited container.
+the report, because even the basic report makes three actuator calls, and the
+details report seven plus a JVM start. That is far too much for a timer in a
+CPU-limited container.
+
+**The basic report skips the details calls.** Uptime, version, java and heap
+cost four actuator calls and a JVM start per instance, and only the details
+level renders them. The CLI passes `--details` to the script only at that
+level, so a basic run makes three calls. The trade is that basic-level JSON
+carries none of those four fields. A script deployed by an older release
+ignores the argument and prints everything, so either pairing still works.
+
+**One exec per instance.** The run checks for the script and runs it in one
+exec, with the path and arguments as positional parameters rather than shell
+text. It echoes a marker line instead when the script is missing. A separate
+probe doubled the per-instance cost to learn something only a missing script
+needs.
+
+**Script runs go four at a time.** The in-container script is the run's
+dominant cost, so the instances run side by side and the wall time is the
+slowest one's, not the sum. Four bounds the exec streams an `--all` opens
+against one API server. Only the coordinating goroutine touches the report and
+the progress line.
 
 **Health is read under either key order.** Spring Boot 3 (connector 2.x) writes
 the instance's own status first; Spring Boot 4 (connector 3.x) sorts every key,
@@ -593,6 +613,14 @@ or with neither. The spinner draws with carriage return and spaces, no ANSI,
 capped at 79 columns so a wrapped line never leaves residue above the cursor.
 `--watch` prints no progress: the redraw owns the screen, and the same holds when
 stdout is a pipe, where each refresh is a section line instead of a redraw.
+
+**A watch refresh collects before it clears.** Status runs on the shared
+`watch.LoopFrames`, which hands each refresh a frame to render into and writes
+the clear-screen, the header and the frame in one write once the collection is
+complete, so the previous report stays readable for the whole collection. A
+refresh cut short by Ctrl-C draws nothing, which leaves the last complete report
+in place. A collection that fails goes back to the loop, which draws the header
+and then warns on stderr, naming the retry.
 
 **JSON is the same model the tables render from**, so they cannot disagree.
 Fields are a compatibility contract: additions keep `schemaVersion`, renames
@@ -688,9 +716,9 @@ the package only builds `Cmd` values. Names read back from the engine are held t
   podman version, id-map and image-command reads, and `systemctl is-active`'s state), because a platform CLI writes warnings to
   stderr whenever it likes (OpenShift greets `oc get` with a deprecation notice), and
   merged into stdout that line lands in front of the JSON. A failure carries both
-  streams, trimmed, so the message is no less useful. `ScriptInstalled` and
-  `RunStatusScript` still capture combined: they tolerate an extra line and want the
-  script's stderr advisories.
+  streams, trimmed, so the message is no less useful. `RunStatusScript` still
+  captures combined: it reads its absent marker line by line, so an extra line does
+  no harm, and it wants the script's stderr advisories.
 - **`logs`** calls `Run` with the process's own stdout and stderr, so output arrives
   while the command runs and `logs > app.log` captures the log and leaves the platform
   CLI's diagnostics on the terminal. Under `--follow` the operator's Ctrl-C cancels the
