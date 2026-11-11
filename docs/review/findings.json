@@ -1,0 +1,1646 @@
+{
+  "version": 1,
+  "updated": "2026-11-11",
+  "next_id": 67,
+  "runs": [
+    {
+      "date": "2026-11-11",
+      "commit": "298cccf",
+      "report": "docs/review/2026-11-11-critical-review.md",
+      "areas": [
+        "all"
+      ],
+      "new": 66,
+      "open": 0,
+      "fixed": 0,
+      "reopened": 0,
+      "accepted": 0
+    }
+  ],
+  "findings": [
+    {
+      "id": "CR-0001",
+      "fingerprint": "3dc9b7b2c10e",
+      "title": "remove on docker and podman needs a fully valid spec, so a broken workflow file blocks teardown",
+      "area": "design",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main.go:727-731",
+        "cmd/solmq-conn-util/main.go:882-886",
+        "internal/gen/gen.go:233-255"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0002",
+      "fingerprint": "ac303bb80645",
+      "title": "Platform orchestration is three hand-sequenced pipelines in cmd, and their step order differs",
+      "area": "design",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main.go:646-1056",
+        "cmd/solmq-conn-util/lifecycle.go:70-116"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0003",
+      "fingerprint": "5d7d7c1f70c9",
+      "title": "actTargets doc comment sits above the actionOpts type",
+      "area": "design",
+      "severity": "nit",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main.go:514-545"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0004",
+      "fingerprint": "4c6c357381eb",
+      "title": "status takes its clock from time.Now() instead of the injected app clock",
+      "area": "design",
+      "severity": "nit",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/status.go:202-208",
+        "cmd/solmq-conn-util/main.go:141-184"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0005",
+      "fingerprint": "42d37be606bf",
+      "title": "Passthrough map keys are written into application.yml unquoted and unchecked; a key holding a newline adds lines",
+      "area": "correctness",
+      "severity": "blocker",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/render/render.go:392-403",
+        "internal/render/render.go:369-371",
+        "internal/consolidate/consolidate.go:550-557",
+        "internal/validate/transform.go:88-98",
+        "internal/validate/extra.go:23-25"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0006",
+      "fingerprint": "f5332c61402e",
+      "title": "Engine calls use the unexpanded env.yaml while validate and the rendered artifacts use the expanded one",
+      "area": "correctness",
+      "severity": "major",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main.go:1701-1745",
+        "cmd/solmq-conn-util/main.go:670-711",
+        "internal/gen/gen.go:1091-1101",
+        "internal/spec/expand.go:30-44",
+        "docs/configuration.md:79-82"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0007",
+      "fingerprint": "ecc393ca0f11",
+      "title": "remove can delete a namespace that still holds kinds its listing never asks for, also under --no-prompt",
+      "area": "correctness",
+      "severity": "major",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/namespace.go:103-142",
+        "cmd/solmq-conn-util/namespace.go:37-42",
+        "internal/runner/runner.go:866-876",
+        "docs/DESIGN.md:186-189"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0008",
+      "fingerprint": "19312c951372",
+      "title": "docker remove resolves every -env credential and refuses when one is not exported",
+      "area": "correctness",
+      "severity": "major",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main.go:732-737",
+        "cmd/solmq-conn-util/main.go:752-773",
+        "internal/gen/gen.go:794-812",
+        "docs/operations.md:275-276"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0009",
+      "fingerprint": "e819adbc8b52",
+      "title": "cipher and key-alias reach application.yml unquoted",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/consolidate/consolidate.go:277-279",
+        "internal/tls/tls.go:68-70",
+        "internal/render/render.go:375-378"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0010",
+      "fingerprint": "b02e4c44453a",
+      "title": "An aliased or non-mapping passthrough block is dropped without a message",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/consolidate/consolidate.go:545-548",
+        "internal/render/render.go:363-366",
+        "internal/validate/extra.go:100-103"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0011",
+      "fingerprint": "f88722ad21c2",
+      "title": "solace-defaults is passed through unchecked while mq-defaults rejects credentials and tool-managed keys",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/validate/extra.go:68-73",
+        "internal/consolidate/consolidate.go:232-244"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0012",
+      "fingerprint": "9791b5488092",
+      "title": "podman remove deletes the instance's secrets even when stopping or removing the unit failed",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main.go:1038-1055",
+        "internal/runner/runner.go:790-810"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0013",
+      "fingerprint": "2d81270bf481",
+      "title": "Names reach the argv of status, logs and cli with a leading dash allowed; lifecycle verbs hand-roll a second name grammar",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/instances.go:114-127",
+        "cmd/solmq-conn-util/instances.go:219-223",
+        "cmd/solmq-conn-util/instances.go:281-291",
+        "cmd/solmq-conn-util/lifecycle.go:19-24",
+        "internal/validate/validate.go:1863-1873"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0014",
+      "fingerprint": "748a29c3d440",
+      "title": "The kubernetes manifest writes deployment and namespace names bare, so a name such as 123 changes type",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/deploy/deploy.go:537-550"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0015",
+      "fingerprint": "f3f5ebf4f4dd",
+      "title": "validate accepts replicas and management.port values that only the cluster or the connector rejects",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/spec/kubernetes.go:441-443",
+        "internal/validate/validate.go:942-948"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0016",
+      "fingerprint": "e8ed6b3f5866",
+      "title": "Binder names can collide with the reserved undefined binder and with their own numbered suffixes",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/consolidate/names.go:105-114",
+        "internal/consolidate/consolidate.go:286-287"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0017",
+      "fingerprint": "47066f3c8d24",
+      "title": "FormatScalar compares Style for equality, so a tagged quoted scalar is written bare",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/consolidate/consolidate.go:574-588"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0018",
+      "fingerprint": "6aafe9a6c1a3",
+      "title": "Only the first YAML document of env.yaml is read; later documents are ignored",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/spec/env.go:52-56"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0019",
+      "fingerprint": "37ff8703391b",
+      "title": "generate -o writes in place and keeps an existing file's wider mode; a failed stdout write exits 0",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main.go:1771-1780"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0020",
+      "fingerprint": "1ea376d980b4",
+      "title": "A double-dash separator protects only the first token after it",
+      "area": "correctness",
+      "severity": "nit",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main.go:1682-1695"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0021",
+      "fingerprint": "9e4580bf3dc7",
+      "title": "Rootless podman deploy enables linger before the redeploy question, then says nothing changed",
+      "area": "correctness",
+      "severity": "nit",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main.go:899-906",
+        "cmd/solmq-conn-util/main.go:1627-1632"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0022",
+      "fingerprint": "aa8800a90ff7",
+      "title": "A folder with no workflow files validates, generates and deploys",
+      "area": "resilience",
+      "severity": "major",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/validate/validate.go:214-224",
+        "internal/scan/scan.go:25-50",
+        "cmd/solmq-conn-util/main.go:1728-1743"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0023",
+      "fingerprint": "eb0ad153c68c",
+      "title": "download jar drops a dependency's subtree when its POM cannot be fetched and still reports success",
+      "area": "resilience",
+      "severity": "major",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/libs/maven.go:224-236",
+        "internal/libs/maven.go:175-181",
+        "internal/libs/libs.go:394-397"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0024",
+      "fingerprint": "7b874ca29277",
+      "title": "podman deploy removes stale secrets before the new unit is written, and writes the unit in place",
+      "area": "resilience",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main.go:976-998",
+        "internal/runner/runner.go:116-126"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0025",
+      "fingerprint": "2b659edfbffb",
+      "title": "No engine call carries a deadline",
+      "area": "resilience",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main.go:207-210"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0026",
+      "fingerprint": "8cd859800419",
+      "title": "Output goes to process-wide os.Stdout and os.Stderr; tests swap them without defer and none runs in parallel",
+      "area": "quality",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main_test.go:202-240",
+        "cmd/solmq-conn-util/main.go:1782-1792",
+        "cmd/solmq-conn-util/main.go:141-184"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0027",
+      "fingerprint": "12ca0c2951fd",
+      "title": "Small helpers are defined more than once",
+      "area": "quality",
+      "severity": "nit",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/dockergen/dockergen.go:297",
+        "internal/podmangen/podmangen.go:113",
+        "internal/validate/transform.go:278",
+        "internal/spec/defaults.go:559",
+        "internal/deploy/deploy_test.go:362",
+        "internal/render/render_test.go:275",
+        "internal/gen/golden_test.go:578"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0028",
+      "fingerprint": "ad2fb0829956",
+      "title": "checkSecretName's doc comment sits above checkJavaOptions",
+      "area": "quality",
+      "severity": "nit",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/validate/validate.go:1448-1453",
+        "internal/validate/validate.go:1612"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0029",
+      "fingerprint": "d7beaa95dd15",
+      "title": "Two package-level variables in libs are test seams written at run time",
+      "area": "quality",
+      "severity": "nit",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/libs/libs.go:137",
+        "internal/libs/image.go:104"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0030",
+      "fingerprint": "363f5f7232bd",
+      "title": "No gate executes the generator page's JavaScript port",
+      "area": "tests",
+      "severity": "major",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/gen/htmlgolden_test.go:38-68",
+        "internal/gen/htmlgolden_test.go:194-212",
+        "docs/DEVELOPMENT.md:91-100"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0031",
+      "fingerprint": "1b04e8a0ed19",
+      "title": "The docs/test.md gate compares three counts and never a test name",
+      "area": "tests",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/testcatalog_test.go:56-91"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0032",
+      "fingerprint": "58116b8b4948",
+      "title": "main_test.go holds the tests for six source files, so the test tree does not mirror the source tree",
+      "area": "tests",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main_test.go:1-8096"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0033",
+      "fingerprint": "e8a48b2b80c6",
+      "title": "Tests that need openssl, keytool or sh skip when the tool is absent, in CI too",
+      "area": "tests",
+      "severity": "nit",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/gen/existingstore_test.go:79",
+        "internal/storebuild/storebuild_test.go:565",
+        "internal/statusscript/statusscript_test.go:853"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0034",
+      "fingerprint": "c4e4e45740d5",
+      "title": "tag.yml lacks the template's tag-format check and latest handling, so any v* tag publishes as Latest",
+      "area": "cicd",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        ".github/workflows/tag.yml:38-40",
+        ".github/workflows/tag.yml:53-66",
+        ".github/workflows/tag.yml:291-295"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0035",
+      "fingerprint": "4c5d5c0295a0",
+      "title": "CI runs all scan where the contract and the template say all cov scan, and tag.yml's header still lists cov",
+      "area": "cicd",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        ".github/workflows/ci.yml:58-65",
+        ".github/workflows/tag.yml:8"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0036",
+      "fingerprint": "fc4cc26cd02d",
+      "title": "The dev scripts are behind their contract: no race detector, no cov-queued skip, gofmt taken from PATH",
+      "area": "cicd",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "scripts/dev.sh:84-105",
+        "scripts/dev.ps1:101-107"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0037",
+      "fingerprint": "4cbf60901d30",
+      "title": "Local gates build the sibling checkout through go.work while CI builds the pin, and this repo's docs do not say so",
+      "area": "cicd",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "scripts/dev.sh:70-130",
+        "docs/DEVELOPMENT.md:15-47"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0038",
+      "fingerprint": "be101af8799c",
+      "title": "Dependabot covers GitHub Actions only and no scan is scheduled, so module advisories surface at tag time",
+      "area": "cicd",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        ".github/dependabot.yml:8-24",
+        ".github/workflows/ci.yml:12-24"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0039",
+      "fingerprint": "8528e1647c9c",
+      "title": "The release version stamp comes from git describe, not from the tag being released",
+      "area": "cicd",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "scripts/dev.sh:62-73",
+        ".github/workflows/tag.yml:214-218"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0040",
+      "fingerprint": "76759542f592",
+      "title": "dev.sh takes the host OS from uname, which is not a GOOS under Git Bash",
+      "area": "cicd",
+      "severity": "nit",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "scripts/dev.sh:54-59"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0041",
+      "fingerprint": "e54ce7ae1dfc",
+      "title": "The kubernetes libs.download init container fetches jars with wget, with no checksum and with http accepted",
+      "area": "build",
+      "severity": "major",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/deploy/deploy.go:592-601",
+        "internal/validate/validate.go:1069-1078",
+        "internal/validate/validate.go:1104-1112"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0042",
+      "fingerprint": "8bad17a3232c",
+      "title": "No artifact states a read-only root or a network mode, and DESIGN does not say the root must stay writable",
+      "area": "build",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/podmangen/podmangen.go:147-156",
+        "internal/deploy/deploy.go:605"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0043",
+      "fingerprint": "ddbe3634f120",
+      "title": "Quadlet values are written without percent escaping",
+      "area": "build",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/podmangen/podmangen.go:148-151",
+        "internal/podmangen/podmangen.go:199-201"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0044",
+      "fingerprint": "ac2b6ce4209a",
+      "title": "The status script passes the actuator Basic credential on wget's command line",
+      "area": "build",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/statusscript/statusscript.go:251-257"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0045",
+      "fingerprint": "9b5372824636",
+      "title": "cli with a one-shot command and logs exit 0 without acting when several instances match",
+      "area": "interfaces",
+      "severity": "major",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/instances.go:571-575",
+        "cmd/solmq-conn-util/shell.go:193-201",
+        "cmd/solmq-conn-util/logs.go:222-230",
+        "docs/DESIGN.md:132-134"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0046",
+      "fingerprint": "ce9449b06768",
+      "title": "Misspelled keys in env.yaml sections and workflow files are ignored without a message",
+      "area": "interfaces",
+      "severity": "major",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/spec/env.go:52-56",
+        "internal/validate/extra.go:107-112"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0047",
+      "fingerprint": "00f35c8a39ac",
+      "title": "Refusals the documented rule makes exit 2 exit 1, and the same mistake exits differently by platform",
+      "area": "interfaces",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main.go:584-600",
+        "cmd/solmq-conn-util/shell.go:168-170",
+        "cmd/solmq-conn-util/instances.go:484-488",
+        "cmd/solmq-conn-util/main.go:744-747",
+        "cmd/solmq-conn-util/main.go:926-929",
+        "docs/operations.md:61-72"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0048",
+      "fingerprint": "2fa62ed37e1a",
+      "title": "The closing ok and error lines name the action and platform only",
+      "area": "observability",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main.go:1782-1792"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0049",
+      "fingerprint": "405dec7eb30d",
+      "title": "The README quick start validates and deploys a sample that ships none of the four PKCS12 stores its env.yaml selects",
+      "area": "conventions",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "README.md:27-36",
+        "internal/examples/files/env.yaml:81-98",
+        "internal/examples/examples.go:19-53",
+        "cmd/solmq-conn-util/main.go:1304-1305"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0050",
+      "fingerprint": "9ae122c4c972",
+      "title": "Messages, the starter files and the generator page point to a user guide that does not exist",
+      "area": "conventions",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/validate/transform.go:45",
+        "internal/validate/transform.go:53",
+        "internal/validate/transform.go:209",
+        "internal/validate/extra.go:170",
+        "cmd/solmq-conn-util/commands.go:773",
+        "internal/examples/files/env.yaml:253",
+        "solmq-conn-util-generator.html:1655"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0051",
+      "fingerprint": "04650f40d9fa",
+      "title": "The shipped env.yaml and configuration.md describe behaviour that was removed",
+      "area": "conventions",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/examples/files/env.yaml:192-193",
+        "internal/examples/files/env.yaml:252-253",
+        "docs/configuration.md:756",
+        "internal/gen/gen.go:198-211"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0052",
+      "fingerprint": "6f9257dd79f9",
+      "title": "Tests and docs cite the deleted review ledger, stage labels and numbered rules that no file defines",
+      "area": "conventions",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/main_test.go:3105",
+        "cmd/solmq-conn-util/main_test.go:6721",
+        "internal/gen/gen_extra_test.go:1494",
+        "internal/validate/validate_extra_test.go:1031",
+        "internal/validate/validate_extra_test.go:1230",
+        "docs/test.md:12-30",
+        "internal/spec/expand.go:23-32"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0053",
+      "fingerprint": "e10ac06da5c6",
+      "title": "Two validate messages and the four starter workflow files carry non-ASCII characters",
+      "area": "conventions",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/validate/validate.go:382",
+        "internal/validate/validate.go:867",
+        "internal/examples/files/workflow-0.yaml:1-54",
+        "testdata/golden/specs/workflow-0.yaml:1-54"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0054",
+      "fingerprint": "ef3a45de4d56",
+      "title": "docs/test.md carries no support notice and the list that enforces it is explicit, so a new doc is exempt",
+      "area": "conventions",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "cmd/solmq-conn-util/support_test.go:15-28",
+        "docs/DEVELOPMENT.md:64-68",
+        "docs/test.md:1-10"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0055",
+      "fingerprint": "0c747c145dbb",
+      "title": "The README says every artifact runs non-root; run-as image runs the image's own user",
+      "area": "conventions",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "README.md:23",
+        "docs/configuration.md:935"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0056",
+      "fingerprint": "971766191f93",
+      "title": "The project CLAUDE.md tells the agent to run graphify update, against the user-run rule and the dev-script task",
+      "area": "conventions",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "CLAUDE.md:9",
+        "scripts/dev.sh:145-150"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0057",
+      "fingerprint": "9b633bfdeb17",
+      "title": "File-read errors flatten the cause with %v where the rule asks for the chain",
+      "area": "conventions",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "internal/gen/stores.go:102",
+        "internal/gen/gen.go:1183",
+        "internal/spec/spec.go:191",
+        "internal/spec/env.go:55"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0058",
+      "fingerprint": "30a392e8137c",
+      "title": "241 graphify cache files and a settings backup are tracked although the cache path is ignored",
+      "area": "conventions",
+      "severity": "minor",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        ".gitignore:18",
+        "graphify-out/cache/last_query_stamp:1",
+        ".claude/settings.json.graphify-bak:1-23"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0059",
+      "fingerprint": "9177841466e8",
+      "title": "DEVELOPMENT.md's dependency list omits go-deploy-utility",
+      "area": "conventions",
+      "severity": "nit",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "docs/DEVELOPMENT.md:17-19",
+        "go.mod:5-10"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0060",
+      "fingerprint": "a11aa822936f",
+      "title": ".gitignore keeps unanchored scratch names and *.p12 has no binary attribute",
+      "area": "conventions",
+      "severity": "nit",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        ".gitignore:12-23",
+        ".gitattributes:1-4"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0061",
+      "fingerprint": "01f645c24bd1",
+      "title": "The module path differs from the repository and the README states no licence",
+      "area": "conventions",
+      "severity": "nit",
+      "confidence": "verified",
+      "status": "open",
+      "locations": [
+        "go.mod:1",
+        "README.md:1-10"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0062",
+      "fingerprint": "d4707116d8c0",
+      "title": "kubernetes restart after stop reports ok while no replica runs",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "suspected",
+      "status": "open",
+      "locations": [
+        "internal/runner/runner.go:233-250",
+        "cmd/solmq-conn-util/lifecycle.go:89-93"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0063",
+      "fingerprint": "901b530243ed",
+      "title": "status --all --details reads kubectl top output as four columns, but --all-namespaces adds a fifth",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "suspected",
+      "status": "open",
+      "locations": [
+        "internal/statusreport/parse.go:497-521",
+        "internal/runner/runner.go:886-898"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0064",
+      "fingerprint": "f705b98bb98d",
+      "title": "kubernetes status strings skip the control-character filter the docker and podman path applies",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "suspected",
+      "status": "open",
+      "locations": [
+        "internal/statusreport/parse.go:240-246",
+        "internal/statusreport/parse.go:569-574"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0065",
+      "fingerprint": "8bb72cf51f90",
+      "title": "The init-container download names its file after the raw URL, query string included",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "suspected",
+      "status": "open",
+      "locations": [
+        "internal/deploy/deploy.go:594-597"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    },
+    {
+      "id": "CR-0066",
+      "fingerprint": "95d514e6e6d6",
+      "title": "A repeat podman remove fails at systemctl stop once the unit is gone",
+      "area": "correctness",
+      "severity": "minor",
+      "confidence": "suspected",
+      "status": "open",
+      "locations": [
+        "internal/runner/runner.go:790-798"
+      ],
+      "first_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "last_seen": {
+        "date": "2026-11-11",
+        "commit": "298cccf"
+      },
+      "resolved": null,
+      "history": [],
+      "notes": ""
+    }
+  ]
+}
