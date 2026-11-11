@@ -2,7 +2,7 @@ module github.com/solacecommunity/hafio-solace/connectors/ibmmq/solmq-conn
 
 go 1.27
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/hafio/go-deploy-utility v0.1.2
