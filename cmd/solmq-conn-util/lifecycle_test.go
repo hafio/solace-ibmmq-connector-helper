@@ -15,7 +15,8 @@ import (
 // the spec's credentials are all -env here and none is exported -- and no
 // store file, since nothing is rendered or resolved.
 func TestLifecycleVerbsActInPlace(t *testing.T) {
-	podmanQuadletHome(t) // podman resolves to the invoking user's units
+	a := testApp(nil)
+	podmanQuadletHome(t, &a) // podman resolves to the invoking user's units
 	envFile := func(t *testing.T, section string) string {
 		dir := t.TempDir()
 		write(t, dir, "env.yaml", sharedEnv+"\ntls:\n  stores:\n    ts:\n      password-env: SOLMQ_UNSET_TS_PW\n      existing:\n        pkcs12: ./gone.p12\n"+section)
@@ -50,7 +51,7 @@ func TestLifecycleVerbsActInPlace(t *testing.T) {
 			f := useFakeRunner(t)
 			var code int
 			stderr := captureStderr(t, func() {
-				code = dispatch([]string{c.verb, "--platform", c.platform, "-e", envFile(t, c.section)}, f)
+				code = dispatch([]string{c.verb, "--platform", c.platform, "-e", envFile(t, c.section)}, a.withRunner(f))
 			})
 			if code != 0 {
 				t.Fatalf("exit=%d\n%s", code, stderr)
@@ -80,20 +81,20 @@ func TestLifecycleVerbsRefuseBeforeActing(t *testing.T) {
 	env := filepath.Join(dir, "env.yaml")
 
 	f := &fakeRunner{err: errors.New("Cannot connect to the Docker daemon")}
-	if code := dispatch([]string{"stop", "--platform", "docker", "-e", env}, f); code == 0 || len(f.calls) != 1 {
+	if code := dispatch([]string{"stop", "--platform", "docker", "-e", env}, testApp(f)); code == 0 || len(f.calls) != 1 {
 		t.Errorf("a failed preflight must stop before acting: exit %d, calls %+v", code, f.calls)
 	}
 
 	write(t, dir, "env.yaml", sharedEnv+strings.Replace(dockerEnv, "name: solmq-conn", "name: --all", 1))
 	f = &fakeRunner{}
 	var code int
-	stderr := captureStderr(t, func() { code = dispatch([]string{"restart", "--platform", "docker", "-e", env}, f) })
+	stderr := captureStderr(t, func() { code = dispatch([]string{"restart", "--platform", "docker", "-e", env}, testApp(f)) })
 	if code != 2 || len(f.calls) != 0 || !strings.Contains(stderr, `docker.name "--all" is not a valid DNS-1123 label`) {
 		t.Errorf("an unsafe name must be refused before anything runs: exit %d, calls %+v\n%s", code, f.calls, stderr)
 	}
 
 	f = &fakeRunner{}
-	if code := dispatch([]string{"start", "docker", "-e", env}, f); code != 2 || len(f.calls) != 0 {
+	if code := dispatch([]string{"start", "docker", "-e", env}, testApp(f)); code != 2 || len(f.calls) != 0 {
 		t.Errorf("a positional argument is a usage error: exit %d, calls %+v", code, f.calls)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "docker-compose.yml")); !os.IsNotExist(err) {
@@ -130,7 +131,7 @@ func TestLifecycleRolloutWait(t *testing.T) {
 			q := &queueRunner{resp: []queuedResp{{"yes\n", nil}, {"", nil}, c.wait}}
 			var code int
 			stderr := captureStderr(t, func() {
-				code = dispatch([]string{c.verb, "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, q)
+				code = dispatch([]string{c.verb, "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, testApp(q))
 			})
 			if code != c.wantCode {
 				t.Fatalf("exit = %d, want %d\n%s", code, c.wantCode, stderr)
@@ -151,7 +152,7 @@ func TestLifecycleRolloutWait(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
-	if code := dispatch([]string{"stop", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, q); code != 0 || len(q.calls) != 2 {
+	if code := dispatch([]string{"stop", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, testApp(q)); code != 0 || len(q.calls) != 2 {
 		t.Errorf("stop must not wait: exit %d, calls %+v", code, q.calls)
 	}
 }

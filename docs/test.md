@@ -45,6 +45,13 @@ input first: the probe-set errors in `actKubernetes` and the lifecycle path (an 
 the command guard in `actKubernetes` (`validate.Run` already held the command to it), and the Namespace
 document's refusal in `ensureNamespace` and `GenerateKubernetes`.
 
+The seven package-level seams in `cmd/solmq-conn-util` (the host facts, the prompter, the stderr
+terminal check, the library downloader, the status worker count and the progress line's frame rate and clock) moved onto one explicit `app`
+value that `run` builds once and threads through `dispatch` to the code that reads them. No
+behaviour changed and no test was added, removed or renamed; a test builds its own with `testApp`
+and sets the field it needs instead of overwriting a package variable. The floor stays 96.3%, to be
+confirmed by the next `cov` run.
+
 ## Contents
 
 - [internal/scan](#internalscan)
@@ -82,6 +89,14 @@ document's refusal in `ensureNamespace` and `GenerateKubernetes`.
   which record the argv and stdin crossing the boundary instead of starting a process and
   write their scripted output to the writers `Run` is handed. The real `os/exec` path, and
   its child-process tests, live in the shared module's own suite.
+- **The app seams** are the other process-wide inputs a command reads: the host facts, the
+  prompter, the stderr terminal check, the library downloader, the status worker count and the progress frame rate and clock.
+  They are the fields of `app` (main.go), built live by `liveApp` and per test by `testApp`
+  (main_test.go), which starts from an ordinary user (euid 1000, no session), a prompter over the
+  real stdin, four workers, a 120ms frame and the real clock. A test that needs another value sets
+  the field through `withPrompter`, `useHost`, `useFakeDownload`, `withStderrTerminal`,
+  `withScriptWorkers`, `withProgressFrameRate` or `withProgressClock`
+  and dispatches with that `app`; nothing is package-wide, so nothing is restored on cleanup.
 - **Columns**: a `-` in the Case column means the test runs once; otherwise Case carries
   the subtest name or the case's label/input value, in source order where the test defines
   one.
@@ -1534,11 +1549,11 @@ Tests: [main_test.go](../cmd/solmq-conn-util/main_test.go), [lifecycle_test.go](
 | TestExamplesWriteSkipForceThenGenerate | re-run with -f before dir | exits 0 and overwrites existing file |
 | TestExamplesWriteSkipForceThenGenerate | generate on shipped examples | generate config on generated env.yaml exits 0 |
 | TestExamplesDefaultDir | - | examples with no dir arg exits 0 and creates ./examples/workflow-0.yaml |
-| TestDownloadMissingAndUnknownWordsRejected | missing target / unknown target / missing set / unknown set | each is a usage error (exit 2) naming the offending word, with downloadFn and the runner both left uncalled |
+| TestDownloadMissingAndUnknownWordsRejected | missing target / unknown target / missing set / unknown set | each is a usage error (exit 2) naming the offending word, with the downloader and the runner both left uncalled |
 | TestDownloadDirDefaultAndPositionalOverride | default dir / explicit dir | the trailing [dir] positional defaults to ./libs and threads an explicit value through to Input.Dir unchanged |
 | TestDownloadSetReachesInput | mq / syslog | both modeled sets thread through to libs.Input.Set unchanged |
 | TestDownloadURLFlagRepeatable | - | repeated `--url` collects every occurrence, in order, into Input.URLs |
-| TestDownloadJMSFlagIsGone | mq / syslog, either value | `--jms` is an unknown flag: exit 2 and downloadFn never runs, so a script still passing it fails loudly instead of being silently ignored |
+| TestDownloadJMSFlagIsGone | mq / syslog, either value | `--jms` is an unknown flag: exit 2 and the downloader never runs, so a script still passing it fails loudly instead of being silently ignored |
 | TestDownloadForceFlagReachesInput | default false / -f short / --force long | both -f and `--force` spellings reach Input.Force, defaulting to false |
 | TestDownloadVersionFlagReachesInput | default empty / explicit pin | `--version` defaults to "" (latest stable) and an explicit pin reaches Input.Version unchanged |
 | TestDownloadOmitLibFileFlagReachesInput | default empty / explicit path | `--omit-lib-file` defaults to "" (a built-in list) and an explicit path reaches Input.OmitLibFile unchanged |

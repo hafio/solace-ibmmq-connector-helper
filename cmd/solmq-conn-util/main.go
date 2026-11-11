@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hafio/go-deploy-utility/abbrev"
 	"github.com/hafio/go-deploy-utility/confirm"
@@ -132,10 +133,75 @@ func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
-// run is the CLI entry point: it dispatches with the production Runner. Tests
-// that need to inspect what would run call dispatch directly with a fake.
+// app is what a command reads from the process and the machine rather than
+// from its arguments: the runner, the host facts, the prompter, the stderr
+// terminal check, the library downloader and how many status scripts run at
+// once. run builds the live one once (liveApp); a test builds its own
+// (testApp) instead of overwriting package variables.
+type app struct {
+	// r is the runner every command shells out through: gdurunner.Exec in
+	// production, a fake in tests that inspect what would run.
+	r gdurunner.Runner
+	// host is how deploy, remove, the lifecycle verbs, status and validate learn
+	// the effective uid, the environment and the subordinate-id files, so a test
+	// supplies its own rather than depending on the machine it runs on.
+	host hostFacts
+	// prompter is the run's one confirmation seam: the platform menu, the status
+	// install prompt and both remove questions go through it, so a single
+	// buffered reader serves every question in the run. A test supplies one whose
+	// terminal answer and input it controls, because go test's own stdin is never
+	// a character device.
+	prompter *confirm.Prompter
+	// stderrIsTerminal reports whether there is a screen to draw a progress line
+	// on. Deliberately separate from the prompter's terminal answer (stdin),
+	// because the two differ in exactly the cases that matter -- `status app >
+	// report.txt` still has a terminal to spin on, and `status app 2>steps.log`
+	// still has an operator to prompt. A function so a test can answer for it:
+	// go test's own stderr is a pipe, so a hard-coded probe would make the
+	// spinner unreachable from a test.
+	stderrIsTerminal func() bool
+	// download is the seam behind runDownload's call into internal/libs, so this
+	// package's own tests stay decoupled from its HTTP/Maven behavior: a fake
+	// captures the Input it received instead of touching the network. download
+	// never shells out, so it carries no runner of its own; this is its only
+	// injected boundary.
+	download func(libs.Input) (libs.Report, error)
+	// statusWorkers is how many instances the status script runs on at once. The
+	// script is the run's dominant cost, so running it side by side makes the
+	// wall time the slowest instance's rather than the sum of all of them. Four
+	// keeps an --all over many pods from opening dozens of exec streams against
+	// one API server at once. A test sets it to 1 to pin the order the calls are
+	// made in.
+	statusWorkers int
+	// progressFrameRate and now are the two seams under the progress line: how
+	// often the spinner redraws and the clock each step is timed with. Fields for
+	// the same reason stderrIsTerminal is: a hard-coded 120ms tick and a real
+	// clock would make the rendered output untestable and the elapsed times
+	// unpinnable.
+	progressFrameRate time.Duration
+	now               func() time.Time
+}
+
+// liveApp is the production app: the real runner, the machine's own host facts,
+// one prompter for the whole run, the real stderr check and the real downloader.
+func liveApp() app {
+	return app{
+		r:                gdurunner.Exec{},
+		host:             liveHost(),
+		prompter:         confirm.New(confirm.Options{}),
+		stderrIsTerminal: func() bool { return confirm.IsCharDevice(os.Stderr) },
+		download:         libs.Download,
+		statusWorkers:    4,
+
+		progressFrameRate: 120 * time.Millisecond,
+		now:               time.Now,
+	}
+}
+
+// run is the CLI entry point: it dispatches with the production app. Tests that
+// need to inspect what would run call dispatch directly with their own.
 func run(args []string) int {
-	return dispatch(args, gdurunner.Exec{})
+	return dispatch(args, liveApp())
 }
 
 // bg is the context every runner helper call outside logs --follow runs under.
@@ -144,27 +210,27 @@ func run(args []string) int {
 func bg() context.Context { return context.Background() }
 
 // verbHandlers maps each modeled verb (cliVerbs in commands.go) to its
-// implementation, threading r down to whichever action ends up shelling out.
+// implementation, threading a down to whichever action ends up shelling out.
 // Keying dispatch off the model instead of a parallel switch is what
 // TestDispatchHandlersMatchModel gates: a verb added to one side and not the
 // other fails that test rather than drifting silently (see task 2's
 // examples-default-dir drift for what this class of bug looks like).
-var verbHandlers = map[string]func(args []string, r gdurunner.Runner) int{
-	"generate":      func(args []string, r gdurunner.Runner) int { return runGenerate(args) },
-	"deploy":        func(args []string, r gdurunner.Runner) int { return runAction(runner.ActionDeploy, args, r) },
-	"remove":        func(args []string, r gdurunner.Runner) int { return runAction(runner.ActionRemove, args, r) },
-	"start":         func(args []string, r gdurunner.Runner) int { return runLifecycle(runner.ActionStart, args, r) },
-	"stop":          func(args []string, r gdurunner.Runner) int { return runLifecycle(runner.ActionStop, args, r) },
-	"restart":       func(args []string, r gdurunner.Runner) int { return runLifecycle(runner.ActionRestart, args, r) },
-	"status":        func(args []string, r gdurunner.Runner) int { return runStatus(args, r) },
-	"logs":          func(args []string, r gdurunner.Runner) int { return runLogs(args, r) },
-	"cli":           func(args []string, r gdurunner.Runner) int { return runShell(args, r) },
-	"version":       func(args []string, r gdurunner.Runner) int { return actVersion() },
-	"validate":      func(args []string, r gdurunner.Runner) int { return runValidate(args, r) },
-	"examples":      func(args []string, r gdurunner.Runner) int { return runExamples(args) },
-	"download":      func(args []string, r gdurunner.Runner) int { return runDownload(args) },
-	"auto-complete": func(args []string, r gdurunner.Runner) int { return runAutoComplete(args) },
-	"help":          func(args []string, r gdurunner.Runner) int { return runHelp(args) },
+var verbHandlers = map[string]func(args []string, a app) int{
+	"generate":      func(args []string, a app) int { return runGenerate(args, a.prompter) },
+	"deploy":        func(args []string, a app) int { return runAction(runner.ActionDeploy, args, a) },
+	"remove":        func(args []string, a app) int { return runAction(runner.ActionRemove, args, a) },
+	"start":         func(args []string, a app) int { return runLifecycle(runner.ActionStart, args, a) },
+	"stop":          func(args []string, a app) int { return runLifecycle(runner.ActionStop, args, a) },
+	"restart":       func(args []string, a app) int { return runLifecycle(runner.ActionRestart, args, a) },
+	"status":        func(args []string, a app) int { return runStatus(args, a) },
+	"logs":          func(args []string, a app) int { return runLogs(args, a) },
+	"cli":           func(args []string, a app) int { return runShell(args, a) },
+	"version":       func(args []string, a app) int { return actVersion() },
+	"validate":      func(args []string, a app) int { return runValidate(args, a) },
+	"examples":      func(args []string, a app) int { return runExamples(args) },
+	"download":      func(args []string, a app) int { return runDownload(args, a.download) },
+	"auto-complete": func(args []string, a app) int { return runAutoComplete(args) },
+	"help":          func(args []string, a app) int { return runHelp(args) },
 }
 
 // commandAbbrev is cliVerbs (Name and Aliases in commands.go) as the shared
@@ -196,7 +262,7 @@ func resolveVerb(name string) string {
 // its canonical verb the same way, right after that -h/--help normalization;
 // the unknown-command message below still echoes args[0] as typed, never the
 // resolved name.
-func dispatch(args []string, r gdurunner.Runner) int {
+func dispatch(args []string, a app) int {
 	if len(args) == 0 {
 		usage(os.Stderr)
 		return exitcode.Usage
@@ -220,7 +286,7 @@ func dispatch(args []string, r gdurunner.Runner) int {
 		fmt.Fprint(os.Stdout, verbUsage(verb))
 		return exitcode.OK
 	}
-	return h(args[1:], r)
+	return h(args[1:], a)
 }
 
 // runHelp implements the help verb: the top-level summary, or -- with a
@@ -356,7 +422,7 @@ var platformGenerators = map[string]func(envPath, out string) int{
 // that platform's artifacts. A positional naming an old-grammar platform
 // (generate kubernetes, ...) is rejected with a hint at --platform instead of
 // being resolved, per platformResolutionDetail in commands.go.
-func runGenerate(args []string) int {
+func runGenerate(args []string, p *confirm.Prompter) int {
 	fs := verbFlagSet("generate")
 	env := envFlag(fs)
 	out := outFlag(fs)
@@ -384,7 +450,7 @@ func runGenerate(args []string) int {
 	if lerr != nil {
 		return usageExit(lerr)
 	}
-	platformName, perr := resolvePlatform(*platform, presentPlatforms(e), true)
+	platformName, perr := resolvePlatform(*platform, presentPlatforms(e), true, p)
 	if perr != nil {
 		return usageExit(perr)
 	}
@@ -469,6 +535,11 @@ type actionOpts struct {
 	// release does not own is never removed, with or without this set -- the
 	// occupancy check runs first and an occupant of any kind ends it.
 	noPrompt bool
+	// host and prompter are the run's, carried here so the three targets keep
+	// one signature: only podman reads the host, and only the paths that ask a
+	// question read the prompter.
+	host     hostFacts
+	prompter *confirm.Prompter
 }
 
 var actTargets = map[string]func(o actionOpts, r gdurunner.Runner) int{
@@ -483,7 +554,7 @@ var actTargets = map[string]func(o actionOpts, r gdurunner.Runner) int{
 // ...) is rejected with a hint at --platform, and anything else is an
 // unexpected argument -- both usage errors (exit 2), per
 // platformResolutionDetail in commands.go.
-func runAction(action string, args []string, r gdurunner.Runner) int {
+func runAction(action string, args []string, a app) int {
 	fs := verbFlagSet(action)
 	env := envFlag(fs)
 	platform := platformFlag(fs)
@@ -510,7 +581,7 @@ func runAction(action string, args []string, r gdurunner.Runner) int {
 	if lerr != nil {
 		return usageExit(lerr)
 	}
-	platformName, perr := resolvePlatform(*platform, presentPlatforms(e), true)
+	platformName, perr := resolvePlatform(*platform, presentPlatforms(e), true, a.prompter)
 	if perr != nil {
 		return usageExit(perr)
 	}
@@ -523,7 +594,7 @@ func runAction(action string, args []string, r gdurunner.Runner) int {
 	// the per-platform preflight probe -- so a cancelled teardown touches the
 	// cluster not at all, not even with a read.
 	if action == runner.ActionRemove && !*noPrompt {
-		ok, cerr := confirmRemove(platformName, removeTarget(platformName, e))
+		ok, cerr := confirmRemove(a.prompter, platformName, removeTarget(platformName, e))
 		if cerr != nil {
 			return errExit(cerr)
 		}
@@ -539,7 +610,9 @@ func runAction(action string, args []string, r gdurunner.Runner) int {
 		envPath:   *env,
 		approvals: approvals,
 		noPrompt:  *noPrompt,
-	}, r)
+		host:      a.host,
+		prompter:  a.prompter,
+	}, a.r)
 }
 
 // preflight runs the read-only probes (runner.Preflight) before any
@@ -738,7 +811,7 @@ func confirmDockerRedeploy(r gdurunner.Runner, o actionOpts, d *spec.Docker, dig
 	if !running || have == digest {
 		return exitcode.OK, true
 	}
-	approved, cerr := confirmRedeploy(o.noPrompt, fmt.Sprintf(
+	approved, cerr := confirmRedeploy(o.prompter, o.noPrompt, fmt.Sprintf(
 		"container %s is running and its compose file or credentials changed (or cannot be compared), so compose will recreate it", d.Name))
 	if cerr != nil {
 		return errExit(cerr), false
@@ -799,7 +872,7 @@ func actPodman(o actionOpts, r gdurunner.Runner) int {
 	}
 	// The refusals from the rootless rule and the quadlet directory exit 2, a
 	// session that cannot be repaired exits 1: see runner.ResolveQuadletScope.
-	h := host()
+	h := o.host
 	sc, serr := runner.ResolveQuadletScope(h.scope, e.Podman.Rootful)
 	if serr != nil {
 		return errExit(serr)
@@ -834,14 +907,14 @@ func actPodman(o actionOpts, r gdurunner.Runner) int {
 	for _, w := range podmanHostChecks(plan, sc) {
 		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
-	return podmanDeploy(sc, plan, e.Podman, res, r, approvals, o.noPrompt)
+	return podmanDeploy(sc, plan, e.Podman, res, r, approvals, o)
 }
 
 // podmanSecret is one secret the unit mounts: its name in podman's store and the
 // value to store under it. The value is never printed.
 type podmanSecret struct{ name, value string }
 
-func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, res gen.Resolver, r gdurunner.Runner, approvals execguard.Approvals, noPrompt bool) int {
+func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, res gen.Resolver, r gdurunner.Runner, approvals execguard.Approvals, o actionOpts) int {
 	// Everything the unit mounts is resolved first -- the credentials, then the
 	// documents and stores -- so a missing variable or an unreadable or
 	// oversized store stops the deploy before anything is created: the unit
@@ -924,7 +997,7 @@ func podmanDeploy(sc runner.QuadletScope, plan gen.PodmanPlan, p *spec.Podman, r
 		return out.String(), nil
 	}
 	approve := func() (bool, error) {
-		return confirmRedeploy(noPrompt, fmt.Sprintf("%s is running and %s changed, so it will be restarted",
+		return confirmRedeploy(o.prompter, o.noPrompt, fmt.Sprintf("%s is running and %s changed, so it will be restarted",
 			plan.Service, podmanChangeSummary(unitChanged, changed)))
 	}
 	out, cancelled, err := runner.PodmanDeploy(bg(), r, sc, []string{plan.Service}, unitChanged || len(changed) > 0, approve, write)
@@ -1036,7 +1109,7 @@ func presentPlatforms(e *spec.Env) []string {
 // present: true for every caller except status with explicit --pod/--container
 // targets, which names its own targets and so needs no section to run
 // against them (see actStatus).
-func resolvePlatform(flagVal string, present []string, requireSection bool) (string, error) {
+func resolvePlatform(flagVal string, present []string, requireSection bool, p *confirm.Prompter) (string, error) {
 	if flagVal != "" {
 		// Resolved first so the section check, the messages below, and every
 		// caller see a canonical name -- an operator who typed an alias is told
@@ -1060,39 +1133,22 @@ func resolvePlatform(flagVal string, present []string, requireSection bool) (str
 		fmt.Fprintf(os.Stderr, "platform: %s (the only section present in env.yaml)\n", present[0])
 		return present[0], nil
 	default:
-		return promptPlatformMenu(present)
+		return promptPlatformMenu(p, present)
 	}
 }
 
-// prompter is the run's one confirmation seam: the platform menu, the status
-// install prompt and both remove questions go through it, so a single buffered
-// reader serves every question in the run. Tests replace it with a prompter
-// whose terminal answer and input they control (withPrompter in main_test.go),
-// because go test's own stdin is never a character device.
-var prompter = confirm.New(confirm.Options{})
-
-// stderrIsTerminal reports whether there is a screen to draw a progress line
-// on. Deliberately separate from the prompter's terminal answer (stdin), because
-// the two differ in exactly the cases that matter -- `status app > report.txt`
-// still has a terminal to spin on, and `status app 2>steps.log` still has an
-// operator to prompt.
-//
-// A var for the reason prompter is one: go test's own stderr is a pipe, so a
-// hard-coded probe would make the spinner unreachable from a test.
-var stderrIsTerminal = func() bool { return confirm.IsCharDevice(os.Stderr) }
-
 // promptPlatformMenu lists present as a numbered menu and reads the operator's
-// choice via the prompter. A non-TTY refusal or an unanswered prompt is wrapped
+// choice via the prompter p. A non-TTY refusal or an unanswered prompt is wrapped
 // with a --platform hint so the operator has an immediate next step instead of
 // a bare "not a terminal" error.
-func promptPlatformMenu(present []string) (string, error) {
+func promptPlatformMenu(p *confirm.Prompter, present []string) (string, error) {
 	var b strings.Builder
 	b.WriteString("multiple platforms are configured in env.yaml; choose one:\n")
 	for i, p := range present {
 		fmt.Fprintf(&b, "  %d) %s\n", i+1, p)
 	}
 	b.WriteString("> ")
-	line, answered, err := prompter.ReadLine(b.String())
+	line, answered, err := p.ReadLine(b.String())
 	if err == nil && !answered {
 		err = confirm.Unanswered()
 	}
@@ -1143,7 +1199,7 @@ func actVersion() int {
 
 // ---- validate / examples -----------------------------------------------------
 
-func runValidate(args []string, r gdurunner.Runner) int {
+func runValidate(args []string, a app) int {
 	fs := verbFlagSet("validate")
 	env := envFlag(fs)
 	if _, err := collectFlagsAndDirs(fs, args); err != nil {
@@ -1155,7 +1211,7 @@ func runValidate(args []string, r gdurunner.Runner) int {
 	}
 	res := resolver(envDir)
 	verrs, warns := gen.Validate(req, res)
-	eerrs, herrs, hwarns := hostChecks(req, e, res, r)
+	eerrs, herrs, hwarns := hostChecks(req, e, res, a.r, a.host)
 	nverr := len(verrs) + len(eerrs)
 	errs, warns := append(append(verrs, eerrs...), herrs...), append(warns, hwarns...)
 	printWarnings(warns)
@@ -1186,7 +1242,7 @@ func runValidate(args []string, r gdurunner.Runner) int {
 // envErrs are what env.yaml or the user running validate got wrong (the
 // rootless rule, the quadlet directory), which is a usage error like any other
 // validate error; errs are a host that is not ready, a failure.
-func hostChecks(req gen.Request, e *spec.Env, res gen.Resolver, r gdurunner.Runner) (envErrs, errs, warns []gen.Issue) {
+func hostChecks(req gen.Request, e *spec.Env, res gen.Resolver, r gdurunner.Runner, h hostFacts) (envErrs, errs, warns []gen.Issue) {
 	issue := func(msg string) gen.Issue { return gen.Issue{File: defaultEnvFile, Msg: msg} }
 	if e.Docker != nil {
 		if plan, perrs, _ := gen.GenerateDocker(req, res); len(perrs) == 0 {
@@ -1200,7 +1256,6 @@ func hostChecks(req gen.Request, e *spec.Env, res gen.Resolver, r gdurunner.Runn
 		}
 	}
 	if e.Podman != nil {
-		h := host()
 		sc, serr := runner.ResolveQuadletScope(h.scope, e.Podman.Rootful)
 		plan, perrs, _ := gen.GeneratePodman(req, res)
 		switch {
@@ -1263,15 +1318,6 @@ var downloadSets = map[string]string{
 	libs.SetSyslog: libs.SetSyslog,
 }
 
-// downloadFn is the injectable seam behind runDownload's call into
-// internal/libs: libs.Download in production, a fake in tests that captures
-// the Input it received instead of touching the network -- mirrors the
-// gdurunner.Runner seam dispatch threads explicitly, so this package's own tests
-// stay decoupled from internal/libs's HTTP/Maven behavior. download never
-// shells out, so it carries no gdurunner.Runner of its own; this is its only
-// injected boundary.
-var downloadFn = libs.Download
-
 // runDownload parses download's flags and validates all three positional
 // words (target, set, optional dir) against the model before calling
 // internal/libs -- mirrors runAutoComplete's missing/unknown-word handling
@@ -1321,7 +1367,7 @@ func downloadDeployedImage(fs *flag.FlagSet, envPath string) (string, error) {
 	return e.Image.Ref(), nil
 }
 
-func runDownload(args []string) int {
+func runDownload(args []string, download func(libs.Input) (libs.Report, error)) int {
 	fs := verbFlagSet("download")
 	var urls []string
 	urlVal := repeatableName{&urls}
@@ -1375,7 +1421,7 @@ func runDownload(args []string) int {
 		return usageExit(ierr)
 	}
 
-	rep, derr := downloadFn(libs.Input{
+	rep, derr := download(libs.Input{
 		Dir:             dir,
 		Set:             set,
 		Version:         *version,
@@ -1567,14 +1613,14 @@ func noPromptFlag(fs *flag.FlagSet) *bool {
 }
 
 // confirmRedeploy asks before a deploy restarts or recreates a service that is
-// running, through the same prompter and non-TTY refusal confirmRemove uses.
+// running, through the same prompter p and non-TTY refusal confirmRemove uses.
 // "y"/"yes" proceeds; anything else, a blank line included, declines.
 //
 // what is the service and the reason it would restart, so a run pointed at the
 // wrong env.yaml is caught here. With noPrompt it approves without asking; a
 // non-TTY with no flag is an error naming --no-prompt, exit 1.
-func confirmRedeploy(noPrompt bool, what string) (bool, error) {
-	return prompter.Gate(noPrompt, confirm.Lenient,
+func confirmRedeploy(p *confirm.Prompter, noPrompt bool, what string) (bool, error) {
+	return p.Gate(noPrompt, confirm.Lenient,
 		fmt.Sprintf("deploy: %s -- continue? [y/N] ", what), "the redeploy")
 }
 
@@ -1593,8 +1639,8 @@ func redeployCancelled() int {
 // what names the actual target so a run pointed at the wrong env.yaml is caught
 // here: on kubernetes that means the namespace, which is usually the only thing
 // distinguishing production from a scratch cluster.
-func confirmRemove(platform, what string) (bool, error) {
-	return prompter.Gate(false, confirm.Lenient,
+func confirmRemove(p *confirm.Prompter, platform, what string) (bool, error) {
+	return p.Gate(false, confirm.Lenient,
 		fmt.Sprintf("remove %s: this tears down %s -- continue? [y/N] ", platform, what), "the teardown")
 }
 

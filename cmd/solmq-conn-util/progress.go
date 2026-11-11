@@ -58,20 +58,16 @@ var progressFrames = []string{"-", "\\", "|", "/"}
 // trimmed rather than the terminal trusted.
 const progressLineWidth = 79
 
-// progressFrameRate and progressNow are the two test seams, vars for the same
-// reason stderrIsTerminal is one: a hard-coded 120ms tick and a real clock would
-// make the rendered output untestable and the elapsed times unpinnable.
-var (
-	progressFrameRate = 120 * time.Millisecond
-	progressNow       = time.Now
-)
-
 // progress reports the step a status run is on. Every method is a no-op on a
 // nil receiver and in progressOff, so call sites are one unconditional line
 // with no branching -- the same rule enableVirtualTerminal follows.
 type progress struct {
 	w    *os.File
 	mode progressMode
+	// frameRate and now are app.progressFrameRate and app.now, kept here so the
+	// frame goroutine and the step timer read them without reaching for the app.
+	frameRate time.Duration
+	now       func() time.Time
 
 	// mu guards everything below it: the frame ticker runs in its own goroutine
 	// and the collectors call step from theirs, so the label and the live line's
@@ -95,16 +91,16 @@ type progress struct {
 // screen, and step lines would scroll under a report being cleared every tick),
 // then --verbose, which is an explicit request and so prints whether or not
 // stderr is a terminal, and only then the spinner, which needs one.
-func newProgress(o statusOpts, w *os.File) *progress {
+func newProgress(o statusOpts, w *os.File, a app) *progress {
 	switch {
 	case o.watch.on:
-		return &progress{w: w, mode: progressOff}
+		return &progress{w: w, mode: progressOff, frameRate: a.progressFrameRate, now: a.now}
 	case o.verbose:
-		return &progress{w: w, mode: progressSteps}
-	case stderrIsTerminal():
-		return &progress{w: w, mode: progressSpinner}
+		return &progress{w: w, mode: progressSteps, frameRate: a.progressFrameRate, now: a.now}
+	case a.stderrIsTerminal():
+		return &progress{w: w, mode: progressSpinner, frameRate: a.progressFrameRate, now: a.now}
 	default:
-		return &progress{w: w, mode: progressOff}
+		return &progress{w: w, mode: progressOff, frameRate: a.progressFrameRate, now: a.now}
 	}
 }
 
@@ -122,7 +118,7 @@ func (p *progress) step(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.finishLocked()
-	p.label, p.start, p.frame = label, progressNow(), 0
+	p.label, p.start, p.frame = label, p.now(), 0
 	if p.mode == progressSpinner {
 		p.drawLocked()
 		p.startLocked()
@@ -200,7 +196,7 @@ func (p *progress) startLocked() {
 // themselves (see runScripts).
 func (p *progress) spin(quit, joined chan struct{}) {
 	defer close(joined)
-	tick := time.NewTicker(progressFrameRate)
+	tick := time.NewTicker(p.frameRate)
 	defer tick.Stop()
 	for {
 		select {
@@ -224,7 +220,7 @@ func (p *progress) finishLocked() {
 		return
 	}
 	if p.mode == progressSteps {
-		fmt.Fprintf(p.w, "step: %s %s\n", p.label, progressElapsed(progressNow().Sub(p.start)))
+		fmt.Fprintf(p.w, "step: %s %s\n", p.label, progressElapsed(p.now().Sub(p.start)))
 	} else {
 		p.eraseLocked()
 	}
@@ -241,7 +237,7 @@ func (p *progress) drawLocked() {
 	// an operator watches, and a tenths digit changing eight times a second
 	// reads as noise. Under a second there is nothing worth counting yet.
 	tail := ""
-	if d := progressNow().Sub(p.start); d >= time.Second {
+	if d := p.now().Sub(p.start); d >= time.Second {
 		tail = fmt.Sprintf("  %ds", int(d.Seconds()))
 	}
 	line := head + progressTrim(p.label, progressLineWidth-len(head)-len(tail)) + tail

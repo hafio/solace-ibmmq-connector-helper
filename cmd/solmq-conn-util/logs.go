@@ -104,7 +104,7 @@ func (o logsOpts) forRunner() runner.LogsOpts {
 }
 
 // runLogs parses logs's flags and hands them to actLogs.
-func runLogs(args []string, r gdurunner.Runner) int {
+func runLogs(args []string, a app) int {
 	fs := verbFlagSet("logs")
 	env := envFlag(fs)
 	platform := platformFlag(fs)
@@ -156,7 +156,7 @@ func runLogs(args []string, r gdurunner.Runner) int {
 	if code := checkLogsFlags(o); code != 0 {
 		return code
 	}
-	return actLogs(o, r)
+	return actLogs(o, a)
 }
 
 // checkLogsFlags rejects the combinations that cannot mean anything, before any
@@ -191,7 +191,8 @@ func checkLogsFlags(o logsOpts) int {
 // log. Everything that can fail the whole run -- an unreadable env.yaml, an
 // unsafe name, a platform that cannot be resolved, a failed preflight -- fails
 // here, before anything is read.
-func actLogs(o logsOpts, r gdurunner.Runner) int {
+func actLogs(o logsOpts, a app) int {
+	r := a.r
 	sess, serr := resolveInstanceSession(instanceRequest{
 		verb:     verbLogs,
 		envPath:  o.envPath,
@@ -201,7 +202,7 @@ func actLogs(o logsOpts, r gdurunner.Runner) int {
 		pods:     o.pods,
 		conts:    o.conts,
 		approved: o.approved,
-	})
+	}, a)
 	if serr != nil {
 		return usageExit(serr)
 	}

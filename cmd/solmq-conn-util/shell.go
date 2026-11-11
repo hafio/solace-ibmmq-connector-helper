@@ -68,7 +68,7 @@ func splitAtSeparator(args []string) (before, after []string, sawSep bool) {
 }
 
 // runShell parses cli's flags and hands them to actShell.
-func runShell(args []string, r gdurunner.Runner) int {
+func runShell(args []string, a app) int {
 	flagArgs, remote, sawSep := splitAtSeparator(args)
 
 	fs := verbFlagSet(verbShell)
@@ -116,7 +116,7 @@ func runShell(args []string, r gdurunner.Runner) int {
 	if code := checkShellFlags(o); code != 0 {
 		return code
 	}
-	return actShell(o, r)
+	return actShell(o, a)
 }
 
 // checkShellFlags rejects the combinations that cannot mean anything, before
@@ -146,7 +146,8 @@ func checkShellFlags(o shellOpts) int {
 // command token, a non-interactive stdin, an unreadable env.yaml, a platform
 // that cannot be resolved, a failed preflight -- fails here, before any process
 // starts.
-func actShell(o shellOpts, r gdurunner.Runner) int {
+func actShell(o shellOpts, a app) int {
+	r := a.r
 	// Every token of the in-container command is held to the same charset every
 	// other operator-supplied argv token is. No shell is involved -- the tokens
 	// reach the engine as separate argv entries, never through sh -c -- so a
@@ -164,7 +165,7 @@ func actShell(o shellOpts, r gdurunner.Runner) int {
 	// possibly work should say so with a next step rather than hang or open a
 	// session nobody can type into. Only the shell form needs a terminal; the
 	// one-shot form is exactly what a script should be using instead.
-	if o.interactive() && !prompter.Terminal() {
+	if o.interactive() && !a.prompter.Terminal() {
 		return errExit(fmt.Errorf("cli opens an interactive shell and stdin is not a terminal; run `cli %s <command>` to run one command instead", argSeparator))
 	}
 
@@ -177,7 +178,7 @@ func actShell(o shellOpts, r gdurunner.Runner) int {
 		pods:     o.pods,
 		conts:    o.conts,
 		approved: o.approved,
-	})
+	}, a)
 	if serr != nil {
 		return usageExit(serr)
 	}
@@ -198,7 +199,7 @@ func actShell(o shellOpts, r gdurunner.Runner) int {
 		// exactly what to type next, which is not a failure.
 		return exitcode.OK
 	}
-	return attachShell(r, sess, o, target)
+	return attachShell(a, sess, o, target)
 }
 
 // shellInvocation rebuilds the command that was run, minus the instance, so the
@@ -239,7 +240,7 @@ func shellInvocation(sess instanceSession, o shellOpts) pickerLine {
 // outright -- kubectl exec reports "the pod could not be reached" and "the
 // command exited 1" with the same status, so a non-zero cli exit means one of
 // the two and the engine's own message on stderr is what distinguishes them.
-func attachShell(r gdurunner.Runner, sess instanceSession, o shellOpts, t instanceRef) int {
+func attachShell(a app, sess instanceSession, o shellOpts, t instanceRef) int {
 	opts := runner.ExecOpts{Stdin: true, TTY: true}
 	payload := []string{runner.ContainerShell}
 	if !o.interactive() {
@@ -248,7 +249,7 @@ func attachShell(r gdurunner.Runner, sess instanceSession, o shellOpts, t instan
 		// piped in, which is what a stdin that is not a terminal means here.
 		// Asking for it unconditionally would leave a command that reads stdin
 		// waiting on a terminal that never sends EOF.
-		opts = runner.ExecOpts{Stdin: !prompter.Terminal()}
+		opts = runner.ExecOpts{Stdin: !a.prompter.Terminal()}
 		payload = o.remote
 	}
 
@@ -267,7 +268,7 @@ func attachShell(r gdurunner.Runner, sess instanceSession, o shellOpts, t instan
 	restore := ignoreInterruptWhileAttached()
 	defer restore()
 
-	code, aerr := r.Attach(gdurunner.Cmd{Argv: argv}, os.Stdin, os.Stdout, os.Stderr)
+	code, aerr := a.r.Attach(gdurunner.Cmd{Argv: argv}, os.Stdin, os.Stdout, os.Stderr)
 	if aerr != nil {
 		return errExit(fmt.Errorf("opening a session on %s: %w", t.name, aerr))
 	}

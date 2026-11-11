@@ -71,6 +71,8 @@ type instanceSession struct {
 	command string
 	cmdArgv []string
 	ns      string
+	// host is the run's host facts, which rootless reads the effective uid from.
+	host hostFacts
 }
 
 // rootless is whether this session's podman engine is a rootless one, which only
@@ -84,7 +86,7 @@ func (s instanceSession) rootless() bool {
 		return false
 	}
 	rootful := s.env != nil && s.env.Podman != nil && s.env.Podman.Rootful
-	mode, err := rootless.Decide(host().scope.Euid, rootful, "podman.rootful")
+	mode, err := rootless.Decide(s.host.scope.Euid, rootful, "podman.rootful")
 	return err == nil && mode
 }
 
@@ -96,7 +98,7 @@ func (s instanceSession) rootless() bool {
 // is started. What it deliberately does not do is run the preflight probe: that
 // reports through an exit code rather than an error, so it stays with the
 // caller.
-func resolveInstanceSession(t instanceRequest) (instanceSession, error) {
+func resolveInstanceSession(t instanceRequest, a app) (instanceSession, error) {
 	var s instanceSession
 
 	e, err := loadInstanceEnv(t.envPath, t.explicitTargets() && t.platform != "")
@@ -104,7 +106,7 @@ func resolveInstanceSession(t instanceRequest) (instanceSession, error) {
 		return s, err
 	}
 
-	platform, err := resolvePlatform(t.platform, presentPlatforms(e), !t.explicitTargets())
+	platform, err := resolvePlatform(t.platform, presentPlatforms(e), !t.explicitTargets(), a.prompter)
 	if err != nil {
 		return s, err
 	}
@@ -130,7 +132,7 @@ func resolveInstanceSession(t instanceRequest) (instanceSession, error) {
 		return s, err
 	}
 
-	return instanceSession{verb: t.verb, env: e, platform: platform, command: command, cmdArgv: cmdArgv, ns: ns}, nil
+	return instanceSession{verb: t.verb, env: e, platform: platform, command: command, cmdArgv: cmdArgv, ns: ns, host: a.host}, nil
 }
 
 // loadInstanceEnv reads env.yaml the same way loadEnvFile does, except when the

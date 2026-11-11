@@ -93,9 +93,9 @@ func linuxHost(home string, files map[string]string) hostFacts {
 // derivedSession is the environment a stripped session for uid 1000 gets.
 var derivedSession = []string{"XDG_RUNTIME_DIR=/run/user/1000", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"}
 
-// runPodmanVerb runs verb against a podman env.yaml made of section and reports
-// the exit code and stderr.
-func runPodmanVerb(t *testing.T, verb, section string, r gdurunner.Runner) (int, string) {
+// runPodmanVerb runs verb with a against a podman env.yaml made of section and
+// reports the exit code and stderr.
+func runPodmanVerb(t *testing.T, verb, section string, a app) (int, string) {
 	t.Helper()
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+section)
@@ -105,10 +105,10 @@ func runPodmanVerb(t *testing.T, verb, section string, r gdurunner.Runner) (int,
 		args = append(args, "--platform", "podman")
 	}
 	if verb == "remove" { // remove asks first; this is about what follows the answer
-		withPrompter(t, true, "y\n")
+		withPrompter(&a, true, "y\n")
 	}
 	var code int
-	stderr := captureStderr(t, func() { code = dispatch(args, r) })
+	stderr := captureStderr(t, func() { code = dispatch(args, a) })
 	return code, stderr
 }
 
@@ -141,8 +141,9 @@ func TestDeployPodmanRootlessLinger(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			home := t.TempDir()
-			useHost(t, linuxHost(home, nil))
-			code, stderr := runPodmanVerb(t, "deploy", podmanEnv(), c.r)
+			a := testApp(nil)
+			useHost(&a, linuxHost(home, nil))
+			code, stderr := runPodmanVerb(t, "deploy", podmanEnv(), a.withRunner(c.r))
 			if code != c.wantCode {
 				t.Fatalf("exit=%d, want %d\n%s", code, c.wantCode, stderr)
 			}
@@ -192,8 +193,9 @@ func TestValidatePodmanRefusesWithoutLinger(t *testing.T) {
 		{"probe fails", &probeRunner{lingerErr: errors.New("exit status 1")}, "cannot read the linger state"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			useHost(t, linuxHost(t.TempDir(), nil))
-			code, stderr := runPodmanVerb(t, "validate", podmanEnv(), c.r)
+			a := testApp(nil)
+			useHost(&a, linuxHost(t.TempDir(), nil))
+			code, stderr := runPodmanVerb(t, "validate", podmanEnv(), a.withRunner(c.r))
 			if code != 1 || !strings.Contains(stderr, c.want) {
 				t.Errorf("exit=%d, want 1 naming %q:\n%s", code, c.want, stderr)
 			}
@@ -202,9 +204,10 @@ func TestValidatePodmanRefusesWithoutLinger(t *testing.T) {
 			}
 		})
 	}
-	useHost(t, linuxHost(t.TempDir(), nil))
+	a := testApp(nil)
+	useHost(&a, linuxHost(t.TempDir(), nil))
 	r := &probeRunner{}
-	if code, stderr := runPodmanVerb(t, "validate", podmanEnv(), r); code != 0 {
+	if code, stderr := runPodmanVerb(t, "validate", podmanEnv(), a.withRunner(r)); code != 0 {
 		t.Errorf("a lingering user with a mappable run-as validates: exit=%d\n%s", code, stderr)
 	}
 }
@@ -246,8 +249,9 @@ func TestPodmanRunAsAgainstTheSubIDRanges(t *testing.T) {
 		// Deploy exits 1 before it stores or writes anything.
 		t.Run("deploy "+c.name, func(t *testing.T) {
 			home := t.TempDir()
-			useHost(t, linuxHost(home, c.files))
-			code, stderr := runPodmanVerb(t, "deploy", section, c.r)
+			a := testApp(nil)
+			useHost(&a, linuxHost(home, c.files))
+			code, stderr := runPodmanVerb(t, "deploy", section, a.withRunner(c.r))
 			if (len(c.wantErr) > 0) != (code == 1) || (len(c.wantErr) == 0 && code != 0) {
 				t.Fatalf("exit=%d, want errors %q\n%s", code, c.wantErr, stderr)
 			}
@@ -268,8 +272,9 @@ func TestPodmanRunAsAgainstTheSubIDRanges(t *testing.T) {
 		})
 		// validate reports it as a host error, exit 1.
 		t.Run("validate "+c.name, func(t *testing.T) {
-			useHost(t, linuxHost(t.TempDir(), c.files))
-			code, stderr := runPodmanVerb(t, "validate", section, c.r)
+			a := testApp(nil)
+			useHost(&a, linuxHost(t.TempDir(), c.files))
+			code, stderr := runPodmanVerb(t, "validate", section, a.withRunner(c.r))
 			if (len(c.wantErr) > 0) != (code == 1) || (len(c.wantErr) == 0 && code != 0) {
 				t.Fatalf("exit=%d, want errors %q\n%s", code, c.wantErr, stderr)
 			}
@@ -300,9 +305,10 @@ func TestPodmanRootfulRule(t *testing.T) {
 	} {
 		for _, verb := range []string{"deploy", "remove", "start", "validate"} {
 			t.Run(c.name+" "+verb, func(t *testing.T) {
-				useHost(t, c.host(testHost(t.TempDir())))
+				a := testApp(nil)
+				useHost(&a, c.host(testHost(t.TempDir())))
 				f := useFakeRunner(t)
-				code, stderr := runPodmanVerb(t, verb, c.section, f)
+				code, stderr := runPodmanVerb(t, verb, c.section, a.withRunner(f))
 				if code != 2 || !strings.Contains(stderr, c.want) {
 					t.Errorf("exit=%d, want 2 naming %q:\n%s", code, c.want, stderr)
 				}
@@ -313,9 +319,10 @@ func TestPodmanRootfulRule(t *testing.T) {
 		}
 	}
 	t.Run("root asking for rootful drives the system manager", func(t *testing.T) {
-		useHost(t, asRoot(linuxHost(t.TempDir(), nil)))
+		a := testApp(nil)
+		useHost(&a, asRoot(linuxHost(t.TempDir(), nil)))
 		r := &probeRunner{}
-		code, stderr := runPodmanVerb(t, "start", podmanEnv()+rootful, r)
+		code, stderr := runPodmanVerb(t, "start", podmanEnv()+rootful, a.withRunner(r))
 		if code != 0 {
 			t.Fatalf("exit=%d\n%s", code, stderr)
 		}
@@ -341,9 +348,10 @@ func TestPodmanScopeRefusals(t *testing.T) {
 				}
 				return ""
 			}
-			useHost(t, h)
+			a := testApp(nil)
+			useHost(&a, h)
 			f := useFakeRunner(t)
-			code, stderr := runPodmanVerb(t, verb, podmanEnv(), f)
+			code, stderr := runPodmanVerb(t, verb, podmanEnv(), a.withRunner(f))
 			if code != 2 || !strings.Contains(stderr, `XDG_CONFIG_HOME is "rel/config"`) || len(f.calls) != 0 {
 				t.Errorf("%s: exit=%d, calls=%+v, want 2 naming it with nothing run:\n%s", verb, code, f.calls, stderr)
 			}
@@ -352,17 +360,18 @@ func TestPodmanScopeRefusals(t *testing.T) {
 	t.Run("no user runtime directory", func(t *testing.T) {
 		h := linuxHost(t.TempDir(), nil)
 		h.scope.IsDir = func(string) (bool, error) { return false, nil }
-		useHost(t, h)
+		a := testApp(nil)
+		useHost(&a, h)
 		for _, verb := range []string{"deploy", "remove", "start"} {
 			f := useFakeRunner(t)
-			code, stderr := runPodmanVerb(t, verb, podmanEnv(), f)
+			code, stderr := runPodmanVerb(t, verb, podmanEnv(), a.withRunner(f))
 			if code != 1 || !strings.Contains(stderr, "/run/user/1000 does not exist") || len(f.calls) != 0 {
 				t.Errorf("%s: exit=%d, calls=%+v, want 1 naming the directory with nothing run:\n%s", verb, code, f.calls, stderr)
 			}
 		}
 		// validate reports it as a host error.
 		f := useFakeRunner(t)
-		if code, stderr := runPodmanVerb(t, "validate", podmanEnv(), f); code != 1 || !strings.Contains(stderr, "/run/user/1000 does not exist") {
+		if code, stderr := runPodmanVerb(t, "validate", podmanEnv(), a.withRunner(f)); code != 1 || !strings.Contains(stderr, "/run/user/1000 does not exist") {
 			t.Errorf("validate: exit=%d, want 1 naming the directory:\n%s", code, stderr)
 		}
 	})

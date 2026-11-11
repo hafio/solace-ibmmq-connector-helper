@@ -34,7 +34,8 @@ var lifecycleNameRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 //   - docker: `<command> stop|start|restart <docker.name>`; a created store is
 //     decoded again on every start.
 //   - podman: `systemctl [--user] stop|start|restart <name>.service`.
-func runLifecycle(action string, args []string, r gdurunner.Runner) int {
+func runLifecycle(action string, args []string, a app) int {
+	r := a.r
 	fs := verbFlagSet(action)
 	env := envFlag(fs)
 	platform := platformFlag(fs)
@@ -56,7 +57,7 @@ func runLifecycle(action string, args []string, r gdurunner.Runner) int {
 	if lerr != nil {
 		return usageExit(lerr)
 	}
-	name, perr := resolvePlatform(*platform, presentPlatforms(e), true)
+	name, perr := resolvePlatform(*platform, presentPlatforms(e), true, a.prompter)
 	if perr != nil {
 		return usageExit(perr)
 	}
@@ -104,7 +105,7 @@ func runLifecycle(action string, args []string, r gdurunner.Runner) int {
 		if err := checkName("podman.name", p.Name); err != nil {
 			return usageExit(err)
 		}
-		sc, serr := runner.ResolveQuadletScope(host().scope, p.Rootful)
+		sc, serr := runner.ResolveQuadletScope(a.host.scope, p.Rootful)
 		if serr != nil {
 			return errExit(serr)
 		}

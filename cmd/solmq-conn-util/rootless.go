@@ -14,18 +14,17 @@ import (
 
 // hostFacts is what the podman paths read from the process and the host: the
 // effective uid, the environment, the home directory, the subordinate-id files
-// and the user's name. A seam like downloadFn, so a test supplies its own rather
-// than depending on the euid or the files of the machine it runs on.
+// and the user's name. A field of app rather than a lookup of its own, so a test
+// supplies its own rather than depending on the euid or the files of the machine
+// it runs on.
 type hostFacts struct {
 	scope    runner.ScopeEnv
 	readFile func(string) ([]byte, error)
 	userName func() string
 }
 
-// host is how deploy, remove, the lifecycle verbs, status and validate learn the
-// facts above: liveHost in production, a fake in tests.
-var host = liveHost
-
+// liveHost reads the facts above from this process and machine; it is what
+// liveApp puts in app.host.
 func liveHost() hostFacts {
 	return hostFacts{scope: runner.LiveScopeEnv(), readFile: os.ReadFile, userName: currentUserName}
 }

@@ -127,7 +127,7 @@ func removeNamespace(r gdurunner.Runner, o actionOpts, k *spec.Kubernetes, base 
 		return exitcode.OK
 	}
 	if !o.noPrompt {
-		ok, cerr := confirmNamespaceRemoval(ns)
+		ok, cerr := confirmNamespaceRemoval(o.prompter, ns)
 		if cerr != nil {
 			// The prompter's error already names --no-prompt as the way to answer
 			// without a terminal.
@@ -157,7 +157,7 @@ func removeNamespace(r gdurunner.Runner, o actionOpts, k *spec.Kubernetes, base 
 // something the teardown does not, and something the operator may well not have
 // created: saying yes to removing a deployment is not saying yes to removing
 // the namespace around it.
-func confirmNamespaceRemoval(ns string) (bool, error) {
-	return prompter.Gate(false, confirm.Lenient,
+func confirmNamespaceRemoval(p *confirm.Prompter, ns string) (bool, error) {
+	return p.Gate(false, confirm.Lenient,
 		fmt.Sprintf("namespace %s holds nothing else -- remove the namespace too? [y/N] ", ns), "the namespace removal")
 }

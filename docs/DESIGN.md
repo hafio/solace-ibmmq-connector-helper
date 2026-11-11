@@ -770,8 +770,8 @@ the package only builds `Cmd` values. Names read back from the engine are held t
   (euid, `getenv`, home, `isDir`, whether the host is Linux) and the `rootful`
   setting instead of reading the process; `LiveScopeEnv` is the production value.
   `cmd/solmq-conn-util` reaches it, the subid files and the user's name through the
-  `host` seam (`hostFacts`), so a test supplies its own euid and files and passes
-  the same as root or off Linux. `QuadletScope.WithEnv` attaches the session to
+  `host` field of `app` (`hostFacts`), so a test supplies its own euid and files and
+  passes the same as root or off Linux. `QuadletScope.WithEnv` attaches the session to
   each `systemctl --user` and `loginctl` command as `Cmd.Env`; the runner allows an
   environment on any command.
 - **Contexts.** Every helper in `internal/runner` takes a `context.Context` first.

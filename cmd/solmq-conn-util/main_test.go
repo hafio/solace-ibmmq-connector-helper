@@ -239,24 +239,55 @@ func captureStderr(t *testing.T, f func()) string {
 	return <-done
 }
 
-// withPrompter swaps the run's prompter (the seam behind the platform menu, the
-// status install confirmation, both remove questions and cli's terminal check)
-// for one whose terminal answer and input the test controls, restoring the
-// previous one on cleanup. input is every line the run may read, one per
-// question: the prompter holds a single reader, so a run that asks twice needs
-// two lines. It returns the buffer the questions are written to. It never
-// touches the real os.Stdin, so it carries no risk of blocking on a read
+// ordinaryHost is the host a test runs on unless it sets one up for itself: an
+// ordinary user with no session, never the euid of the machine the suite is on.
+func ordinaryHost() hostFacts {
+	h := liveHost()
+	h.scope.Euid, h.scope.Linux = 1000, false
+	return h
+}
+
+// testApp is the app a test dispatches with: r as the runner, an ordinary host,
+// a prompter over the real stdin (which go test never makes a terminal), the
+// real stderr probe, the real downloader and the production worker count. A test
+// that needs one of them to differ sets that field (withPrompter, useHost,
+// useFakeDownload, withStderrTerminal, withScriptWorkers) rather than touching
+// anything package-wide.
+func testApp(r gdurunner.Runner) app {
+	return app{
+		r:                r,
+		host:             ordinaryHost(),
+		prompter:         confirm.New(confirm.Options{}),
+		stderrIsTerminal: func() bool { return confirm.IsCharDevice(os.Stderr) },
+		download:         libs.Download,
+		statusWorkers:    4,
+
+		progressFrameRate: 120 * time.Millisecond,
+		now:               time.Now,
+	}
+}
+
+// withRunner is a with r as its runner, for a test that has set up other fields
+// on a and dispatches against several runners.
+func (a app) withRunner(r gdurunner.Runner) app {
+	a.r = r
+	return a
+}
+
+// withPrompter gives a a prompter (the seam behind the platform menu, the status
+// install confirmation, both remove questions and cli's terminal check) whose
+// terminal answer and input the test controls. input is every line the run may
+// read, one per question: the prompter holds a single reader, so a run that asks
+// twice needs two lines. It returns the buffer the questions are written to. It
+// never touches the real os.Stdin, so it carries no risk of blocking on a read
 // regardless of how the test binary itself was invoked.
-func withPrompter(t *testing.T, terminal bool, input string) *bytes.Buffer {
-	t.Helper()
+func withPrompter(a *app, terminal bool, input string) *bytes.Buffer {
 	out := &bytes.Buffer{}
-	old := prompter
-	prompter = confirm.New(confirm.Options{
+	a.prompter = confirm.New(confirm.Options{
 		IsTerminal: func() bool { return terminal },
 		In:         strings.NewReader(input),
 		Out:        out,
 	})
-	t.Cleanup(func() { prompter = old })
 	return out
 }
 
@@ -427,7 +458,7 @@ func TestExitCodeContract(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeRunner{}
-			if got := dispatch(c.args, f); got != c.want {
+			if got := dispatch(c.args, testApp(f)); got != c.want {
 				t.Errorf("dispatch(%v) = %d, want %d", c.args, got, c.want)
 			}
 			// Every case here is a rejection (bad usage or a missing deploy section):
@@ -448,7 +479,7 @@ func TestAutoCompleteDispatchPrintsScript(t *testing.T) {
 		t.Run(shell, func(t *testing.T) {
 			f := &fakeRunner{}
 			code := -1
-			out := captureStdout(t, func() { code = dispatch([]string{"auto-complete", shell}, f) })
+			out := captureStdout(t, func() { code = dispatch([]string{"auto-complete", shell}, testApp(f)) })
 			if code != 0 {
 				t.Errorf("dispatch(auto-complete %s) = %d, want 0", shell, code)
 			}
@@ -506,12 +537,12 @@ func TestVerbAliasesDispatchLikeCanonical(t *testing.T) {
 			var canonErrOut, aliasErrOut string
 			canonOut := captureStdout(t, func() {
 				canonErrOut = captureStderr(t, func() {
-					canonCode = dispatch(append([]string{c.canonical}, c.rest...), fCanon)
+					canonCode = dispatch(append([]string{c.canonical}, c.rest...), testApp(fCanon))
 				})
 			})
 			aliasOut := captureStdout(t, func() {
 				aliasErrOut = captureStderr(t, func() {
-					aliasCode = dispatch(append([]string{c.alias}, c.rest...), fAlias)
+					aliasCode = dispatch(append([]string{c.alias}, c.rest...), testApp(fAlias))
 				})
 			})
 			if aliasCode != canonCode {
@@ -764,7 +795,7 @@ func TestDeployKubernetesSeamHappyPath(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, testApp(f)); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	// The read-only probes come first, one per kind the manifest writes
@@ -801,12 +832,13 @@ func TestRemoveKubernetesSeamHappyPath(t *testing.T) {
 	f := &queueRunner{resp: removeResp(queuedResp{nsList(), nil}, queuedResp{"yes\n", nil}, queuedResp{"", nil})}
 	// remove asks before it tears down; this test is about the argv that
 	// follows, so it answers yes. The prompt itself is covered below.
-	withPrompter(t, true, "y\ny\n")
+	a := testApp(nil)
+	withPrompter(&a, true, "y\ny\n")
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f)); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	if len(f.calls) != kubeProbes+4 {
@@ -872,7 +904,7 @@ func TestDeployKubernetesProbesOperatorSecrets(t *testing.T) {
 			write(t, dir, "10.yaml", tlsWF)
 			var code int
 			stderr := captureStderr(t, func() {
-				code = dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f)
+				code = dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, testApp(f))
 			})
 			if code != c.wantCode {
 				t.Fatalf("exit = %d, want %d\n%s", code, c.wantCode, stderr)
@@ -903,7 +935,7 @@ func TestDeployKubernetesSeamRejectsUnsafeCommand(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+kubeEnvUnsafeCommand)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 2 {
+	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, testApp(f)); code != 2 {
 		t.Fatalf("unsafe kubernetes.command should exit 2, got %d", code)
 	}
 	if len(f.calls) != 0 {
@@ -918,12 +950,13 @@ func TestRemoveKubernetesSeamPromptsBeforeTearingDown(t *testing.T) {
 	for _, answer := range []string{"y", "yes", "YES", "Y"} {
 		t.Run(answer, func(t *testing.T) {
 			f := &queueRunner{resp: removeResp(queuedResp{nsList(), nil}, queuedResp{"yes\n", nil}, queuedResp{"", nil})}
-			withPrompter(t, true, answer+"\n"+answer+"\n")
+			a := testApp(nil)
+			withPrompter(&a, true, answer+"\n"+answer+"\n")
 			dir := t.TempDir()
 			write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 			write(t, dir, "10.yaml", validWF)
 
-			if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+			if code := dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f)); code != 0 {
 				t.Fatalf("exit=%d, want 0", code)
 			}
 			// The same answer approves the namespace question too, so every call
@@ -943,14 +976,15 @@ func TestRemoveDeclinedTouchesNothing(t *testing.T) {
 	for _, answer := range []string{"n", "no", "", "  ", "anything else"} {
 		t.Run("answer="+answer, func(t *testing.T) {
 			f := useFakeRunner(t)
-			withPrompter(t, true, answer+"\n")
+			a := testApp(nil)
+			withPrompter(&a, true, answer+"\n")
 			dir := t.TempDir()
 			write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 			write(t, dir, "10.yaml", validWF)
 
 			var code int
 			stderr := captureStderr(t, func() {
-				code = dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f)
+				code = dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f))
 			})
 			if code != 0 {
 				t.Fatalf("exit=%d, want 0 -- a teardown declined on purpose did not fail", code)
@@ -969,13 +1003,14 @@ func TestRemoveDeclinedTouchesNothing(t *testing.T) {
 // no question at all, rather than asking it and ignoring the answer.
 func TestRemoveNoPromptSkipsThePromptEntirely(t *testing.T) {
 	f := &queueRunner{resp: removeResp(queuedResp{nsList(), nil}, queuedResp{"yes\n", nil}, queuedResp{"", nil})}
-	out := withPrompter(t, true, "n\nn\n")
+	a := testApp(nil)
+	out := withPrompter(&a, true, "n\nn\n")
 
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"remove", "--platform", "kubernetes", noPromptFlagName, "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"remove", "--platform", "kubernetes", noPromptFlagName, "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f)); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	// Neither question is asked, and the empty namespace goes with it:
@@ -994,7 +1029,8 @@ func TestRemoveNoPromptSkipsThePromptEntirely(t *testing.T) {
 // confirmation use.
 func TestRemoveNonTTYFailsFastNamingTheFlag(t *testing.T) {
 	f := useFakeRunner(t)
-	out := withPrompter(t, false, "y\ny\n")
+	a := testApp(nil)
+	out := withPrompter(&a, false, "y\ny\n")
 
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
@@ -1002,7 +1038,7 @@ func TestRemoveNonTTYFailsFastNamingTheFlag(t *testing.T) {
 
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f)
+		code = dispatch([]string{"remove", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f))
 	})
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
@@ -1034,14 +1070,15 @@ func TestRemovePromptNamesWhatItWillDestroy(t *testing.T) {
 	} {
 		t.Run(c.platform, func(t *testing.T) {
 			f := useFakeRunner(t)
-			out := withPrompter(t, true, "n\n")
+			a := testApp(nil)
+			out := withPrompter(&a, true, "n\n")
 
 			dir := t.TempDir()
 			write(t, dir, "env.yaml", sharedEnv+c.env)
 			write(t, dir, "10.yaml", validWF)
 
 			captureStderr(t, func() {
-				dispatch([]string{"remove", "--platform", c.platform, "-e", filepath.Join(dir, "env.yaml")}, f)
+				dispatch([]string{"remove", "--platform", c.platform, "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f))
 			})
 			asked := out.String()
 			if !strings.Contains(asked, c.platform) {
@@ -1116,13 +1153,13 @@ func kubeFixture(t *testing.T, kube string) string {
 	return filepath.Join(dir, "env.yaml")
 }
 
-// runKube dispatches a kubernetes verb against r and returns its exit code and what
+// runKube dispatches a kubernetes verb with a and returns its exit code and what
 // it wrote to stderr.
-func runKube(t *testing.T, r gdurunner.Runner, envPath string, args ...string) (int, string) {
+func runKube(t *testing.T, a app, envPath string, args ...string) (int, string) {
 	t.Helper()
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch(append(append([]string(nil), args...), "--platform", "kubernetes", "-e", envPath), r)
+		code = dispatch(append(append([]string(nil), args...), "--platform", "kubernetes", "-e", envPath), a)
 	})
 	return code, stderr
 }
@@ -1148,10 +1185,11 @@ func canIAsked(calls []fakeCall) []string {
 // must never carry it.
 func TestRemoveTeardownManifestOmitsTheNamespace(t *testing.T) {
 	f := &queueRunner{resp: removeResp(queuedResp{nsList(), nil}, queuedResp{"yes\n", nil}, queuedResp{"", nil})}
-	withPrompter(t, true, "y\ny\n")
+	a := testApp(nil)
+	withPrompter(&a, true, "y\ny\n")
 	env := kubeFixture(t, kubeEnv)
 
-	if code, stderr := runKube(t, f, env, "remove"); code != 0 {
+	if code, stderr := runKube(t, a.withRunner(f), env, "remove"); code != 0 {
 		t.Fatalf("exit=%d, want 0\n%s", code, stderr)
 	}
 	if strings.Contains(f.calls[kubeProbes].stdin, "kind: Namespace") {
@@ -1172,7 +1210,7 @@ func TestRemoveTeardownManifestOmitsTheNamespace(t *testing.T) {
 func TestDeployManifestOmitsTheNamespace(t *testing.T) {
 	env := kubeFixture(t, kubeEnv)
 	f := useFakeRunner(t)
-	if code, stderr := runKube(t, f, env, "deploy"); code != 0 {
+	if code, stderr := runKube(t, testApp(f), env, "deploy"); code != 0 {
 		t.Fatalf("deploy exit=%d\n%s", code, stderr)
 	}
 	if strings.Contains(f.calls[kubeProbes+1].stdin, "kind: Namespace") {
@@ -1231,7 +1269,7 @@ func TestDeployNamespaceFlow(t *testing.T) {
 				resp = append(resp, c.applyNS)
 			}
 			q := &queueRunner{resp: resp}
-			code, stderr := runKube(t, q, kubeFixture(t, kubeEnv), "deploy")
+			code, stderr := runKube(t, testApp(q), kubeFixture(t, kubeEnv), "deploy")
 			if code != c.wantCode {
 				t.Fatalf("exit = %d, want %d\n%s", code, c.wantCode, stderr)
 			}
@@ -1302,7 +1340,7 @@ func TestDeployWaitsForTheRollout(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			q := &queueRunner{resp: append(yesProbes(kubeProbes), queuedResp{"namespace/solace-connectors\n", nil}, queuedResp{"", nil}, c.wait)}
-			code, stderr := runKube(t, q, kubeFixture(t, kubeEnv), "deploy")
+			code, stderr := runKube(t, testApp(q), kubeFixture(t, kubeEnv), "deploy")
 			if code != c.wantCode {
 				t.Fatalf("exit = %d, want %d\n%s", code, c.wantCode, stderr)
 			}
@@ -1321,7 +1359,7 @@ func TestDeployWaitsForTheRollout(t *testing.T) {
 	}
 	// A failed apply is not waited on.
 	q := &queueRunner{resp: append(yesProbes(kubeProbes), queuedResp{"namespace/solace-connectors\n", nil}, queuedResp{"denied", errors.New("exit status 1")})}
-	if code, _ := runKube(t, q, kubeFixture(t, kubeEnv), "deploy"); code != 1 || len(q.calls) != kubeProbes+2 {
+	if code, _ := runKube(t, testApp(q), kubeFixture(t, kubeEnv), "deploy"); code != 1 || len(q.calls) != kubeProbes+2 {
 		t.Errorf("a failed apply must not wait: exit %d, calls %+v", code, q.calls)
 	}
 }
@@ -1387,13 +1425,14 @@ kubernetes:
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := useFakeRunner(t)
-			runKube(t, f, kubeFixture(t, c.env), "deploy")
+			runKube(t, testApp(f), kubeFixture(t, c.env), "deploy")
 			if got := canIAsked(f.calls); !reflect.DeepEqual(got, c.deploy) {
 				t.Errorf("deploy asked %v, want %v", got, c.deploy)
 			}
 			f = useFakeRunner(t)
-			withPrompter(t, true, "n\ny\n")
-			runKube(t, f, kubeFixture(t, c.env), "remove", noPromptFlagName)
+			a := testApp(nil)
+			withPrompter(&a, true, "n\ny\n")
+			runKube(t, a.withRunner(f), kubeFixture(t, c.env), "remove", noPromptFlagName)
 			// The remove's last question is the namespace delete, asked after the
 			// occupancy check, so only the first len(c.drop) belong to the teardown.
 			got := canIAsked(f.calls)
@@ -1414,7 +1453,7 @@ kubernetes:
 func TestKubernetesRefusedProbeStopsBeforeAnyWrite(t *testing.T) {
 	resp := append(yesProbes(1), queuedResp{"no\n", errors.New("exit status 1")})
 	q := &queueRunner{resp: resp}
-	code, stderr := runKube(t, q, kubeFixture(t, kubeEnv), "deploy")
+	code, stderr := runKube(t, testApp(q), kubeFixture(t, kubeEnv), "deploy")
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1\n%s", code, stderr)
 	}
@@ -1436,10 +1475,11 @@ func TestRemoveNamespaceOccupiedLeavesItAlone(t *testing.T) {
 			nsItemJSON("PersistentVolumeClaim", "billing-data"),
 		), nil},
 	)}
-	withPrompter(t, true, "y\n")
+	a := testApp(nil)
+	withPrompter(&a, true, "y\n")
 	env := kubeFixture(t, kubeEnv)
 
-	code, stderr := runKube(t, q, env, "remove")
+	code, stderr := runKube(t, a.withRunner(q), env, "remove")
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0 -- the teardown succeeded", code)
 	}
@@ -1471,10 +1511,11 @@ func TestRemoveNamespaceEmptyPromptsSeparately(t *testing.T) {
 			q := &queueRunner{resp: removeResp(queuedResp{nsList(), nil}, queuedResp{"yes\n", nil}, queuedResp{"", nil})}
 			// Two questions: yes to the teardown, then the case's answer to the
 			// namespace. That separation is the point of the feature.
-			withPrompter(t, true, "y\n"+c.answer+"\n")
+			a := testApp(nil)
+			withPrompter(&a, true, "y\n"+c.answer+"\n")
 			env := kubeFixture(t, kubeEnv)
 
-			if code, stderr := runKube(t, q, env, "remove"); code != 0 {
+			if code, stderr := runKube(t, a.withRunner(q), env, "remove"); code != 0 {
 				t.Fatalf("exit=%d, want 0\n%s", code, stderr)
 			}
 			want := kubeProbes + 3
@@ -1499,10 +1540,11 @@ func TestRemoveNamespaceEmptyPromptsSeparately(t *testing.T) {
 // question's read-ahead.
 func TestRemoveSharesOneReaderAcrossBothQuestions(t *testing.T) {
 	q := &queueRunner{resp: removeResp(queuedResp{nsList(), nil}, queuedResp{"yes\n", nil}, queuedResp{"", nil})}
-	out := withPrompter(t, true, "y\ny\n")
+	a := testApp(nil)
+	out := withPrompter(&a, true, "y\ny\n")
 	env := kubeFixture(t, kubeEnv)
 
-	if code, stderr := runKube(t, q, env, "remove"); code != 0 {
+	if code, stderr := runKube(t, a.withRunner(q), env, "remove"); code != 0 {
 		t.Fatalf("exit=%d, want 0\n%s", code, stderr)
 	}
 	if n := strings.Count(out.String(), "[y/N]"); n != 2 {
@@ -1522,10 +1564,11 @@ func TestRemoveSharesOneReaderAcrossBothQuestions(t *testing.T) {
 // silently or not.
 func TestRemoveNoPromptNeverRemovesAnOccupiedNamespace(t *testing.T) {
 	q := &queueRunner{resp: removeResp(queuedResp{nsList(nsItemJSON("Deployment", "billing-api")), nil})}
-	out := withPrompter(t, true, "n\nn\n")
+	a := testApp(nil)
+	out := withPrompter(&a, true, "n\nn\n")
 	env := kubeFixture(t, kubeEnv)
 
-	code, stderr := runKube(t, q, env, "remove", noPromptFlagName)
+	code, stderr := runKube(t, a.withRunner(q), env, "remove", noPromptFlagName)
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0 -- the teardown succeeded", code)
 	}
@@ -1549,10 +1592,11 @@ func TestRemoveNoPromptNeverRemovesAnOccupiedNamespace(t *testing.T) {
 // something to opt into.
 func TestRemovePlainRunChecksTheNamespace(t *testing.T) {
 	q := &queueRunner{resp: removeResp(queuedResp{nsList(), nil}, queuedResp{"yes\n", nil}, queuedResp{"", nil})}
-	out := withPrompter(t, true, "y\ny\n")
+	a := testApp(nil)
+	out := withPrompter(&a, true, "y\ny\n")
 	env := kubeFixture(t, kubeEnv)
 
-	if code, stderr := runKube(t, q, env, "remove"); code != 0 {
+	if code, stderr := runKube(t, a.withRunner(q), env, "remove"); code != 0 {
 		t.Fatalf("exit=%d, want 0\n%s", code, stderr)
 	}
 	// Two questions with no flags at all: the teardown, then the namespace.
@@ -1583,7 +1627,7 @@ func TestRemoveNamespaceRefusesClusterNamespaces(t *testing.T) {
 			env := strings.Replace(kubeEnv, "namespace: solace-connectors", "namespace: "+ns, 1)
 
 			q := &queueRunner{resp: removeResp()}
-			code, stderr := runKube(t, q, kubeFixture(t, env), "remove", noPromptFlagName)
+			code, stderr := runKube(t, testApp(q), kubeFixture(t, env), "remove", noPromptFlagName)
 			if code != 0 {
 				t.Fatalf("exit=%d, want 0", code)
 			}
@@ -1602,7 +1646,7 @@ func TestRemoveNamespaceRefusesClusterNamespaces(t *testing.T) {
 // deleting on a guess.
 func TestRemoveNamespaceProbeFailureLeavesItAlone(t *testing.T) {
 	q := &queueRunner{resp: removeResp(queuedResp{"boom", fmt.Errorf("forbidden")})}
-	code, stderr := runKube(t, q, kubeFixture(t, kubeEnv), "remove", noPromptFlagName)
+	code, stderr := runKube(t, testApp(q), kubeFixture(t, kubeEnv), "remove", noPromptFlagName)
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0 -- the teardown itself succeeded", code)
 	}
@@ -1618,7 +1662,7 @@ func TestRemoveNamespaceProbeFailureLeavesItAlone(t *testing.T) {
 // in there, so the namespace is not even considered.
 func TestRemoveFailedTeardownSkipsTheNamespace(t *testing.T) {
 	q := &queueRunner{resp: append(yesProbes(kubeProbes), queuedResp{"boom", fmt.Errorf("denied")})}
-	code, _ := runKube(t, q, kubeFixture(t, kubeEnv), "remove", noPromptFlagName)
+	code, _ := runKube(t, testApp(q), kubeFixture(t, kubeEnv), "remove", noPromptFlagName)
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
 	}
@@ -1632,7 +1676,7 @@ func TestRemoveFailedTeardownSkipsTheNamespace(t *testing.T) {
 // error before anything reaches the runner -- there is no second path around it.
 func TestRemoveKubernetesSeamRejectsUnsafeCommand(t *testing.T) {
 	f := useFakeRunner(t)
-	code, stderr := runKube(t, f, kubeFixture(t, kubeEnvUnsafeCommand), "remove", noPromptFlagName)
+	code, stderr := runKube(t, testApp(f), kubeFixture(t, kubeEnvUnsafeCommand), "remove", noPromptFlagName)
 	if code != 2 {
 		t.Fatalf("exit=%d, want 2\n%s", code, stderr)
 	}
@@ -1796,10 +1840,13 @@ func TestRemoveNamespaceUnreadableProbeLeavesItAlone(t *testing.T) {
 // without a terminal, and the exit code stays 0.
 func TestRemoveNamespaceNonTTYKeepsItNamingTheFlag(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{{nsList(), nil}, {"yes\n", nil}}}
-	withPrompter(t, false, "y\n")
+	a := testApp(nil)
+	withPrompter(&a, false, "y\n")
 
 	var code int
-	stderr := captureStderr(t, func() { code = removeNamespace(q, actionOpts{action: "remove"}, gateKube("prod"), gateBase) })
+	stderr := captureStderr(t, func() {
+		code = removeNamespace(q, actionOpts{action: "remove", prompter: a.prompter}, gateKube("prod"), gateBase)
+	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0 -- the teardown succeeded", code)
 	}
@@ -1826,9 +1873,12 @@ func TestRemoveNamespaceAsksThePermissionBeforeTheQuestion(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			q := &queueRunner{resp: []queuedResp{{nsList(), nil}, c.probe}}
-			out := withPrompter(t, true, "y\n")
+			a := testApp(nil)
+			out := withPrompter(&a, true, "y\n")
 			var code int
-			stderr := captureStderr(t, func() { code = removeNamespace(q, actionOpts{action: "remove"}, gateKube("prod"), gateBase) })
+			stderr := captureStderr(t, func() {
+				code = removeNamespace(q, actionOpts{action: "remove", prompter: a.prompter}, gateKube("prod"), gateBase)
+			})
 			if code != 0 {
 				t.Fatalf("exit=%d, want 0", code)
 			}
@@ -1924,7 +1974,7 @@ func TestValidateChecksDockerHost(t *testing.T) {
 	write(t, dir, "10.yaml", strings.Replace(tlsWF, "    truststore: ts\n", "    truststore: ts\n    keystore: ks\n", 1))
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"validate", "-e", filepath.Join(dir, "env.yaml")}, f)
+		code = dispatch([]string{"validate", "-e", filepath.Join(dir, "env.yaml")}, testApp(f))
 	})
 	for _, want := range []string{
 		"docker mounts tls.stores.ts.existing.pkcs12 " + filepath.Join(dir, "certs", "missing.p12") + ", which does not exist",
@@ -1951,7 +2001,8 @@ func TestValidateWarnsAboutHostMountsTheConnectorCannotRead(t *testing.T) {
 		t.Skip("the mount check runs on Linux only")
 	}
 	f := useFakeRunner(t)
-	podmanQuadletHome(t) // podman is rootless, as an ordinary user
+	a := testApp(nil)
+	podmanQuadletHome(t, &a) // podman is rootless, as an ordinary user
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, "certs"), 0o755); err != nil {
 		t.Fatal(err)
@@ -1973,7 +2024,7 @@ func TestValidateWarnsAboutHostMountsTheConnectorCannotRead(t *testing.T) {
 	write(t, dir, "10.yaml", tlsWF)
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"validate", "-e", filepath.Join(dir, "env.yaml")}, f)
+		code = dispatch([]string{"validate", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want warnings only:\n%s", code, stderr)
@@ -2045,7 +2096,7 @@ func TestExamplesDefaultDir(t *testing.T) {
 
 // ---- j) download subcommand -------------------------------------------------------
 
-// fakeDownload records every Input reaching the injectable downloadFn seam
+// fakeDownload records every Input reaching the app's download seam
 // (see main.go) so tests can assert exactly what runDownload built, without
 // ever touching the network or internal/libs's own Maven/HTTP behavior --
 // mirrors fakeRunner's role for the deploy/remove seam. resp/err are returned
@@ -2061,17 +2112,13 @@ func (f *fakeDownload) call(in libs.Input) (libs.Report, error) {
 	return f.resp, f.err
 }
 
-// useFakeDownload installs f as the downloadFn seam for the duration of the
-// test, restoring the production libs.Download on cleanup.
-func useFakeDownload(t *testing.T, f *fakeDownload) {
-	t.Helper()
-	old := downloadFn
-	downloadFn = f.call
-	t.Cleanup(func() { downloadFn = old })
+// useFakeDownload makes f the downloader a runs, in place of libs.Download.
+func useFakeDownload(a *app, f *fakeDownload) {
+	a.download = f.call
 }
 
 // TestDownloadMissingAndUnknownWordsRejected covers all three command-level
-// validations runDownload enforces before ever calling downloadFn: a missing
+// validations runDownload enforces before ever calling the downloader: a missing
 // or unknown target, and a missing or unknown set -- mirroring
 // runAutoComplete's messages and exit codes for the same shape of error.
 func TestDownloadMissingAndUnknownWordsRejected(t *testing.T) {
@@ -2088,10 +2135,11 @@ func TestDownloadMissingAndUnknownWordsRejected(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeDownload{}
-			useFakeDownload(t, f)
+			a := testApp(nil)
+			useFakeDownload(&a, f)
 			r := &fakeRunner{}
 			var code int
-			stderr := captureStderr(t, func() { code = dispatch(c.args, r) })
+			stderr := captureStderr(t, func() { code = dispatch(c.args, a.withRunner(r)) })
 			if code != 2 {
 				t.Errorf("dispatch(%v) = %d, want 2", c.args, code)
 			}
@@ -2099,7 +2147,7 @@ func TestDownloadMissingAndUnknownWordsRejected(t *testing.T) {
 				t.Errorf("dispatch(%v) stderr = %q, want substring %q", c.args, stderr, c.want)
 			}
 			if len(f.calls) != 0 {
-				t.Errorf("dispatch(%v): downloadFn must not be invoked on a rejection, got %d calls", c.args, len(f.calls))
+				t.Errorf("dispatch(%v): the downloader must not be invoked on a rejection, got %d calls", c.args, len(f.calls))
 			}
 			if len(r.calls) != 0 {
 				t.Errorf("dispatch(%v): runner must not be invoked, got %d calls", c.args, len(r.calls))
@@ -2122,12 +2170,13 @@ func TestDownloadDirDefaultAndPositionalOverride(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeDownload{}
-			useFakeDownload(t, f)
-			if code := dispatch(c.args, &fakeRunner{}); code != 0 {
+			a := testApp(nil)
+			useFakeDownload(&a, f)
+			if code := dispatch(c.args, a.withRunner(&fakeRunner{})); code != 0 {
 				t.Fatalf("dispatch(%v) = %d, want 0", c.args, code)
 			}
 			if len(f.calls) != 1 {
-				t.Fatalf("downloadFn calls = %d, want 1", len(f.calls))
+				t.Fatalf("the downloader calls = %d, want 1", len(f.calls))
 			}
 			if f.calls[0].Dir != c.want {
 				t.Errorf("Input.Dir = %q, want %q", f.calls[0].Dir, c.want)
@@ -2150,9 +2199,10 @@ func TestDownloadSetReachesInput(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeDownload{}
-			useFakeDownload(t, f)
+			a := testApp(nil)
+			useFakeDownload(&a, f)
 			args := []string{"download", "jar", c.set}
-			if code := dispatch(args, &fakeRunner{}); code != 0 {
+			if code := dispatch(args, a.withRunner(&fakeRunner{})); code != 0 {
 				t.Fatalf("dispatch(%v) = %d, want 0", args, code)
 			}
 			if f.calls[0].Set != c.want {
@@ -2166,9 +2216,10 @@ func TestDownloadSetReachesInput(t *testing.T) {
 // order, into libs.Input.URLs.
 func TestDownloadURLFlagRepeatable(t *testing.T) {
 	f := &fakeDownload{}
-	useFakeDownload(t, f)
+	a := testApp(nil)
+	useFakeDownload(&a, f)
 	args := []string{"download", "jar", "mq", "--url", "https://example.com/a.jar", "--url", "https://example.com/b.jar"}
-	if code := dispatch(args, &fakeRunner{}); code != 0 {
+	if code := dispatch(args, a.withRunner(&fakeRunner{})); code != 0 {
 		t.Fatalf("dispatch(%v) = %d, want 0", args, code)
 	}
 	want := []string{"https://example.com/a.jar", "https://example.com/b.jar"}
@@ -2192,8 +2243,9 @@ func TestDownloadForceFlagReachesInput(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeDownload{}
-			useFakeDownload(t, f)
-			if code := dispatch(c.args, &fakeRunner{}); code != 0 {
+			a := testApp(nil)
+			useFakeDownload(&a, f)
+			if code := dispatch(c.args, a.withRunner(&fakeRunner{})); code != 0 {
 				t.Fatalf("dispatch(%v) = %d, want 0", c.args, code)
 			}
 			if f.calls[0].Force != c.want {
@@ -2218,8 +2270,9 @@ func TestDownloadVersionFlagReachesInput(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeDownload{}
-			useFakeDownload(t, f)
-			if code := dispatch(c.args, &fakeRunner{}); code != 0 {
+			a := testApp(nil)
+			useFakeDownload(&a, f)
+			if code := dispatch(c.args, a.withRunner(&fakeRunner{})); code != 0 {
 				t.Fatalf("dispatch(%v) = %d, want 0", c.args, code)
 			}
 			if f.calls[0].Version != c.want {
@@ -2244,8 +2297,9 @@ func TestDownloadOmitLibFileFlagReachesInput(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeDownload{}
-			useFakeDownload(t, f)
-			if code := dispatch(c.args, &fakeRunner{}); code != 0 {
+			a := testApp(nil)
+			useFakeDownload(&a, f)
+			if code := dispatch(c.args, a.withRunner(&fakeRunner{})); code != 0 {
 				t.Fatalf("dispatch(%v) = %d, want 0", c.args, code)
 			}
 			if f.calls[0].OmitLibFile != c.want {
@@ -2269,8 +2323,9 @@ func TestDownloadIncludeProvidedFlagReachesInput(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeDownload{}
-			useFakeDownload(t, f)
-			if code := dispatch(c.args, &fakeRunner{}); code != 0 {
+			a := testApp(nil)
+			useFakeDownload(&a, f)
+			if code := dispatch(c.args, a.withRunner(&fakeRunner{})); code != 0 {
 				t.Fatalf("dispatch(%v) = %d, want 0", c.args, code)
 			}
 			if f.calls[0].IncludeProvided != c.want {
@@ -2281,7 +2336,7 @@ func TestDownloadIncludeProvidedFlagReachesInput(t *testing.T) {
 }
 
 // TestDownloadReportExitCode covers reportDownload's exit contract: a
-// systemic error (downloadFn's own error return) and a non-empty
+// systemic error (the downloader's own error return) and a non-empty
 // Report.Failed both exit non-zero; a clean write, a skip-only run, and a
 // run where everything was omitted (the image already has all of it -- see
 // task 2's version-aware omission) all exit 0.
@@ -2312,9 +2367,10 @@ func TestDownloadReportExitCode(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeDownload{resp: c.rep, err: c.err}
-			useFakeDownload(t, f)
+			a := testApp(nil)
+			useFakeDownload(&a, f)
 			var code int
-			stderr := captureStderr(t, func() { code = dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
+			stderr := captureStderr(t, func() { code = dispatch([]string{"download", "jar", "mq"}, a.withRunner(&fakeRunner{})) })
 			if code != c.want {
 				t.Errorf("dispatch = %d, want %d\nstderr:\n%s", code, c.want, stderr)
 			}
@@ -2333,9 +2389,10 @@ func TestDownloadReportPrintsWrittenSkippedFailedAndFallback(t *testing.T) {
 		Failed:   []libs.Failure{{Name: "c.jar", Err: fmt.Errorf("404")}},
 		Fallback: []string{"c.jar: version could not be resolved from the POM chain, used latest stable"},
 	}}
-	useFakeDownload(t, f)
+	a := testApp(nil)
+	useFakeDownload(&a, f)
 	var code int
-	stderr := captureStderr(t, func() { code = dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
+	stderr := captureStderr(t, func() { code = dispatch([]string{"download", "jar", "mq"}, a.withRunner(&fakeRunner{})) })
 	if code != 1 {
 		t.Errorf("dispatch = %d, want 1 (Report.Failed non-empty)", code)
 	}
@@ -2366,9 +2423,10 @@ func TestDownloadReportPrintsOmittedBlockDistinctFromFallback(t *testing.T) {
 		Fallback:   []string{"logstash-logback-encoder-9.0.jar: version could not be resolved from the POM chain, used latest stable"},
 		Unverified: []string{"custom.jar: no .sha1 sidecar was published for this url"},
 	}}
-	useFakeDownload(t, f)
+	a := testApp(nil)
+	useFakeDownload(&a, f)
 	var code int
-	stderr := captureStderr(t, func() { code = dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
+	stderr := captureStderr(t, func() { code = dispatch([]string{"download", "jar", "mq"}, a.withRunner(&fakeRunner{})) })
 	if code != 0 {
 		t.Errorf("dispatch = %d, want 0 (no Failed entries)", code)
 	}
@@ -2405,9 +2463,12 @@ func TestDownloadReportExitZeroWhenEverythingOmitted(t *testing.T) {
 			"jakarta.jms-api-3.0.0.jar: the image has 3.1.0",
 		},
 	}}
-	useFakeDownload(t, f)
+	a := testApp(nil)
+	useFakeDownload(&a, f)
 	var code int
-	stderr := captureStderr(t, func() { code = dispatch([]string{"download", "jar", "mq", "--version", "9.4.2.0"}, &fakeRunner{}) })
+	stderr := captureStderr(t, func() {
+		code = dispatch([]string{"download", "jar", "mq", "--version", "9.4.2.0"}, a.withRunner(&fakeRunner{}))
+	})
 	if code != 0 {
 		t.Fatalf("dispatch = %d, want 0 when every artifact was omitted, stderr:\n%s", code, stderr)
 	}
@@ -2434,8 +2495,9 @@ func TestDownloadReportNextHint(t *testing.T) {
 
 	t.Run("no omissions", func(t *testing.T) {
 		f := &fakeDownload{resp: libs.Report{Written: []string{"libs/a.jar"}}}
-		useFakeDownload(t, f)
-		stderr := captureStderr(t, func() { dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
+		a := testApp(nil)
+		useFakeDownload(&a, f)
+		stderr := captureStderr(t, func() { dispatch([]string{"download", "jar", "mq"}, a.withRunner(&fakeRunner{})) })
 		if !strings.Contains(stderr, base) {
 			t.Errorf("stderr missing base next: hint, got:\n%s", stderr)
 		}
@@ -2449,8 +2511,9 @@ func TestDownloadReportNextHint(t *testing.T) {
 			Written: []string{"libs/a.jar"},
 			Omitted: []string{"bcprov-jdk18on-1.84.jar: the image has 1.84"},
 		}}
-		useFakeDownload(t, f)
-		stderr := captureStderr(t, func() { dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
+		a := testApp(nil)
+		useFakeDownload(&a, f)
+		stderr := captureStderr(t, func() { dispatch([]string{"download", "jar", "mq"}, a.withRunner(&fakeRunner{})) })
 		if !strings.Contains(stderr, base) {
 			t.Errorf("stderr missing base next: hint, got:\n%s", stderr)
 		}
@@ -2477,8 +2540,9 @@ func TestDownloadReportPrintsOmitListProvenance(t *testing.T) {
 			OmitListProvenance: "solace-pubsub-connector-ibmmq-2.13.0",
 			OmitListRange:      "2.10.0 and later, before 3.0.0",
 		}}
-		useFakeDownload(t, f)
-		stderr := captureStderr(t, func() { dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
+		a := testApp(nil)
+		useFakeDownload(&a, f)
+		stderr := captureStderr(t, func() { dispatch([]string{"download", "jar", "mq"}, a.withRunner(&fakeRunner{})) })
 		want := "omit list: solace-pubsub-connector-ibmmq-2.13.0 (built in; describes 2.10.0 and later, before 3.0.0)"
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr missing %q, got:\n%s", want, stderr)
@@ -2491,9 +2555,10 @@ func TestDownloadReportPrintsOmitListProvenance(t *testing.T) {
 			OmitListProvenance: "./my-image-libs.txt",
 			OmitListWarnings:   []string{"jackson-core-9zzz.jar: version \"9zzz\" rejected as unparseable -- treated as not provided by the image"},
 		}}
-		useFakeDownload(t, f)
+		a := testApp(nil)
+		useFakeDownload(&a, f)
 		args := []string{"download", "jar", "mq", "--omit-lib-file", "./my-image-libs.txt"}
-		stderr := captureStderr(t, func() { dispatch(args, &fakeRunner{}) })
+		stderr := captureStderr(t, func() { dispatch(args, a.withRunner(&fakeRunner{})) })
 		if !strings.Contains(stderr, "omit list: ./my-image-libs.txt") {
 			t.Errorf("stderr missing the explicit-file provenance line, got:\n%s", stderr)
 		}
@@ -2512,14 +2577,15 @@ func TestDownloadReportPrintsOmitListProvenance(t *testing.T) {
 // as it always has.
 func TestDownloadReportPrintsSeedChoice(t *testing.T) {
 	const why = "logstash-logback-encoder 8.1, the newest 8.x: connector 2.14.1 ships Jackson 2"
-	useFakeDownload(t, &fakeDownload{resp: libs.Report{Written: []string{"libs/a.jar"}, SeedChoice: why}})
-	stderr := captureStderr(t, func() { dispatch([]string{"download", "jar", "syslog"}, &fakeRunner{}) })
+	a := testApp(nil)
+	useFakeDownload(&a, &fakeDownload{resp: libs.Report{Written: []string{"libs/a.jar"}, SeedChoice: why}})
+	stderr := captureStderr(t, func() { dispatch([]string{"download", "jar", "syslog"}, a.withRunner(&fakeRunner{})) })
 	if !strings.Contains(stderr, "seed: "+why+"\n") {
 		t.Errorf("stderr missing the seed line, got:\n%s", stderr)
 	}
 
-	useFakeDownload(t, &fakeDownload{resp: libs.Report{Written: []string{"libs/a.jar"}}})
-	stderr = captureStderr(t, func() { dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}) })
+	useFakeDownload(&a, &fakeDownload{resp: libs.Report{Written: []string{"libs/a.jar"}}})
+	stderr = captureStderr(t, func() { dispatch([]string{"download", "jar", "mq"}, a.withRunner(&fakeRunner{})) })
 	if strings.Contains(stderr, "seed:") {
 		t.Errorf("a report with no SeedChoice printed a seed line:\n%s", stderr)
 	}
@@ -2545,7 +2611,7 @@ func TestDownloadSetMapMatchesModel(t *testing.T) {
 // The failure mode worth pinning is the quiet one: a script still passing the
 // flag must fail as a usage error rather than appear to work while the argument
 // is ignored. Go's flag package reports it as an unknown flag, which is exit 2
-// here, and downloadFn is never reached.
+// here, and the downloader is never reached.
 func TestDownloadJMSFlagIsGone(t *testing.T) {
 	for _, args := range [][]string{
 		{"download", "jar", "mq", "--jms", "jakarta"},
@@ -2553,12 +2619,13 @@ func TestDownloadJMSFlagIsGone(t *testing.T) {
 		{"download", "jar", "syslog", "--jms", "jakarta"},
 	} {
 		f := &fakeDownload{}
-		useFakeDownload(t, f)
-		if code := dispatch(args, &fakeRunner{}); code != 2 {
+		a := testApp(nil)
+		useFakeDownload(&a, f)
+		if code := dispatch(args, a.withRunner(&fakeRunner{})); code != 2 {
 			t.Errorf("dispatch(%v) = %d, want 2 (unknown flag)", args, code)
 		}
 		if len(f.calls) != 0 {
-			t.Errorf("dispatch(%v): downloadFn must not run, got %d calls", args, len(f.calls))
+			t.Errorf("dispatch(%v): the downloader must not run, got %d calls", args, len(f.calls))
 		}
 	}
 }
@@ -2588,9 +2655,10 @@ func TestDownloadReadsDeployedImageFromEnv(t *testing.T) {
 		dir := t.TempDir()
 		downloadEnvWithImage(t, dir, "2.14.1")
 		f := &fakeDownload{}
-		useFakeDownload(t, f)
+		a := testApp(nil)
+		useFakeDownload(&a, f)
 		t.Chdir(dir)
-		if code := dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}); code != 0 {
+		if code := dispatch([]string{"download", "jar", "mq"}, a.withRunner(&fakeRunner{})); code != 0 {
 			t.Fatalf("exit=%d, want 0", code)
 		}
 		if got := f.calls[0].DeployedImage; got != wantRef {
@@ -2600,9 +2668,10 @@ func TestDownloadReadsDeployedImageFromEnv(t *testing.T) {
 
 	t.Run("no env.yaml at all: silent, and still runs", func(t *testing.T) {
 		f := &fakeDownload{}
-		useFakeDownload(t, f)
+		a := testApp(nil)
+		useFakeDownload(&a, f)
 		t.Chdir(t.TempDir())
-		if code := dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}); code != 0 {
+		if code := dispatch([]string{"download", "jar", "mq"}, a.withRunner(&fakeRunner{})); code != 0 {
 			t.Fatalf("exit=%d, want 0: download must work with no config at all", code)
 		}
 		if got := f.calls[0].DeployedImage; got != "" {
@@ -2612,13 +2681,14 @@ func TestDownloadReadsDeployedImageFromEnv(t *testing.T) {
 
 	t.Run("explicit -e that cannot be read is systemic", func(t *testing.T) {
 		f := &fakeDownload{}
-		useFakeDownload(t, f)
+		a := testApp(nil)
+		useFakeDownload(&a, f)
 		args := []string{"download", "jar", "mq", "-e", filepath.Join(t.TempDir(), "nope.yaml")}
-		if code := dispatch(args, &fakeRunner{}); code != 2 {
+		if code := dispatch(args, a.withRunner(&fakeRunner{})); code != 2 {
 			t.Errorf("exit=%d, want 2: the operator named this file", code)
 		}
 		if len(f.calls) != 0 {
-			t.Errorf("downloadFn must not run, got %d calls", len(f.calls))
+			t.Errorf("the downloader must not run, got %d calls", len(f.calls))
 		}
 	})
 
@@ -2626,9 +2696,10 @@ func TestDownloadReadsDeployedImageFromEnv(t *testing.T) {
 		dir := t.TempDir()
 		write(t, dir, "env.yaml", "image: [this is not a mapping\n")
 		f := &fakeDownload{}
-		useFakeDownload(t, f)
+		a := testApp(nil)
+		useFakeDownload(&a, f)
 		t.Chdir(dir)
-		if code := dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}); code != 0 {
+		if code := dispatch([]string{"download", "jar", "mq"}, a.withRunner(&fakeRunner{})); code != 0 {
 			t.Fatalf("exit=%d, want 0: a broken config must not break a download that does not need it", code)
 		}
 		if got := f.calls[0].DeployedImage; got != "" {
@@ -2640,9 +2711,10 @@ func TestDownloadReadsDeployedImageFromEnv(t *testing.T) {
 		dir := t.TempDir()
 		write(t, dir, "env.yaml", "workflows:\n  dir: .\n")
 		f := &fakeDownload{}
-		useFakeDownload(t, f)
+		a := testApp(nil)
+		useFakeDownload(&a, f)
 		t.Chdir(dir)
-		if code := dispatch([]string{"download", "jar", "mq"}, &fakeRunner{}); code != 0 {
+		if code := dispatch([]string{"download", "jar", "mq"}, a.withRunner(&fakeRunner{})); code != 0 {
 			t.Fatalf("exit=%d, want 0", code)
 		}
 		if got := f.calls[0].DeployedImage; got != "" {
@@ -2682,22 +2754,9 @@ func testHost(home string) hostFacts {
 	}
 }
 
-// useHost installs h as the host the podman paths read for the length of the test.
-func useHost(t *testing.T, h hostFacts) {
-	t.Helper()
-	prev := host
-	host = func() hostFacts { return h }
-	t.Cleanup(func() { host = prev })
-}
-
-func init() {
-	// Whatever a test does not set up for itself runs as an ordinary user with
-	// no session, never as the euid of the machine the suite is on.
-	host = func() hostFacts {
-		h := liveHost()
-		h.scope.Euid, h.scope.Linux = 1000, false
-		return h
-	}
+// useHost makes h the host the podman paths of a read.
+func useHost(a *app, h hostFacts) {
+	a.host = h
 }
 
 // podmanQuadletHome runs the test as an ordinary user whose home is a temp
@@ -2709,13 +2768,13 @@ func init() {
 // else reads it, the environment, with XDG_CONFIG_HOME cleared so a developer's
 // own does not move the directory. It no longer depends on the euid of the
 // process, so nothing is skipped as root.
-func podmanQuadletHome(t *testing.T) string {
+func podmanQuadletHome(t *testing.T, a *app) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)        // unix
 	t.Setenv("USERPROFILE", home) // windows
 	t.Setenv("XDG_CONFIG_HOME", "")
-	useHost(t, testHost(home))
+	useHost(a, testHost(home))
 	return filepath.Join(home, ".config", "containers", "systemd")
 }
 
@@ -2900,13 +2959,14 @@ tls:
 			os.Unsetenv(unsetVar)
 			f := useFakeRunner(t)
 			dir := t.TempDir()
-			quadletDir := podmanQuadletHome(t)
+			a := testApp(nil)
+			quadletDir := podmanQuadletHome(t, &a)
 			write(t, dir, "env.yaml", c.env)
 			write(t, dir, "10.yaml", c.wf)
 
 			var code int
 			stderr := captureStderr(t, func() {
-				code = dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f)
+				code = dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f))
 			})
 			if code != 2 {
 				t.Fatalf("exit=%d, want 2: a deploy with an unresolved input is refused for what env.yaml names", code)
@@ -2939,14 +2999,15 @@ func TestDeployPodmanSetButEmptyCredentialFailsBeforeAnyWrite(t *testing.T) {
 	t.Setenv(emptyVar, "")
 	f := useFakeRunner(t)
 	dir := t.TempDir()
-	quadletDir := podmanQuadletHome(t)
+	a := testApp(nil)
+	quadletDir := podmanQuadletHome(t, &a)
 	write(t, dir, "env.yaml", sharedEnv+podmanEnv())
 	write(t, dir, "10.yaml", strings.Replace(validWF, "    password: pw\n", "    password-env: "+emptyVar+"\n", 1))
 	envPath := filepath.Join(dir, "env.yaml")
 
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"deploy", "--platform", "podman", "-e", envPath}, f)
+		code = dispatch([]string{"deploy", "--platform", "podman", "-e", envPath}, a.withRunner(f))
 	})
 	if code != 2 {
 		t.Fatalf("exit=%d, want 2: a set but empty credential variable is refused like an unset one", code)
@@ -2998,7 +3059,8 @@ func TestDeployPodmanFailureStopsBeforeSystemctl(t *testing.T) {
 				f.err = fmt.Errorf("boom")
 				f.failFrom = c.failFrom
 			}
-			quadletDir := podmanQuadletHome(t)
+			a := testApp(nil)
+			quadletDir := podmanQuadletHome(t, &a)
 			want := c.want
 			if c.blockUnit {
 				// A file where ~/.config should be makes the unit directory
@@ -3014,7 +3076,7 @@ func TestDeployPodmanFailureStopsBeforeSystemctl(t *testing.T) {
 
 			var code int
 			stderr := captureStderr(t, func() {
-				code = dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f)
+				code = dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f))
 			})
 			if code != 1 {
 				t.Fatalf("exit=%d, want 1", code)
@@ -3051,7 +3113,7 @@ func TestDeployDockerSeamPipesComposeAndRuns(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, testApp(f)); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "docker-compose.yml")); !os.IsNotExist(err) {
@@ -3108,7 +3170,7 @@ func TestDeployDockerSeamFailedRunLeavesNoComposeFile(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
+	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, testApp(f)); code != 1 {
 		t.Fatalf("exit=%d, want 1 for a failed deploy", code)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "docker-compose.yml")); !os.IsNotExist(err) {
@@ -3136,7 +3198,7 @@ func TestDeployDockerSeamChildEnvCarriesCredentials(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	write(t, dir, "10.yaml", envCredWF)
 
-	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, testApp(f)); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	// Call 0 is the preflight probe (no Env), call 1 the running probe; call 2 is
@@ -3203,7 +3265,7 @@ tls:
 
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f)
+		code = dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, testApp(f))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want the deploy to go ahead:\n%s", code, stderr)
@@ -3225,12 +3287,13 @@ func TestRemoveDockerSeam(t *testing.T) {
 	f := useFakeRunner(t)
 	// remove asks before it tears down; this test is about the argv that
 	// follows, so it answers yes. The prompt itself is covered in section g.
-	withPrompter(t, true, "y\n")
+	a := testApp(nil)
+	withPrompter(&a, true, "y\n")
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"remove", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"remove", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f)); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	wantCalls := [][]string{
@@ -3249,7 +3312,8 @@ func TestRemoveDockerSeam(t *testing.T) {
 
 func TestDeployPodmanSeamWritesUnitsAndStarts(t *testing.T) {
 	f := useFakeRunner(t)
-	quadletDir := podmanQuadletHome(t)
+	a := testApp(nil)
+	quadletDir := podmanQuadletHome(t, &a)
 	legacyDir := filepath.Join(t.TempDir(), "old-base-dir")
 	dir := t.TempDir()
 	// A binary truststore -- a real PKCS12, which deploy opens with its
@@ -3280,7 +3344,7 @@ tls:
 		t.Fatal(err)
 	}
 
-	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f)); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	// The unit is the one file deploy writes, to the quadlet dir the invoking
@@ -3359,7 +3423,8 @@ func TestDeployPodmanRootlessWarnsAboutAnUnlistableLibsDir(t *testing.T) {
 		t.Skip("the mount check runs on Linux only")
 	}
 	f := useFakeRunner(t)
-	podmanQuadletHome(t) // an ordinary user, so this deploy is rootless
+	a := testApp(nil)
+	podmanQuadletHome(t, &a) // an ordinary user, so this deploy is rootless
 	dir := t.TempDir()
 	libs := filepath.Join(dir, "libs")
 	if err := os.Mkdir(libs, 0o700); err != nil {
@@ -3371,7 +3436,7 @@ func TestDeployPodmanRootlessWarnsAboutAnUnlistableLibsDir(t *testing.T) {
 
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f)
+		code = dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want the deploy to go ahead:\n%s", code, stderr)
@@ -3384,12 +3449,13 @@ func TestDeployPodmanRootlessWarnsAboutAnUnlistableLibsDir(t *testing.T) {
 
 func TestRemovePodmanSeamStopsRemovesReloads(t *testing.T) {
 	f := useFakeRunner(t)
-	quadletDir := podmanQuadletHome(t)
+	a := testApp(nil)
+	quadletDir := podmanQuadletHome(t, &a)
 	legacyDir := t.TempDir()
 	dir := t.TempDir()
 	// remove asks before it tears down; this test is about the argv that
 	// follows, so it answers yes. The prompt itself is covered in section g.
-	withPrompter(t, true, "y\n")
+	withPrompter(&a, true, "y\n")
 	write(t, dir, "env.yaml", sharedEnv+podmanEnv()+"  base-dir: "+filepath.ToSlash(legacyDir)+"\n")
 	write(t, dir, "10.yaml", validWF)
 	// Pre-seed the unit a deploy would have written, and the files an older
@@ -3403,7 +3469,7 @@ func TestRemovePodmanSeamStopsRemovesReloads(t *testing.T) {
 	write(t, legacyDir, "solmq-conn-application.yml", "x\n")
 	write(t, legacyDir, "solmq-conn-status", "#!/bin/sh\n")
 
-	if code := dispatch([]string{"remove", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"remove", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f)); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	// Secrets are removed from podman's store only AFTER the unit is stopped and
@@ -3471,7 +3537,7 @@ func TestAllowCommandFlagBadValueExitsUsageError(t *testing.T) {
 			f := &fakeRunner{}
 			var code int
 			stderr := captureStderr(t, func() {
-				code = dispatch([]string{"deploy", "--platform", "kubernetes", "-e", envPath, "--allow-command", c.val}, f)
+				code = dispatch([]string{"deploy", "--platform", "kubernetes", "-e", envPath, "--allow-command", c.val}, testApp(f))
 			})
 			if code != 2 {
 				t.Errorf("--allow-command %q: exit=%d, want 2", c.val, code)
@@ -3499,7 +3565,7 @@ func TestAllowCommandSudoNamesTheSupportedAlternative(t *testing.T) {
 			f := &fakeRunner{}
 			var code int
 			stderr := captureStderr(t, func() {
-				code = dispatch([]string{verb, "--platform", "kubernetes", "-e", envPath, "--allow-command", "sudo"}, f)
+				code = dispatch([]string{verb, "--platform", "kubernetes", "-e", envPath, "--allow-command", "sudo"}, testApp(f))
 			})
 			if code != 2 {
 				t.Errorf("%s --allow-command sudo: exit=%d, want 2", verb, code)
@@ -3540,14 +3606,15 @@ func TestAllowCommandFlagRejectedOnGenerateAndValidate(t *testing.T) {
 func TestAllowCommandFlagRepeatableThreadsToRunner(t *testing.T) {
 	// The approved run completes a deploy, so the unit directory has to be
 	// redirected away from the developer's real ~/.config.
-	podmanQuadletHome(t)
+	a := testApp(nil)
+	podmanQuadletHome(t, &a)
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+podmanEnvChained())
 	write(t, dir, "10.yaml", validWF)
 	envPath := filepath.Join(dir, "env.yaml")
 
 	fReject := useFakeRunner(t)
-	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", envPath}, fReject); code != 2 {
+	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", envPath}, a.withRunner(fReject)); code != 2 {
 		t.Fatalf("without --allow-command: exit=%d, want 2", code)
 	}
 	if len(fReject.calls) != 0 {
@@ -3556,7 +3623,7 @@ func TestAllowCommandFlagRepeatableThreadsToRunner(t *testing.T) {
 
 	fAccept := useFakeRunner(t)
 	args := []string{"deploy", "--platform", "podman", "-e", envPath, "--allow-command", "lima", "--allow-command", "lima"}
-	if code := dispatch(args, fAccept); code != 0 {
+	if code := dispatch(args, a.withRunner(fAccept)); code != 0 {
 		t.Fatalf("with --allow-command lima: exit=%d, want 0", code)
 	}
 	if len(fAccept.calls) == 0 {
@@ -3592,7 +3659,7 @@ func TestDeployRefusesSudoCommandWhateverIsApproved(t *testing.T) {
 		f := useFakeRunner(t)
 		args := append([]string{"deploy", "--platform", "podman", "-e", envPath}, extra...)
 		var code int
-		stderr := captureStderr(t, func() { code = dispatch(args, f) })
+		stderr := captureStderr(t, func() { code = dispatch(args, testApp(f)) })
 		if code != 2 {
 			t.Errorf("%v: exit=%d, want 2", args, code)
 		}
@@ -3620,7 +3687,7 @@ func TestDeployKubernetesPreflightFailureStopsBeforeApply(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
+	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, testApp(f)); code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
 	}
 	if len(f.calls) != 1 {
@@ -3639,7 +3706,7 @@ func TestDeployDockerPreflightFailureStopsBeforeWrite(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
+	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, testApp(f)); code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
 	}
 	compose := filepath.Join(dir, "docker-compose.yml")
@@ -3657,12 +3724,13 @@ func TestDeployDockerPreflightFailureStopsBeforeWrite(t *testing.T) {
 func TestDeployPodmanPreflightFailureStopsBeforeWrite(t *testing.T) {
 	f := useFakeRunner(t)
 	f.err = fmt.Errorf("podman unreachable")
-	quadletDir := podmanQuadletHome(t)
+	a := testApp(nil)
+	quadletDir := podmanQuadletHome(t, &a)
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+podmanEnv())
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 1 {
+	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f)); code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
 	}
 	// The unit is the one file deploy writes, and preflight runs before it.
@@ -3693,7 +3761,7 @@ func TestPlatformFlagHitOverridesInference(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, testApp(f)); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	if want := []string{"docker", "info"}; len(f.calls) == 0 || !reflect.DeepEqual(f.calls[0].argv, want) {
@@ -3714,18 +3782,19 @@ func TestPlatformAliasesResolveToCanonical(t *testing.T) {
 		{alias: "pm", wantBinary: "podman"},
 	} {
 		t.Run(c.alias, func(t *testing.T) {
+			a := testApp(nil)
 			if c.wantBinary == "podman" {
 				// A podman deploy writes its unit to the invoking user's quadlet
 				// directory, so it is redirected like every other podman deploy
 				// test -- or this one would install a fixture unit for real.
-				podmanQuadletHome(t)
+				podmanQuadletHome(t, &a)
 			}
 			f := useFakeRunner(t)
 			dir := t.TempDir()
 			write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv+podmanEnv())
 			write(t, dir, "10.yaml", validWF)
 
-			if code := dispatch([]string{"deploy", "--platform", c.alias, "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+			if code := dispatch([]string{"deploy", "--platform", c.alias, "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f)); code != 0 {
 				t.Fatalf("--platform %s: exit=%d, want 0", c.alias, code)
 			}
 			if len(f.calls) == 0 {
@@ -3746,7 +3815,7 @@ func TestPlatformAliasMissingSectionNamesCanonicalSection(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	f := &fakeRunner{}
 	stderr := captureStderr(t, func() {
-		code := dispatch([]string{"deploy", "--platform", "kube", "-e", filepath.Join(dir, "env.yaml")}, f)
+		code := dispatch([]string{"deploy", "--platform", "kube", "-e", filepath.Join(dir, "env.yaml")}, testApp(f))
 		if code != 2 {
 			t.Fatalf("exit=%d, want 2", code)
 		}
@@ -3767,7 +3836,7 @@ func TestPlatformUnknownValueListsEverySpelling(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	f := &fakeRunner{}
 	stderr := captureStderr(t, func() {
-		code := dispatch([]string{"deploy", "--platform", "k8s", "-e", filepath.Join(dir, "env.yaml")}, f)
+		code := dispatch([]string{"deploy", "--platform", "k8s", "-e", filepath.Join(dir, "env.yaml")}, testApp(f))
 		if code != 2 {
 			t.Fatalf("exit=%d, want 2", code)
 		}
@@ -3877,7 +3946,7 @@ func TestPlatformFlagMissingSectionIsLoudError(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+dockerEnv)
 	f := &fakeRunner{}
 	stderr := captureStderr(t, func() {
-		code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, f)
+		code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", filepath.Join(dir, "env.yaml")}, testApp(f))
 		if code != 2 {
 			t.Fatalf("exit=%d, want 2", code)
 		}
@@ -3899,7 +3968,7 @@ func TestPlatformSingleSectionInferred(t *testing.T) {
 	write(t, dir, "10.yaml", validWF)
 
 	stderr := captureStderr(t, func() {
-		code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, f)
+		code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, testApp(f))
 		if code != 0 {
 			t.Fatalf("exit=%d, want 0", code)
 		}
@@ -3916,13 +3985,14 @@ func TestPlatformSingleSectionInferred(t *testing.T) {
 // than one section present, the interactive menu (via the injected prompter
 // seam) picks the platform.
 func TestPlatformMenuOnMultipleSections(t *testing.T) {
-	withPrompter(t, true, "2\n") // present order is [kubernetes, docker]; 2 = docker
+	a := testApp(nil)
+	withPrompter(&a, true, "2\n") // present order is [kubernetes, docker]; 2 = docker
 	f := useFakeRunner(t)
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv)
 	write(t, dir, "10.yaml", validWF)
 
-	if code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f)); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	if want := []string{"docker", "info"}; len(f.calls) == 0 || !reflect.DeepEqual(f.calls[0].argv, want) {
@@ -3940,11 +4010,12 @@ func TestPlatformMenuNonTTYRefusesWithPlatformHint(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv)
 
-	withPrompter(t, false, "")
+	a := testApp(nil)
+	withPrompter(&a, false, "")
 
 	f := &fakeRunner{}
 	stderr := captureStderr(t, func() {
-		code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, f)
+		code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f))
 		if code != 2 {
 			t.Fatalf("exit=%d, want 2", code)
 		}
@@ -3964,7 +4035,7 @@ func TestPlatformZeroSectionsIsLoudError(t *testing.T) {
 	write(t, dir, "env.yaml", bareEnv)
 	f := &fakeRunner{}
 	stderr := captureStderr(t, func() {
-		code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, f)
+		code := dispatch([]string{"deploy", "-e", filepath.Join(dir, "env.yaml")}, testApp(f))
 		if code != 2 {
 			t.Fatalf("exit=%d, want 2", code)
 		}
@@ -3992,7 +4063,7 @@ func TestOldPositionalFormsRejectedWithPlatformHint(t *testing.T) {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			f := &fakeRunner{}
 			stderr := captureStderr(t, func() {
-				code := dispatch(args, f)
+				code := dispatch(args, testApp(f))
 				if code != 2 {
 					t.Errorf("%v: exit=%d, want 2", args, code)
 				}
@@ -4063,7 +4134,7 @@ const appReport = "leader-election mode: active_standby\nleader-election state: 
 func TestStatusTargetWordIsRequired(t *testing.T) {
 	f := &fakeRunner{}
 	var code int
-	stderr := captureStderr(t, func() { code = dispatch([]string{"status"}, f) })
+	stderr := captureStderr(t, func() { code = dispatch([]string{"status"}, testApp(f)) })
 	if code != 2 {
 		t.Errorf("exit=%d, want 2", code)
 	}
@@ -4099,7 +4170,7 @@ func TestStatusUnknownAndExtraTargetWords(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeRunner{}
 			var code int
-			stderr := captureStderr(t, func() { code = dispatch(c.args, f) })
+			stderr := captureStderr(t, func() { code = dispatch(c.args, testApp(f)) })
 			if code != 2 {
 				t.Errorf("exit=%d, want 2", code)
 			}
@@ -4153,7 +4224,7 @@ func TestStatusTargetAliasesResolve(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{{podsJSON, nil}}}
 	var code int
 	captureStdout(t, func() {
-		code = dispatch([]string{"sts", "cnt", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
+		code = dispatch([]string{"sts", "cnt", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -4186,7 +4257,7 @@ func TestStatusRejectsImpossibleFlagCombinations(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeRunner{}
 			var code int
-			stderr := captureStderr(t, func() { code = dispatch(c.args, f) })
+			stderr := captureStderr(t, func() { code = dispatch(c.args, testApp(f)) })
 			if code != 2 {
 				t.Errorf("exit=%d, want 2", code)
 			}
@@ -4231,7 +4302,8 @@ func TestWatchFlagAcceptsBareAndInterval(t *testing.T) {
 // runner, so a watch refresh costs one inspect call and prints one table.
 func watchTestCollector(r gdurunner.Runner, view statusreport.View) (*statusCollector, statusOpts) {
 	o := statusOpts{view: view, conts: []string{"solmq-connector"}, watch: watchFlag{on: true, interval: 5 * time.Second}}
-	return &statusCollector{opts: o, platform: validate.PlatformDocker, cmdArgv: []string{"docker"}, r: r}, o
+	a := testApp(r)
+	return &statusCollector{opts: o, platform: validate.PlatformDocker, cmdArgv: []string{"docker"}, r: r, host: a.host, prompter: a.prompter, workers: a.statusWorkers, now: a.now}, o
 }
 
 // inspectRunner answers every call with the same inspect document, or fails
@@ -4486,7 +4558,7 @@ func TestStatusContainerViewReadsEngineFactsWithoutExecing(t *testing.T) {
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "container", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
+		code = dispatch([]string{"status", "container", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -4535,7 +4607,7 @@ func TestStatusContainerDetailsSamplesAndChecksComponents(t *testing.T) {
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "container", "-d", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
+		code = dispatch([]string{"status", "container", "-d", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -4570,7 +4642,7 @@ func TestStatusContainerDetailsWithoutMetricsServerDegradesToANote(t *testing.T)
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "container", "-d", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+		code = dispatch([]string{"status", "container", "-d", "--platform", "kubernetes", "--pod", "pod-a"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0 (a missing add-on is not a failed status run)", code)
@@ -4596,7 +4668,7 @@ func TestStatusDockerContainerViewIsOneInspect(t *testing.T) {
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "container", "--platform", "docker", "--container", "solmq-connector"}, q)
+		code = dispatch([]string{"status", "container", "--platform", "docker", "--container", "solmq-connector"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -4629,7 +4701,7 @@ func TestStatusPodmanRestartCountComesFromSystemd(t *testing.T) {
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "container", "--platform", "podman", "--container", "solmq-connector"}, q)
+		code = dispatch([]string{"status", "container", "--platform", "podman", "--container", "solmq-connector"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -4662,7 +4734,7 @@ func TestStatusPodmanRestartCountFallsBackWhenSystemdCannotAnswer(t *testing.T) 
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "container", "--platform", "podman", "--container", "solmq-connector"}, q)
+		code = dispatch([]string{"status", "container", "--platform", "podman", "--container", "solmq-connector"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -4696,7 +4768,7 @@ func TestStatusAllSearchesByImage(t *testing.T) {
 		q := &queueRunner{resp: []queuedResp{{pods, nil}}}
 		var code int
 		stdout := captureStdout(t, func() {
-			code = dispatch([]string{"status", "container", "--platform", "kubernetes", "--all"}, q)
+			code = dispatch([]string{"status", "container", "--platform", "kubernetes", "--all"}, testApp(q))
 		})
 		if code != 0 {
 			t.Fatalf("exit=%d, want 0", code)
@@ -4731,7 +4803,7 @@ func TestStatusAllSearchesByImage(t *testing.T) {
 		q := &queueRunner{resp: []queuedResp{{"", nil}, {list, nil}, {inspect, nil}}}
 		var code int
 		stdout := captureStdout(t, func() {
-			code = dispatch([]string{"status", "container", "--platform", "docker", "--all"}, q)
+			code = dispatch([]string{"status", "container", "--platform", "docker", "--all"}, testApp(q))
 		})
 		if code != 0 {
 			t.Fatalf("exit=%d, want 0", code)
@@ -4755,7 +4827,7 @@ func TestStatusAllWithNoMatchIsActionable(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{{`{"items":[]}`, nil}}}
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"status", "container", "--platform", "kubernetes", "--all"}, q)
+		code = dispatch([]string{"status", "container", "--platform", "kubernetes", "--all"}, testApp(q))
 	})
 	if code != 1 {
 		t.Errorf("exit=%d, want 1", code)
@@ -4777,7 +4849,7 @@ func TestStatusApplicationViewRunsTheScriptAndRendersItsFacts(t *testing.T) {
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "application", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+		code = dispatch([]string{"status", "application", "--platform", "kubernetes", "--pod", "pod-a"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -4813,7 +4885,7 @@ func TestStatusApplicationDetailsAddsTheEnrichmentLines(t *testing.T) {
 	report := func(args ...string) (string, []string) {
 		q := &queueRunner{resp: []queuedResp{{onePodJSON, nil}, {full, nil}}}
 		out := captureStdout(t, func() {
-			if code := dispatch(args, q); code != 0 {
+			if code := dispatch(args, testApp(q)); code != 0 {
 				t.Fatalf("%v: exit=%d, want 0", args, code)
 			}
 		})
@@ -4859,7 +4931,8 @@ func TestStatusApplicationDetailsAddsTheEnrichmentLines(t *testing.T) {
 // failure as a body line under the container facts that explain it. Before this
 // change that instance produced one stderr line and no block at all.
 func TestStatusFailedScriptRunStillGetsItsOwnBlock(t *testing.T) {
-	withScriptWorkers(t, 1) // the answers below are in report order
+	a := testApp(nil)
+	withScriptWorkers(&a, 1) // the answers below are in report order
 	q := &queueRunner{resp: []queuedResp{
 		{podsJSON, nil},  // get pods: pod-a fine, pod-b crash looping
 		{appReport, nil}, // pod-a run
@@ -4867,7 +4940,7 @@ func TestStatusFailedScriptRunStillGetsItsOwnBlock(t *testing.T) {
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "all", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
+		code = dispatch([]string{"status", "all", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, a.withRunner(q))
 	})
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1 (an instance that could not be run)", code)
@@ -4899,7 +4972,7 @@ func TestStatusInstallPaths(t *testing.T) {
 	t.Run("--install installs without asking", func(t *testing.T) {
 		q := base(queuedResp{"", nil}, queuedResp{appReport, nil})
 		captureStdout(t, func() {
-			if code := dispatch([]string{"status", "app", "--install", "--platform", "kubernetes", "--pod", "pod-a"}, q); code != 0 {
+			if code := dispatch([]string{"status", "app", "--install", "--platform", "kubernetes", "--pod", "pod-a"}, testApp(q)); code != 0 {
 				t.Fatalf("exit=%d, want 0", code)
 			}
 		})
@@ -4909,10 +4982,11 @@ func TestStatusInstallPaths(t *testing.T) {
 	})
 
 	t.Run("prompt answered yes installs", func(t *testing.T) {
-		withPrompter(t, true, "y\n")
+		a := testApp(nil)
+		withPrompter(&a, true, "y\n")
 		q := base(queuedResp{"", nil}, queuedResp{appReport, nil})
 		captureStdout(t, func() {
-			if code := dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, q); code != 0 {
+			if code := dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, a.withRunner(q)); code != 0 {
 				t.Fatalf("exit=%d, want 0", code)
 			}
 		})
@@ -4922,11 +4996,12 @@ func TestStatusInstallPaths(t *testing.T) {
 	})
 
 	t.Run("prompt declined skips the instance and exits 1", func(t *testing.T) {
-		withPrompter(t, true, "n\n")
+		a := testApp(nil)
+		withPrompter(&a, true, "n\n")
 		q := base()
 		var code int
 		stdout := captureStdout(t, func() {
-			code = dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+			code = dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, a.withRunner(q))
 		})
 		if code != 1 {
 			t.Fatalf("exit=%d, want 1", code)
@@ -4947,7 +5022,8 @@ func TestStatusInstallPaths(t *testing.T) {
 // confirmation shares the same prompter, so it must refuse rather than block
 // on a read that would never return, and point at --install.
 func TestStatusInstallPromptNonTTYRefusesWithInstallHint(t *testing.T) {
-	withPrompter(t, false, "")
+	a := testApp(nil)
+	withPrompter(&a, false, "")
 
 	q := &queueRunner{resp: []queuedResp{
 		{onePodJSON, nil},
@@ -4955,7 +5031,7 @@ func TestStatusInstallPromptNonTTYRefusesWithInstallHint(t *testing.T) {
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+		code = dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, a.withRunner(q))
 	})
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
@@ -4981,7 +5057,7 @@ func TestStatusScriptStillMissingAfterInstallFails(t *testing.T) {
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "app", "--install", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+		code = dispatch([]string{"status", "app", "--install", "--platform", "kubernetes", "--pod", "pod-a"}, testApp(q))
 	})
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
@@ -4998,7 +5074,8 @@ func TestStatusScriptStillMissingAfterInstallFails(t *testing.T) {
 // built on: the script always exits 0 and carries the state in its output, so a
 // standby instance prints like any other and the run still exits 0.
 func TestStatusStandbyIsAnAnswerNotAFailure(t *testing.T) {
-	withScriptWorkers(t, 1) // the answers below are in report order
+	a := testApp(nil)
+	withScriptWorkers(&a, 1) // the answers below are in report order
 	q := &queueRunner{resp: []queuedResp{
 		{podsJSON, nil},
 		{"leader-election mode: active_standby\nleader-election state: standby\n", nil},
@@ -5006,7 +5083,7 @@ func TestStatusStandbyIsAnAnswerNotAFailure(t *testing.T) {
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
+		code = dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, a.withRunner(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0 (standby is an answer, not a failure)", code)
@@ -5041,7 +5118,7 @@ func TestStatusRunningWorkflowNotConnectedFailsTheRun(t *testing.T) {
 		q := &queueRunner{resp: []queuedResp{{onePodJSON, nil}, {reconnectingReport(leState, wfState), nil}}}
 		var code int
 		stdout := captureStdout(t, func() {
-			code = dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+			code = dispatch([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, testApp(q))
 		})
 		return stdout, code
 	}
@@ -5083,7 +5160,7 @@ func TestStatusRawPrintsTheHealthDocumentInFull(t *testing.T) {
 		q := &queueRunner{resp: []queuedResp{{onePodJSON, nil}, {report, nil}}}
 		var code int
 		stdout := captureStdout(t, func() {
-			code = dispatch(append([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, args...), q)
+			code = dispatch(append([]string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a"}, args...), testApp(q))
 		})
 		return stdout, code
 	}
@@ -5210,14 +5287,15 @@ func (r *targetRunner) Run(_ context.Context, c gdurunner.Cmd, stdout, _ io.Writ
 // each answer still lands on the instance that gave it.
 func TestStatusRunsTheScriptsConcurrently(t *testing.T) {
 	names := []string{"pod-a", "pod-b", "pod-c", "pod-d", "pod-e"}
-	withScriptWorkers(t, 2)
+	a := testApp(nil)
+	withScriptWorkers(&a, 2)
 	r := newTargetRunner(podListJSON(names...), 2)
 	args := []string{"status", "app", "--output", "json", "--platform", "kubernetes"}
 	for _, n := range names {
 		args = append(args, "--pod", n)
 	}
 	var code int
-	stdout := captureStdout(t, func() { code = dispatch(args, r) })
+	stdout := captureStdout(t, func() { code = dispatch(args, a.withRunner(r)) })
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
@@ -5259,7 +5337,7 @@ func TestStatusJSONOutputIsOneDocument(t *testing.T) {
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "all", "--output", "json", "--platform", "kubernetes", "--pod", "pod-a"}, q)
+		code = dispatch([]string{"status", "all", "--output", "json", "--platform", "kubernetes", "--pod", "pod-a"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -5304,7 +5382,7 @@ func TestStatusImageMismatchIsReportedAtBothLevels(t *testing.T) {
 		q := &queueRunner{resp: []queuedResp{{onePodJSON, nil}, {deployment, nil}}}
 		var code int
 		stdout := captureStdout(t, func() {
-			code = dispatch([]string{"status", "container", "-e", envPath, "--platform", "kubernetes", "--pod", "pod-a"}, q)
+			code = dispatch([]string{"status", "container", "-e", envPath, "--platform", "kubernetes", "--pod", "pod-a"}, testApp(q))
 		})
 		if code != 0 {
 			t.Fatalf("exit=%d, want 0 (a wrong image is a finding, not a failed run)", code)
@@ -5323,7 +5401,7 @@ func TestStatusImageMismatchIsReportedAtBothLevels(t *testing.T) {
 		}}
 		var code int
 		stdout := captureStdout(t, func() {
-			code = dispatch([]string{"status", "container", "-d", "-e", envPath, "--platform", "kubernetes", "--pod", "pod-a"}, q)
+			code = dispatch([]string{"status", "container", "-d", "-e", envPath, "--platform", "kubernetes", "--pod", "pod-a"}, testApp(q))
 		})
 		if code != 0 {
 			t.Fatalf("exit=%d, want 0", code)
@@ -5346,7 +5424,7 @@ func TestStatusImageMismatchIsReportedAtBothLevels(t *testing.T) {
 		q := &queueRunner{resp: []queuedResp{{onePodJSON, nil}, {deployment, nil}}}
 		var code int
 		stdout := captureStdout(t, func() {
-			code = dispatch([]string{"status", "container", "-e", matchPath, "--platform", "kubernetes", "--pod", "pod-a"}, q)
+			code = dispatch([]string{"status", "container", "-e", matchPath, "--platform", "kubernetes", "--pod", "pod-a"}, testApp(q))
 		})
 		if code != 0 {
 			t.Fatalf("exit=%d, want 0", code)
@@ -5382,7 +5460,7 @@ func TestStatusDockerProjectMismatchIsReported(t *testing.T) {
 		q := &queueRunner{resp: []queuedResp{{"", nil}, {dockerInspect, nil}}}
 		var code int
 		stdout := captureStdout(t, func() {
-			code = dispatch([]string{"status", "container", "-e", envPath, "--platform", "docker", "--container", "solmq-connector"}, q)
+			code = dispatch([]string{"status", "container", "-e", envPath, "--platform", "docker", "--container", "solmq-connector"}, testApp(q))
 		})
 		if code != 0 {
 			t.Fatalf("exit=%d, want 0 (a project mismatch is a finding, not a failed run)", code)
@@ -5401,7 +5479,7 @@ func TestStatusDockerProjectMismatchIsReported(t *testing.T) {
 		q := &queueRunner{resp: []queuedResp{{"", nil}, {dockerInspect, nil}}}
 		var code int
 		stdout := captureStdout(t, func() {
-			code = dispatch([]string{"status", "container", "-e", envPath, "--platform", "docker", "--container", "solmq-connector"}, q)
+			code = dispatch([]string{"status", "container", "-e", envPath, "--platform", "docker", "--container", "solmq-connector"}, testApp(q))
 		})
 		if code != 0 {
 			t.Fatalf("exit=%d, want 0", code)
@@ -5421,7 +5499,7 @@ func TestStatusDockerProjectMismatchIsReported(t *testing.T) {
 		q := &queueRunner{resp: []queuedResp{{"", nil}, {bare, nil}}}
 		var code int
 		stdout := captureStdout(t, func() {
-			code = dispatch([]string{"status", "container", "-e", envPath, "--platform", "docker", "--container", "solmq-connector"}, q)
+			code = dispatch([]string{"status", "container", "-e", envPath, "--platform", "docker", "--container", "solmq-connector"}, testApp(q))
 		})
 		if code != 0 {
 			t.Fatalf("exit=%d, want 0", code)
@@ -5446,7 +5524,7 @@ func TestStatusDockerDetailsAddsDigestAndStats(t *testing.T) {
 	}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "container", "-d", "--platform", "docker", "--container", "solmq-connector"}, q)
+		code = dispatch([]string{"status", "container", "-d", "--platform", "docker", "--container", "solmq-connector"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -5473,7 +5551,7 @@ func TestStatusDockerDetailsAddsDigestAndStats(t *testing.T) {
 func TestStatusRejectsUnsafeUserBeforeAnyExec(t *testing.T) {
 	for _, user := range []string{"bad/user", "who$e", "a b", "quote'd"} {
 		f := &fakeRunner{}
-		code := dispatch([]string{"status", "app", "--platform", "docker", "--container", "c1", "--user", user}, f)
+		code := dispatch([]string{"status", "app", "--platform", "docker", "--container", "c1", "--user", user}, testApp(f))
 		if code != 2 {
 			t.Errorf("--user %q: exit=%d, want 2", user, code)
 		}
@@ -5497,7 +5575,7 @@ func TestStatusTargetValidationRejectsBadPodAndNamespace(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeRunner{}
-			if code := dispatch(c.args, f); code != 2 {
+			if code := dispatch(c.args, testApp(f)); code != 2 {
 				t.Errorf("%s: exit=%d, want 2", c.name, code)
 			}
 			if len(f.calls) != 0 {
@@ -5515,7 +5593,7 @@ func TestStatusManagementPortBounds(t *testing.T) {
 		t.Run(p, func(t *testing.T) {
 			f := &fakeRunner{}
 			args := []string{"status", "app", "--platform", "kubernetes", "--pod", "pod-a", "--management-port", p}
-			if code := dispatch(args, f); code != 2 {
+			if code := dispatch(args, testApp(f)); code != 2 {
 				t.Errorf("--management-port %s: exit=%d, want 2", p, code)
 			}
 			if len(f.calls) != 0 {
@@ -5537,7 +5615,7 @@ func TestStatusNoPodsFoundNamesTheSelector(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{{`{"items":[]}`, nil}}}
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"status", "container", "--platform", "kubernetes", "-e", envPath}, q)
+		code = dispatch([]string{"status", "container", "--platform", "kubernetes", "-e", envPath}, testApp(q))
 	})
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
@@ -5578,7 +5656,7 @@ func TestStatusAllSkipsAnUnsafeNameOutLoud(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{{"", nil}, {list, nil}, {inspect, nil}}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "container", "--platform", "docker", "--all"}, q)
+		code = dispatch([]string{"status", "container", "--platform", "docker", "--all"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -5617,7 +5695,7 @@ func TestStatusAllSortsRowsAlphabetically(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{{"", nil}, {list, nil}, {inspect, nil}}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"status", "container", "--platform", "docker", "--all"}, q)
+		code = dispatch([]string{"status", "container", "--platform", "docker", "--all"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -5634,49 +5712,43 @@ func TestStatusAllSortsRowsAlphabetically(t *testing.T) {
 // The report is the artifact, and a `1>` capture has to be byte-identical with
 // and without a terminal to spin on.
 
-// withStderrTerminal injects an answer for the stderrIsTerminal seam so a test
+// withStderrTerminal gives a an answer for the stderr terminal check so a test
 // can ask for the spinner: go test's own stderr is a pipe, which would otherwise
 // make the default rendering unreachable. withPrompter is the stdin counterpart.
-func withStderrTerminal(t *testing.T, yes bool) {
-	t.Helper()
-	prev := stderrIsTerminal
-	stderrIsTerminal = func() bool { return yes }
-	t.Cleanup(func() { stderrIsTerminal = prev })
+func withStderrTerminal(a *app, yes bool) {
+	a.stderrIsTerminal = func() bool { return yes }
 }
 
-// withProgressClock pins progressNow to a clock that advances by step on every
-// read, so an elapsed time is arithmetic rather than timing: each step reports
-// exactly one step's worth whatever the machine was doing. Atomic because the
-// frame goroutine reads the same clock.
-func withProgressClock(t *testing.T, step time.Duration) {
-	t.Helper()
-	prev := progressNow
+// withProgressClock pins a's clock to one that advances by step on every read,
+// so an elapsed time is arithmetic rather than timing: each step reports exactly
+// one step's worth whatever the machine was doing. Atomic because the frame
+// goroutine reads the same clock.
+func withProgressClock(a *app, step time.Duration) {
 	base := time.Date(2026, 8, 18, 4, 0, 0, 0, time.UTC)
 	var reads int64
-	progressNow = func() time.Time {
+	a.now = func() time.Time {
 		return base.Add(time.Duration(atomic.AddInt64(&reads, 1)) * step)
 	}
-	t.Cleanup(func() { progressNow = prev })
+}
+
+// progressOn is a progress writing to w in mode, with a's clock and frame rate,
+// built the way newProgress builds one but without the choosing.
+func progressOn(a app, w *os.File, mode progressMode) *progress {
+	return &progress{w: w, mode: mode, frameRate: a.progressFrameRate, now: a.now}
 }
 
 // withProgressFrameRate replaces the spinner's tick. A case wants one of two
 // extremes: an hour, so only the draws the call itself makes are captured, or a
 // millisecond, so the goroutine's own redraw is observable without a sleep.
-func withProgressFrameRate(t *testing.T, d time.Duration) {
-	t.Helper()
-	prev := progressFrameRate
-	progressFrameRate = d
-	t.Cleanup(func() { progressFrameRate = prev })
+func withProgressFrameRate(a *app, d time.Duration) {
+	a.progressFrameRate = d
 }
 
 // withScriptWorkers sets how many instances the status script runs on at once.
 // 1 pins the calls to report order, which a queueRunner's ordered answers need
 // once a test has more than one instance.
-func withScriptWorkers(t *testing.T, n int) {
-	t.Helper()
-	prev := statusScriptWorkers
-	statusScriptWorkers = n
-	t.Cleanup(func() { statusScriptWorkers = prev })
+func withScriptWorkers(a *app, n int) {
+	a.statusWorkers = n
 }
 
 // progressErase is what blanking a live line of n columns looks like on the
@@ -5758,8 +5830,9 @@ func TestNewProgressPicksOneRendering(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			withStderrTerminal(t, c.tty)
-			if got := newProgress(c.opts, os.Stderr).mode; got != c.want {
+			a := testApp(nil)
+			withStderrTerminal(&a, c.tty)
+			if got := newProgress(c.opts, os.Stderr, a).mode; got != c.want {
 				t.Errorf("mode=%d, want %d", got, c.want)
 			}
 		})
@@ -5771,7 +5844,7 @@ func TestNewProgressPicksOneRendering(t *testing.T) {
 // rewritten line out of `2>steps.log`.
 func TestStderrIsTerminalReportsAPipe(t *testing.T) {
 	var got bool
-	captureStderr(t, func() { got = stderrIsTerminal() })
+	captureStderr(t, func() { got = testApp(nil).stderrIsTerminal() })
 	if got {
 		t.Error("a pipe is not a terminal")
 	}
@@ -5788,7 +5861,7 @@ func TestProgressOffAndNilWriteNothing(t *testing.T) {
 		nilp.pause(func() { paused++ })
 		nilp.stop()
 
-		off := &progress{w: os.Stderr, mode: progressOff}
+		off := progressOn(testApp(nil), os.Stderr, progressOff)
 		off.step("preflight")
 		off.pause(func() { paused++ })
 		off.stop()
@@ -5805,12 +5878,13 @@ func TestProgressOffAndNilWriteNothing(t *testing.T) {
 // one line, rewritten in place, and erased when the step ends -- no ANSI, so it
 // needs no VT processing, and nothing on stdout.
 func TestProgressSpinnerRewritesOneLineAndErases(t *testing.T) {
-	withProgressFrameRate(t, time.Hour) // only the draws step and stop make themselves
-	withProgressClock(t, 0)             // a pinned clock: no seconds counter in this case
+	a := testApp(nil)
+	withProgressFrameRate(&a, time.Hour) // only the draws step and stop make themselves
+	withProgressClock(&a, 0)             // a pinned clock: no seconds counter in this case
 	var p *progress
 	stdout := captureStdout(t, func() {
 		stderr := captureStderr(t, func() {
-			p = &progress{w: os.Stderr, mode: progressSpinner}
+			p = progressOn(a, os.Stderr, progressSpinner)
 			p.step("list pods")
 			p.step("read service solmq-connector")
 			p.stop()
@@ -5838,11 +5912,12 @@ func TestProgressSpinnerRewritesOneLineAndErases(t *testing.T) {
 // to watch the live line while it is still live, so it writes to its own pipe:
 // captureStderr only hands back what was written in total.
 func TestProgressSpinnerGoroutineAdvancesAndCountsSeconds(t *testing.T) {
-	withProgressFrameRate(t, time.Millisecond)
-	withProgressClock(t, 600*time.Millisecond)
+	a := testApp(nil)
+	withProgressFrameRate(&a, time.Millisecond)
+	withProgressClock(&a, 600*time.Millisecond)
 	const label = "status script pod-a 1/2"
 	pr := newPipeReader(t)
-	p := &progress{w: pr.w, mode: progressSpinner}
+	p := progressOn(a, pr.w, progressSpinner)
 
 	p.step(label)
 	// The second frame is the goroutine's work, not step's own first draw.
@@ -5865,13 +5940,14 @@ func TestProgressSpinnerGoroutineAdvancesAndCountsSeconds(t *testing.T) {
 // needs: the live line is gone before the question is asked, no frame is drawn
 // over it while it waits for an answer, and the next step opens a fresh line.
 func TestProgressPauseHandsBackTheStream(t *testing.T) {
-	withProgressFrameRate(t, time.Hour)
-	withProgressClock(t, 0)
+	a := testApp(nil)
+	withProgressFrameRate(&a, time.Hour)
+	withProgressClock(&a, 0)
 	const runs = "- status script on 1 instance(s)"
 	const installs = "- install script pod-a 1/1"
 	const question = "install the status script on pod-a? [y/N] "
 	stderr := captureStderr(t, func() {
-		p := &progress{w: os.Stderr, mode: progressSpinner}
+		p := progressOn(a, os.Stderr, progressSpinner)
 		p.step("status script on 1 instance(s)")
 		p.pause(func() { fmt.Fprint(os.Stderr, question) })
 		p.step("install script pod-a 1/1")
@@ -5887,10 +5963,11 @@ func TestProgressPauseHandsBackTheStream(t *testing.T) {
 // --verbose: the step ends before the question, so its line reports the time the
 // call took rather than the time the operator took to answer.
 func TestProgressStepsPauseFinishesTheStepFirst(t *testing.T) {
-	withProgressClock(t, 600*time.Millisecond)
+	a := testApp(nil)
+	withProgressClock(&a, 600*time.Millisecond)
 	const question = "install the status script on pod-a? [y/N] "
 	stderr := captureStderr(t, func() {
-		p := &progress{w: os.Stderr, mode: progressSteps}
+		p := progressOn(a, os.Stderr, progressSteps)
 		p.step("status script on 1 instance(s)")
 		p.pause(func() { fmt.Fprint(os.Stderr, question) })
 		p.stop()
@@ -5906,10 +5983,11 @@ func TestProgressStepsPauseFinishesTheStepFirst(t *testing.T) {
 // step stays in flight and is timed as a whole. The spinner and the off mode
 // print nothing for it.
 func TestProgressDoneLinesCarryTheirOwnTime(t *testing.T) {
-	withProgressFrameRate(t, time.Hour)
-	withProgressClock(t, 600*time.Millisecond)
+	a := testApp(nil)
+	withProgressFrameRate(&a, time.Hour)
+	withProgressClock(&a, 600*time.Millisecond)
 	steps := captureStderr(t, func() {
-		p := &progress{w: os.Stderr, mode: progressSteps}
+		p := progressOn(a, os.Stderr, progressSteps)
 		p.step("status script on 2 instance(s)")
 		p.done(2100*time.Millisecond, "status script %s %d/%d", "pod-b", 1, 2)
 		p.done(90*time.Second, "status script %s %d/%d", "pod-a", 2, 2)
@@ -5924,7 +6002,7 @@ func TestProgressDoneLinesCarryTheirOwnTime(t *testing.T) {
 
 	for _, mode := range []progressMode{progressSpinner, progressOff} {
 		got := captureStderr(t, func() {
-			p := &progress{w: os.Stderr, mode: mode}
+			p := progressOn(a, os.Stderr, mode)
 			p.step("status script on 1 instance(s)")
 			p.done(time.Second, "status script %s %d/%d", "pod-a", 1, 1)
 			p.stop()
@@ -5938,7 +6016,7 @@ func TestProgressDoneLinesCarryTheirOwnTime(t *testing.T) {
 }
 
 // TestProgressElapsedShapes pins the two shapes a step's duration is printed in.
-// The negative case is not hypothetical: progressNow is a var, and a clock that
+// The negative case is not hypothetical: the clock is a seam, and a clock that
 // goes backwards should read as no time at all rather than as a minus sign.
 func TestProgressElapsedShapes(t *testing.T) {
 	cases := []struct {
@@ -5998,11 +6076,12 @@ func TestProgressTrimElidesTheMiddle(t *testing.T) {
 // leave residue for the report to land under. Nothing the spinner writes --
 // neither a draw nor the blanking that follows it -- may be wider than the cap.
 func TestProgressSpinnerNeverExceedsOneRow(t *testing.T) {
-	withProgressFrameRate(t, time.Hour)
-	withProgressClock(t, 0)
+	a := testApp(nil)
+	withProgressFrameRate(&a, time.Hour)
+	withProgressClock(&a, 0)
 	label := "status script " + strings.Repeat("a", 100) + " 12/34"
 	stderr := captureStderr(t, func() {
-		p := &progress{w: os.Stderr, mode: progressSpinner}
+		p := progressOn(a, os.Stderr, progressSpinner)
 		p.step("%s", label) // step is printf-like, and this label is built, not constant
 		p.stop()
 	})
@@ -6020,9 +6099,10 @@ func TestProgressSpinnerNeverExceedsOneRow(t *testing.T) {
 // environment: one durable line per call, in the order they were made, each with
 // the time it took -- and nothing on stdout for a parser to trip over.
 func TestStatusVerboseNamesEverySlowCall(t *testing.T) {
-	withProgressClock(t, 600*time.Millisecond)
-	withStderrTerminal(t, false) // --verbose prints whether or not there is a screen
-	withScriptWorkers(t, 1)      // one worker reads the clock in a fixed order
+	a := testApp(nil)
+	withProgressClock(&a, 600*time.Millisecond)
+	withStderrTerminal(&a, false) // --verbose prints whether or not there is a screen
+	withScriptWorkers(&a, 1)      // one worker reads the clock in a fixed order
 	q := &queueRunner{resp: []queuedResp{
 		{podsJSON, nil},  // get pods
 		{appReport, nil}, // pod-a run
@@ -6032,7 +6112,7 @@ func TestStatusVerboseNamesEverySlowCall(t *testing.T) {
 	var stderr string
 	stdout := captureStdout(t, func() {
 		stderr = captureStderr(t, func() {
-			code = dispatch([]string{"status", "app", "-v", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q)
+			code = dispatch([]string{"status", "app", "-v", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, a.withRunner(q))
 		})
 	})
 	if code != 0 {
@@ -6078,7 +6158,7 @@ func TestStatusVerboseUnderWatchSaysWhichWins(t *testing.T) {
 			f := &fakeRunner{err: fmt.Errorf("no engine")}
 			var code int
 			stderr := captureStderr(t, func() {
-				code = dispatch([]string{"status", "container", "-w", spelling, "--platform", "docker", "--container", "solmq-connector"}, f)
+				code = dispatch([]string{"status", "container", "-w", spelling, "--platform", "docker", "--container", "solmq-connector"}, testApp(f))
 			})
 			if code != 1 {
 				t.Fatalf("exit=%d, want 1", code)
@@ -6097,10 +6177,12 @@ func TestStatusVerboseUnderWatchSaysWhichWins(t *testing.T) {
 // whole feature rests on: the document is the artifact, so a redirected stdout
 // cannot depend on whether there was a terminal to spin on.
 func TestStatusStdoutIsIdenticalWithAndWithoutTheSpinner(t *testing.T) {
-	withProgressFrameRate(t, time.Hour)
-	withProgressClock(t, 0)
+	a := testApp(nil)
+	withProgressFrameRate(&a, time.Hour)
+	withProgressClock(&a, 0)
 	run := func(t *testing.T, tty bool) (string, string) {
-		withStderrTerminal(t, tty)
+		a := a // a copy, so each run sets its own terminal answer
+		withStderrTerminal(&a, tty)
 		q := &queueRunner{resp: []queuedResp{
 			{onePodJSON, nil},
 			{appReport, nil},
@@ -6108,7 +6190,7 @@ func TestStatusStdoutIsIdenticalWithAndWithoutTheSpinner(t *testing.T) {
 		var out string
 		errs := captureStderr(t, func() {
 			out = captureStdout(t, func() {
-				if code := dispatch([]string{"status", "app", "--output", "json", "--platform", "kubernetes", "--pod", "pod-a"}, q); code != 0 {
+				if code := dispatch([]string{"status", "app", "--output", "json", "--platform", "kubernetes", "--pod", "pod-a"}, a.withRunner(q)); code != 0 {
 					t.Fatalf("exit=%d, want 0", code)
 				}
 			})
@@ -6226,7 +6308,7 @@ func TestLogsDockerArgvShape(t *testing.T) {
 	var code int
 	stdout := captureStdout(t, func() {
 		code = dispatch([]string{"logs", "--platform", "docker", "--container", "solmq-conn",
-			"--tail", "100", "--since", "10m", "--timestamps"}, q)
+			"--tail", "100", "--since", "10m", "--timestamps"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -6249,7 +6331,7 @@ func TestLogsDockerArgvShape(t *testing.T) {
 // other, so journalctl never enters the allowlist.
 func TestLogsPodmanReadsTheContainerNotTheJournal(t *testing.T) {
 	q := &streamRunner{resp: []queuedResp{{"", nil}}, streams: []streamed{{stdout: "p\n"}}}
-	if code := dispatch([]string{"logs", "--platform", "podman", "--container", "solmq-conn"}, q); code != 0 {
+	if code := dispatch([]string{"logs", "--platform", "podman", "--container", "solmq-conn"}, testApp(q)); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	want := []string{"podman", "logs", "solmq-conn"}
@@ -6281,7 +6363,7 @@ func TestLogsTailAllAndZero(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			q := &streamRunner{resp: []queuedResp{{"", nil}}}
 			args := append([]string{"logs", "--platform", "docker", "--container", "solmq-conn"}, c.args...)
-			if code := dispatch(args, q); code != 0 {
+			if code := dispatch(args, testApp(q)); code != 0 {
 				t.Fatalf("exit=%d, want 0", code)
 			}
 			if !reflect.DeepEqual(q.calls[1].argv, c.want) {
@@ -6304,7 +6386,7 @@ func TestLogsPreviousIsKubernetesOnly(t *testing.T) {
 			q := &streamRunner{}
 			var code int
 			stderr := captureStderr(t, func() {
-				code = dispatch([]string{"logs", "--platform", platform, "--container", "solmq-conn", "--previous"}, q)
+				code = dispatch([]string{"logs", "--platform", platform, "--container", "solmq-conn", "--previous"}, testApp(q))
 			})
 			if code != 2 {
 				t.Fatalf("exit=%d, want 2", code)
@@ -6326,7 +6408,7 @@ func TestLogsPreviousIsKubernetesOnly(t *testing.T) {
 // the concept exists, the flag arrives as kubectl's own -p.
 func TestLogsPreviousReachesTheKubernetesArgv(t *testing.T) {
 	q := &streamRunner{}
-	if code := dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "pod-a", "--previous"}, q); code != 0 {
+	if code := dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "pod-a", "--previous"}, testApp(q)); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	if !containsToken(q.calls[0].argv, "-p") {
@@ -6343,7 +6425,7 @@ func TestLogsFollowReadsTheOneInstance(t *testing.T) {
 	}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"logs", "--platform", "docker", "--container", "solmq-conn", "--follow"}, q)
+		code = dispatch([]string{"logs", "--platform", "docker", "--container", "solmq-conn", "--follow"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -6371,7 +6453,7 @@ func TestLogsFollowCancelledByTheOperatorEndsClean(t *testing.T) {
 	}
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"logs", "--platform", "docker", "--container", "solmq-conn", "--follow"}, q)
+		code = dispatch([]string{"logs", "--platform", "docker", "--container", "solmq-conn", "--follow"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0 (Ctrl-C is how a follow ends)", code)
@@ -6402,7 +6484,7 @@ func TestLogsFollowFailureIsNotACleanEnd(t *testing.T) {
 			}
 			args := append([]string{"logs", "--platform", "docker", "--container", "solmq-conn"}, c.args...)
 			var code int
-			stderr := captureStderr(t, func() { code = dispatch(args, q) })
+			stderr := captureStderr(t, func() { code = dispatch(args, testApp(q)) })
 			if code != 1 {
 				t.Fatalf("exit=%d, want 1", code)
 			}
@@ -6430,7 +6512,7 @@ func TestLogsRejectsUnsafeNamesBeforeAnyCall(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			q := &streamRunner{}
 			var code int
-			stderr := captureStderr(t, func() { code = dispatch(c.args, q) })
+			stderr := captureStderr(t, func() { code = dispatch(c.args, testApp(q)) })
 			if code != 2 {
 				t.Fatalf("exit=%d, want 2", code)
 			}
@@ -6461,7 +6543,7 @@ func TestLogsSinceAndTailAreValidatedAtParse(t *testing.T) {
 			q := &streamRunner{}
 			var code int
 			captureStderr(t, func() {
-				code = dispatch([]string{"logs", "--platform", "docker", "--container", "solmq-conn", c.flag, c.value}, q)
+				code = dispatch([]string{"logs", "--platform", "docker", "--container", "solmq-conn", c.flag, c.value}, testApp(q))
 			})
 			if code != 2 {
 				t.Fatalf("exit=%d, want 2", code)
@@ -6481,7 +6563,7 @@ func TestLogsSinceAndTailAreValidatedAtParse(t *testing.T) {
 func TestLogsUnexpectedPositionalArgument(t *testing.T) {
 	q := &streamRunner{}
 	var code int
-	stderr := captureStderr(t, func() { code = dispatch([]string{"logs", "pod-a"}, q) })
+	stderr := captureStderr(t, func() { code = dispatch([]string{"logs", "pod-a"}, testApp(q)) })
 	if code != 2 {
 		t.Fatalf("exit=%d, want 2", code)
 	}
@@ -6504,13 +6586,14 @@ func TestLogsUnexpectedPositionalArgument(t *testing.T) {
 func TestLogsPlatformMenuWhenSeveralSectionsArePresent(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv)
-	withPrompter(t, true, "1\n") // kubernetes, the first section present
+	a := testApp(nil)
+	withPrompter(&a, true, "1\n") // kubernetes, the first section present
 
 	q := &streamRunner{resp: []queuedResp{{onePodJSON, nil}}}
 	var code int
 	captureStdout(t, func() {
 		captureStderr(t, func() {
-			code = dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml")}, q)
+			code = dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(q))
 		})
 	})
 	if code != 0 {
@@ -6535,12 +6618,13 @@ func TestLogsPlatformFlagSkipsTheMenu(t *testing.T) {
 	write(t, dir, "env.yaml", sharedEnv+kubeEnv+dockerEnv)
 	// Answering the menu with kubernetes would be wrong; the flag must win
 	// before the prompter is ever consulted.
-	withPrompter(t, true, "1\n")
+	a := testApp(nil)
+	withPrompter(&a, true, "1\n")
 
 	q := &streamRunner{resp: []queuedResp{{"", nil}}}
 	var code int
 	captureStdout(t, func() {
-		code = dispatch([]string{"logs", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, q)
+		code = dispatch([]string{"logs", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -6562,7 +6646,7 @@ func TestLogsWithoutEnvFileNeedsAnExplicitPlatform(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such-env.yaml")
 
 	q := &streamRunner{resp: []queuedResp{{"", nil}}, streams: []streamed{{stdout: "x\n"}}}
-	if code := dispatch([]string{"logs", "--platform", "docker", "--container", "foreign", "-e", missing}, q); code != 0 {
+	if code := dispatch([]string{"logs", "--platform", "docker", "--container", "foreign", "-e", missing}, testApp(q)); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	if got := q.calls[1].argv; got[len(got)-1] != "foreign" {
@@ -6574,7 +6658,7 @@ func TestLogsWithoutEnvFileNeedsAnExplicitPlatform(t *testing.T) {
 	q2 := &streamRunner{}
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"logs", "--container", "foreign", "-e", missing}, q2)
+		code = dispatch([]string{"logs", "--container", "foreign", "-e", missing}, testApp(q2))
 	})
 	if code != 2 {
 		t.Fatalf("exit=%d, want 2", code)
@@ -6597,7 +6681,7 @@ func TestLogsNoInstancesFoundNamesTheFix(t *testing.T) {
 	q := &streamRunner{resp: []queuedResp{{`{"items":[]}`, nil}}}
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml")}, q)
+		code = dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml")}, testApp(q))
 	})
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
@@ -6619,7 +6703,7 @@ func TestLogsPlatformWithNoSectionAtAllIsLoud(t *testing.T) {
 	q := &streamRunner{}
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"logs", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, q)
+		code = dispatch([]string{"logs", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, testApp(q))
 	})
 	if code != 2 {
 		t.Fatalf("exit=%d, want 2", code)
@@ -6648,7 +6732,8 @@ func TestReadVerbsAskKubernetesNoPermissionFirst(t *testing.T) {
 	status := &queueRunner{resp: []queuedResp{{forbidden, refused}}}
 	logs := &streamRunner{streams: []streamed{{stderr: forbidden, err: refused}}}
 	cli := &attachRunner{attaches: []attached{{code: 1, err: refused}}}
-	withPrompter(t, true, "")
+	a := testApp(nil)
+	withPrompter(&a, true, "")
 	for _, c := range []struct {
 		args  []string
 		r     gdurunner.Runner
@@ -6660,7 +6745,7 @@ func TestReadVerbsAskKubernetesNoPermissionFirst(t *testing.T) {
 		{[]string{"cli", "--platform", "kubernetes", "--pod", "p", "--namespace", "prod"}, cli, func() []fakeCall { return cli.calls }, []string{"exec"}},
 	} {
 		var code int
-		captureStderr(t, func() { code = dispatch(c.args, c.r) })
+		captureStderr(t, func() { code = dispatch(c.args, a.withRunner(c.r)) })
 		if code == 0 {
 			t.Errorf("%s: a refused read must not exit 0", c.args[0])
 		}
@@ -6686,7 +6771,7 @@ func TestLogsNamedPodIsNotPreChecked(t *testing.T) {
 	}
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "ghost", "--namespace", "prod"}, q)
+		code = dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "ghost", "--namespace", "prod"}, testApp(q))
 	})
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
@@ -6716,7 +6801,7 @@ func TestLogsUsesTheSectionCommandOverride(t *testing.T) {
 	var code int
 	captureStdout(t, func() {
 		captureStderr(t, func() {
-			code = dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml")}, q)
+			code = dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml")}, testApp(q))
 		})
 	})
 	if code != 0 {
@@ -6733,7 +6818,7 @@ func TestLogsUsesTheSectionCommandOverride(t *testing.T) {
 // env.yaml, and still goes through the binary allowlist.
 func TestLogsCommandFlagOverridesTheSection(t *testing.T) {
 	q := &streamRunner{}
-	if code := dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "pod-a", "--command", "oc"}, q); code != 0 {
+	if code := dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "pod-a", "--command", "oc"}, testApp(q)); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	if q.calls[0].argv[0] != "oc" {
@@ -6745,7 +6830,7 @@ func TestLogsCommandFlagOverridesTheSection(t *testing.T) {
 	q2 := &streamRunner{}
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "pod-a", "--command", "curl"}, q2)
+		code = dispatch([]string{"logs", "--platform", "kubernetes", "--pod", "pod-a", "--command", "curl"}, testApp(q2))
 	})
 	if code != 2 {
 		t.Fatalf("exit=%d, want 2", code)
@@ -6770,7 +6855,7 @@ func TestLogsKubernetesArgvShape(t *testing.T) {
 	}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"logs", "--platform", "kubernetes", "--namespace", "prod", "--pod", "pod-a"}, q)
+		code = dispatch([]string{"logs", "--platform", "kubernetes", "--namespace", "prod", "--pod", "pod-a"}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -6816,7 +6901,7 @@ func TestLogsRejectsImpossibleFlagCombinations(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			q := &streamRunner{}
 			var code int
-			stderr := captureStderr(t, func() { code = dispatch(c.args, q) })
+			stderr := captureStderr(t, func() { code = dispatch(c.args, testApp(q)) })
 			if code != 2 {
 				t.Fatalf("exit=%d, want 2", code)
 			}
@@ -6839,7 +6924,7 @@ func TestLogsAllIsNotALogsFlag(t *testing.T) {
 	q := &streamRunner{}
 	var code int
 	captureStderr(t, func() {
-		code = dispatch([]string{"logs", "--platform", "kubernetes", "--all"}, q)
+		code = dispatch([]string{"logs", "--platform", "kubernetes", "--all"}, testApp(q))
 	})
 	if code != 2 {
 		t.Fatalf("exit=%d, want 2", code)
@@ -6870,7 +6955,7 @@ func TestLogsWithoutASectionToDiscoverFrom(t *testing.T) {
 			q := &streamRunner{resp: []queuedResp{{"", nil}}}
 			var code int
 			stderr := captureStderr(t, func() {
-				code = dispatch([]string{"logs", "--platform", c.platform, c.wrongFlag, c.wrongVal, "-e", missing}, q)
+				code = dispatch([]string{"logs", "--platform", c.platform, c.wrongFlag, c.wrongVal, "-e", missing}, testApp(q))
 			})
 			if code != 2 {
 				t.Fatalf("exit=%d, want 2", code)
@@ -6919,7 +7004,7 @@ func TestLogsPickerListsPasteableCommands(t *testing.T) {
 	q := &streamRunner{resp: []queuedResp{{unsortedPodsJSON, nil}}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"logs", "-e", envPath, "--tail", "50", "--follow"}, q)
+		code = dispatch([]string{"logs", "-e", envPath, "--tail", "50", "--follow"}, testApp(q))
 	})
 	// The run answered an ambiguous request with what to type next, which is
 	// not a failure.
@@ -6960,7 +7045,7 @@ func TestLogsOneDiscoveredInstanceIsJustRead(t *testing.T) {
 	}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml")}, q)
+		code = dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml")}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -6987,7 +7072,7 @@ func TestLogsIndexSelectsFromTheSortedList(t *testing.T) {
 				resp:    []queuedResp{{unsortedPodsJSON, nil}},
 				streams: []streamed{{stdout: "x\n"}},
 			}
-			if code := dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml"), "--pod", c.index}, q); code != 0 {
+			if code := dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml"), "--pod", c.index}, testApp(q)); code != 0 {
 				t.Fatalf("exit=%d, want 0", code)
 			}
 			read := q.calls[len(q.calls)-1].argv
@@ -7014,7 +7099,7 @@ func TestLogsNameWinsOverIndex(t *testing.T) {
 		resp:    []queuedResp{{podsNamedZero, nil}},
 		streams: []streamed{{stdout: "x\n"}},
 	}
-	if code := dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml"), "--pod", "0"}, q); code != 0 {
+	if code := dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml"), "--pod", "0"}, testApp(q)); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	// Sorted, "0" is index 0 anyway -- so assert the name matched rather than
@@ -7034,7 +7119,7 @@ func TestLogsIndexOutOfRangeNamesTheRange(t *testing.T) {
 	q := &streamRunner{resp: []queuedResp{{unsortedPodsJSON, nil}}}
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml"), "--pod", "3"}, q)
+		code = dispatch([]string{"logs", "-e", filepath.Join(dir, "env.yaml"), "--pod", "3"}, testApp(q))
 	})
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
@@ -7058,7 +7143,7 @@ func TestLogsIndexWithNothingToIndexInto(t *testing.T) {
 	q := &streamRunner{}
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"logs", "--platform", "kubernetes", "-e", missing, "--pod", "0"}, q)
+		code = dispatch([]string{"logs", "--platform", "kubernetes", "-e", missing, "--pod", "0"}, testApp(q))
 	})
 	if code != 2 {
 		t.Fatalf("exit=%d, want 2", code)
@@ -7082,7 +7167,7 @@ func TestStatusAcceptsAnIndexToo(t *testing.T) {
 		{unsortedPodsJSON, nil}, // enumeration for the index
 		{unsortedPodsJSON, nil}, // the report query itself
 	}}
-	if code := dispatch([]string{"status", "container", "-e", filepath.Join(dir, "env.yaml"), "--pod", "1"}, q); code != 0 {
+	if code := dispatch([]string{"status", "container", "-e", filepath.Join(dir, "env.yaml"), "--pod", "1"}, testApp(q)); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	// calls: 0 the enumeration for the index, 1 the report query. Later calls
@@ -7100,7 +7185,7 @@ func TestStatusAcceptsAnIndexToo(t *testing.T) {
 // reports many instances by design, so the one-entry limit is a logs rule only.
 func TestStatusKeepsPodRepeatable(t *testing.T) {
 	q := &queueRunner{resp: []queuedResp{{podsJSON, nil}}}
-	if code := dispatch([]string{"status", "container", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, q); code != 0 {
+	if code := dispatch([]string{"status", "container", "--platform", "kubernetes", "--pod", "pod-a", "--pod", "pod-b"}, testApp(q)); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	argv := q.calls[0].argv
@@ -7253,7 +7338,7 @@ func TestLogsPickerCarriesEveryFlagBack(t *testing.T) {
 			"--timestamps",
 			"--since", "10m",
 			"--tail", "50",
-		}, q)
+		}, testApp(q))
 	})
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
@@ -7507,11 +7592,12 @@ func (a *attachRunner) Attach(c gdurunner.Cmd, _, _, _ *os.File) (int, error) {
 // fail with the next step rather than open a session nobody can type into. The
 // next step here is the one-shot form, so the message has to name it.
 func TestCliRefusesAShellWithoutATerminal(t *testing.T) {
-	withPrompter(t, false, "")
+	a := testApp(nil)
+	withPrompter(&a, false, "")
 	q := &attachRunner{}
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, q)
+		code = dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, a.withRunner(q))
 	})
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
@@ -7530,9 +7616,10 @@ func TestCliRefusesAShellWithoutATerminal(t *testing.T) {
 // discovery call, and kubernetes asks no permission first, so the whole run is
 // the attach.
 func TestCliKubernetesArgvShape(t *testing.T) {
-	withPrompter(t, true, "")
+	a := testApp(nil)
+	withPrompter(&a, true, "")
 	q := &attachRunner{}
-	if code := dispatch([]string{"cli", "--platform", "kubernetes", "--pod", "pod-a", "--namespace", "prod"}, q); code != 0 {
+	if code := dispatch([]string{"cli", "--platform", "kubernetes", "--pod", "pod-a", "--namespace", "prod"}, a.withRunner(q)); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	if len(q.calls) != 1 {
@@ -7550,9 +7637,10 @@ func TestCliKubernetesArgvShape(t *testing.T) {
 func TestCliEngineArgvShape(t *testing.T) {
 	for _, platform := range []string{"docker", "podman"} {
 		t.Run(platform, func(t *testing.T) {
-			withPrompter(t, true, "")
+			a := testApp(nil)
+			withPrompter(&a, true, "")
 			q := &attachRunner{}
-			if code := dispatch([]string{"cli", "--platform", platform, "--container", "solmq-conn"}, q); code != 0 {
+			if code := dispatch([]string{"cli", "--platform", platform, "--container", "solmq-conn"}, a.withRunner(q)); code != 0 {
 				t.Fatalf("exit=%d, want 0", code)
 			}
 			if len(q.calls) != 2 {
@@ -7571,9 +7659,10 @@ func TestCliEngineArgvShape(t *testing.T) {
 // no prompt to draw, and no -i either while stdin is a terminal -- a command
 // that reads stdin would otherwise wait on one that never sends EOF.
 func TestCliOneShotRunsTheCommandWithNoTerminal(t *testing.T) {
-	withPrompter(t, true, "")
+	a := testApp(nil)
+	withPrompter(&a, true, "")
 	q := &attachRunner{}
-	code := dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn", "--", "ls", "-la", "/app/external"}, q)
+	code := dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn", "--", "ls", "-la", "/app/external"}, a.withRunner(q))
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
@@ -7588,9 +7677,10 @@ func TestCliOneShotRunsTheCommandWithNoTerminal(t *testing.T) {
 // into, so -i is what makes `echo hi | cli -- cat` work. It is also the case
 // that proves the one-shot form is allowed without a terminal at all.
 func TestCliOneShotAttachesStdinWhenSomethingIsPiped(t *testing.T) {
-	withPrompter(t, false, "")
+	a := testApp(nil)
+	withPrompter(&a, false, "")
 	q := &attachRunner{}
-	code := dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn", "--", "cat"}, q)
+	code := dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn", "--", "cat"}, a.withRunner(q))
 	if code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
@@ -7604,9 +7694,10 @@ func TestCliOneShotAttachesStdinWhenSomethingIsPiped(t *testing.T) {
 // contract: once the session ran, its own status is the answer, so `exit 3`
 // inside the shell reaches the operator as 3.
 func TestCliPropagatesTheSessionExitStatus(t *testing.T) {
-	withPrompter(t, true, "")
+	a := testApp(nil)
+	withPrompter(&a, true, "")
 	q := &attachRunner{attaches: []attached{{code: 3}}}
-	if code := dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, q); code != 3 {
+	if code := dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, a.withRunner(q)); code != 3 {
 		t.Errorf("exit=%d, want the session status 3", code)
 	}
 }
@@ -7614,11 +7705,12 @@ func TestCliPropagatesTheSessionExitStatus(t *testing.T) {
 // TestCliSessionThatCouldNotStartIsAnError separates the two: a session that
 // never began is this tool failing, which is exit 1 and names the instance.
 func TestCliSessionThatCouldNotStartIsAnError(t *testing.T) {
-	withPrompter(t, true, "")
+	a := testApp(nil)
+	withPrompter(&a, true, "")
 	q := &attachRunner{attaches: []attached{{err: fmt.Errorf("docker: not found")}}}
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, q)
+		code = dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, a.withRunner(q))
 	})
 	if code != 1 {
 		t.Fatalf("exit=%d, want 1", code)
@@ -7679,10 +7771,11 @@ func TestCliRejectsWhatCannotMeanAnything(t *testing.T) {
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			withPrompter(t, true, "")
+			a := testApp(nil)
+			withPrompter(&a, true, "")
 			q := &attachRunner{}
 			var code int
-			stderr := captureStderr(t, func() { code = dispatch(c.args, q) })
+			stderr := captureStderr(t, func() { code = dispatch(c.args, a.withRunner(q)) })
 			if code != c.code {
 				t.Fatalf("exit=%d, want %d; stderr:\n%s", code, c.code, stderr)
 			}
@@ -7703,7 +7796,8 @@ func TestCliRejectsWhatCannotMeanAnything(t *testing.T) {
 // behind the --pod the picker is telling the operator to add. A line that
 // pasted the flag after the command would not parse.
 func TestCliPickerCarriesTheCommandBehindTheSeparator(t *testing.T) {
-	withPrompter(t, true, "")
+	a := testApp(nil)
+	withPrompter(&a, true, "")
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
 	envPath := filepath.Join(dir, "env.yaml")
@@ -7711,7 +7805,7 @@ func TestCliPickerCarriesTheCommandBehindTheSeparator(t *testing.T) {
 	q := &attachRunner{resp: []queuedResp{{unsortedPodsJSON, nil}}}
 	var code int
 	stdout := captureStdout(t, func() {
-		code = dispatch([]string{"cli", "-e", envPath, "--", "ls", "-la"}, q)
+		code = dispatch([]string{"cli", "-e", envPath, "--", "ls", "-la"}, a.withRunner(q))
 	})
 	// An ambiguous request answered with what to type next is not a failure.
 	if code != 0 {
@@ -7737,12 +7831,13 @@ func TestCliPickerCarriesTheCommandBehindTheSeparator(t *testing.T) {
 // order logs and status print, so a number copied off one verb means the same
 // instance in another.
 func TestCliIndexSelectsFromTheSortedList(t *testing.T) {
-	withPrompter(t, true, "")
+	a := testApp(nil)
+	withPrompter(&a, true, "")
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+kubeEnvForLogs)
 
 	q := &attachRunner{resp: []queuedResp{{unsortedPodsJSON, nil}}}
-	if code := dispatch([]string{"cli", "-e", filepath.Join(dir, "env.yaml"), "--pod", "1"}, q); code != 0 {
+	if code := dispatch([]string{"cli", "-e", filepath.Join(dir, "env.yaml"), "--pod", "1"}, a.withRunner(q)); code != 0 {
 		t.Fatalf("exit=%d, want 0", code)
 	}
 	if len(q.calls) != 2 {
@@ -7758,11 +7853,12 @@ func TestCliIndexSelectsFromTheSortedList(t *testing.T) {
 // and logs: an engine that cannot be reached is reported once, up front, and no
 // session is attempted.
 func TestCliPreflightFailureOpensNothing(t *testing.T) {
-	withPrompter(t, true, "")
+	a := testApp(nil)
+	withPrompter(&a, true, "")
 	q := &attachRunner{resp: []queuedResp{{"cannot connect to the docker daemon", fmt.Errorf("exit status 1")}}}
 	var code int
 	captureStderr(t, func() {
-		code = dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, q)
+		code = dispatch([]string{"cli", "--platform", "docker", "--container", "solmq-conn"}, a.withRunner(q))
 	})
 	if code == 0 {
 		t.Fatal("a failed preflight must not exit 0")
@@ -7826,7 +7922,7 @@ func TestDeployDockerCarriesCreatedStores(t *testing.T) {
 	dir := t.TempDir()
 	createdStoreDockerSpec(t, dir)
 	t.Setenv("SOLMQ_TEST_TS_PW", "store-pass-123")
-	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, testApp(f)); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	if len(f.calls) != 4 || f.calls[0].argv[1] != "info" || !reflect.DeepEqual(f.calls[1].argv[:3], []string{"docker", "image", "inspect"}) ||
@@ -7877,7 +7973,7 @@ func TestDeployDockerPullsAnImageItCannotInspect(t *testing.T) {
 			t.Setenv("SOLMQ_TEST_TS_PW", "store-pass-123")
 			var code int
 			stderr := captureStderr(t, func() {
-				code = dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, q)
+				code = dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, testApp(q))
 			})
 			if code != c.code {
 				t.Fatalf("exit=%d, want %d:\n%s", code, c.code, stderr)
@@ -7907,7 +8003,7 @@ func TestDeployDockerRefusesAnImageStartingOtherwise(t *testing.T) {
 	t.Setenv("SOLMQ_TEST_TS_PW", "store-pass-123")
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, q)
+		code = dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, testApp(q))
 	})
 	if code == 0 || !strings.Contains(stderr, `the image img:1 starts with entrypoint ["java" "-jar" "/app.jar"] and command []`) {
 		t.Fatalf("exit=%d, stderr:\n%s", code, stderr)
@@ -7926,14 +8022,15 @@ func TestDeployDockerRefusesAnImageStartingOtherwise(t *testing.T) {
 // every credential is.
 func TestRemoveDockerNeedsNoCreatedStoreSources(t *testing.T) {
 	f := useFakeRunner(t)
-	withPrompter(t, true, "y\n")
+	a := testApp(nil)
+	withPrompter(&a, true, "y\n")
 	dir := t.TempDir()
 	createdStoreDockerSpec(t, dir)
 	t.Setenv("SOLMQ_TEST_TS_PW", "store-pass-123")
 	if err := os.Remove(filepath.Join(dir, "ca.pem")); err != nil {
 		t.Fatal(err)
 	}
-	if code := dispatch([]string{"remove", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"remove", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f)); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	down := f.calls[len(f.calls)-1]
@@ -7950,8 +8047,9 @@ func TestRemoveDockerNeedsNoCreatedStoreSources(t *testing.T) {
 // unit deleted by hand -- and needs no store source to do so.
 func TestRemovePodmanDeletesACreatedStoreSecretWithoutTheUnit(t *testing.T) {
 	f := useFakeRunner(t)
-	podmanQuadletHome(t) // no unit written: the fallback is what is tested
-	withPrompter(t, true, "y\n")
+	a := testApp(nil)
+	podmanQuadletHome(t, &a) // no unit written: the fallback is what is tested
+	withPrompter(&a, true, "y\n")
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+`
 tls:
@@ -7963,7 +8061,7 @@ tls:
           - ./gone.pem
 `+podmanEnv())
 	write(t, dir, "10.yaml", tlsWF)
-	if code := dispatch([]string{"remove", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, f); code != 0 {
+	if code := dispatch([]string{"remove", "--platform", "podman", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(f)); code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	rm := f.calls[len(f.calls)-1].argv
@@ -7982,7 +8080,7 @@ func TestDeployDockerRefusesAMissingStoreFile(t *testing.T) {
 	write(t, dir, "10.yaml", tlsWF)
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, f)
+		code = dispatch([]string{"deploy", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, testApp(f))
 	})
 	if code != 1 || !strings.Contains(stderr, "docker mounts tls.stores.ts.existing.pkcs12 "+filepath.Join(dir, "certs", "missing.p12")+", which does not exist") {
 		t.Fatalf("exit=%d, stderr:\n%s", code, stderr)
@@ -7990,8 +8088,9 @@ func TestDeployDockerRefusesAMissingStoreFile(t *testing.T) {
 	if len(f.calls) != 0 {
 		t.Errorf("nothing may run before the store is there, got %+v", f.calls)
 	}
-	withPrompter(t, true, "y\n")
-	if code := dispatch([]string{"remove", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, useFakeRunner(t)); code != 0 {
+	a := testApp(nil)
+	withPrompter(&a, true, "y\n")
+	if code := dispatch([]string{"remove", "--platform", "docker", "-e", filepath.Join(dir, "env.yaml")}, a.withRunner(useFakeRunner(t))); code != 0 {
 		t.Errorf("remove must not need the store: exit=%d", code)
 	}
 }

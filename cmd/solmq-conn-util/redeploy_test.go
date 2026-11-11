@@ -47,7 +47,7 @@ func dockerSpec(t *testing.T) string {
 func dockerDigestOf(t *testing.T, envPath string) string {
 	t.Helper()
 	f := useFakeRunner(t)
-	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", envPath}, f); code != 0 {
+	if code := dispatch([]string{"deploy", "--platform", "docker", "-e", envPath}, testApp(f)); code != 0 {
 		t.Fatalf("first deploy exit=%d", code)
 	}
 	digest, ok := envValue(f.calls[2].env, dockergen.DeployDigestVar)
@@ -72,9 +72,10 @@ func dockerInspectWithLabel(label string) string {
 // stderr and what the prompter was asked.
 func deployDocker(t *testing.T, envPath string, q *queueRunner, terminal bool, input string, extra ...string) (code int, stderr, asked string) {
 	t.Helper()
-	out := withPrompter(t, terminal, input)
+	a := testApp(nil)
+	out := withPrompter(&a, terminal, input)
 	args := append([]string{"deploy", "--platform", "docker", "-e", envPath}, extra...)
-	stderr = captureStderr(t, func() { code = dispatch(args, q) })
+	stderr = captureStderr(t, func() { code = dispatch(args, a.withRunner(q)) })
 	return code, stderr, out.String()
 }
 
@@ -241,8 +242,9 @@ func TestDeployKubernetesNeverPromptsAndRefusesNoPrompt(t *testing.T) {
 	envPath := filepath.Join(dir, "env.yaml")
 
 	f := useFakeRunner(t)
-	out := withPrompter(t, true, "n\n")
-	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", envPath}, f); code != 0 {
+	a := testApp(nil)
+	out := withPrompter(&a, true, "n\n")
+	if code := dispatch([]string{"deploy", "--platform", "kubernetes", "-e", envPath}, a.withRunner(f)); code != 0 {
 		t.Fatalf("deploy exit=%d, want 0", code)
 	}
 	if out.Len() != 0 {
@@ -252,7 +254,7 @@ func TestDeployKubernetesNeverPromptsAndRefusesNoPrompt(t *testing.T) {
 	f2 := useFakeRunner(t)
 	var code int
 	stderr := captureStderr(t, func() {
-		code = dispatch([]string{"deploy", "--platform", "kubernetes", noPromptFlagName, "-e", envPath}, f2)
+		code = dispatch([]string{"deploy", "--platform", "kubernetes", noPromptFlagName, "-e", envPath}, a.withRunner(f2))
 	})
 	if code != 2 || len(f2.calls) != 0 {
 		t.Fatalf("deploy %s: exit=%d with %d calls, want 2 and nothing run", noPromptFlagName, code, len(f2.calls))
@@ -326,17 +328,21 @@ func creates(calls []fakeCall) map[string]string {
 type podmanRedeploy struct {
 	envPath, unitPath string
 	stored            map[string]string
+	// host is the ordinary user whose quadlet directory holds the unit, which
+	// every later run has to dispatch with to find it.
+	host hostFacts
 }
 
 func deployedPodman(t *testing.T) podmanRedeploy {
 	t.Helper()
-	quadletDir := podmanQuadletHome(t)
+	a := testApp(nil)
+	quadletDir := podmanQuadletHome(t, &a)
 	dir := t.TempDir()
 	write(t, dir, "env.yaml", sharedEnv+podmanEnv())
 	write(t, dir, "10.yaml", validWF)
-	r := podmanRedeploy{envPath: filepath.Join(dir, "env.yaml"), unitPath: filepath.Join(quadletDir, "solmq-conn.container")}
+	r := podmanRedeploy{envPath: filepath.Join(dir, "env.yaml"), unitPath: filepath.Join(quadletDir, "solmq-conn.container"), host: a.host}
 	f := useFakeRunner(t)
-	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", r.envPath}, f); code != 0 {
+	if code := dispatch([]string{"deploy", "--platform", "podman", "-e", r.envPath}, a.withRunner(f)); code != 0 {
 		t.Fatalf("first deploy exit=%d", code)
 	}
 	r.stored = creates(f.calls)
@@ -348,9 +354,11 @@ func deployedPodman(t *testing.T) podmanRedeploy {
 
 func (r podmanRedeploy) run(t *testing.T, p *podmanDeployRunner, terminal bool, input string, extra ...string) (code int, stderr, asked string) {
 	t.Helper()
-	out := withPrompter(t, terminal, input)
+	a := testApp(nil)
+	useHost(&a, r.host)
+	out := withPrompter(&a, terminal, input)
 	args := append([]string{"deploy", "--platform", "podman", "-e", r.envPath}, extra...)
-	stderr = captureStderr(t, func() { code = dispatch(args, p) })
+	stderr = captureStderr(t, func() { code = dispatch(args, a.withRunner(p)) })
 	return code, stderr, out.String()
 }
 
@@ -634,19 +642,19 @@ func TestPodmanChangeSummary(t *testing.T) {
 // podman, and false rather than an error where the rule refuses -- the verbs that
 // resolve the full scope report that refusal.
 func TestSessionRootless(t *testing.T) {
-	useHost(t, testHost(t.TempDir())) // euid 1000, not root
+	h := testHost(t.TempDir()) // euid 1000, not root
 	podman := func(rootful bool) *spec.Env { return &spec.Env{Podman: &spec.Podman{Rootful: rootful}} }
 	for _, c := range []struct {
 		name string
 		s    instanceSession
 		want bool
 	}{
-		{"podman, rootless by default", instanceSession{platform: "podman", env: podman(false)}, true},
-		{"podman with no env.yaml at all", instanceSession{platform: "podman"}, true},
-		{"podman with no podman section", instanceSession{platform: "podman", env: &spec.Env{}}, true},
-		{"rootful asked by a non-root user is refused, so not rootless", instanceSession{platform: "podman", env: podman(true)}, false},
-		{"docker", instanceSession{platform: "docker", env: podman(false)}, false},
-		{"kubernetes", instanceSession{platform: "kubernetes"}, false},
+		{"podman, rootless by default", instanceSession{platform: "podman", env: podman(false), host: h}, true},
+		{"podman with no env.yaml at all", instanceSession{platform: "podman", host: h}, true},
+		{"podman with no podman section", instanceSession{platform: "podman", env: &spec.Env{}, host: h}, true},
+		{"rootful asked by a non-root user is refused, so not rootless", instanceSession{platform: "podman", env: podman(true), host: h}, false},
+		{"docker", instanceSession{platform: "docker", env: podman(false), host: h}, false},
+		{"kubernetes", instanceSession{platform: "kubernetes", host: h}, false},
 	} {
 		if got := c.s.rootless(); got != c.want {
 			t.Errorf("%s: rootless() = %v, want %v", c.name, got, c.want)

@@ -18,7 +18,7 @@ package main
 // (kubectl top, docker stats) and the in-container script exec are per-run or
 // per-instance costs beyond that. The exec is one per instance, checking for
 // the script and running it together, and several run at once (see
-// statusScriptWorkers), so its wall time is the slowest instance's rather than
+// app.statusWorkers), so its wall time is the slowest instance's rather than
 // the sum of all of them.
 //
 // Every fact collected here lands in an internal/statusreport model and is
@@ -156,7 +156,7 @@ type statusOpts struct {
 }
 
 // runStatus parses status's target word and flags and hands them to actStatus.
-func runStatus(args []string, r gdurunner.Runner) int {
+func runStatus(args []string, a app) int {
 	fs := verbFlagSet("status")
 	env := envFlag(fs)
 	install := fs.Bool("install", false, "install the status script on every target without prompting")
@@ -212,7 +212,7 @@ func runStatus(args []string, r gdurunner.Runner) int {
 	if code := checkStatusFlags(opts, *output); code != 0 {
 		return code
 	}
-	return actStatus(opts, r)
+	return actStatus(opts, a)
 }
 
 // statusView resolves the target word into a view. The word is required: the
@@ -300,7 +300,8 @@ func checkStatusFlags(o statusOpts, output string) int {
 // or on a watch loop. Everything that can fail the whole run -- an unreadable
 // env.yaml, an unsafe name, a platform that cannot be resolved, a failed
 // preflight -- fails here, before any instance is queried.
-func actStatus(o statusOpts, r gdurunner.Runner) int {
+func actStatus(o statusOpts, a app) int {
+	r := a.r
 	sess, serr := resolveInstanceSession(instanceRequest{
 		verb:     verbStatus,
 		envPath:  o.envPath,
@@ -311,7 +312,7 @@ func actStatus(o statusOpts, r gdurunner.Runner) int {
 		conts:    o.conts,
 		approved: o.approved,
 		all:      o.all,
-	})
+	}, a)
 	if serr != nil {
 		return usageExit(serr)
 	}
@@ -338,7 +339,7 @@ func actStatus(o statusOpts, r gdurunner.Runner) int {
 	// an operator waits on is the preflight probe below -- up to a few seconds of
 	// dead air before anything else has run. Deferred stop, so no error return
 	// between here and the report can leave a spinner on screen.
-	prog := newProgress(o, os.Stderr)
+	prog := newProgress(o, os.Stderr, a)
 	defer prog.stop()
 
 	// Reuse the read-only engine probe before touching anything, same as
@@ -372,7 +373,7 @@ func actStatus(o statusOpts, r gdurunner.Runner) int {
 	}
 	o.pods, o.conts = pods, conts
 
-	c := &statusCollector{opts: o, platform: sess.platform, cmdArgv: sess.cmdArgv, env: sess.env, r: r, prog: prog}
+	c := &statusCollector{opts: o, platform: sess.platform, cmdArgv: sess.cmdArgv, env: sess.env, r: r, prog: prog, host: a.host, prompter: a.prompter, workers: a.statusWorkers, now: a.now}
 	if o.watch.on {
 		// Ctrl-C ends the watch with success; the context is how the loop hears it.
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -393,6 +394,14 @@ type statusCollector struct {
 	cmdArgv  []string
 	env      *spec.Env
 	r        gdurunner.Runner
+	// host, prompter and workers are the run's: the host facts the podman restart
+	// count reads, the one prompter the install question goes through and how
+	// many instances the status script runs on at once.
+	host     hostFacts
+	prompter *confirm.Prompter
+	workers  int
+	// now is the clock each status script call is timed with: app.now.
+	now func() time.Time
 
 	// prog names the step each slow call is on while the operator waits. Built
 	// once in actStatus, since the first step is the preflight probe that runs
@@ -417,7 +426,7 @@ func (c *statusCollector) wantsContainerFacts() bool {
 // session re-presents what actStatus already resolved in the shape the shared
 // discovery helpers take, so status and logs ask them the same question.
 func (c *statusCollector) session() instanceSession {
-	return instanceSession{env: c.env, platform: c.platform, cmdArgv: c.cmdArgv, ns: c.opts.ns}
+	return instanceSession{env: c.env, platform: c.platform, cmdArgv: c.cmdArgv, ns: c.opts.ns, host: c.host}
 }
 
 // collect gathers the whole report. It returns the report plus whether any
@@ -656,7 +665,7 @@ func (c *statusCollector) applyPodmanRestarts(rep *statusreport.Report) {
 	// podman.rootful is the one setting read from env.yaml, and status can run
 	// with none (see loadStatusEnv), so an absent section is the rootless default.
 	// Any refusal or session failure leaves the container's own count in place.
-	sc, err := runner.ResolveQuadletScope(host().scope, c.podmanRootful())
+	sc, err := runner.ResolveQuadletScope(c.host.scope, c.podmanRootful())
 	if err != nil {
 		return
 	}
@@ -797,14 +806,6 @@ func quoteAll(vals []string) []string {
 
 // ---- the application half ----------------------------------------------------
 
-// statusScriptWorkers is how many instances the status script runs on at once.
-// The script is the run's dominant cost, so running it side by side makes the
-// wall time the slowest instance's rather than the sum of all of them. Four keeps
-// an --all over many pods from opening dozens of exec streams against one API
-// server at once. A var rather than a const for the reason progressFrameRate is
-// one: a test sets it to 1 to pin the order the calls are made in.
-var statusScriptWorkers = 4
-
 // scriptResult is one instance's answer from runner.RunStatusScript: its
 // report, or that the script is not there, or why the exec failed.
 type scriptResult struct {
@@ -885,7 +886,7 @@ func (c *statusCollector) applyScripts(rep *statusreport.Report, idx []int, args
 }
 
 // runScripts runs the status script on the instances at idx, up to
-// statusScriptWorkers at a time, and returns each answer at its position in
+// c.workers at a time, and returns each answer at its position in
 // idx. Positions rather than names: under --all two pods in different
 // namespaces can share a name.
 //
@@ -915,12 +916,12 @@ func (c *statusCollector) runScripts(rep *statusreport.Report, idx []int, args [
 	answers := make(chan answer, len(idx))
 
 	c.prog.step("status script on %d instance(s)", len(idx))
-	for w := 0; w < max(1, min(statusScriptWorkers, len(idx))); w++ {
+	for w := 0; w < max(1, min(c.workers, len(idx))); w++ {
 		go func() {
 			for j := range jobs {
-				start := progressNow()
+				start := c.now()
 				out, present, err := runner.RunStatusScript(bg(), c.r, c.cmdArgv, c.platform, j.name, j.ns, statusscript.ContainerPath, args...)
-				answers <- answer{n: j.n, res: scriptResult{out: out, present: present, err: err}, took: progressNow().Sub(start)}
+				answers <- answer{n: j.n, res: scriptResult{out: out, present: present, err: err}, took: c.now().Sub(start)}
 			}
 		}()
 	}
@@ -948,7 +949,7 @@ func (c *statusCollector) installScripts(rep *statusreport.Report, missing []int
 		var answer bool
 		var cerr error
 		c.prog.pause(func() {
-			answer, cerr = confirmInstall(instanceNames(rep, missing))
+			answer, cerr = confirmInstall(c.prompter, instanceNames(rep, missing))
 		})
 		if cerr != nil {
 			// The prompt could not be asked at all (stdin is not a TTY). That
@@ -1003,8 +1004,8 @@ func instanceNames(rep *statusreport.Report, idx []int) []string {
 // missing instances, via the same prompter and non-TTY refusal
 // promptPlatformMenu uses. "y"/"yes" (case-insensitive) installs; anything
 // else, including a blank line, declines.
-func confirmInstall(missing []string) (bool, error) {
-	yes, answered, err := prompter.Ask(
+func confirmInstall(p *confirm.Prompter, missing []string) (bool, error) {
+	yes, answered, err := p.Ask(
 		fmt.Sprintf("status script missing on %s -- install it now? [y/N] ", strings.Join(missing, ", ")), confirm.Lenient)
 	if err == nil && !answered {
 		err = confirm.Unanswered()
