@@ -349,8 +349,14 @@ func TestResolveQuadletScope(t *testing.T) {
 	})
 
 	t.Run("XDG_CONFIG_HOME", func(t *testing.T) {
-		got, err := ResolveQuadletScope(scopeEnv(1000, map[string]string{"XDG_CONFIG_HOME": "/srv/xdg"}, runtimeDir), false)
-		if err != nil || got.Dir != "/srv/xdg/containers/systemd" {
+		// Windows calls a path absolute only with a drive, as an XDG_CONFIG_HOME set
+		// on that host would carry.
+		xdg := "/srv/xdg"
+		if runtime.GOOS == "windows" {
+			xdg = `C:\srv\xdg`
+		}
+		got, err := ResolveQuadletScope(scopeEnv(1000, map[string]string{"XDG_CONFIG_HOME": xdg}, runtimeDir), false)
+		if err != nil || got.Dir != filepath.ToSlash(xdg)+"/containers/systemd" {
 			t.Errorf("an absolute XDG_CONFIG_HOME is honoured: dir=%q err=%v", got.Dir, err)
 		}
 		_, err = ResolveQuadletScope(scopeEnv(1000, map[string]string{"XDG_CONFIG_HOME": "rel/xdg"}, runtimeDir), false)
