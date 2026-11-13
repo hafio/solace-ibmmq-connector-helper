@@ -175,7 +175,7 @@
       "area": "correctness",
       "severity": "major",
       "confidence": "verified",
-      "status": "open",
+      "status": "accepted",
       "locations": [
         "cmd/solmq-conn-util/namespace.go:103-142",
         "cmd/solmq-conn-util/namespace.go:37-42",
@@ -192,7 +192,7 @@
       },
       "resolved": null,
       "history": [],
-      "notes": ""
+      "notes": "Accepted 2026-11-13: namespace removal stays as it is. Ownership labels on every artifact and a wider listing are planned in go-deploy-utility docs/todo.md item 1."
     },
     {
       "id": "CR-0008",
@@ -301,7 +301,7 @@
       "area": "correctness",
       "severity": "minor",
       "confidence": "verified",
-      "status": "open",
+      "status": "accepted",
       "locations": [
         "cmd/solmq-conn-util/main.go:1038-1055",
         "internal/runner/runner.go:790-810"
@@ -316,7 +316,7 @@
       },
       "resolved": null,
       "history": [],
-      "notes": ""
+      "notes": "Accepted 2026-11-13: owner chose to leave podman remove as it is."
     },
     {
       "id": "CR-0013",
@@ -469,7 +469,7 @@
       "area": "correctness",
       "severity": "minor",
       "confidence": "verified",
-      "status": "open",
+      "status": "accepted",
       "locations": [
         "cmd/solmq-conn-util/main.go:1771-1780"
       ],
@@ -483,7 +483,7 @@
       },
       "resolved": null,
       "history": [],
-      "notes": ""
+      "notes": "Accepted 2026-11-13: owner chose to leave generate -o as it is."
     },
     {
       "id": "CR-0020",
@@ -1483,7 +1483,7 @@
       "area": "conventions",
       "severity": "nit",
       "confidence": "verified",
-      "status": "open",
+      "status": "accepted",
       "locations": [
         ".gitignore:12-23",
         ".gitattributes:1-4"
@@ -1498,7 +1498,7 @@
       },
       "resolved": null,
       "history": [],
-      "notes": ""
+      "notes": "Accepted 2026-11-13: owner chose to leave .gitignore and .gitattributes as they are."
     },
     {
       "id": "CR-0061",
