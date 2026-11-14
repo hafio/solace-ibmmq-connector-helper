@@ -5,7 +5,7 @@ go 1.27
 toolchain go1.27.4
 
 require (
-	github.com/hafio/go-deploy-utility v0.1.2
+	github.com/hafio/go-deploy-utility v0.1.3
 	github.com/pavlo-v-chernykh/keystore-go/v4 v4.5.0
 	gopkg.in/yaml.v3 v3.0.1
 	software.sslmate.com/src/go-pkcs12 v0.7.4
